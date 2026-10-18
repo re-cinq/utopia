@@ -255,7 +255,17 @@ pub async fn resolve_mention(
     text: Option<&str>,
     exclude: &[Uuid],
 ) -> AppResult<Resolution> {
-    let mut r = resolve_by_name(pool, kb_id, type_id, raw_name, context, text, exclude).await?;
+    let mut r = resolve_by_name(
+        pool,
+        kb_id,
+        type_id,
+        raw_name,
+        context,
+        text,
+        exclude,
+        Recall::Full,
+    )
+    .await?;
     if let Some(query) = name_vector {
         propose_by_name_vector(pool, kb_id, type_id, raw_name, query, exclude, &mut r).await?;
     }
@@ -265,6 +275,45 @@ pub async fn resolve_mention(
         r.reviews.retain(|v| !kept.contains(&v.other_id));
     }
     Ok(r)
+}
+
+/// 推送来的名字（0054 的 `statements` 来源，RC-002）：只按字面召回——名字相等的归并、没有的新建，
+/// 名字向量（通道 2）与名字互相包含的两条召回都不走、不排对。推送的名字是客户端给的身份；
+/// 机器起的名字共用前缀，向量上相近、字面上层层包含，那两条召回排出的对永远不是一个，
+/// 而包含召回是 `LIKE '%…%'`，每个名字扫一遍全库的实体
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_pushed_name(
+    pool: &PgPool,
+    kb_id: Uuid,
+    type_id: Option<Uuid>,
+    raw_name: &str,
+    context: Option<&[f32]>,
+    text: Option<&str>,
+    exclude: &[Uuid],
+) -> AppResult<Resolution> {
+    let mut r = resolve_by_name(
+        pool,
+        kb_id,
+        type_id,
+        raw_name,
+        context,
+        text,
+        exclude,
+        Recall::Spelling,
+    )
+    .await?;
+    if !r.created && !r.reviews.is_empty() {
+        let kept = kept_apart_from(pool, kb_id, r.entity_id).await?;
+        r.reviews.retain(|v| !kept.contains(&v.other_id));
+    }
+    Ok(r)
+}
+
+/// 新建实体时走不走名字互相包含那条召回
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recall {
+    Full,
+    Spelling,
 }
 
 /// 跟这个实体判过「不是一个」的那些实体。
@@ -371,6 +420,7 @@ async fn resolve_by_name(
     // Candidates already claimed by a different response-local handle. They remain stored
     // and recallable on later calls, but this mention cannot attach to them.
     exclude: &[Uuid],
+    recall: Recall,
 ) -> AppResult<Resolution> {
     let name = normalize_name(raw_name);
     // 召回键 = 本名 + 泛用后缀词干及其增广（"星尘"↔"星尘项目"互为候选）。
@@ -407,7 +457,8 @@ async fn resolve_by_name(
     if candidates.is_empty() {
         // 同类型无候选 ≠ 新名字：类型标签会漂（同一团队被抽成 organization/project/
         // concept），先查其它类型下的同名实体，按类型对的互斥强度分流。
-        return resolve_type_drift(pool, kb_id, type_id, &name, &keys, context, exclude).await;
+        return resolve_type_drift(pool, kb_id, type_id, &name, &keys, context, exclude, recall)
+            .await;
     }
 
     let Some(ctx) = context else {
@@ -576,7 +627,9 @@ async fn resolve_by_name(
         .unwrap_or_default();
     // 名字互相包含的既有实体：等值召回看不见它们（前缀枚举不完），
     // 于是简称会静默变成第二个实体。只入队，不合并
-    reviews.extend(containment_reviews(pool, kb_id, type_id, &name, id, context).await?);
+    if recall == Recall::Full {
+        reviews.extend(containment_reviews(pool, kb_id, type_id, &name, id, context).await?);
+    }
     Ok(Resolution {
         entity_id: id,
         created: true,
@@ -939,6 +992,7 @@ fn confusable_reviews(
 /// concept 兜底型候选跑既有画像分层：高相似直接 ATTACH（漂移的召回修复，concept
 /// 侧类型升格为具体类型），灰区/无从判别 → 宁分勿合新建 + 审核对；易混具体类型
 /// 一律新建 + 审核对（同名 + 类型摇摆本身就是信号，不设相似度门槛）；硬互斥忽略。
+#[allow(clippy::too_many_arguments)]
 async fn resolve_type_drift(
     pool: &PgPool,
     kb_id: Uuid,
@@ -948,6 +1002,7 @@ async fn resolve_type_drift(
     keys: &[String],
     context: Option<&[f32]>,
     exclude: &[Uuid],
+    recall: Recall,
 ) -> AppResult<Resolution> {
     // 这一侧也可能还没判出类型（0009），那时没有 key 可查
     let mention_key: Option<String> = match type_id {
@@ -1089,7 +1144,9 @@ async fn resolve_type_drift(
     }
     reviews.truncate(MAX_DRIFT_REVIEWS);
     // 漂移这条路一样会新建实体，包含关系照查
-    reviews.extend(containment_reviews(pool, kb_id, type_id, name, id, context).await?);
+    if recall == Recall::Full {
+        reviews.extend(containment_reviews(pool, kb_id, type_id, name, id, context).await?);
+    }
     Ok(Resolution {
         entity_id: id,
         created: true,

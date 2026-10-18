@@ -157,7 +157,7 @@ Three things to know before wiring a system to it:
 
 - **Send events, not state.** A row that *is* the current state of a system belongs on a mounted database, read at query time. Pushing it here copies state into the ledger and the two drift.
 - **A new push under the same identity does not close the old statement.** The earlier one becomes stale and goes to review; deciding that an interval ended is done on the typed layer, by alignment and the temporal engine, not by the push.
-- **A name you push is matched by its spelling.** It joins an entity with that name (case aside) or creates one; it is not compared by meaning with similar names, so two names for one thing stay two until an `n` row or a reviewer joins them.
+- **A name you push is matched by its spelling.** It joins an entity with that name (case aside) or creates one; it is not compared by meaning with similar names, nor matched against names that contain it or that it contains, so two names for one thing stay two until an `n` row or a reviewer joins them.
 
 The response is the API push's: `{ "action": "created" }` · `updated` · `unchanged` · `marked_missing` · `duplicate` (with `duplicate_of`). It is never `moved`: the stored document carries its `external_id`, so two identities never share content.
 
