@@ -235,7 +235,7 @@ async fn historical_search_keeps_live_candidates_before_limiting_results() -> an
     let raw = f
         .state
         .search
-        .search(&f.kb.to_string(), "apple harvest", 24)?;
+        .search(&f.kb.to_string(), "apple harvest", 24, None)?;
     assert_eq!(raw.len(), 7);
     assert_eq!(raw.last().unwrap().chunk_id, f.b.to_string());
     let current = super::hybrid(&f.state, f.kb, f.ws, "apple harvest", 6, None, None).await?;

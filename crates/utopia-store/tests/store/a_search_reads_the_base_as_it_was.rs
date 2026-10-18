@@ -22,6 +22,8 @@ fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
 struct Fixture {
     org: Uuid,
     kb: Uuid,
+    /// 现行那篇文档
+    doc: Uuid,
     /// 五月被重解析顶掉的旧块
     old_chunk: Uuid,
     /// 顶替它的新块
@@ -132,6 +134,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     Ok(Fixture {
         org,
         kb,
+        doc,
         old_chunk,
         new_chunk: new_chunk.0,
         deleted_doc_chunk,
@@ -158,13 +161,15 @@ async fn a_superseded_chunk_keeps_its_vector_and_answers_as_of_then() -> anyhow:
 
     // 2. 现在：向量召回给出新块，给不出被顶掉的旧块
     let query = vec![1.0_f32, 0.0, 0.0];
-    let now_hits = utopia_store::documents::vector_search(&pool, f.kb, &query, 10, None).await?;
+    let now_hits =
+        utopia_store::documents::vector_search(&pool, f.kb, &query, 10, None, None).await?;
     assert!(!now_hits.contains(&f.old_chunk), "现行检索不该翻出旧版本");
     assert!(now_hits.contains(&f.new_chunk));
 
     // 3. 三月：那时旧块是现行的，新块还不存在
     let then = Some(t("2026-03-01T00:00:00Z"));
-    let then_hits = utopia_store::documents::vector_search(&pool, f.kb, &query, 10, then).await?;
+    let then_hits =
+        utopia_store::documents::vector_search(&pool, f.kb, &query, 10, then, None).await?;
     assert!(
         then_hits.contains(&f.old_chunk),
         "三月该搜得到当时那一版——这一条在丢向量的实现上不可能成立"
@@ -206,13 +211,34 @@ async fn a_superseded_chunk_keeps_its_vector_and_answers_as_of_then() -> anyhow:
         "五月初已被顶掉的块不属于五月中"
     );
 
+    cleanup(&pool, &f).await
+}
+
+/// 只取一条时，最近的是那篇删掉的文档的块；限定在现行文档里，名额就归它的块——
+/// 过滤在 `LIMIT` 之前，不是取完一条再筛成零条
+#[tokio::test]
+async fn a_document_filter_spends_the_limit_on_its_own_chunks() -> anyhow::Result<()> {
+    let Some(url) = utopia_store::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPool::connect(&url).await?;
+    let f = seed(&pool).await?;
+    let query = vec![1.0_f32, 0.0, 0.0];
+    let search =
+        |documents| utopia_store::documents::vector_search(&pool, f.kb, &query, 1, None, documents);
+    assert_eq!(search(None).await?, vec![f.deleted_doc_chunk]);
+    assert_eq!(search(Some(&[f.doc][..])).await?, vec![f.new_chunk]);
+    cleanup(&pool, &f).await
+}
+
+async fn cleanup(pool: &PgPool, f: &Fixture) -> anyhow::Result<()> {
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(f.kb)
-        .execute(&pool)
+        .execute(pool)
         .await?;
     let gone = sqlx::query("DELETE FROM organizations WHERE id = $1")
         .bind(f.org)
-        .execute(&pool)
+        .execute(pool)
         .await?;
     assert_eq!(gone.rows_affected(), 1, "一次性 org 没删掉");
     Ok(())
