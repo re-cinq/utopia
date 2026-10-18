@@ -20,6 +20,7 @@ struct Fixture {
     /// BM25 排第一的那块
     best: Uuid,
     token: String,
+    search: Arc<utopia_search::SearchIndex>,
     _dir: tempfile::TempDir,
 }
 
@@ -84,7 +85,7 @@ impl Fixture {
         let token = utopia_store::tokens::issue(&pool, user, "ci", "read", None, None)
             .await?
             .1;
-        let state = AppState::new(pool.clone(), &cfg, search, "test-only".into());
+        let state = AppState::new(pool.clone(), &cfg, search.clone(), "test-only".into());
         Ok(Some(Self {
             app: super::router(state, &cfg),
             pool,
@@ -94,8 +95,36 @@ impl Fixture {
             doc,
             best: chunks[0].0.parse()?,
             token,
+            search,
             _dir: dir,
         }))
+    }
+
+    /// 本库 statements 来源里再推一篇一块的文档，进全文索引；交回那一块的 id
+    async fn push(&self, external_id: &str, text: &str) -> anyhow::Result<Uuid> {
+        let (doc, chunk) = (Uuid::now_v7(), Uuid::now_v7());
+        sqlx::query(
+            "INSERT INTO documents(id,kb_id,source_id,external_key,filename,sha256)
+             VALUES ($1,$2,$3,$4,$5,$1::text)",
+        )
+        .bind(doc)
+        .bind(self.kb)
+        .bind(self.source)
+        .bind(format!("statements:{external_id}"))
+        .bind(external_id)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("INSERT INTO chunks(id,kb_id,document_id,seq,text) VALUES($1,$2,$3,0,$4)")
+            .bind(chunk)
+            .bind(self.kb)
+            .bind(doc)
+            .bind(text)
+            .execute(&self.pool)
+            .await?;
+        let chunks = [(chunk.to_string(), text.to_string())];
+        self.search
+            .reindex_document(&self.kb.to_string(), &doc.to_string(), &chunks)?;
+        Ok(chunk)
     }
 
     async fn search(&self, body: Value) -> anyhow::Result<(StatusCode, Value)> {
@@ -189,5 +218,94 @@ async fn a_page_past_the_hundredth_hit_is_refused() -> anyhow::Result<()> {
         .await?;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert_eq!(body["code"], "page_too_deep");
+    f.cleanup().await
+}
+
+fn ids(body: &Value) -> Vec<Value> {
+    body["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|hit| hit["id"].clone())
+        .collect()
+}
+
+/// 三十篇代码条目都比那条规格陈述更像 apple；每路只召回 24 条，召回完再筛就什么也
+/// 剩不下。过滤在召回之内，那条陈述才回得来
+#[tokio::test]
+async fn a_prefix_finds_the_statement_that_thirty_better_matches_crowd_out() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    for n in 0..30 {
+        f.push(&format!("code:src/a_{n}.rs"), "apple apple apple apple")
+            .await?;
+    }
+    let spec = f
+        .push(
+            "doc:specs/x_y.md",
+            "one apple among many quiet words about the spring planting schedule",
+        )
+        .await?;
+
+    let (status, body) = f.search(json!({ "q": "apple", "top_k": 10 })).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!ids(&body).contains(&json!(spec)), "{body}");
+
+    let (status, body) = f
+        .search(json!({
+            "q": "apple",
+            "top_k": 10,
+            "source_id": f.source,
+            "external_id_prefixes": ["doc:"],
+        }))
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), vec![json!(spec)]);
+
+    // `_` 与 `%` 是路径里的字，不是通配符：没有哪篇以 `doc:specs/x%` 开头
+    let (status, body) = f
+        .search(json!({
+            "q": "apple",
+            "source_id": f.source,
+            "external_id_prefixes": ["doc:specs/x%"],
+        }))
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&body), Vec::<Value>::new());
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn prefixes_without_a_source_are_refused() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let (status, body) = f
+        .search(json!({ "q": "apple", "external_id_prefixes": ["doc:"] }))
+        .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "prefixes_need_source");
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn a_source_of_another_base_is_not_found() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let (other_kb, other_source) = (Uuid::now_v7(), Uuid::now_v7());
+    sqlx::raw_sql(&format!(
+        "INSERT INTO knowledge_bases(id,workspace_id,name)
+             SELECT '{other_kb}', workspace_id, 'other' FROM knowledge_bases WHERE id = '{kb}';
+         INSERT INTO sources(id,kb_id,kind,name) VALUES ('{other_source}','{other_kb}','statements','ci');",
+        kb = f.kb,
+    ))
+    .execute(&f.pool)
+    .await?;
+    let (status, body) = f
+        .search(json!({ "q": "apple", "source_id": other_source }))
+        .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     f.cleanup().await
 }

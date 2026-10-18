@@ -28,6 +28,9 @@ pub struct SearchOpts {
     pub top_k: usize,
     pub offset: usize,
     pub as_of: Option<chrono::DateTime<chrono::Utc>>,
+    /// 只在这些文档里检索。两路各自在召回**之内**过滤：每路只取前 `recall` 条，
+    /// 召回完再筛，要的文档早被库里别的东西挤出名额了。None 即全库
+    pub documents: Option<Vec<Uuid>>,
 }
 
 /// 一条命中连同它的分数（#1271）。`score` 是 RRF 总分，只在同一次查询里能排先后，
@@ -62,6 +65,7 @@ pub async fn hybrid(
         top_k,
         offset: 0,
         as_of,
+        documents: None,
     };
     let page = hybrid_scored(state, kb_id, workspace_id, query, opts, embeddings).await?;
     Ok(page
@@ -79,6 +83,13 @@ pub async fn hybrid_scored(
     opts: SearchOpts,
     embeddings: Option<&mut llm_util::EmbedCache>,
 ) -> AppResult<SearchPage> {
+    if opts.documents.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(SearchPage {
+            results: Vec::new(),
+            has_more: false,
+            vector_used: false,
+        });
+    }
     // 每路多取一条：页尾之后还有没有，得在召回里看得见
     let depth = opts.offset + opts.top_k;
     let recall = (depth + 1).max(RECALL_PER_CHANNEL);
@@ -86,21 +97,19 @@ pub async fn hybrid_scored(
         let search = state.search.clone();
         let kb = kb_id.to_string();
         let query = query.to_string();
-        tokio::task::spawn_blocking(move || search.search(&kb, &query, recall))
+        let documents: Option<Vec<String>> = opts
+            .documents
+            .as_ref()
+            .map(|ids| ids.iter().map(Uuid::to_string).collect());
+        tokio::task::spawn_blocking(move || {
+            search.search(&kb, &query, recall, documents.as_deref())
+        })
     };
     // `join!` 不是 `try_join!`：向量那一路失败是降级不是错误（见 vector_channel），
     // `try_join!` 会把模型故障变成检索报错
     let (bm25, vector) = tokio::join!(
         bm25,
-        vector_channel(
-            state,
-            kb_id,
-            workspace_id,
-            query,
-            recall,
-            opts.as_of,
-            embeddings
-        )
+        vector_channel(state, kb_id, workspace_id, query, recall, &opts, embeddings)
     );
     let bm25 = bm25
         .map_err(|e| utopia_core::AppError::Other(anyhow::anyhow!("BM25 检索线程退出：{e}")))?
@@ -163,7 +172,7 @@ async fn vector_channel(
     workspace_id: Uuid,
     query: &str,
     recall: usize,
-    as_of: Option<chrono::DateTime<chrono::Utc>>,
+    opts: &SearchOpts,
     cache: Option<&mut llm_util::EmbedCache>,
 ) -> AppResult<Option<Vec<String>>> {
     let vector = match cache.as_deref().and_then(|c| c.get(query)).cloned() {
@@ -190,9 +199,15 @@ async fn vector_channel(
             v
         }
     };
-    let ids =
-        utopia_store::documents::vector_search(&state.pool, kb_id, &vector, recall as i64, as_of)
-            .await?;
+    let ids = utopia_store::documents::vector_search(
+        &state.pool,
+        kb_id,
+        &vector,
+        recall as i64,
+        opts.as_of,
+        opts.documents.as_deref(),
+    )
+    .await?;
     Ok(Some(ids.into_iter().map(|id| id.to_string()).collect()))
 }
 
