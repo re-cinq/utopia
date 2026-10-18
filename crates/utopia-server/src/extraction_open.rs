@@ -22,7 +22,7 @@
 
 use crate::extraction::{
     chat_retrying_rate_limits_at, drop_signal, incomplete_reason, origin_ceiling, resolve_handle,
-    span_in_quote,
+    span_in_quote, NameRecall,
 };
 use crate::state::AppState;
 use sqlx::PgPool;
@@ -273,7 +273,11 @@ async fn apply_open_extraction(
                 bound,
                 name,
                 ctx,
-                name_vecs.get(&key).map(Vec::as_slice),
+                if pushed {
+                    NameRecall::Spelling
+                } else {
+                    NameRecall::Full(name_vecs.get(&key).map(Vec::as_slice))
+                },
                 Some(&chunk.text),
                 &mut response_claims,
                 handled_by_name,

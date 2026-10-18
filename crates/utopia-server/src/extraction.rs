@@ -197,6 +197,14 @@ pub async fn extract_document(
     }
 }
 
+/// 名字召回走哪几条路：上传、同步来的文档全走（名字向量可有可无）；推送来的只按字面
+/// （`resolve_pushed_name`，RC-002）
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum NameRecall<'a> {
+    Full(Option<&'a [f32]>),
+    Spelling,
+}
+
 /// Resolve without the document's name cache. Handles use this path so two identities claimed
 /// separately in one response cannot collapse before their fact refs are bound.
 #[allow(clippy::too_many_arguments)]
@@ -206,15 +214,25 @@ async fn resolve_uncached(
     type_id: Option<Uuid>,
     name: &str,
     ctx: Option<&[f32]>,
-    name_vec: Option<&[f32]>,
+    recall: NameRecall<'_>,
     text: Option<&str>,
     exclude: &[Uuid],
     needs_adjudication: &mut bool,
 ) -> anyhow::Result<Uuid> {
-    let r = utopia_store::resolution::resolve_mention(
-        pool, kb_id, type_id, name, ctx, name_vec, text, exclude,
-    )
-    .await?;
+    let r = match recall {
+        NameRecall::Full(name_vec) => {
+            utopia_store::resolution::resolve_mention(
+                pool, kb_id, type_id, name, ctx, name_vec, text, exclude,
+            )
+            .await?
+        }
+        NameRecall::Spelling => {
+            utopia_store::resolution::resolve_pushed_name(
+                pool, kb_id, type_id, name, ctx, text, exclude,
+            )
+            .await?
+        }
+    };
     // 疑似重复对（画像灰区 / 类型漂移 / 同名并列）入审核队列。多数走批量裁决器，
     // 同名并列（`ReviewStage::Human`）分不出谁是谁，只能等人裁——它自己带着 stage。
     for review in &r.reviews {
@@ -266,7 +284,7 @@ pub(crate) async fn resolve_handle(
     type_id: Option<Uuid>,
     name: &str,
     ctx: Option<&[f32]>,
-    name_vec: Option<&[f32]>,
+    recall: NameRecall<'_>,
     text: Option<&str>,
     response_claims: &mut HashMap<String, Vec<Uuid>>,
     handled_by_name: &mut HashMap<String, Vec<Uuid>>,
@@ -306,7 +324,7 @@ pub(crate) async fn resolve_handle(
                 type_id,
                 name,
                 ctx,
-                name_vec,
+                recall,
                 text,
                 &excluded,
                 needs_adjudication,
@@ -398,7 +416,7 @@ mod origin_ceiling_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{incomplete_reason, resolve_handle, span_in_quote};
+    use super::{incomplete_reason, resolve_handle, span_in_quote, NameRecall};
     use std::collections::HashMap;
     use uuid::Uuid;
 
@@ -494,7 +512,7 @@ mod tests {
                 Some(person),
                 "Zhang Wei",
                 None,
-                None,
+                NameRecall::Full(None),
                 None,
                 &mut response_claims,
                 &mut document_claims,
@@ -508,7 +526,7 @@ mod tests {
                 Some(person),
                 "Zhang Wei",
                 None,
-                None,
+                NameRecall::Full(None),
                 None,
                 &mut response_claims,
                 &mut document_claims,
@@ -586,7 +604,7 @@ mod tests {
                 Some(person),
                 "Zhang Wei",
                 None,
-                None,
+                NameRecall::Full(None),
                 None,
                 &mut later_response_claims,
                 &mut document_claims,
@@ -614,7 +632,7 @@ mod tests {
                 None,
                 "Zhang Wei",
                 None,
-                None,
+                NameRecall::Full(None),
                 None,
                 &mut another_response_claims,
                 &mut document_claims,
@@ -741,7 +759,7 @@ mod tests {
                 Some(person),
                 "Zhang Wei",
                 Some(&ctx),
-                None,
+                NameRecall::Full(None),
                 None,
                 &mut response_claims,
                 &mut document_claims,
