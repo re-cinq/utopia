@@ -139,11 +139,16 @@ pub async fn document_text(pool: &PgPool, document_id: Uuid) -> AppResult<String
 
 /// 该看的文档：还有活着的类型化行没看过的，以及抽完了却一次都没看过的（它可能一条类型化行
 /// 都没有——对齐没绑上——这时 agent 能做的只有加，而加正是第一次真跑里最值的那一半）。
-/// 最早摄入的在前
+/// 最早摄入的在前。
+///
+/// 推送来的文档（`statements` 来源）不看（RC-001）：勘误拿行去对文档的原话，推送的陈述
+/// 没有原话（0054 的 `quote` 必须为空），无从对起
 pub async fn documents_due(pool: &PgPool, kb_id: Uuid, limit: i64) -> AppResult<Vec<Uuid>> {
     Ok(sqlx::query_scalar(
         "SELECT d.id FROM documents d
+          LEFT JOIN sources s ON s.id = d.source_id
           WHERE d.kb_id = $1 AND d.deleted_at IS NULL
+            AND s.kind IS DISTINCT FROM 'statements'
             AND (EXISTS (
               SELECT 1 FROM fact_evidence fe
                 JOIN (SELECT fact_id, statement_id FROM typed_fact_sources
