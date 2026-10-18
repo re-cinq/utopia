@@ -572,3 +572,42 @@ async fn a_revision_and_an_addition_write_typed_facts_with_the_documents_words(
     cleanup(&pool, &f).await?;
     run
 }
+
+/// 推送来的文档不送勘误（RC-001）：勘误拿类型化行去对文档的原话，推送的陈述没有原话
+/// （`quote` 必须为空，0054），看了也无从对起，只是每份文档一次全表扫描、一次对话请求。
+/// 同一个库里上传的文档照样待看
+#[tokio::test]
+async fn a_pushed_document_is_never_due_for_errata() -> anyhow::Result<()> {
+    let Some(url) = crate::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPool::connect(&url).await?;
+    crate::db::migrate(&pool).await?;
+    let f = seed(&pool).await?;
+    let run = async {
+        let (source, pushed, uploaded) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        sqlx::raw_sql(&format!(
+            "INSERT INTO sources(id,kb_id,kind,name) VALUES ('{source}','{}','statements','lore');
+             INSERT INTO documents(id,kb_id,filename,sha256,graph_status,source_id) VALUES
+                 ('{pushed}','{}','commit-a.json','p','done','{source}');
+             INSERT INTO documents(id,kb_id,filename,sha256,graph_status) VALUES
+                 ('{uploaded}','{}','notes.txt','u','done');",
+            f.kb, f.kb, f.kb
+        ))
+        .execute(&pool)
+        .await?;
+        let due = documents_due(&pool, f.kb, 10).await?;
+        assert!(
+            due.contains(&uploaded),
+            "an uploaded document is still due: {due:?}"
+        );
+        assert!(
+            !due.contains(&pushed),
+            "a pushed document is not due: {due:?}"
+        );
+        Ok(())
+    }
+    .await;
+    cleanup(&pool, &f).await?;
+    run
+}
