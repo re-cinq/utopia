@@ -6,7 +6,7 @@ on:
     # 而此前没有任何一次 CI 在 dev 上跑过，于是 PR 之间互相看不见对方存的东西，
     # 每次都从零编 300 多个依赖——今天 12 次 backend 运行，恢复缓存全是 No cache found。
     # 顺带把「合并后的 dev 从没被 CI 跑过」这个口子堵上（见下面 migrations job 的注释）
-    branches: [main, dev]
+    branches: [main, dev, re-dev]
   pull_request:
 
 # **显式只读。** 没有这一块时它继承仓库级默认，而那个默认要为
