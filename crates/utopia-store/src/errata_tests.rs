@@ -597,8 +597,14 @@ async fn a_pushed_document_is_never_due_for_errata() -> anyhow::Result<()> {
         .execute(&pool)
         .await?;
         let due = documents_due(&pool, f.kb, 10).await?;
-        assert!(due.contains(&uploaded), "an uploaded document is still due: {due:?}");
-        assert!(!due.contains(&pushed), "a pushed document is not due: {due:?}");
+        assert!(
+            due.contains(&uploaded),
+            "an uploaded document is still due: {due:?}"
+        );
+        assert!(
+            !due.contains(&pushed),
+            "a pushed document is not due: {due:?}"
+        );
         Ok(())
     }
     .await;
