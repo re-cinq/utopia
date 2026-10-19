@@ -89,21 +89,22 @@ push documents in.
 
 7. **A token reads the graph** (added 2026-10-16, #1262). A service that mirrors into a base reads the
    base back to check what landed, and a session JWT is the wrong credential for a backend
-   (decision 6). These reads take any live token, acting as its owner:
-   - entity search (`GET /kbs/{id}/entities`), to find an entity by name;
-   - an entity's detail (`GET /kbs/{id}/entities/{eid}`), its facts, names and derivations;
-   - its record-axis history (`…/history`), when we changed our mind;
-   - a fact's evidence (`GET /kbs/{id}/facts/{fid}/evidence`), the sentence behind it;
-   - the graph overview and an entity's neighbourhood (`GET /kbs/{id}/graph/overview`,
-     `…/graph/neighborhood`), the shape of what was pushed and what a statement touches;
-   - the ontology and a class's instances (`GET /kbs/{id}/ontology`,
-     `…/ontology/entity-types/{type_id}/entities`), to turn a class key into its members;
-   - a document's extractions (`GET /documents/{id}/extractions`), what was read from it;
-   - the export (`GET /kbs/{id}/export`). A read token may take the whole base out because a
-     Viewer could already copy it piece by piece through the reads above; requiring write scope
-     would only push a mirror to hold a write token for a read-only job. The `kb.exported` row
-     names the token, and that is the control.
-
+   (decision 6). These reads also take any live token, acting as its owner: searching a base's
+   entities (`GET /kbs/{id}/entities`), an entity's detail (`GET /kbs/{id}/entities/{eid}`), its
+   record-axis history (`…/history`), a fact's evidence (`GET /kbs/{id}/facts/{fid}/evidence`),
+   the graph overview (`GET /kbs/{id}/graph/overview`), an entity's neighbourhood
+   (`GET /kbs/{id}/graph/neighborhood`), the ontology and a class's instances
+   (`GET /kbs/{id}/ontology`, `…/ontology/entity-types/{type_id}/entities`), a document's
+   extractions (`GET /documents/{id}/extractions`) and the export (`GET /kbs/{id}/export`).
+   Search finds the entity by name; the detail gives its facts, names and derivations; the
+   history says when we changed our mind; the evidence ties a fact to its sentence; the overview
+   gives the most connected entities with the base's totals, so a client sees the shape of what
+   it pushed; the neighbourhood gives the entities around one, so it can follow what a statement
+   touches, and one started from another base's entity comes back empty; the ontology turns a
+   class key into its members; the extractions say what was read from a document. A read token
+   may take the whole base out through the export because a Viewer could already copy it piece by
+   piece through the reads above; requiring write scope would only push a mirror to hold a write
+   token for a read-only job. The `kb.exported` row names the token, and that is the control.
    Read is the lowest scope, so any token qualifies; the owner's role is still the ceiling and
    Viewer suffices; a token whose `kb_ids` exclude the base gets 404, as for document content
    (0052). Writes on the same paths (`PATCH` on an entity, ontology edits) still take a session.
