@@ -781,6 +781,58 @@ fn like_escaped(name: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// 新名字里所有不短于 [`MIN_CONTAIN_CHARS`] 个字的子串（去重）。
+///
+/// 反向包含原本写成 `$3 LIKE '%' || 旧名字 || '%'`：模式在存储那一侧，任何索引都用不上，
+/// 只能把库里每个名字拿来试。反过来列出新名字的子串，「旧名字是新名字的子串」就成了
+/// `lower(旧名字) = ANY(子串)` 的等值查，走 (kb_id, lower(名字)) 的 btree。语义一字不差；
+/// 名字短，n 个字至多 n²/2 个子串，几十个字的名字也只是几百次索引探查
+fn contained_names(lower: &str) -> Vec<String> {
+    let chars: Vec<char> = lower.chars().collect();
+    let min = MIN_CONTAIN_CHARS as usize;
+    let names: std::collections::BTreeSet<String> = (0..chars.len())
+        .flat_map(|start| (start + min..=chars.len()).map(move |end| (start, end)))
+        .map(|(start, end)| chars[start..end].iter().collect())
+        .collect();
+    names.into_iter().collect()
+}
+
+/// 名字包含关系的候选（9002）。三路各自能走索引，最后合成一个 id 集合：
+/// 名字含新名字（三元组）、名字是新名字的子串（$7 等值）、别名二者之一
+///（`known_as` 的 id 用子查询取，才成了 `facts_live_predicate_idx` 的索引条件，见 `name_vectors::pending`）。
+/// $6 是转义过的新名字（#1293）；$7 是 [`contained_names`]，等值比较不需要转义
+const CONTAINMENT_SQL: &str = "SELECT e.id, e.canonical_name, t.key, e.type_id, e.profile_embedding
+     FROM entities e LEFT JOIN entity_types t ON t.id = e.type_id
+     WHERE e.kb_id = $1 AND e.merged_into IS NULL
+       AND e.id <> $2
+       AND lower(e.canonical_name) <> $3
+       AND e.id IN (
+         SELECT c.id FROM entities c
+          WHERE c.kb_id = $1 AND c.merged_into IS NULL
+            AND char_length(c.canonical_name) >= $4
+            AND (lower(c.canonical_name) LIKE '%' || $6 || '%'
+                 OR lower(c.canonical_name) = ANY($7))
+         UNION
+         -- **别的名字也要参与召回，否则每合并一次就少一条桥。**
+         --
+         -- 合并把名字事实搬到存活者身上：Holmes 并入 Sherlock Holmes 之后，
+         -- Holmes 那一行 merged_into 非空、被上面的条件滤掉了。可十分钟后
+         -- 出现的 Mr. Holmes 跟 Sherlock Holmes 谁也不含谁——本来正是靠
+         -- Holmes 才桥得上。实测就是这么漏的：同类型那个 bug 修好、Holmes
+         -- 正确合并之后，Mr. Holmes 反而永远进不了队列。
+         --
+         -- 合并越成功，桥拆得越多。这个洞会自我加剧。
+         SELECT nf.subject_id FROM facts nf
+          WHERE nf.kb_id = $1 AND nf.invalidated_at IS NULL
+            AND nf.predicate_id = (SELECT nr.id FROM relation_types nr
+                                    WHERE nr.kb_id = $1 AND nr.builtin AND nr.key = $8)
+            AND char_length(nf.object_value->>'value') >= $4
+            AND (lower(nf.object_value->>'value') LIKE '%' || $6 || '%'
+                 OR lower(nf.object_value->>'value') = ANY($7))
+       )
+     ORDER BY char_length(e.canonical_name)
+     LIMIT $5";
+
 /// 新建实体之后，找出**名字互相包含**的既有实体，作为审阅候选。
 ///
 /// 中文商业文本在一篇之内就会全称转简称（「星云科技上海研究院」→「上海研究院」），
@@ -803,14 +855,13 @@ fn like_escaped(name: &str) -> String {
 /// 合并越成功、漏得越多，是个会自我加剧的洞。
 ///
 /// **已知不覆盖**：两个名字既不互相包含、又没有共同别名做桥的情形
-///（`启明 X7 加速卡` 与 `启明 X7 推理加速卡`）。那要三元组相似度，而
-/// `CREATE EXTENSION pg_trgm` 需要超级权限——本仓库是受限角色连库（见 `migrations/0010_least_privilege_role.sql`），
-/// 装扩展会在部署上失败。留给需要时再说。
+///（`启明 X7 加速卡` 与 `启明 X7 推理加速卡`）。那要三元组相似度，留给需要时再说。
 ///
-/// **性能**：反向那半（新名字包含旧名字）用不上任何索引，别名那半同样，
-/// 所以这里靠 `kb_id` 收窄行集并设上限，且只在**新建实体时**跑一次，
-/// 不是每条 mention。大库上如果不够，正解是建一张「后缀键」表走等值查，
-/// 而不是加模糊索引。
+/// **性能**（9002）：正向那半（旧名字包含新名字）走实体名的三元组索引；反向那半
+/// （新名字包含旧名字）把新名字的所有子串列出来做等值查，见 [`contained_names`]；
+/// 别名两半都只读本库的名字事实（9001）。整句关 JIT：编译比执行还贵（生产上 833 ms 对 534 ms）。
+///
+/// 下次同步上游：#1104（按词边界）和 #1322 都改写了这个谓词，合并时以那边为准重做这里。
 /// 包含扫描的一行：(id, 本名, 类型 key, 类型 id, 画像)。类型 id 用来比本体声明的互斥
 type ContainRow = (Uuid, String, Option<String>, Option<Uuid>, Option<Vector>);
 
@@ -844,46 +895,20 @@ async fn containment_reviews(
     // 本体声明了跟这个类互斥的那些类（含继承），一次取出，逐行比 id
     let disjoint = declared_disjoint_from(pool, kb_id, type_id).await?;
     // 第三列可空：未分类实体也要参与包含关系扫描（0009）
-    let rows: Vec<ContainRow> = sqlx::query_as(
-        "SELECT e.id, e.canonical_name, t.key, e.type_id, e.profile_embedding
-         FROM entities e LEFT JOIN entity_types t ON t.id = e.type_id
-         WHERE e.kb_id = $1 AND e.merged_into IS NULL
-           AND e.id <> $2
-           AND lower(e.canonical_name) <> $3
-           AND (
-             (char_length(e.canonical_name) >= $4
-              AND (lower(e.canonical_name) LIKE '%' || $6 || '%'
-                   OR $3 LIKE '%' || replace(replace(replace(lower(e.canonical_name), '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%'))
-             -- **别的名字也要参与召回，否则每合并一次就少一条桥。**
-             --
-             -- 合并把名字事实搬到存活者身上：Holmes 并入 Sherlock Holmes 之后，
-             -- Holmes 那一行 merged_into 非空、被上面第一个条件滤掉了。可十分钟后
-             -- 出现的 Mr. Holmes 跟 Sherlock Holmes 谁也不含谁——本来正是靠
-             -- Holmes 才桥得上。实测就是这么漏的：同类型那个 bug 修好、Holmes
-             -- 正确合并之后，Mr. Holmes 反而永远进不了队列。
-             --
-             -- 合并越成功，桥拆得越多。这个洞会自我加剧。
-             OR EXISTS (
-               SELECT 1 FROM facts nf
-                 JOIN relation_types nr ON nr.id = nf.predicate_id
-                WHERE nf.subject_id = e.id AND nf.kb_id = $1
-                  AND nr.builtin AND nr.key = 'known_as'
-                  AND nf.invalidated_at IS NULL
-                  AND char_length(nf.object_value->>'value') >= $4
-                  AND (lower(nf.object_value->>'value') LIKE '%' || $6 || '%'
-                       OR $3 LIKE '%' || replace(replace(replace(lower(nf.object_value->>'value'), '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%'))
-           )
-         ORDER BY char_length(e.canonical_name)
-         LIMIT $5",
-    )
-    .bind(kb_id)
-    .bind(new_id)
-    .bind(&lower)
-    .bind(MIN_CONTAIN_CHARS)
-    .bind(CONTAIN_SCAN_LIMIT)
-    .bind(like_escaped(&lower))
-    .fetch_all(pool)
-    .await?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL jit = off").execute(&mut *tx).await?;
+    let rows: Vec<ContainRow> = sqlx::query_as(CONTAINMENT_SQL)
+        .bind(kb_id)
+        .bind(new_id)
+        .bind(&lower)
+        .bind(MIN_CONTAIN_CHARS)
+        .bind(CONTAIN_SCAN_LIMIT)
+        .bind(like_escaped(&lower))
+        .bind(contained_names(&lower))
+        .bind(crate::names::KNOWN_AS)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
 
     Ok(rows
         .into_iter()
@@ -2603,6 +2628,51 @@ mod tests {
     #[test]
     fn like_escaped_turns_backslash_percent_and_underscore_into_literals() {
         assert_eq!(like_escaped(r"a\b%c_d"), r"a\\b\%c\_d");
+    }
+
+    #[test]
+    fn contained_names_of_mr_holmes_are_its_substrings_of_four_chars_or_more() {
+        assert_eq!(
+            contained_names("mr. holmes"),
+            [
+                " hol",
+                " holm",
+                " holme",
+                " holmes",
+                ". ho",
+                ". hol",
+                ". holm",
+                ". holme",
+                ". holmes",
+                "holm",
+                "holme",
+                "holmes",
+                "lmes",
+                "mr. ",
+                "mr. h",
+                "mr. ho",
+                "mr. hol",
+                "mr. holm",
+                "mr. holme",
+                "mr. holmes",
+                "olme",
+                "olmes",
+                "r. h",
+                "r. ho",
+                "r. hol",
+                "r. holm",
+                "r. holme",
+                "r. holmes"
+            ]
+        );
+    }
+
+    #[test]
+    fn contained_names_count_chars_not_bytes() {
+        assert_eq!(
+            contained_names("上海研究院"),
+            ["上海研究", "上海研究院", "海研究院"]
+        );
     }
 
     #[test]
