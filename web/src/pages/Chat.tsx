@@ -74,6 +74,7 @@ import {
 import { NodCard } from "./PendingFacts";
 import { stepDetail, stepLabel } from "../steps";
 import { NextStep, nextStep, useReadiness } from "./NextStep";
+import { KbMenuList } from "./KbMenuList";
 import { DRAFT_KEY, fetchMe, lastKey } from "../authSession";
 import { KbMenuList } from "./KbMenuList";
 
