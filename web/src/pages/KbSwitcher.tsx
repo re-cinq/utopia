@@ -20,7 +20,6 @@ import {
 } from "@/components/ui/popover";
 import { KbMenuList } from "./KbMenuList";
 import { fetchMe } from "../authSession";
-import { KbMenuList } from "./KbMenuList";
 
 export function KbSwitcher({
   kb,

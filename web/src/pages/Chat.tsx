@@ -76,7 +76,6 @@ import { stepDetail, stepLabel } from "../steps";
 import { NextStep, nextStep, useReadiness } from "./NextStep";
 import { KbMenuList } from "./KbMenuList";
 import { DRAFT_KEY, fetchMe, lastKey } from "../authSession";
-import { KbMenuList } from "./KbMenuList";
 
 /* `Turn` 定义在 liveAnswer 里：进行中的那一次也是一串 Turn，
    而它必须活得比这个组件长（见那个文件顶上的说明） */
