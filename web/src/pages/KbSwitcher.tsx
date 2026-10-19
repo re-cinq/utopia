@@ -18,8 +18,8 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { fetchMe } from "../authSession";
 import { KbMenuList } from "./KbMenuList";
+import { fetchMe } from "../authSession";
 
 export function KbSwitcher({
   kb,

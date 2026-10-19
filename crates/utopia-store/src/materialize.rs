@@ -156,14 +156,11 @@ async fn materialize_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     kb_id: Uuid,
 ) -> AppResult<(Outcome, Vec<Uuid>)> {
-    // Plan every statement of the recompute for this base. Prepared statements switch to a
-    // generic plan after a few runs, and a generic plan cannot see how many rows `kb_id = $1`
-    // selects: on a production base of 200,000 typed-fact sources the source cleanup below
-    // chose a nested loop over a materialized anti-join and ran for hours, where the plan for
-    // the base's own id takes two seconds. LOCAL ends with the transaction.
-    sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan")
-        .execute(&mut **tx)
-        .await?;
+    // The statements that scan the whole base (steps 0 to 3, the implication scans and the
+    // attestation sync) are not cached: a cached statement switches to a generic plan after a few
+    // runs, and a generic plan cannot see how many rows `kb_id = $1` selects. The source cleanup's
+    // generic plan ran for hours on a production base where the plan for its own id takes two
+    // seconds (#1298). The per-row statements in the loops stay cached.
     // 这一轮写下的行（新建的和并入的），提交后对账
     let mut written: Vec<Uuid> = Vec::new();
     // 0. 起止同值的物化状态行（#966 之前照抄一刻写下的）任何时刻都不成立：作废，它的陈述
@@ -189,6 +186,7 @@ async fn materialize_in_tx(
                              OR s.id IN (SELECT i.statement_id FROM implied_fact_sources i
                                           WHERE i.fact_id = t.id)))",
     )
+    .persistent(false)
     .bind(kb_id)
     .execute(&mut **tx)
     .await?
@@ -206,6 +204,7 @@ async fn materialize_in_tx(
              LEFT JOIN entities oe ON oe.id = s.object_id
                   JOIN phrase_bindings b ON {MATCH}
                  WHERE s.id = src.statement_id
+                   AND s.kb_id = $1
                    AND s.invalidated_at IS NULL
                    AND t.invalidated_at IS NULL
                    AND b.status = 'bound'
@@ -216,6 +215,7 @@ async fn materialize_in_tx(
                                     WHERE q.fact_id = s.id AND q.role = 'mood')
                    AND NOT {MOMENT_UNREAD})"
     ))
+    .persistent(false)
     .bind(kb_id)
     .execute(&mut **tx)
     .await?;
@@ -240,6 +240,7 @@ async fn materialize_in_tx(
         RULE_MATCH = crate::implication_rules::RULE_MATCH,
         KIND = kind_word_sql("e.specific_type"),
     ))
+    .persistent(false)
     .bind(kb_id)
     .execute(&mut **tx)
     .await?;
@@ -253,6 +254,7 @@ async fn materialize_in_tx(
             AND NOT EXISTS (SELECT 1 FROM typed_fact_sources src WHERE src.fact_id = t.id)
             AND NOT EXISTS (SELECT 1 FROM implied_fact_sources i WHERE i.fact_id = t.id)",
     )
+    .persistent(false)
     .bind(kb_id)
     .execute(&mut **tx)
     .await?
@@ -288,6 +290,7 @@ async fn materialize_in_tx(
                                AND t.predicate_id = b.relation_type_id)
           ORDER BY s.id"
     ))
+    .persistent(false)
     .bind(kb_id)
     .fetch_all(&mut **tx)
     .await?;
@@ -297,7 +300,8 @@ async fn materialize_in_tx(
         let reverse = d.direction == "reverse";
         // 一刻的陈述在状态属性下按绑定说的读（#966）：开始写成从那一刻起，结束写成到那一刻
         // 为止（走 `insert_fact_on`「某天结束了」那条路，关上开放的那段）。什么都不算的
-        // 在查询里已经排掉了（[`MOMENT_UNREAD`]）
+        // 在查询里已经排掉了（[`MOMENT_UNREAD`]）。陈述不带 `end_after_period`：终点挪没挪到
+        // 时段的尽头由写入路径定（#994 第一刀）
         let moment = d.temporal.as_deref() == Some("state")
             && d.valid_from.is_some()
             && d.valid_from == d.valid_to;
@@ -309,6 +313,7 @@ async fn materialize_in_tx(
                 to: d.valid_to,
                 to_precision: d.valid_to_precision.as_deref(),
                 attested_at: d.attested_from,
+                end_after_period: false,
             },
             (true, Some("start")) => Validity {
                 from: d.valid_from,
@@ -317,6 +322,7 @@ async fn materialize_in_tx(
                 to: None,
                 to_precision: None,
                 attested_at: d.attested_from,
+                end_after_period: false,
             },
             (true, Some("end")) => Validity {
                 from: None,
@@ -325,6 +331,7 @@ async fn materialize_in_tx(
                 to: d.valid_from,
                 to_precision: d.valid_from_precision.as_deref(),
                 attested_at: d.attested_from,
+                end_after_period: false,
             },
             (true, _) => continue,
         };
@@ -500,6 +507,7 @@ pub async fn sync_typed_attestation<'e>(
                  OR t.attested_by IS DISTINCT FROM src.by)
           RETURNING t.id",
     )
+    .persistent(false)
     .bind(kb_id)
     .bind(only)
     .fetch_all(ex)
@@ -565,6 +573,7 @@ async fn imply_in_tx(
         TEXT = crate::implication_rules::object_text_sql(),
         RULE_MATCH = crate::implication_rules::RULE_MATCH,
     ))
+    .persistent(false)
     .bind(kb_id)
     .fetch_all(&mut **tx)
     .await?;
@@ -587,6 +596,7 @@ async fn imply_in_tx(
           ORDER BY e.id",
         KIND = kind_word_sql("e.specific_type"),
     ))
+    .persistent(false)
     .bind(kb_id)
     .fetch_all(&mut **tx)
     .await?;
@@ -600,6 +610,7 @@ async fn imply_in_tx(
             to: d.valid_to,
             to_precision: d.valid_to_precision.as_deref(),
             attested_at: d.attested_from,
+            end_after_period: false,
         };
         let value;
         let object = match (d.object_id, &d.object_value) {

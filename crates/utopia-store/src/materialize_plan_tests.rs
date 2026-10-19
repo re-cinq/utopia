@@ -1,23 +1,31 @@
-//! The recompute plans each statement for the base it is given (#1298: a generic plan of the
-//! source cleanup ran for hours on a production base where the custom plan takes two seconds).
-use super::materialize_in_tx;
-use sqlx::PgPool;
+//! The recompute's whole-base statements are planned for the base they are given (#1298): a cached
+//! statement switches to a generic plan after a few runs, and the generic plan of the source
+//! cleanup ran for hours on a production base where the plan for the base's own id takes seconds.
+use super::materialize;
+use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn a_recompute_plans_its_statements_for_the_base_it_is_given() -> anyhow::Result<()> {
+async fn a_recompute_leaves_none_of_its_whole_base_statements_cached_on_its_connection(
+) -> anyhow::Result<()> {
     let Some(url) = crate::test_db::url() else {
         return Ok(());
     };
-    let pool = PgPool::connect(&url).await?;
-    let mut tx = pool.begin().await?;
-
-    materialize_in_tx(&mut tx, Uuid::now_v7()).await?;
-    let mode: String = sqlx::query_scalar("SELECT current_setting('plan_cache_mode')")
-        .fetch_one(&mut *tx)
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
         .await?;
-    tx.rollback().await?;
+    let base = Uuid::now_v7();
 
-    assert_eq!(mode, "force_custom_plan");
+    materialize(&pool, base).await?;
+    materialize(&pool, base).await?;
+    let cached: Vec<String> = sqlx::query_scalar(
+        "SELECT statement FROM pg_prepared_statements
+          WHERE statement LIKE '%kb_id = $1%' AND statement NOT LIKE '%pg_prepared_statements%'",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(cached, Vec::<String>::new());
     Ok(())
 }
