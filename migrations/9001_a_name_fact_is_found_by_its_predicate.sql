@@ -1,3 +1,6 @@
+-- re:cinq fork only until deeplethe/utopia#1318 merges (RE-CINQ.md: fork migrations are numbered from 9000 and
+-- idempotent). Upstream's copy is 0115_a_name_fact_is_found_by_its_predicate.sql; whichever runs second is a no-op.
+--
 -- 按谓词找现行的名字事实（#1296）。
 --
 -- 补向量每篇文档都跑一次 `name_vectors::pending`：现行的、`known_as` 上的、还没有向量的名字
