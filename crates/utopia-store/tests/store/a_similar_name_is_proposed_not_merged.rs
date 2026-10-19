@@ -556,3 +556,37 @@ async fn an_underscore_in_a_name_is_not_a_wildcard() -> anyhow::Result<()> {
     teardown(&pool, &f).await?;
     run
 }
+
+/// 反向包含也走别名（9002 把它改成了子串等值查）：`Mr. Holmes` 不含 `Sherlock Holmes`，
+/// 可含它记下的别名 `Holmes`，于是照常配对
+#[tokio::test]
+async fn mr_holmes_is_paired_with_sherlock_holmes_through_its_alias_holmes() -> anyhow::Result<()> {
+    let Some(url) = utopia_store::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPool::connect(&url).await?;
+    let f = seed(&pool, "contain-alias").await?;
+    let run = async {
+        let resolve = |name: &'static str| {
+            utopia_store::resolution::resolve_mention(
+                &pool,
+                f.kb,
+                Some(f.device),
+                name,
+                None,
+                None,
+                None,
+                &[],
+            )
+        };
+        let sherlock = resolve("Sherlock Holmes").await?;
+        utopia_store::names::record(&pool, f.kb, sherlock.entity_id, "Holmes", None, None).await?;
+        let mr = resolve("Mr. Holmes").await?;
+        assert!(mr.created, "{mr:?}");
+        assert_eq!(contained(&mr), vec![sherlock.entity_id], "{:?}", mr.reviews);
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    teardown(&pool, &f).await?;
+    run
+}
