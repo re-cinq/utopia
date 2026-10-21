@@ -34,6 +34,13 @@ pub struct SearchReq {
     /// 所以没有 `source_id` 不收
     #[serde(default)]
     pub external_id_prefixes: Option<Vec<String>>,
+    /// 这次检索算不算「用过」（RC-003）：默认算。探测、评测、健康检查传 false，不留痕
+    #[serde(default = "record_by_default")]
+    pub record: bool,
+}
+
+fn record_by_default() -> bool {
+    true
 }
 
 fn check_prefixes(req: &SearchReq) -> Result<(), AppError> {
@@ -110,6 +117,10 @@ pub async fn search(
         documents,
     };
     let page = retrieval::hybrid_scored(&state, kb_id, kb.workspace_id, q, opts, None).await?;
+    if req.record {
+        let documents = page.results.iter().map(|hit| hit.chunk.chunk.document_id);
+        retrieval::record_retrievals(&state, documents.collect());
+    }
     Ok(Json(json!({
         "results": page.results,
         "offset": req.offset,
@@ -117,4 +128,19 @@ pub async fn search(
         "has_more": page.has_more,
         "vector_used": page.vector_used,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SearchReq;
+    use serde_json::json;
+
+    #[test]
+    fn a_search_counts_as_a_use_unless_it_says_otherwise() {
+        let plain: SearchReq = serde_json::from_value(json!({ "q": "x" })).unwrap();
+        let probe: SearchReq =
+            serde_json::from_value(json!({ "q": "x", "record": false })).unwrap();
+        assert!(plain.record);
+        assert!(!probe.record);
+    }
 }

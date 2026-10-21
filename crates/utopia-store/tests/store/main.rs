@@ -82,6 +82,7 @@ mod a_relation_points_only_inside_its_own_kb;
 mod a_remembered_episode_strips_nul;
 mod a_retired_account;
 mod a_retraction_leaves_the_graph;
+mod a_retrieval_is_recorded_only_for_a_decaying_source;
 mod a_review_has_a_summary;
 mod a_review_page_is_assembled_in_batches;
 mod a_rule_computes_what_it_concludes;
