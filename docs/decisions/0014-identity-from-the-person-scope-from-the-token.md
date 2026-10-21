@@ -109,6 +109,13 @@ push documents in.
    Viewer suffices; a token whose `kb_ids` exclude the base gets 404, as for document content
    (0052). Writes on the same paths (`PATCH` on an entity, ontology edits) still take a session.
 
+   Reading a pushed document back by the `external_id` it was pushed under
+   (`GET /kbs/{id}/sources/{sid}/documents/by-external-id`, added 2026-10-19, #1276) takes a
+   token on the same terms. It is a document-content read (0052), but a client pushing into an
+   `api` or `statements` source names its documents by its own ids and keeps none of ours, so
+   without it the client can check what landed only by searching for its own text. The source's
+   push key is not a credential here, so a leaked key stays push-only.
+
 ## Dead ends
 
 - **Base-level machine tokens**, one per base and unrelated to a person. It would be a third
