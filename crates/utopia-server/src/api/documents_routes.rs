@@ -108,7 +108,7 @@ pub async fn content(
     if document.purged_at.is_some() {
         return Ok(gone(PURGED_MESSAGE));
     }
-    let Some(retained) = read_retained(&state, id, query.version).await? else {
+    let Some(retained) = read_retained(&state, id, query.version, |_| true).await? else {
         return Ok(gone(PURGED_MESSAGE));
     };
     let headers = content_headers(&retained.document, &retained.version, retained.bytes.len())?;
@@ -122,14 +122,18 @@ struct Retained {
     bytes: Vec<u8>,
 }
 
-/// Read a retained original, `None` when the document has been purged.
+/// Read a retained original, `None` when the document has been purged or the
+/// locked row is not one `serves` accepts.
 ///
 /// Hold the row lock through the blob read. Replacement and purge otherwise
 /// can move or delete the selected blob after the ledger says we may serve it.
+/// A caller's own conditions on the row go in `serves`, so they are judged on
+/// the row the lock holds rather than on one read before it.
 async fn read_retained(
     state: &AppState,
     id: Uuid,
     requested: Option<i32>,
+    serves: impl FnOnce(&Document) -> bool,
 ) -> ApiResult<Option<Retained>> {
     let mut tx = state.pool.begin().await?;
     let document: Document =
@@ -137,7 +141,7 @@ async fn read_retained(
             .bind(id)
             .fetch_one(&mut *tx)
             .await?;
-    if document.purged_at.is_some() {
+    if document.purged_at.is_some() || !serves(&document) {
         return Ok(None);
     }
     let version: utopia_store::documents::DocumentVersion = match requested {
@@ -206,16 +210,14 @@ pub async fn versions(
 #[derive(Deserialize)]
 pub struct ExternalIdQuery {
     pub external_id: String,
-    #[serde(default)]
-    pub include_missing: bool,
 }
 
 /// Read a pushed document back by the identity its source pushed it under (#1276).
 ///
 /// The reader is the person, as on the content route; a source's push key is no
-/// credential here, so a leaked key stays push-only (0052). A tombstoned identity
-/// answers 404 unless `include_missing`, a deleted one 404, and purge erases the
-/// identity, so a purged one is 404 too.
+/// credential here, so a leaked key stays push-only (0052). A document in the
+/// trash, a tombstoned identity and one never pushed are all 404, and purge
+/// erases the identity, so a purged one is 404 too.
 pub async fn by_external_id(
     State(state): State<AppState>,
     reader: SessionOrToken,
@@ -224,23 +226,27 @@ pub async fn by_external_id(
 ) -> ApiResult<Response> {
     require_reader_kb(&state, &reader, kb_id).await?;
     let source = super::sources_routes::source_in_kb(&state, kb_id, source_id).await?;
-    if !matches!(source.kind.as_str(), "api" | "statements") {
+    if !super::sources_routes::is_push_kind(&source.kind) {
         return Err(AppError::NotFound.into());
     }
     let external_id = query.external_id.trim();
-    let key = format!("{}:{external_id}", source.kind);
-    let document = utopia_store::documents::find_by_external_key(&state.pool, source.id, &key)
+    let key = super::sources_routes::pushed_key(&source, external_id);
+    let found = utopia_store::documents::find_by_external_key(&state.pool, source.id, &key)
         .await?
-        .filter(|d| d.deleted_at.is_none() && (query.include_missing || d.missing_since.is_none()))
         .ok_or(AppError::NotFound)?;
-    let Some(Retained {
+    let live_under_key = |document: &Document| {
+        document.source_id == Some(source.id)
+            && document.external_key.as_deref() == Some(key.as_str())
+            && document.deleted_at.is_none()
+            && document.missing_since.is_none()
+    };
+    let Retained {
         document,
         version,
         bytes,
-    }) = read_retained(&state, document.id, None).await?
-    else {
-        return Ok(gone(PURGED_MESSAGE));
-    };
+    } = read_retained(&state, found.id, None, live_under_key)
+        .await?
+        .ok_or(AppError::NotFound)?;
     let versions = utopia_store::documents::versions(&state.pool, document.id).await?;
     let body = json!({
         "id": document.id,
@@ -252,7 +258,6 @@ pub async fn by_external_id(
         "status": document.status,
         "doc_time": document.doc_time,
         "updated_at": document.updated_at,
-        "missing_since": document.missing_since,
         "version": version.version,
         "content": String::from_utf8_lossy(&bytes),
         "versions": versions,

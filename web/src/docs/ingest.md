@@ -165,7 +165,7 @@ The response is the API push's: `{ "action": "created" }` · `updated` · `uncha
 
 ## Reading a pushed document back
 
-An API or Statements source's document can be read back by the identity it was pushed under: its `external_id`, or for an API push without one, its `filename`. The identity goes in the query string, so it may contain `/`.
+An API or Statements source's document can be read back by the identity it was pushed under: its `external_id`, or for an API push without one, its `filename`. The identity goes in the query string, URL-encoded, so it may contain `/`.
 
 ```
 GET {your-utopia-base}/api/v1/kbs/{kb_id}/sources/{source_id}/documents/by-external-id?external_id=note-42
@@ -185,7 +185,6 @@ The credential is a personal access token (or a signed-in session) of someone wh
   "status": "ready",
   "doc_time": "2026-08-20T09:00:00Z",
   "updated_at": "2026-08-20T09:00:04Z",
-  "missing_since": null,
   "version": 2,
   "content": "# Runbook v2 …",
   "versions": [
@@ -195,7 +194,7 @@ The credential is a personal access token (or a signed-in session) of someone wh
 }
 ```
 
-`content` is the current version's text. An identity marked "Not in source" is `404` unless you add `include_missing=true`; a deleted or purged document is `404`, as is an identity this source never pushed.
+`content` is the current version's text; older versions are at `GET /api/v1/documents/{id}/content?version=N`. An identity marked "Not in source", a document in the trash or purged, and an identity this source never pushed are all `404`.
 
 ---
 
