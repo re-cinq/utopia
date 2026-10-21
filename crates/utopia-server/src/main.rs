@@ -4,6 +4,7 @@ mod api;
 mod auth;
 mod blob;
 mod client_ctx;
+mod decay_sweep;
 mod docs_corpus;
 mod errata;
 mod error;
@@ -291,6 +292,32 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Err(e) => tracing::warn!(error = %e, "扫描治理积压失败"),
+            }
+        }
+    });
+
+    // 衰减的每日扫描（RC-003）：打开了衰减的源，活文档超过 max_items 的，排一个淘汰任务
+    let decay_state = state.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(86_400));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            match utopia_store::decay::sources_over_cap(&decay_state.pool).await {
+                Ok(sources) => {
+                    for source_id in sources {
+                        if let Err(e) = utopia_store::jobs::enqueue_unless_queued(
+                            &decay_state.pool,
+                            "decay_sweep",
+                            serde_json::json!({ "source_id": source_id }),
+                        )
+                        .await
+                        {
+                            tracing::warn!(source_id = %source_id, error = %e, "衰减任务入队失败");
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "扫描超出容量的源失败"),
             }
         }
     });
@@ -598,6 +625,15 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .and_then(|s| s.parse().ok())
                 .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
             adjudication::adjudicate_entities(st, kb_id).await
+        }
+        "decay_sweep" => {
+            let source_id: Uuid = job
+                .payload
+                .get("source_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("payload 缺少 source_id"))?;
+            decay_sweep::sweep_source(st, source_id).await
         }
         "govern" => {
             let kb_id: Uuid = job

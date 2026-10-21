@@ -81,10 +81,11 @@ pub async fn record_retrievals(pool: &PgPool, document_ids: &[Uuid]) -> AppResul
     Ok(written.rows_affected())
 }
 
-/// 打分用到的一个文档：`key` 是文档名，`value` 是它的文字。
-pub struct Memory<'a> {
-    pub key: &'a str,
-    pub value: &'a str,
+/// 打分用到的一个文档：`key` 是文档名，`value_len` 是它的文字有多长（UTF-16 码元数，
+/// 和 Lore 的 JS 字符串长度一致；库里按字符数，非基本平面的字符会少算，只差在边界上）。
+pub struct Memory {
+    pub key: String,
+    pub value_len: usize,
     pub created_at: DateTime<Utc>,
     pub last_retrieved_at: Option<DateTime<Utc>>,
     /// 0 或没有都取 [`DEFAULT_HALF_LIFE_DAYS`]。
@@ -110,20 +111,24 @@ fn decay_strength(memory: &Memory, now: DateTime<Utc>) -> f64 {
 }
 
 fn importance_adjustments(memory: &Memory) -> i64 {
-    value_length_adjustment(memory.value)
-        + key_prefix_adjustment(memory.key)
-        + key_topic_adjustment(memory.key)
+    value_length_adjustment(memory.value_len)
+        + key_prefix_adjustment(&memory.key)
+        + key_topic_adjustment(&memory.key)
         + retrieval_adjustment(memory.retrieval_count)
         + if memory.stale { -1 } else { 0 }
 }
 
-/// 长度按 UTF-16 码元数，和 Lore（JS 的 `string.length`）一致，表情符号算两个。
-fn value_length_adjustment(value: &str) -> i64 {
-    match value.encode_utf16().count() {
+fn value_length_adjustment(value_len: usize) -> i64 {
+    match value_len {
         0..=49 => -2,
         501.. => 1,
         _ => 0,
     }
+}
+
+/// 一段文字的 UTF-16 码元数，Lore 里的 `string.length`：表情符号算两个。
+pub fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
 }
 
 fn key_prefix_adjustment(key: &str) -> i64 {
@@ -144,6 +149,145 @@ fn retrieval_adjustment(retrievals: u32) -> i64 {
     }
 }
 
+/// 一直没被检索：最近一次检索（没有就创建）距今超过 `stale_after_days` 天。陈旧是读的时候
+/// 算的，不写进库，也不碰事实的 `confidence`。
+pub fn is_stale(last_touched: DateTime<Utc>, stale_after_days: u32, now: DateTime<Utc>) -> bool {
+    now - last_touched > chrono::Duration::days(i64::from(stale_after_days))
+}
+
+/// 淘汰候选：一个文档和给它打分用的材料。
+pub struct Candidate {
+    pub document_id: Uuid,
+    pub memory: Memory,
+}
+
+/// 分最低的 `count` 个，分相同的保持候选的先后（候选按创建时间从旧到新给）。
+pub fn lowest_scoring(
+    candidates: &[Candidate],
+    now: DateTime<Utc>,
+    count: usize,
+) -> Vec<(Uuid, u8)> {
+    let mut scored: Vec<(Uuid, u8)> = candidates
+        .iter()
+        .map(|c| (c.document_id, score_importance(&c.memory, now)))
+        .collect();
+    scored.sort_by_key(|(_, score)| *score);
+    scored.truncate(count);
+    scored
+}
+
+#[derive(sqlx::FromRow)]
+struct CandidateRow {
+    id: Uuid,
+    filename: String,
+    created_at: DateTime<Utc>,
+    last_retrieved_at: Option<DateTime<Utc>>,
+    half_life_days: Option<f32>,
+    retrieval_count: i32,
+    text_len: i64,
+}
+
+impl CandidateRow {
+    fn into_candidate(self, settings: &DecaySettings, now: DateTime<Utc>) -> Candidate {
+        let last_touched = self.last_retrieved_at.unwrap_or(self.created_at);
+        Candidate {
+            document_id: self.id,
+            memory: Memory {
+                key: self.filename,
+                value_len: self.text_len as usize,
+                created_at: self.created_at,
+                last_retrieved_at: self.last_retrieved_at,
+                half_life_days: Some(
+                    self.half_life_days
+                        .map_or(f64::from(settings.half_life_days), f64::from),
+                ),
+                retrieval_count: self.retrieval_count as u32,
+                stale: is_stale(last_touched, settings.stale_after_days, now),
+            },
+        }
+    }
+}
+
+/// 淘汰的计划：哪个源、哪些文档、其中最低的分。
+pub struct Eviction {
+    pub kb_id: Uuid,
+    pub documents: Vec<Uuid>,
+    pub lowest_score: u8,
+}
+
+/// 打开了衰减、活文档数超过 `max_items` 的源。
+pub async fn sources_over_cap(pool: &PgPool) -> AppResult<Vec<Uuid>> {
+    let ids: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT s.id FROM sources s
+          WHERE s.decay IS NOT NULL
+            AND (SELECT count(*) FROM documents d
+                  WHERE d.source_id = s.id AND d.deleted_at IS NULL)
+                > COALESCE((s.decay->>'max_items')::bigint, $1)",
+    )
+    .bind(i64::from(DecaySettings::default().max_items))
+    .fetch_all(pool)
+    .await?;
+    Ok(ids.into_iter().map(|(id,)| id).collect())
+}
+
+/// 把一个源淘汰回 `max_items`：在比 `min_age_days` 老的文档里取最旧的 `2 × 多出来的数`，
+/// 打分，其中最低的 `多出来的数` 个。多取一倍是为了让分有挑的余地，而不是只拿最旧的。
+/// 源没开衰减或没超出，返回 None。
+pub async fn plan_eviction(
+    pool: &PgPool,
+    source_id: Uuid,
+    now: DateTime<Utc>,
+) -> AppResult<Option<Eviction>> {
+    let source: Option<(Uuid, Option<serde_json::Value>)> =
+        sqlx::query_as("SELECT kb_id, decay FROM sources WHERE id = $1")
+            .bind(source_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some((kb_id, Some(decay))) = source else {
+        return Ok(None);
+    };
+    let settings: DecaySettings =
+        serde_json::from_value(decay).map_err(|e| AppError::Other(e.into()))?;
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM documents WHERE source_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(source_id)
+    .fetch_one(pool)
+    .await?;
+    let excess = live - i64::from(settings.max_items);
+    if excess <= 0 {
+        return Ok(None);
+    }
+    let rows: Vec<CandidateRow> = sqlx::query_as(
+        "SELECT d.id, d.filename, d.created_at, sal.last_retrieved_at, sal.half_life_days,
+                COALESCE(sal.retrieval_count, 0) AS retrieval_count,
+                COALESCE((SELECT sum(char_length(c.text)) FROM chunks c
+                           WHERE c.document_id = d.id AND c.superseded_at IS NULL), 0)::bigint
+                    AS text_len
+           FROM documents d LEFT JOIN document_salience sal ON sal.document_id = d.id
+          WHERE d.source_id = $1 AND d.deleted_at IS NULL AND d.created_at <= $2
+          ORDER BY d.created_at LIMIT $3",
+    )
+    .bind(source_id)
+    .bind(now - chrono::Duration::days(i64::from(settings.min_age_days)))
+    .bind(excess * 2)
+    .fetch_all(pool)
+    .await?;
+    let candidates: Vec<Candidate> = rows
+        .into_iter()
+        .map(|row| row.into_candidate(&settings, now))
+        .collect();
+    let chosen = lowest_scoring(&candidates, now, excess as usize);
+    let Some((_, lowest_score)) = chosen.first().copied() else {
+        return Ok(None);
+    };
+    Ok(Some(Eviction {
+        kb_id,
+        documents: chosen.into_iter().map(|(id, _)| id).collect(),
+        lowest_score,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,10 +297,10 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 10, 21, 0, 0, 0).unwrap()
     }
 
-    fn memory<'a>(key: &'a str, value: &'a str, created_days_ago: i64) -> Memory<'a> {
+    fn memory(key: &str, value: &str, created_days_ago: i64) -> Memory {
         Memory {
-            key,
-            value,
+            key: key.into(),
+            value_len: utf16_len(value),
             created_at: now() - Duration::days(created_days_ago),
             last_retrieved_at: None,
             half_life_days: None,
@@ -240,6 +384,37 @@ mod tests {
             8,
             "40 UTF-16 units is short"
         );
+    }
+
+    fn candidate(key: &str, days_old: i64) -> Candidate {
+        Candidate {
+            document_id: Uuid::now_v7(),
+            memory: memory(key, &"x".repeat(100), days_old),
+        }
+    }
+
+    #[test]
+    fn the_lowest_scores_go_and_ties_keep_the_oldest_first() {
+        let candidates = [
+            candidate("notes/a", 200),
+            candidate("decision/db", 200),
+            candidate("session-summary/x", 200),
+            candidate("notes/b", 100),
+        ];
+        let chosen = lowest_scoring(&candidates, now(), 2);
+        let ids: Vec<Uuid> = chosen.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            ids,
+            vec![candidates[2].document_id, candidates[0].document_id]
+        );
+        assert!(chosen[0].1 <= chosen[1].1);
+    }
+
+    #[test]
+    fn a_document_is_stale_only_after_the_days_have_passed() {
+        let touched = now() - Duration::days(30);
+        assert!(!is_stale(touched, 30, now()));
+        assert!(is_stale(touched, 29, now()));
     }
 
     #[test]

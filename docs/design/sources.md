@@ -132,6 +132,11 @@ A source may let its documents decay [RC-003](../decisions/re-cinq/RC-003-a-sour
 `{}` is Lore's behaviour), `null` turns it off, and leaving the field out changes nothing. A new
 source decays nothing.
 
+Once a day a source that holds more live documents than its `max_items` is taken back to it: from the
+documents older than `min_age_days`, the lowest scoring ones are deleted the way a person deletes them
+(so they can be restored), and one `decay.evict` audit row records how many. A source at or under its
+cap loses nothing, and a source that does not decay is never looked at.
+
 ## Open questions
 
 - Whether low engine confidence on an OCR or transcript segment should cap facts [0040].
