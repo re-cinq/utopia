@@ -247,6 +247,18 @@ pub struct UpdateBody {
     /// 出现 schedule 字段即整体覆盖调度（interval 与 cron 互斥；两者皆 null = 关闭定时）
     #[serde(default)]
     pub schedule: Option<ScheduleBody>,
+    /// 缺省 = 不动；`null` = 关掉衰减；对象 = 打开（RC-003）
+    #[serde(default, deserialize_with = "present_even_when_null")]
+    pub decay: Option<Option<utopia_store::decay::DecaySettings>>,
+}
+
+/// 区分「没写这个字段」和「写成了 null」：前者外层是 `None`，后者是 `Some(None)`。
+fn present_even_when_null<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -281,6 +293,7 @@ pub async fn update(
         body.icon.as_deref(),
         body.schedule
             .map(|s| (s.sync_interval_minutes, s.sync_cron)),
+        body.decay.as_ref().map(Option::as_ref),
     )
     .await?;
     state.emit_source(kb_id);
@@ -292,7 +305,11 @@ pub async fn update(
         "source.updated",
         "source",
         Some(source_id),
-        json!({ "name": body.name, "config_changed": config.is_some() }),
+        json!({
+            "name": body.name,
+            "config_changed": config.is_some(),
+            "decay_changed": body.decay.is_some()
+        }),
     )
     .await;
     Ok(Json(json!({ "source": mask_secrets(source) })))
@@ -893,8 +910,19 @@ mod statements_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{keep_secrets, validate_rss_config};
+    use super::{keep_secrets, validate_rss_config, UpdateBody};
     use serde_json::json;
+
+    #[test]
+    fn an_update_tells_a_missing_decay_from_a_null_one() {
+        let absent: UpdateBody = serde_json::from_value(json!({ "name": "n" })).unwrap();
+        let null: UpdateBody = serde_json::from_value(json!({ "decay": null })).unwrap();
+        let object: UpdateBody =
+            serde_json::from_value(json!({ "decay": { "max_items": 9 } })).unwrap();
+        assert_eq!(absent.decay, None);
+        assert_eq!(null.decay, Some(None));
+        assert_eq!(object.decay.unwrap().unwrap().max_items, 9);
+    }
 
     /// 认证判断写反是这类改动唯一值得担心的事（`ct_eq` 给的是 `Choice` 不是
     /// `bool`，判反一次就是全放行且一切看起来正常），所以两个方向都钉住
@@ -955,6 +983,7 @@ mod tests {
             icon: None,
             sync_interval_minutes: None,
             sync_cron: None,
+            decay: None,
             last_sync_at: None,
             last_sync_status: "never".into(),
             last_sync_error: None,

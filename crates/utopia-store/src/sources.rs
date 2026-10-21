@@ -6,6 +6,8 @@ use utopia_core::models::{Role, Source, SourceKind, SourceView, SyncRun, SOURCE_
 use utopia_core::{secrets, AppError, AppResult};
 use uuid::Uuid;
 
+use crate::decay::DecaySettings;
+
 /// folder = 纯容器（上传/拖拽入内，无同步语义）；url/rss = 拉取型；api = 推送型。
 /// 本机目录监听（watch_folder）已否决——自部署用户看不到服务器磁盘；
 /// 对象存储 / WebDAV / Notion 是它的替代形态（0013）。
@@ -89,7 +91,7 @@ pub async fn list(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<SourceView>> {
     let rows: Vec<SourceView> = sqlx::query_as(&format!(
         "SELECT listed_source.id, listed_source.kind, listed_source.name,
                 listed_source.config - $2::text[] AS config, listed_source.icon,
-                listed_source.sync_interval_minutes, listed_source.sync_cron,
+                listed_source.sync_interval_minutes, listed_source.sync_cron, listed_source.decay,
                 listed_source.last_sync_at, listed_source.last_sync_status,
                 listed_source.last_sync_error, listed_source.last_sync_added,
                 (SELECT count(*) FROM documents d
@@ -249,7 +251,18 @@ pub async fn update(
     config: Option<&serde_json::Value>,
     icon: Option<&str>,
     schedule: Option<(Option<i32>, Option<String>)>,
+    decay: Option<Option<&DecaySettings>>,
 ) -> AppResult<Source> {
+    let decay = decay
+        .map(|settings| {
+            settings
+                .map(|settings| {
+                    settings.validate()?;
+                    serde_json::to_value(settings).map_err(|e| AppError::Other(e.into()))
+                })
+                .transpose()
+        })
+        .transpose()?;
     let schedule = match schedule {
         Some((interval, cron)) => {
             let cron_norm = cron.as_deref().map(validate_cron).transpose()?;
@@ -287,7 +300,8 @@ pub async fn update(
             config = COALESCE($3, config),
             icon = COALESCE($4, icon),
             sync_interval_minutes = CASE WHEN $5 THEN $6 ELSE sync_interval_minutes END,
-            sync_cron = CASE WHEN $5 THEN $7 ELSE sync_cron END
+            sync_cron = CASE WHEN $5 THEN $7 ELSE sync_cron END,
+            decay = CASE WHEN $8 THEN $9 ELSE decay END
          WHERE id = $1 RETURNING *",
     )
     .bind(id)
@@ -297,6 +311,8 @@ pub async fn update(
     .bind(schedule.is_some())
     .bind(schedule.as_ref().and_then(|(i, _)| *i))
     .bind(schedule.as_ref().and_then(|(_, c)| c.clone()))
+    .bind(decay.is_some())
+    .bind(decay.flatten())
     .fetch_one(&mut *tx)
     .await?;
 

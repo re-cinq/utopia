@@ -125,6 +125,13 @@ indexed and never extracted (`sources.config.extract`) [0036 d7].
   HTML tables now are [0039].
 - Backup and restore (#712), a 100k-document benchmark (#713) [0016 E].
 
+## Decay
+
+A source may let its documents decay [RC-003](../decisions/re-cinq/RC-003-a-source-may-decay.md).
+`PATCH` a source with `decay` to set it: an object turns it on (a missing field takes Lore's value, so
+`{}` is Lore's behaviour), `null` turns it off, and leaving the field out changes nothing. A new
+source decays nothing.
+
 ## Open questions
 
 - Whether low engine confidence on an OCR or transcript segment should cap facts [0040].
