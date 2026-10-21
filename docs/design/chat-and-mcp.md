@@ -85,6 +85,9 @@ lose (2026-10-19).
 A search that returns a document of a source that decays counts as a use of it, in the background and
 never failing the read ([RC-003](../decisions/re-cinq/RC-003-a-source-may-decay.md)): `search_chunks`
 always does, and the REST body may carry `record: false` for a probe, an eval or a health check.
+A hit on a document of a decaying source that nobody has retrieved for the source's `stale_after_days`
+scores at 0.6 of its RRF score, before paging, and carries `stale: true`; a base where no source
+decays never sees the field.
 
 **`remember`** writes a memory document at once; its statements go through open extraction and wait
 in `pending_facts`; the assistant says the sentence is recorded and its statements will be shown

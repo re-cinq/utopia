@@ -155,6 +155,30 @@ pub fn is_stale(last_touched: DateTime<Utc>, stale_after_days: u32, now: DateTim
     now - last_touched > chrono::Duration::days(i64::from(stale_after_days))
 }
 
+/// 陈旧文档的检索分乘这个数，和 Lore 对陈旧事实的权重一样。
+pub const STALE_SEARCH_WEIGHT: f64 = 0.6;
+
+/// 这些文档里，属于打开了衰减的源、并且陈旧的那些（[`is_stale`] 的判据，在库里算）。
+pub async fn stale_documents(
+    pool: &PgPool,
+    document_ids: &[Uuid],
+) -> AppResult<std::collections::HashSet<Uuid>> {
+    let ids: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT d.id
+           FROM documents d
+           JOIN sources s ON s.id = d.source_id
+           LEFT JOIN document_salience sal ON sal.document_id = d.id
+          WHERE d.id = ANY($1) AND s.decay IS NOT NULL
+            AND COALESCE(sal.last_retrieved_at, d.created_at)
+                < now() - make_interval(days => COALESCE((s.decay->>'stale_after_days')::int, $2))",
+    )
+    .bind(document_ids)
+    .bind(i32::try_from(DecaySettings::default().stale_after_days).unwrap_or(30))
+    .fetch_all(pool)
+    .await?;
+    Ok(ids.into_iter().map(|(id,)| id).collect())
+}
+
 /// 淘汰候选：一个文档和给它打分用的材料。
 pub struct Candidate {
     pub document_id: Uuid,

@@ -102,6 +102,7 @@ mod a_source_decays_only_when_asked;
 mod a_source_kind_is_listed_once;
 mod a_source_over_its_cap_gives_up_its_lowest_scores;
 mod a_source_reaches_only_where_it_was_granted;
+mod a_stale_document_is_found_among_a_decaying_sources;
 mod a_statement_is_attested_by_what_its_document_says;
 mod a_stopped_chat_is_replayed_as_incomplete;
 mod a_time_mention_is_resolved_against_its_document;
