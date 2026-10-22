@@ -101,7 +101,8 @@ push documents in.
    gives the most connected entities with the base's totals, so a client sees the shape of what
    it pushed; the neighbourhood gives the entities around one, so it can follow what a statement
    touches, and one started from another base's entity comes back empty; the ontology turns a
-   class key into its members; the extractions say what was read from a document. A read token
+   class key into the type id the instances read takes; the instances list that class's members,
+   or only those lacking a relation, and a class id from another base gives an empty page; the extractions say what was read from a document. A read token
    may take the whole base out through the export because a Viewer could already copy it piece by
    piece through the reads above; requiring write scope would only push a mirror to hold a write
    token for a read-only job. The `kb.exported` row names the token, and that is the control.
@@ -143,6 +144,10 @@ push documents in.
 - 2026-10-16: decision 6 let a token create only `statements` sources, though an `api` source is
   push-only as well; a backend mirroring several kinds of documents pushes them through one. A
   token now creates `api` sources too.
+- 2026-10-16: decision 7 opens four graph reads to any token; decision 6's "only these routes
+  and document content" now also counts them. 2026-10-19: the graph overview and neighbourhood
+  join them, and so does reading a pushed document back by its `external_id` (#1276). The
+  ontology and a class's instances follow (#1265).
 
 ## Open questions
 
