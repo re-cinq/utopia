@@ -1353,6 +1353,11 @@ async fn restore_tx(
     let Some((deletion_id, fact_ids, chunk_ids)) = row else {
         return Err(AppError::Conflict("Document is not deleted".into()));
     };
+    // 恢复了就不再算被衰减淘汰的（RC-003）
+    sqlx::query("DELETE FROM decay_evictions WHERE document_id = $1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
     // 清过的没东西可复活：分块、原文都不在了
     let purged: bool =
         sqlx::query_scalar("SELECT purged_at IS NOT NULL FROM documents WHERE id = $1")

@@ -26,6 +26,8 @@ Not every source wants this. A folder of specifications must not forget. So deca
 4. A daily sweep that takes a source over `max_items` back to it: from the documents older than `min_age_days`, the `excess` with the lowest score are deleted the way a person deletes them, so they can be restored.
 5. A stale document ranks at 0.6 of its search score, before paging, and its hit says `stale: true`.
 
+**An evicted document stays evicted when the same content is pushed again.** A pusher that re-sends everything on every pass (Lore's memory mirror does) would otherwise bring each evicted document back, because a push to a deleted identity restores it, and the next sweep would delete it again. The sweep records each document it evicts in `decay_evictions` (migration 9005). A push of an evicted identity whose content is unchanged answers `unchanged` and leaves it deleted; changed content is new information and restores it as before. Any restore, by a person or by a changed push, clears the record.
+
 ## Consequences
 
 - A base where no source sets the option stores nothing new and ranks as before.

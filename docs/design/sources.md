@@ -135,7 +135,9 @@ source decays nothing. In the web UI it is the "Let documents decay" switch in a
 Once a day a source that holds more live documents than its `max_items` is taken back to it: from the
 documents older than `min_age_days`, the lowest scoring ones are deleted the way a person deletes them
 (so they can be restored), and one `decay.evict` audit row records how many. A source at or under its
-cap loses nothing, and a source that does not decay is never looked at.
+cap loses nothing, and a source that does not decay is never looked at. A document the sweep evicted
+is not brought back by a pusher that sends the same content again (the push answers `unchanged`);
+changed content restores it.
 
 ## Open questions
 

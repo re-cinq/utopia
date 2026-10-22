@@ -134,3 +134,119 @@ async fn a_sweep_removes_the_lowest_scoring_document_from_the_base_and_the_index
     let _ = std::fs::remove_dir_all(&dir);
     run
 }
+
+#[tokio::test]
+async fn a_pushed_copy_of_an_evicted_document_stays_evicted_unless_it_changed() -> anyhow::Result<()>
+{
+    use crate::ingest_sources::{ingest_item_with_outcome, Identity, IngestAction};
+
+    let Some(url) = utopia_store::test_db::url() else {
+        return Ok(());
+    };
+    let pool = sqlx::PgPool::connect(&url).await?;
+    utopia_store::db::migrate(&pool).await?;
+    let (org, ws, kb, source) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    sqlx::query("INSERT INTO organizations(id,name) VALUES($1,'decay-push-test')")
+        .bind(org)
+        .execute(&pool)
+        .await?;
+    sqlx::query("INSERT INTO workspaces(id,org_id,name) VALUES($1,$2,'decay-push-test')")
+        .bind(ws)
+        .bind(org)
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO knowledge_bases(id,workspace_id,name) VALUES($1,$2,'decay-push-test')",
+    )
+    .bind(kb)
+    .bind(ws)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO sources(id,kb_id,kind,name,decay)
+         VALUES($1,$2,'api','memories','{\"max_items\":1,\"min_age_days\":0}'::jsonb)",
+    )
+    .bind(source)
+    .bind(kb)
+    .execute(&pool)
+    .await?;
+    let dir = std::env::temp_dir().join(format!("utopia-decay-push-{kb}"));
+    let cfg = utopia_core::config::AppConfig {
+        data_dir: dir.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let search = Arc::new(utopia_search::SearchIndex::open(&dir.join("search"))?);
+    let state = crate::state::AppState::new(pool.clone(), &cfg, search, "test-only".into());
+    let push = |key: &'static str, text: &'static str| {
+        let state = state.clone();
+        async move {
+            ingest_item_with_outcome(
+                &state,
+                kb,
+                source,
+                &format!("api:{key}"),
+                Identity::Declared,
+                key,
+                "text/plain",
+                text.as_bytes(),
+                None,
+            )
+            .await
+        }
+    };
+    let live = |key: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT deleted_at IS NULL FROM documents WHERE source_id = $1 AND filename = $2",
+            )
+            .bind(source)
+            .bind(key)
+            .fetch_one(&pool)
+            .await
+        }
+    };
+
+    let run = async {
+        assert_eq!(
+            push("memory:a", "first memory text").await?.action,
+            IngestAction::Created
+        );
+        assert_eq!(
+            push("memory:b", "second memory text").await?.action,
+            IngestAction::Created
+        );
+        super::sweep_source(&state, source).await?;
+        assert!(!live("memory:a").await?, "the older one was evicted");
+
+        assert_eq!(
+            push("memory:a", "first memory text").await?.action,
+            IngestAction::Unchanged,
+            "the same content again does not bring it back"
+        );
+        assert!(!live("memory:a").await?);
+
+        assert_eq!(
+            push("memory:a", "first memory text, now corrected")
+                .await?
+                .action,
+            IngestAction::Updated,
+            "changed content is new information"
+        );
+        assert!(live("memory:a").await?);
+        anyhow::Ok(())
+    }
+    .await;
+
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await?;
+    let _ = std::fs::remove_dir_all(&dir);
+    run
+}
