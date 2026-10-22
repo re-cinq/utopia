@@ -179,6 +179,28 @@ pub async fn stale_documents(
     Ok(ids.into_iter().map(|(id,)| id).collect())
 }
 
+/// 这篇文档是衰减扫描淘汰的：之后推送方再推同样的内容，不把它恢复出来。
+pub async fn mark_evicted(pool: &PgPool, document_id: Uuid) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO decay_evictions (document_id) VALUES ($1)
+         ON CONFLICT (document_id) DO UPDATE SET evicted_at = now()",
+    )
+    .bind(document_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 衰减扫描淘汰了它，且之后没人恢复过（恢复会清掉这一笔）。
+pub async fn was_evicted(pool: &PgPool, document_id: Uuid) -> AppResult<bool> {
+    Ok(
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM decay_evictions WHERE document_id = $1)")
+            .bind(document_id)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
 /// 淘汰候选：一个文档和给它打分用的材料。
 pub struct Candidate {
     pub document_id: Uuid,

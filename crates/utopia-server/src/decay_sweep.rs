@@ -22,6 +22,7 @@ pub async fn sweep_source(state: &AppState, source_id: Uuid) -> anyhow::Result<(
             Err(AppError::NotFound) => continue,
             Err(e) => return Err(e.into()),
         }
+        utopia_store::decay::mark_evicted(&state.pool, *id).await?;
         let search = state.search.clone();
         let document_id = id.to_string();
         tokio::task::spawn_blocking(move || search.delete_document(&document_id)).await??;

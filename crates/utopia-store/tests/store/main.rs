@@ -123,6 +123,7 @@ mod an_earlier_mention_keeps_the_stated_end;
 mod an_empty_ontology_does_not_cover_the_corpus;
 mod an_end_date_closes_the_open_span;
 mod an_event_holds_at_the_moment_it_names;
+mod an_evicted_document_is_remembered_until_it_is_restored;
 mod an_exploration_says_what_it_covered;
 mod an_export_carries_the_whole_ledger;
 mod an_instance_list_names_what_a_type_lacks;

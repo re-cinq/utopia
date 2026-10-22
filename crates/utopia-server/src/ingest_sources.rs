@@ -295,6 +295,16 @@ pub async fn ingest_item_with_outcome(
     }
 
     if let Some(doc) = existing {
+        // 衰减扫描淘汰的文档，同样的内容再推一遍不恢复它（RC-003）：否则每一轮重推都把它
+        // 救回来、下一次扫描又删。内容变了就是新信息，照常恢复
+        if doc.deleted_at.is_some()
+            && doc.sha256 == sha256
+            && utopia_store::decay::was_evicted(&state.pool, doc.id).await?
+        {
+            return Ok(IngestOutcome {
+                action: IngestAction::Unchanged,
+            });
+        }
         // 新内容已被库里另一篇占着：先答重复，免得下面恢复回收站、重建索引之后才发现
         if doc.sha256 != sha256 {
             if let Some(holder) =
