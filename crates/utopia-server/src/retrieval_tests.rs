@@ -122,6 +122,19 @@ impl Fixture {
         Ok(chunks.into_iter().map(|c| c.id).collect())
     }
 
+    async fn scored_search(&self) -> anyhow::Result<super::SearchPage> {
+        let opts = super::SearchOpts {
+            top_k: 8,
+            offset: 0,
+            as_of: None,
+            documents: None,
+        };
+        Ok(
+            super::hybrid_scored(&self.state, self.kb, self.ws, "apple harvest", opts, None)
+                .await?,
+        )
+    }
+
     async fn cleanup(self) -> anyhow::Result<()> {
         sqlx::query("DELETE FROM organizations WHERE id=$1")
             .bind(self.org)
@@ -262,5 +275,82 @@ async fn historical_search_keeps_live_candidates_before_limiting_results() -> an
         six, expected,
         "ineligible hits must not consume the final limit"
     );
+    Ok(())
+}
+
+fn hit(document_id: Uuid, score: f64) -> super::ScoredChunk {
+    super::ScoredChunk {
+        chunk: utopia_core::models::SourcedChunk {
+            chunk: utopia_core::models::ChunkView {
+                id: Uuid::now_v7(),
+                document_id,
+                seq: 0,
+                text: String::new(),
+                filename: String::new(),
+            },
+            source_id: None,
+            external_id: None,
+        },
+        score,
+        stale: false,
+        bm25_rank: None,
+        vector_rank: None,
+    }
+}
+
+#[test]
+fn a_stale_hit_loses_forty_percent_and_the_list_is_reordered() {
+    let (fresh, old) = (Uuid::now_v7(), Uuid::now_v7());
+    let mut hits = vec![hit(old, 1.0), hit(fresh, 0.7)];
+    super::demote_stale(&mut hits, &[old].into_iter().collect());
+    let order: Vec<(Uuid, bool)> = hits
+        .iter()
+        .map(|h| (h.chunk.chunk.document_id, h.stale))
+        .collect();
+    assert_eq!(order, vec![(fresh, false), (old, true)]);
+    assert!((hits[1].score - 0.6).abs() < 1e-12);
+}
+
+#[test]
+fn a_list_with_nothing_stale_keeps_its_order_and_scores() {
+    let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+    let mut hits = vec![hit(a, 0.2), hit(b, 0.9)];
+    super::demote_stale(&mut hits, &std::collections::HashSet::new());
+    assert_eq!(
+        hits.iter().map(|h| h.score).collect::<Vec<_>>(),
+        vec![0.2, 0.9]
+    );
+}
+
+#[tokio::test]
+async fn a_search_scores_a_stale_document_of_a_decaying_source_at_sixty_percent(
+) -> anyhow::Result<()> {
+    let Some(f) = fixture().await? else {
+        return Ok(());
+    };
+    let before = f.scored_search().await?;
+    assert!(!before.results[0].stale);
+
+    let source = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO sources(id,kb_id,kind,name,decay) VALUES($1,$2,'folder','f','{}'::jsonb)",
+    )
+    .bind(source)
+    .bind(f.kb)
+    .execute(&f.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE documents SET source_id = $1, created_at = now() - interval '100 days' WHERE id = $2",
+    )
+    .bind(source)
+    .bind(f.doc)
+    .execute(&f.pool)
+    .await?;
+    let after = f.scored_search().await?;
+    let (was, is) = (before.results[0].score, after.results[0].score);
+    let stale = after.results[0].stale;
+    f.cleanup().await?;
+    assert!(stale);
+    assert!((is - was * 0.6).abs() < 1e-12, "{is} is not 0.6 of {was}");
     Ok(())
 }

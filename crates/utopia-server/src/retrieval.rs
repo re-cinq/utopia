@@ -40,6 +40,10 @@ pub struct ScoredChunk {
     #[serde(flatten)]
     pub chunk: SourcedChunk,
     pub score: f64,
+    /// 来自一个会衰减的源、且久没被检索：分已经乘过 [`utopia_store::decay::STALE_SEARCH_WEIGHT`]。
+    /// 不衰减的库这一格永远是 false，不进响应
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
     pub bm25_rank: Option<u32>,
     pub vector_rank: Option<u32>,
 }
@@ -130,19 +134,30 @@ pub async fn hybrid_scored(
     let live = utopia_store::documents::chunks_by_ids(&state.pool, kb_id, &ids, opts.as_of).await?;
     let has_more = live.len() > depth;
     let mut fused: HashMap<Uuid, utopia_search::Fused> = fused.into_iter().collect();
-    let results = live
+    let mut scored: Vec<ScoredChunk> = live
         .into_iter()
-        .skip(opts.offset)
-        .take(opts.top_k)
         .filter_map(|chunk| {
             let f = fused.remove(&chunk.chunk.id)?;
             Some(ScoredChunk {
                 chunk,
                 score: f.score,
+                stale: false,
                 bm25_rank: position(&f.ranks, 0),
                 vector_rank: position(&f.ranks, 1),
             })
         })
+        .collect();
+    // 陈旧的先降分再翻页：久没人读的文档才可能被挤出这一页，而不是只在页内挪位置
+    let document_ids: Vec<Uuid> = scored
+        .iter()
+        .map(|hit| hit.chunk.chunk.document_id)
+        .collect();
+    let stale = utopia_store::decay::stale_documents(&state.pool, &document_ids).await?;
+    demote_stale(&mut scored, &stale);
+    let results = scored
+        .into_iter()
+        .skip(opts.offset)
+        .take(opts.top_k)
         .collect();
     Ok(SearchPage {
         results,
@@ -162,6 +177,21 @@ pub fn record_retrievals(state: &AppState, mut document_ids: Vec<Uuid>) {
             tracing::warn!(error = %e, "记录文档被检索失败");
         }
     });
+}
+
+/// 陈旧文档的命中乘 [`utopia_store::decay::STALE_SEARCH_WEIGHT`] 后重排。没有陈旧的就不动，
+/// 排序稳定，同分仍按原来的先后。
+fn demote_stale(hits: &mut [ScoredChunk], stale: &std::collections::HashSet<Uuid>) {
+    if stale.is_empty() {
+        return;
+    }
+    for hit in hits.iter_mut() {
+        if stale.contains(&hit.chunk.chunk.document_id) {
+            hit.score *= utopia_store::decay::STALE_SEARCH_WEIGHT;
+            hit.stale = true;
+        }
+    }
+    hits.sort_by(|a, b| b.score.total_cmp(&a.score));
 }
 
 /// 第 `channel` 路里的名次，从 1 数

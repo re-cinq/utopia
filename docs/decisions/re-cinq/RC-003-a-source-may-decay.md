@@ -24,12 +24,12 @@ Not every source wants this. A folder of specifications must not forget. So deca
 2. Setting the option on a source.
 3. Recording retrievals.
 4. A daily sweep that takes a source over `max_items` back to it: from the documents older than `min_age_days`, the `excess` with the lowest score are deleted the way a person deletes them, so they can be restored.
-5. Stale documents rank at 0.6 of their search score, and a result says its score.
+5. A stale document ranks at 0.6 of its search score, before paging, and its hit says `stale: true`.
 
 ## Consequences
 
 - A base where no source sets the option stores nothing new and ranks as before.
-- The sweep needs a source to be a bounded list; a source with no cap in its option never loses a document.
+- Setting the option caps the source: a missing `max_items` is 500, not unlimited, so `{}` already evicts once a source holds more than 500 documents.
 - The fact purge Lore runs on facts invalidated more than 30 days ago is not part of this. The ledger is append-only.
 
 ## Open questions
