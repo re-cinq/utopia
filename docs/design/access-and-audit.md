@@ -21,7 +21,7 @@ reading the source's push key, importing an ontology and deciding a kind word, w
 role unchanged as the ceiling; any token lists a workspace's bases; a token limited by `kb_ids`
 creates no base. These routes, document content (including the read by a pushed document's
 `external_id`), chunk search and the graph reads (entity search, detail, history, fact evidence,
-overview, neighbourhood, ontology, extractions, export; Viewer suffices, `kb_ids` answers 404) take
+overview, neighbourhood, ontology, a class's instances, extractions, export; Viewer suffices, `kb_ids` answers 404) take
 `SessionOrToken`; apart from MCP, every other route is session-only [0014 d6, d7]. `ingest_token` on a source is a different kind: plaintext, push-only [0014].
 
 **A client reads a pushed document back by its `external_id`.**

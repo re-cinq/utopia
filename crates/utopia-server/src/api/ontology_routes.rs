@@ -85,7 +85,8 @@ fn missing_link(q: &InstancesQuery) -> Result<Option<(&str, LinkEnd)>, AppError>
 }
 
 /// 某个类下的实体实例列表（详情区右侧，分页）。
-/// 令牌也读得到（0014 决定 7）。带 `missing_predicate` 时只列缺那条关系的成员，并回显认作它的属性与短语。
+/// 带 `missing_predicate` 时只列缺那条关系的成员，并回显认作它的属性与短语。
+/// 令牌也读得到（0014 决定 7）。
 pub async fn list_entity_instances(
     State(state): State<AppState>,
     reader: SessionOrToken,
