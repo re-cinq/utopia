@@ -100,6 +100,7 @@ mod a_single_name_candidate_is_not_counted;
 mod a_source_decay_is_set_and_cleared_by_update;
 mod a_source_decays_only_when_asked;
 mod a_source_kind_is_listed_once;
+mod a_source_over_its_cap_gives_up_its_lowest_scores;
 mod a_source_reaches_only_where_it_was_granted;
 mod a_statement_is_attested_by_what_its_document_says;
 mod a_stopped_chat_is_replayed_as_incomplete;
