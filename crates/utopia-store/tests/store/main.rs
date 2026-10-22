@@ -27,6 +27,7 @@
 //!   （比如 lib 单元测试里的 `phrase_bindings_delivery_tests`）就会多数出一个。
 //! - `a_sync_runs_while_model_work_holds_every_slot`：同样起真实的 `run_worker`，同样会认领
 //!   库里任何排队任务，不是自己的就报错。
+//! - `a_name_embedding_runs_while_model_work_holds_every_slot`：同上，换成 `embed_names`。
 //!
 //! 新加测试默认放这个目录；只有碰上面那类全局状态时才放顶层，并在这里补一行为什么。
 mod a_batch_decides_like_a_person;
