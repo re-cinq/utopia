@@ -12,6 +12,7 @@ pub mod competency_questions;
 pub mod conversations;
 pub mod datasources;
 pub mod db;
+pub mod decay;
 pub mod documents;
 pub mod errata;
 pub mod execution_gate;
