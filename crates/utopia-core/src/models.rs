@@ -153,6 +153,8 @@ pub struct Source {
     pub sync_interval_minutes: Option<i32>,
     /// 标准 5 段 cron（服务器本地时区；与 sync_interval_minutes 互斥）
     pub sync_cron: Option<String>,
+    /// NULL = 文档不衰减；对象的形状见 `utopia_store::decay::DecaySettings`（RC-003）
+    pub decay: Option<serde_json::Value>,
     pub last_sync_at: Option<DateTime<Utc>>,
     /// never | queued | running | ok | failed
     pub last_sync_status: String,
@@ -197,6 +199,7 @@ mod source_extracts_tests {
             icon: None,
             sync_interval_minutes: None,
             sync_cron: None,
+            decay: None,
             last_sync_at: None,
             last_sync_status: "never".into(),
             last_sync_error: None,
@@ -353,6 +356,7 @@ pub struct SourceView {
     pub icon: Option<String>,
     pub sync_interval_minutes: Option<i32>,
     pub sync_cron: Option<String>,
+    pub decay: Option<serde_json::Value>,
     pub last_sync_at: Option<DateTime<Utc>>,
     pub last_sync_status: String,
     pub last_sync_error: Option<String>,

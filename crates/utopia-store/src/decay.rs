@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use utopia_core::AppError;
 
 pub const DEFAULT_HALF_LIFE_DAYS: f64 = 60.0;
 pub const MAX_HALF_LIFE_DAYS: f64 = 365.0;
@@ -34,6 +35,20 @@ impl Default for DecaySettings {
             stale_after_days: 30,
             min_age_days: 30,
         }
+    }
+}
+
+impl DecaySettings {
+    /// 数据库不拦的范围：半衰期 1 到 365 天，容量和陈旧天数至少 1。
+    pub fn validate(&self) -> Result<(), AppError> {
+        let half_life_ok = (1..=MAX_HALF_LIFE_DAYS as u32).contains(&self.half_life_days);
+        if !half_life_ok || self.max_items == 0 || self.stale_after_days == 0 {
+            return Err(AppError::Validation(format!(
+                "decay needs max_items >= 1, stale_after_days >= 1 and half_life_days within 1 to {}",
+                MAX_HALF_LIFE_DAYS as u32
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -210,6 +225,31 @@ mod tests {
                 min_age_days: 30
             }
         );
+    }
+
+    #[test]
+    fn a_setting_out_of_range_is_refused() {
+        let ok = DecaySettings::default();
+        assert!(ok.validate().is_ok());
+        let bad = [
+            DecaySettings {
+                max_items: 0,
+                ..ok.clone()
+            },
+            DecaySettings {
+                half_life_days: 0,
+                ..ok.clone()
+            },
+            DecaySettings {
+                half_life_days: 366,
+                ..ok.clone()
+            },
+            DecaySettings {
+                stale_after_days: 0,
+                ..ok.clone()
+            },
+        ];
+        assert!(bad.iter().all(|settings| settings.validate().is_err()));
     }
 
     #[test]
