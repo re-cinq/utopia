@@ -804,6 +804,17 @@ export const en = {
       "Changing what this source fetches never deletes existing documents. " +
       "Items the new configuration no longer returns are marked “Not in source” " +
       "after the next sync. Switching to a different service entirely? Create a new source instead.",
+    decay: {
+      toggle: "Let documents decay",
+      hint:
+        "A document nobody retrieves loses score over time. Once the source holds more " +
+        "than the limit, the lowest-scoring old documents are deleted once a day. " +
+        "They can be restored from the trash.",
+      maxItems: "Keep at most (documents)",
+      halfLife: "Score halves every (days)",
+      staleAfter: "Rank lower after (days unread)",
+      minAge: "Never delete newer than (days)",
+    },
     notInSource: "Not in source",
     cleanupMissing: (n: number) => `Clean up ${n} missing`,
     cleanupTitle: "Delete missing documents",

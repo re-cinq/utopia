@@ -130,7 +130,7 @@ indexed and never extracted (`sources.config.extract`) [0036 d7].
 A source may let its documents decay [RC-003](../decisions/re-cinq/RC-003-a-source-may-decay.md).
 `PATCH` a source with `decay` to set it: an object turns it on (a missing field takes Lore's value, so
 `{}` is Lore's behaviour), `null` turns it off, and leaving the field out changes nothing. A new
-source decays nothing.
+source decays nothing. In the web UI it is the "Let documents decay" switch in a source's settings.
 
 Once a day a source that holds more live documents than its `max_items` is taken back to it: from the
 documents older than `min_age_days`, the lowest scoring ones are deleted the way a person deletes them

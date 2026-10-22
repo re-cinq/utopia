@@ -242,6 +242,8 @@ export interface SourceView {
   icon: string | null;
   sync_interval_minutes: number | null;
   sync_cron: string | null;
+  /** null = 文档不衰减；打开后的设置（RC-003），手写的对象可能缺字段，缺的取默认值 */
+  decay: Partial<DecaySettings> | null;
   last_sync_at: string | null;
   last_sync_status: "never" | "queued" | "running" | "ok" | "failed";
   last_sync_error: string | null;
@@ -251,6 +253,14 @@ export interface SourceView {
   /** 全文补全那一块；**不是 RSS 全文来源的就是 null**，不用再拿 kind 与
    *  content_mode 自己推一遍适不适用（0026 / #417） */
   rss_full_content: RssFullContentSummary | null;
+}
+
+/** 来源的衰减设置（RC-003）：超过 max_items 就淘汰分最低的、至少 min_age_days 天的文档。 */
+export interface DecaySettings {
+  max_items: number;
+  half_life_days: number;
+  stale_after_days: number;
+  min_age_days: number;
 }
 
 /** 一个 RSS 来源当前代的全文补全进度。五个计数一起读，所以一起给。 */
