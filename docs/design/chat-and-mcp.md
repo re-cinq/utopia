@@ -82,6 +82,10 @@ then recall only from that source's documents, live at `as_of`, whose `external_
 of the prefixes, so the base's other documents cannot take the recall a filter after fusion would
 lose (2026-10-19).
 
+A search that returns a document of a source that decays counts as a use of it, in the background and
+never failing the read ([RC-003](../decisions/re-cinq/RC-003-a-source-may-decay.md)): `search_chunks`
+always does, and the REST body may carry `record: false` for a probe, an eval or a health check.
+
 **`remember`** writes a memory document at once; its statements go through open extraction and wait
 in `pending_facts`; the assistant says the sentence is recorded and its statements will be shown
 for confirmation; the card grows into the conversation on the SSE `pending` event, showing the

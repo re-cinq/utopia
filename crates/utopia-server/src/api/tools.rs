@@ -334,6 +334,7 @@ pub async fn search_chunks(
             .error();
         }
     };
+    retrieval::record_retrievals(ctx.state, chunks.iter().map(|c| c.document_id).collect());
     let mut lines = Vec::new();
     for c in &chunks {
         let n = cite(sink, c.id.to_string(), |n| source_json(n, c));

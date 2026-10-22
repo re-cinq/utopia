@@ -151,6 +151,19 @@ pub async fn hybrid_scored(
     })
 }
 
+/// 一次检索交出去的文档记一笔（RC-003）。放到后台写：失败只记日志，不拖慢也不打断这次读。
+/// 只有打开了衰减的源的文档会真的落行。
+pub fn record_retrievals(state: &AppState, mut document_ids: Vec<Uuid>) {
+    document_ids.sort_unstable();
+    document_ids.dedup();
+    let pool = state.pool.clone();
+    tokio::spawn(async move {
+        if let Err(e) = utopia_store::decay::record_retrievals(&pool, &document_ids).await {
+            tracing::warn!(error = %e, "记录文档被检索失败");
+        }
+    });
+}
+
 /// 第 `channel` 路里的名次，从 1 数
 fn position(ranks: &[Option<usize>], channel: usize) -> Option<u32> {
     ranks

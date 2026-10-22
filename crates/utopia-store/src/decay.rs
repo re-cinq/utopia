@@ -5,7 +5,9 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use utopia_core::AppError;
+use sqlx::PgPool;
+use utopia_core::{AppError, AppResult};
+use uuid::Uuid;
 
 pub const DEFAULT_HALF_LIFE_DAYS: f64 = 60.0;
 pub const MAX_HALF_LIFE_DAYS: f64 = 365.0;
@@ -50,6 +52,33 @@ impl DecaySettings {
         }
         Ok(())
     }
+}
+
+/// 这些文档刚被一次检索交了出去：属于打开了衰减的源的，计数加一、最近检索时间记成现在、
+/// 半衰期加 [`RETRIEVAL_HALF_LIFE_GAIN_DAYS`] 天（封顶 [`MAX_HALF_LIFE_DAYS`]）。别的源的文档
+/// 一行也不写。一条语句写完所有文档；第一次被检索的文档从源里的半衰期起算。
+pub async fn record_retrievals(pool: &PgPool, document_ids: &[Uuid]) -> AppResult<u64> {
+    if document_ids.is_empty() {
+        return Ok(0);
+    }
+    let written = sqlx::query(
+        "INSERT INTO document_salience (document_id, retrieval_count, last_retrieved_at, half_life_days)
+         SELECT d.id, 1, now(),
+                LEAST($3::real, COALESCE((s.decay->>'half_life_days')::real, $4::real) + $2::real)
+         FROM documents d JOIN sources s ON s.id = d.source_id
+         WHERE d.id = ANY($1) AND s.decay IS NOT NULL
+         ON CONFLICT (document_id) DO UPDATE SET
+             retrieval_count = document_salience.retrieval_count + 1,
+             last_retrieved_at = now(),
+             half_life_days = LEAST($3::real, document_salience.half_life_days + $2::real)",
+    )
+    .bind(document_ids)
+    .bind(RETRIEVAL_HALF_LIFE_GAIN_DAYS as f32)
+    .bind(MAX_HALF_LIFE_DAYS as f32)
+    .bind(DEFAULT_HALF_LIFE_DAYS as f32)
+    .execute(pool)
+    .await?;
+    Ok(written.rows_affected())
 }
 
 /// 打分用到的一个文档：`key` 是文档名，`value` 是它的文字。
