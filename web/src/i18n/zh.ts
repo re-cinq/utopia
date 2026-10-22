@@ -736,6 +736,16 @@ export const zh: Strings = {
     editKeepNote:
       "改变这个来源抓取什么，绝不会删除已有文档。新配置不再返回的条目会在下次同步后" +
       "标记为「已不在来源中」。要整个换成另一个服务？那就新建一个来源。",
+    decay: {
+      toggle: "让文档随时间衰减",
+      hint:
+        "没人检索的文档分数会随时间下降。来源里的文档超过上限后，每天删除分数最低的旧文档，" +
+        "删掉的可以从回收站恢复。",
+      maxItems: "最多保留（篇）",
+      halfLife: "分数每隔多少天减半",
+      staleAfter: "多少天没人读就排后",
+      minAge: "不删比这新的（天）",
+    },
     notInSource: "已不在来源中",
     cleanupMissing: (n: number) => `清理 ${n} 篇缺失`,
     cleanupTitle: "删除缺失的文档",

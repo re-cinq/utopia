@@ -24,6 +24,8 @@ import { toast } from "../toast";
 import { copyAndSay } from "../clipboard";
 import { pushEndpoint } from "../pushEndpoint";
 import { githubRepoConfig, globList } from "./githubRepoConfig";
+import { SourceDecayFields } from "./SourceDecayFields";
+import { decayChange, decayFormValue, decayIssue } from "./sourceDecay";
 import {
   Button,
   Checkbox,
@@ -1897,6 +1899,8 @@ function SourceEditModal({
     sync_interval_minutes: source.sync_interval_minutes,
     sync_cron: source.sync_cron,
   });
+  const [decayOn, setDecayOn] = useState(source.decay != null);
+  const [decay, setDecay] = useState(() => decayFormValue(source.decay));
   const syncing = SYNCING_KINDS.has(kind);
   const KindIcon = KIND_ICON[kind as keyof typeof KIND_ICON] ?? Upload;
 
@@ -1949,6 +1953,7 @@ function SourceEditModal({
         ...(kind === "custom" && icon ? { icon } : {}),
         ...(config ? { config } : {}),
         ...(syncing ? { schedule } : {}),
+        ...decayChange(source.decay, decayOn, decay),
       });
     },
     onSuccess: () => onDone(),
@@ -1956,6 +1961,7 @@ function SourceEditModal({
 
   const valid =
     name.trim() &&
+    !(decayOn && decayIssue(decay)) &&
     (kind === "url"
       ? urls.trim()
       : kind === "rss"
@@ -2150,6 +2156,13 @@ function SourceEditModal({
                 onChange={setSchedule}
               />,
             )}
+
+          <SourceDecayFields
+            enabled={decayOn}
+            onEnabled={setDecayOn}
+            value={decay}
+            onChange={setDecay}
+          />
 
           {save.isError && (
             <p className="text-small text-danger mb-2">{(save.error as Error).message}</p>
