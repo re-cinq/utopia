@@ -21,7 +21,10 @@ keeps the stored value; a truncated round says so [0013]. A ticket is one docume
 carries its history as dated declarative sentences and a `## History` list; GitHub fetches events
 per ticket; timestamps are written to the second [0013]. A GitHub repository file is one document
 keyed by its path and dated by the last commit that touched it; a file whose blob SHA has not
-changed is not fetched again, and identical files at several paths go in once [#1303].
+changed is not fetched again, and identical files at several paths go in once [#1303]. A GitLab project file
+(gitlab.com; self-managed is not verified) takes the same shape; its tree is paged, so a tree that
+runs past the page cap is a truncated round, and its entries carry no size, so the size cap is read
+from a `HEAD` on the file before anything is downloaded [#1327].
 
 **Google Drive.** A person connects it with OAuth and it reads Drive as them; the refresh token is a sealed source secret and the browser never holds a Google token; the flow is bound to the session that started it; only the person who connected picks folders, subfolders come along, and a sync stops once that person is no longer an editor; a run downloads at most 2000 files and says so when it stops there; Docs, Sheets and Slides are exported to DOCX, XLSX and PPTX; change is Drive's marker (`md5Checksum`, or `modifiedTime` for Google formats) because an export's bytes differ every time; "not in source" only after a complete walk [0074].
 

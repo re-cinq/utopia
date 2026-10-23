@@ -85,12 +85,13 @@ pub(crate) async fn require_reader_kb(
     state: &AppState,
     reader: &SessionOrToken,
     kb_id: Uuid,
-) -> ApiResult<()> {
-    utopia_store::access::require_kb(&state.pool, &reader.user, kb_id, Role::Viewer).await?;
+) -> ApiResult<utopia_core::models::KnowledgeBase> {
+    let kb =
+        utopia_store::access::require_kb(&state.pool, &reader.user, kb_id, Role::Viewer).await?;
     if !reader.reaches(kb_id) {
         return Err(AppError::NotFound.into());
     }
-    Ok(())
+    Ok(kb)
 }
 
 /// Serve the retained original named by the document ledger.

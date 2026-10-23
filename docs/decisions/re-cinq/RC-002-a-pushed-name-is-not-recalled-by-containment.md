@@ -16,3 +16,7 @@ A named entity in a pushed chunk is resolved by `resolution::resolve_pushed_name
 
 - Pushes no longer scan the base for containing names, and the duplicates queue gets no `contains|` pairs from them.
 - Two pushed names for one thing that differ beyond case and whitespace stay two entities until an `n` row or a reviewer joins them.
+
+## Revisions
+
+- 2026-10-23: superseded by upstream's per-source identity names ([0071](../0071-a-source-may-declare-its-names-identities.md), deeplethe/utopia#1333) and upstream's containment recall (#1331, #1357). `resolve_pushed_name` and the skip of name vectors for pushed chunks are gone: a pushed name is resolved like any other unless its source's config says `{"names": "identity"}`, which attaches it by exact name and gives it no name vector. A source that wants the old behaviour sets that config.

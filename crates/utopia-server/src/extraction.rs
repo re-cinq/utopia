@@ -197,14 +197,6 @@ pub async fn extract_document(
     }
 }
 
-/// 名字召回走哪几条路：上传、同步来的文档全走（名字向量可有可无）；推送来的只按字面
-/// （`resolve_pushed_name`，RC-002）
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum NameRecall<'a> {
-    Full(Option<&'a [f32]>),
-    Spelling,
-}
-
 /// Resolve without the document's name cache. Handles use this path so two identities claimed
 /// separately in one response cannot collapse before their fact refs are bound.
 #[allow(clippy::too_many_arguments)]
@@ -214,21 +206,22 @@ async fn resolve_uncached(
     type_id: Option<Uuid>,
     name: &str,
     ctx: Option<&[f32]>,
-    recall: NameRecall<'_>,
+    name_vec: Option<&[f32]>,
     text: Option<&str>,
     exclude: &[Uuid],
+    identity: bool,
     needs_adjudication: &mut bool,
 ) -> anyhow::Result<Uuid> {
-    let r = match recall {
-        NameRecall::Full(name_vec) => {
-            utopia_store::resolution::resolve_mention(
-                pool, kb_id, type_id, name, ctx, name_vec, text, exclude,
+    let r = match identity {
+        true => {
+            utopia_store::resolution::resolve_identity_name(
+                pool, kb_id, type_id, name, ctx, text, exclude,
             )
             .await?
         }
-        NameRecall::Spelling => {
-            utopia_store::resolution::resolve_pushed_name(
-                pool, kb_id, type_id, name, ctx, text, exclude,
+        false => {
+            utopia_store::resolution::resolve_mention(
+                pool, kb_id, type_id, name, ctx, name_vec, text, exclude,
             )
             .await?
         }
@@ -284,8 +277,9 @@ pub(crate) async fn resolve_handle(
     type_id: Option<Uuid>,
     name: &str,
     ctx: Option<&[f32]>,
-    recall: NameRecall<'_>,
+    name_vec: Option<&[f32]>,
     text: Option<&str>,
+    identity: bool,
     response_claims: &mut HashMap<String, Vec<Uuid>>,
     handled_by_name: &mut HashMap<String, Vec<Uuid>>,
     ambiguous_bare_cache: &mut HashMap<String, Uuid>,
@@ -324,9 +318,10 @@ pub(crate) async fn resolve_handle(
                 type_id,
                 name,
                 ctx,
-                recall,
+                name_vec,
                 text,
                 &excluded,
+                identity,
                 needs_adjudication,
             )
             .await?;
@@ -361,10 +356,14 @@ async fn run(state: &AppState, document_id: Uuid, proposer: Proposer) -> anyhow:
     }
     let kb = utopia_store::kbs::get(&state.pool, doc.kb_id).await?;
     // 推送来的陈述（0054）：块就是契约，抽取按契约解析、不问模型，没配对话模型也照抽
-    let pushed = crate::pipeline::source_kind(state, doc.source_id)
-        .await?
-        .as_deref()
-        == Some("statements");
+    let source = match doc.source_id {
+        Some(id) => Some(utopia_store::sources::get(&state.pool, id).await?),
+        None => None,
+    };
+    let pushed = source.as_ref().is_some_and(|s| s.kind == "statements");
+    let identity = source
+        .as_ref()
+        .is_some_and(utopia_core::models::Source::names_are_identities);
     // settings 有就传：推送路径不问对话模型，但名字向量的嵌入模型（#877）仍从它来
     let settings = utopia_store::settings::get(&state.pool, kb.workspace_id).await?;
     let client = if pushed {
@@ -394,6 +393,7 @@ async fn run(state: &AppState, document_id: Uuid, proposer: Proposer) -> anyhow:
         proposer,
         await_nod,
         pushed,
+        identity,
     )
     .await
 }
@@ -416,7 +416,7 @@ mod origin_ceiling_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{incomplete_reason, resolve_handle, span_in_quote, NameRecall};
+    use super::{incomplete_reason, resolve_handle, span_in_quote};
     use std::collections::HashMap;
     use uuid::Uuid;
 
@@ -512,8 +512,9 @@ mod tests {
                 Some(person),
                 "Zhang Wei",
                 None,
-                NameRecall::Full(None),
                 None,
+                None,
+                false,
                 &mut response_claims,
                 &mut document_claims,
                 &mut bare_cache,
@@ -526,8 +527,9 @@ mod tests {
                 Some(person),
                 "Zhang Wei",
                 None,
-                NameRecall::Full(None),
                 None,
+                None,
+                false,
                 &mut response_claims,
                 &mut document_claims,
                 &mut bare_cache,
@@ -604,8 +606,9 @@ mod tests {
                 Some(person),
                 "**Zhang Wei**",
                 None,
-                NameRecall::Full(None),
                 None,
+                None,
+                false,
                 &mut later_response_claims,
                 &mut document_claims,
                 &mut bare_cache,
@@ -632,8 +635,9 @@ mod tests {
                 None,
                 "Zhang Wei",
                 None,
-                NameRecall::Full(None),
                 None,
+                None,
+                false,
                 &mut another_response_claims,
                 &mut document_claims,
                 &mut bare_cache,
@@ -759,8 +763,9 @@ mod tests {
                 Some(person),
                 "Zhang Wei",
                 Some(&ctx),
-                NameRecall::Full(None),
                 None,
+                None,
+                false,
                 &mut response_claims,
                 &mut document_claims,
                 &mut bare_cache,
