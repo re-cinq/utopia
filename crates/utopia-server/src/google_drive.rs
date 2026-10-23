@@ -56,6 +56,9 @@ pub const DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
 pub const SCOPES: &str = "openid email https://www.googleapis.com/auth/drive.readonly";
 
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
+const SHORTCUT_MIME: &str = "application/vnd.google-apps.shortcut";
+/// 一个文件要用到的元数据，列表与快捷方式的目标都取这些
+const FILE_FIELDS: &str = "id,name,mimeType,modifiedTime,md5Checksum,size";
 
 /// 一次遍历最多列多少个文件。列表只是元数据，标记没变的文件不下载，所以这里放得宽；
 /// 它只防一棵大得离谱的树把内存撑爆。到了这个数，这一轮说出来，不报成功
@@ -317,8 +320,10 @@ pub struct Listing {
     /// 选中却打不开的文件夹（删了、或不再共享给这个人）。有它时不对账：
     /// 打不开不等于里面的东西都没了
     pub unreachable: Vec<String>,
-    /// 跳过的文件，每个一句原因：表单、快捷方式、超大的
+    /// 跳过的文件，每个一句原因：表单、超大的
     pub skipped: usize,
+    /// 指向这个人打不开的文件的快捷方式（没共享给他、删了），按快捷方式的名字
+    pub broken_shortcuts: Vec<String>,
 }
 
 /// 读一个文件拿到的字节
@@ -575,13 +580,31 @@ impl Drive {
             }
             let q = format!("'{folder}' in parents and trashed = false");
             let room = MAX_FILES_LISTED.saturating_sub(listing.files.len()) + MAX_FOLDERS_LISTED;
-            let (items, cut) = self
-                .list(&q, "id,name,mimeType,modifiedTime,md5Checksum,size", room)
-                .await?;
+            let fields = format!("{FILE_FIELDS},shortcutDetails(targetId,targetMimeType)");
+            let (items, cut) = self.list(&q, &fields, room).await?;
             if cut {
                 listing.truncated = true;
             }
-            for f in items {
+            for item in items {
+                // 别人组织的会议，纪要与转写住在他的 Drive 里，这边的文件夹里只有快捷方式：
+                // 换成它指向的那一个，之后与普通文件一样
+                let f = if item["mimeType"] == SHORTCUT_MIME {
+                    match self.shortcut_target(&item).await {
+                        Ok(Some(target)) => target,
+                        Ok(None) => {
+                            listing.skipped += 1;
+                            continue;
+                        }
+                        Err(e) if is_inaccessible(&e) => {
+                            let name = item["name"].as_str().unwrap_or("a shortcut");
+                            listing.broken_shortcuts.push(name.to_string());
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                } else {
+                    item
+                };
                 let (Some(id), Some(name), Some(mime)) =
                     (f["id"].as_str(), f["name"].as_str(), f["mimeType"].as_str())
                 else {
@@ -628,6 +651,33 @@ impl Drive {
             }
         }
         Ok(listing)
+    }
+
+    /// 快捷方式指向的那一个。指向文件夹的照文件夹走；指向文件的取目标自己的元数据，
+    /// 变更标记、大小、导出格式都按目标算，文件也按目标的 id 认（直接选到与经快捷方式
+    /// 到达的是同一份）。目标在回收站里 → `None`；打不开 → 403/404 的错误
+    async fn shortcut_target(&self, shortcut: &Value) -> anyhow::Result<Option<Value>> {
+        let details = &shortcut["shortcutDetails"];
+        let Some(target) = details["targetId"].as_str().filter(|id| valid_id(id)) else {
+            return Ok(None);
+        };
+        if details["targetMimeType"] == FOLDER_MIME {
+            return Ok(Some(serde_json::json!({
+                "id": target,
+                "name": shortcut["name"],
+                "mimeType": FOLDER_MIME,
+            })));
+        }
+        let url = format!("{}/files/{target}", self.api_root);
+        let fields = format!("{FILE_FIELDS},trashed");
+        let v = self
+            .get_json(
+                "files.get",
+                &url,
+                &[("fields", fields.as_str()), ("supportsAllDrives", "true")],
+            )
+            .await?;
+        Ok((v["trashed"].as_bool() != Some(true)).then_some(v))
     }
 
     /// 选中的这个还在不在：在且没进回收站 → true；进了回收站 → false；
@@ -706,6 +756,12 @@ impl std::error::Error for DriveError {}
 fn is_not_found(e: &anyhow::Error) -> bool {
     e.downcast_ref::<DriveError>()
         .is_some_and(|d| d.status == StatusCode::NOT_FOUND)
+}
+
+/// 打不开：Drive 对没共享给这个人的文件有时回 404，有时回 403
+fn is_inaccessible(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<DriveError>()
+        .is_some_and(|d| d.status == StatusCode::NOT_FOUND || d.status == StatusCode::FORBIDDEN)
 }
 
 /// 读一个限了体积的响应体。先看 Content-Length，再边读边数
