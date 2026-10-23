@@ -609,12 +609,10 @@ async fn mr_holmes_is_paired_with_sherlock_holmes_through_its_alias_holmes() -> 
     run
 }
 
-/// 上游 #1331 从名字事实出发，按描述建的实体（没有名字事实，0044）不配对；这里的
-/// `CONTAINMENT_SQL` 还读每个实体的 `canonical_name`，所以描述建的实体和普通实体一样配对。
-/// 上游若改成只认名字事实，这条要改回「不配对」
+/// 按描述建的实体没有名字事实（0044），描述文字不是召回的桥；
+/// 同样的文字落在普通实体的 `known_as` 上照常配对
 #[tokio::test]
-async fn a_described_entity_is_paired_by_containment_through_its_canonical_name(
-) -> anyhow::Result<()> {
+async fn a_described_entity_is_not_paired_by_containment() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
         return Ok(());
     };
@@ -650,13 +648,10 @@ async fn a_described_entity_is_paired_by_containment_through_its_canonical_name(
             &[],
         )
         .await?;
-        let mut paired = contained(&mention);
-        paired.sort();
-        let mut expected = vec![named.entity_id, described];
-        expected.sort();
         assert_eq!(
-            paired, expected,
-            "描述建的 {described} 与同文字的普通实体都配对：{:?}",
+            contained(&mention),
+            vec![named.entity_id],
+            "描述建的 {described} 不配对，同文字的普通实体配对：{:?}",
             mention.reviews
         );
         Ok::<_, anyhow::Error>(())

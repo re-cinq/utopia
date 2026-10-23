@@ -12,6 +12,7 @@ mod extraction;
 mod extraction_open;
 mod github_issues;
 mod github_repo;
+mod gitlab_repo;
 mod google_drive;
 mod governance;
 mod http_fetch;
@@ -40,6 +41,9 @@ mod retrieval;
 mod rss_full_content;
 mod search_recovery;
 mod state;
+mod ticket;
+#[cfg(test)]
+mod ticket_golden_tests;
 mod time_resolution;
 mod time_text;
 mod type_alignment;
@@ -174,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState::new(pool.clone(), &cfg, search, jwt_secret);
     api::oidc_routes::warn_about_password_login(&state);
+    api::oidc_routes::warn_about_scopes();
 
     // worker 并发数：系统设置持久化，启动时装载；运行中经同一 AtomicUsize 热调
     let n = utopia_store::access::worker_concurrency(&pool)

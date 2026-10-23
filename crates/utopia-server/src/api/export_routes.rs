@@ -41,8 +41,7 @@ pub async fn export(
     Path(kb_id): Path<Uuid>,
     Query(q): Query<ExportQuery>,
 ) -> ApiResult<Response> {
-    require_reader_kb(&state, &reader, kb_id).await?;
-    let kb = utopia_store::kbs::get(&state.pool, kb_id).await?;
+    let kb = require_reader_kb(&state, &reader, kb_id).await?;
     let format = Format::parse(q.format.as_deref()).ok_or_else(|| {
         AppError::Validation("Unknown `format` (expected turtle or jsonld)".into())
     })?;

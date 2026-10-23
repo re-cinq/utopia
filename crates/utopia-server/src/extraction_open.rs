@@ -22,7 +22,7 @@
 
 use crate::extraction::{
     chat_retrying_rate_limits_at, drop_signal, incomplete_reason, origin_ceiling, resolve_handle,
-    span_in_quote, NameRecall,
+    span_in_quote,
 };
 use crate::state::AppState;
 use sqlx::PgPool;
@@ -246,14 +246,9 @@ async fn call_and_parse_one_chunk(
     }
     // 名字向量（0041 决定 3 通道 2）：这一块里有名字的东西，名字字符串各算一条，
     // 消解时拿它在同库的名字向量里找近邻。一块一批；算不出来（端点抖了）不拦抽取，
-    // 只是这一块少一条召回通道。
-    //
-    // 推送的块不算（#1293、#1296）：推送来的名字是客户端给的身份，只按字面归并或新建。
-    // 机器起的名字共用前缀，向量上个个相近，排出的对永远不是一个，而每个名字一次全库
-    // 近邻查询是推送时数据库的主要开销。名字本身的向量照样由 `embed_pending_names`
-    // 补上，别的文档仍能在通道 2 里召回到它们
+    // 只是这一块少一条召回通道
     let name_vecs: HashMap<String, Vec<f32>> = match (settings, embed_client) {
-        (Some(settings), Some(client)) if !pushed => {
+        (Some(settings), Some(client)) => {
             let mut wanted: Vec<(String, String)> = Vec::new();
             let mut seen: HashSet<String> = HashSet::new();
             for e in &extraction.entities {
@@ -291,6 +286,7 @@ async fn apply_open_extraction(
     attested_at: Option<chrono::DateTime<chrono::Utc>>,
     bound_types: &HashMap<String, Uuid>,
     pushed: bool,
+    identity: bool,
     await_nod: bool,
     proposer: Proposer,
     pending_count: &mut usize,
@@ -333,12 +329,9 @@ async fn apply_open_extraction(
                 bound,
                 name,
                 ctx,
-                if pushed {
-                    NameRecall::Spelling
-                } else {
-                    NameRecall::Full(name_vecs.get(&key).map(Vec::as_slice))
-                },
+                name_vecs.get(&key).map(Vec::as_slice),
                 evidence.get(&key).map(String::as_str),
+                identity,
                 &mut response_claims,
                 handled_by_name,
                 ambiguous_bare_cache,
@@ -1044,6 +1037,8 @@ pub(crate) async fn run_open(
     proposer: Proposer,
     await_nod: bool,
     pushed: bool,
+    // 0071: the source's names are identities, so they get no name vectors
+    identity: bool,
 ) -> anyhow::Result<()> {
     let pool = &state.pool;
     let document_id = doc.id;
@@ -1078,7 +1073,9 @@ pub(crate) async fn run_open(
 
     // 名字向量的嵌入客户端（0041 决定 3 通道 2）。没配嵌入模型就是 None：召回退回
     // 字面相等，抽取照常
-    let embed = settings.and_then(crate::llm_util::embed_client);
+    let embed = settings
+        .and_then(crate::llm_util::embed_client)
+        .filter(|_| !identity);
     // 文档自己说到的日期（0064 决定 1）：每一块报上来的，连它所在的标题路径。块与块之间
     // 不传——一条日期管到哪，看的是它自己那一块正文里的标题，块并行抽的时候照样成立（#588）
     let mut time_entries: Vec<utopia_extract::time::TimeEntry> = Vec::new();
@@ -1174,6 +1171,7 @@ pub(crate) async fn run_open(
             attested_at,
             &bound_types,
             pushed,
+            identity,
             await_nod,
             proposer,
             &mut pending_count,
@@ -1319,12 +1317,12 @@ pub(crate) async fn run_open(
 mod known_flow_tests;
 
 #[cfg(test)]
-#[path = "extraction_open_out_of_credit_tests.rs"]
-mod out_of_credit_tests;
+#[path = "extraction_open_identity_names_tests.rs"]
+mod identity_names_tests;
 
 #[cfg(test)]
-#[path = "extraction_open_pushed_names_tests.rs"]
-mod pushed_names_tests;
+#[path = "extraction_open_out_of_credit_tests.rs"]
+mod out_of_credit_tests;
 
 #[cfg(test)]
 #[path = "extraction_open_name_vectors_job_tests.rs"]
