@@ -113,6 +113,94 @@ async fn a_walk_descends_skips_what_cannot_be_read_and_counts_each_file_once() -
     Ok(())
 }
 
+/// 别人组织的会议：文件夹里只有快捷方式，纪要住在组织者的 Drive 里。
+/// 指向文件的按目标收（目标自己的标记与时间），指向文件夹的往里走；
+/// 同一个目标既被直接选到、又经快捷方式到达，只收一次
+#[tokio::test]
+async fn a_shortcut_brings_in_what_it_points_to() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    mount_folder(&server, "meeting", false).await;
+    mount_folder(&server, "theirs", false).await;
+    mount_children(
+        &server,
+        "meeting",
+        json!([
+            {"id": "s1", "name": "Notes by Gemini", "mimeType": SHORTCUT_MIME,
+             "shortcutDetails": {"targetId": "notes1",
+                                 "targetMimeType": "application/vnd.google-apps.document"}},
+            {"id": "s2", "name": "Recordings", "mimeType": SHORTCUT_MIME,
+             "shortcutDetails": {"targetId": "theirs", "targetMimeType": FOLDER_MIME}}
+        ]),
+    )
+    .await;
+    mount_children(
+        &server,
+        "theirs",
+        json!([
+            {"id": "notes1", "name": "Notes by Gemini", "mimeType": "application/vnd.google-apps.document",
+             "modifiedTime": "2026-10-20T10:00:00.000Z"},
+            {"id": "t1", "name": "Transcript", "mimeType": "application/vnd.google-apps.document",
+             "modifiedTime": "2026-10-20T10:05:00.000Z"}
+        ]),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/files/notes1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "notes1", "name": "Notes by Gemini",
+            "mimeType": "application/vnd.google-apps.document",
+            "modifiedTime": "2026-10-20T10:00:00.000Z", "trashed": false
+        })))
+        .mount(&server)
+        .await;
+
+    let listing = drive(&server).walk(&["meeting".to_string()]).await?;
+    let files: Vec<(&str, String)> = listing
+        .files
+        .iter()
+        .map(|f| (f.id.as_str(), f.marker()))
+        .collect();
+    assert_eq!(
+        files,
+        [
+            ("notes1", "2026-10-20T10:00:00.000Z".to_string()),
+            ("t1", "2026-10-20T10:05:00.000Z".to_string())
+        ]
+    );
+    Ok(())
+}
+
+/// 快捷方式指向的文件没共享给这个人：点名，不当作「没东西」
+#[tokio::test]
+async fn a_shortcut_to_a_file_the_person_cannot_open_is_named() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    mount_folder(&server, "meeting", false).await;
+    mount_children(
+        &server,
+        "meeting",
+        json!([
+            {"id": "s1", "name": "Transcript", "mimeType": SHORTCUT_MIME,
+             "shortcutDetails": {"targetId": "private1",
+                                 "targetMimeType": "application/vnd.google-apps.document"}}
+        ]),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/files/private1"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": {"message": "File not found: private1."}
+        })))
+        .mount(&server)
+        .await;
+
+    let listing = drive(&server).walk(&["meeting".to_string()]).await?;
+    assert_eq!(
+        (listing.files.len(), listing.broken_shortcuts),
+        (0, vec!["Transcript".to_string()])
+    );
+    Ok(())
+}
+
 /// 选中的文件夹打不开（删了、或不再共享）不是错误，但要点名——同步据此不对账
 #[tokio::test]
 async fn an_unreachable_folder_is_named_not_fatal() -> anyhow::Result<()> {

@@ -1667,6 +1667,19 @@ async fn sync_google_drive(state: &AppState, source: &Source) -> anyhow::Result<
                 .join("; ")
         ));
     }
+    if !listing.broken_shortcuts.is_empty() {
+        gaps.push(format!(
+            "{} shortcut(s) point to files the connected account cannot open: {}",
+            listing.broken_shortcuts.len(),
+            listing
+                .broken_shortcuts
+                .iter()
+                .take(3)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
     if listing.truncated {
         gaps.push(
             "the folders go deeper or hold more files than one walk lists, so the rest were not looked at"
