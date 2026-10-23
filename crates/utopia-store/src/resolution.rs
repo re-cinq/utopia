@@ -893,8 +893,11 @@ fn contained_names(lower: &str) -> Vec<String> {
 /// 名字包含关系的候选（9002）。三路各自能走索引，最后合成一个 id 集合：
 /// 名字含新名字（三元组）、名字是新名字的子串（$7 等值）、别名二者之一
 ///（`known_as` 的 id 用子查询取，才成了 `facts_live_predicate_idx` 的索引条件，见 `name_vectors::pending`）。
-/// $6 是转义过的新名字（#1293）；$7 是 [`contained_names`]，等值比较不需要转义
-const CONTAINMENT_SQL: &str = "SELECT e.id, e.canonical_name, t.key, e.type_id, e.profile_embedding
+/// $6 是转义过的新名字（#1293）；$7 是 [`contained_names`]，等值比较不需要转义。
+/// 两个方向都只认词边界（#1104）：$9 是新名字的词边界正则，反方向用 `word_edges_sql` 现场拼
+static CONTAINMENT_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "SELECT e.id, e.canonical_name, t.key, e.type_id, e.profile_embedding
      FROM entities e LEFT JOIN entity_types t ON t.id = e.type_id
      WHERE e.kb_id = $1 AND e.merged_into IS NULL
        AND e.id <> $2
@@ -903,8 +906,10 @@ const CONTAINMENT_SQL: &str = "SELECT e.id, e.canonical_name, t.key, e.type_id, 
          SELECT c.id FROM entities c
           WHERE c.kb_id = $1 AND c.merged_into IS NULL
             AND char_length(c.canonical_name) >= $4
-            AND (lower(c.canonical_name) LIKE '%' || $6 || '%'
-                 OR lower(c.canonical_name) = ANY($7))
+            AND ((lower(c.canonical_name) LIKE '%' || $6 || '%'
+                  AND lower(c.canonical_name) ~ $9)
+                 OR (lower(c.canonical_name) = ANY($7)
+                     AND $3 ~ {canonical_edges}))
          UNION
          -- **别的名字也要参与召回，否则每合并一次就少一条桥。**
          --
@@ -920,11 +925,17 @@ const CONTAINMENT_SQL: &str = "SELECT e.id, e.canonical_name, t.key, e.type_id, 
             AND nf.predicate_id = (SELECT nr.id FROM relation_types nr
                                     WHERE nr.kb_id = $1 AND nr.builtin AND nr.key = $8)
             AND char_length(nf.object_value->>'value') >= $4
-            AND (lower(nf.object_value->>'value') LIKE '%' || $6 || '%'
-                 OR lower(nf.object_value->>'value') = ANY($7))
+            AND ((lower(nf.object_value->>'value') LIKE '%' || $6 || '%'
+                  AND lower(nf.object_value->>'value') ~ $9)
+                 OR (lower(nf.object_value->>'value') = ANY($7)
+                     AND $3 ~ {alias_edges}))
        )
      ORDER BY char_length(e.canonical_name)
-     LIMIT $5";
+     LIMIT $5",
+        canonical_edges = crate::names::word_edges_sql("lower(c.canonical_name)"),
+        alias_edges = crate::names::word_edges_sql("lower(nf.object_value->>'value')"),
+    )
+});
 
 /// 新建实体之后，找出**名字互相包含**的既有实体，作为审阅候选。
 ///
@@ -990,7 +1001,7 @@ async fn containment_reviews(
     // 第三列可空：未分类实体也要参与包含关系扫描（0009）
     let mut tx = pool.begin().await?;
     sqlx::query("SET LOCAL jit = off").execute(&mut *tx).await?;
-    let rows: Vec<ContainRow> = sqlx::query_as(CONTAINMENT_SQL)
+    let rows: Vec<ContainRow> = sqlx::query_as(&CONTAINMENT_SQL)
         .bind(kb_id)
         .bind(new_id)
         .bind(&lower)
@@ -999,6 +1010,8 @@ async fn containment_reviews(
         .bind(like_escaped(&lower))
         .bind(contained_names(&lower))
         .bind(crate::names::KNOWN_AS)
+        // 只靠 LIKE，`token` 会匹配到 `service_token`：拉丁名字须落在词边界上才算包含（#1104）
+        .bind(crate::names::word_edges_pattern(&lower))
         .fetch_all(&mut *tx)
         .await?;
     tx.commit().await?;
