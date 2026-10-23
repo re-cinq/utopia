@@ -79,6 +79,7 @@ export const KIND_ICON: Record<SourceKind, LucideIcon> = {
   gcs: Cloud,
   webdav: FolderOpen,
   notion: Notebook,
+  google_drive: HardDrive,
   memory: Brain,
   upload: Upload,
 };
@@ -96,6 +97,7 @@ export const SYNCING_KINDS = new Set([
   "gcs",
   "webdav",
   "notion",
+  "google_drive",
 ]);
 
 export const SYNC_DOT: Record<SourceView["last_sync_status"], string> = {
