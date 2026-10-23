@@ -118,6 +118,7 @@ export const zh: Strings = {
     memory_source_permanent: "「记忆」是知识库自带的来源，会一直在。",
     google_drive_not_configured:
       "这台服务器没有配置 Google Drive。需要管理员设置 UTOPIA_GOOGLE_DRIVE_CLIENT_ID、_CLIENT_SECRET 与 _REDIRECT_URI。",
+    google_drive_connected_by_someone_else: "这个来源读的是别人的 Google Drive。先断开，再连你自己的。",
     google_drive_not_connector: "只有连上这个 Google Drive 的人能选它的文件夹。",
     google_drive_not_connected: "先连接一个 Google 账号。",
     google_drive_unavailable: "读不了 Google Drive。",
@@ -735,6 +736,12 @@ export const zh: Strings = {
       remove: "移除",
       saveFolders: "保存并同步",
       saved: "文件夹已保存，同步已开始。",
+      disconnectConfirm: (account: string, mine: boolean) =>
+        mine
+          ? `停止读取你的 Google Drive（${account}）？这里会删掉它的授权和选好的文件夹，再连接要从头选。`
+          : `停止读取 ${account} 的 Google Drive？这是别人连上的，文件夹也是他选的。这里会删掉它的授权和那些文件夹。`,
+      unnamedAccount: "已连接的账号",
+      cancel: "取消",
       disconnected: "Google Drive 已断开。",
     },
     tokenField: "GitHub 令牌（可选，不再显示）",
