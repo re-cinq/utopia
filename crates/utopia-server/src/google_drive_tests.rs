@@ -3,14 +3,15 @@
 //! 给了令牌才跑。
 use super::*;
 use serde_json::json;
-use wiremock::matchers::{body_string_contains, method, path, query_param};
+use wiremock::matchers::{body_string_contains, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn drive(server: &MockServer) -> Drive {
     Drive {
         // 本地 mock 不走开发机的系统代理
         http: reqwest::Client::builder().no_proxy().build().unwrap(),
-        token: "ya29.test".into(),
+        token: std::sync::Mutex::new("ya29.test".into()),
+        renewal: None,
         api_root: server.uri(),
     }
 }
@@ -388,6 +389,54 @@ async fn a_revoked_grant_says_reconnect() {
         .await
         .unwrap_err();
     assert!(e.to_string().contains("reconnect"), "{e}");
+}
+
+/// 一轮同步超过一小时，访问令牌就过期了：401 换一枚新的再试，不把文件报成「读不出来」
+#[tokio::test]
+async fn an_expired_access_token_is_renewed_once_mid_sync() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/files/f1"))
+        .and(header("authorization", "Bearer ya29.expired"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .and(body_string_contains("refresh_token=1%2F%2Fgrant"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"access_token": "ya29.fresh"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/files/f1"))
+        .and(header("authorization", "Bearer ya29.fresh"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"%PDF-1.4 body".to_vec()))
+        .mount(&server)
+        .await;
+    let drive = Drive {
+        http: reqwest::Client::builder().no_proxy().build()?,
+        token: std::sync::Mutex::new("ya29.expired".into()),
+        renewal: Some(Renewal {
+            cfg: cfg(),
+            refresh_token: "1//grant".into(),
+            token_url: format!("{}/token", server.uri()),
+        }),
+        api_root: server.uri(),
+    };
+    let first = drive
+        .get("download", &format!("{}/files/f1", server.uri()), &[])
+        .await?;
+    let second = drive
+        .get("download", &format!("{}/files/f1", server.uri()), &[])
+        .await?;
+    assert_eq!(
+        (first.bytes().await?.as_ref(), second.status()),
+        (b"%PDF-1.4 body".as_ref(), StatusCode::OK)
+    );
+    Ok(())
 }
 
 /// ID token：签给别的 client 的、别的 issuer 的不收；没验证过的邮箱不显示

@@ -76,6 +76,36 @@ fn require_connector(source: &Source, user_id: Uuid) -> Result<(), AppError> {
     })
 }
 
+/// 别人连着的来源不能直接重连：一点就会换掉他的 Drive、丢掉他选的文件夹。
+/// 要换人，先断开（断开会问一句，说清是谁的 Drive），再由新的人来连
+fn refuse_someone_elses_connection(source: &Source, user_id: Uuid) -> Result<(), AppError> {
+    match google_drive::connected_by(&source.config) {
+        Some(connector) if connector != user_id => Err(AppError::CodedForbidden {
+            code: "google_drive_connected_by_someone_else",
+            message: "This source reads someone else's Google Drive; disconnect it first".into(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// 同一个 Google 账号是不是还连着别的来源。Google 撤销一枚刷新令牌，撤的是这个人对
+/// 我们这个客户端的整份授权，他别的 Drive 来源会一起失效；还有别的在用就不撤
+pub(super) async fn grant_still_used(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    account_email: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sources
+          WHERE kind = 'google_drive' AND id <> $1
+            AND config->>'account_email' = $2 AND config ? 'refresh_token')",
+    )
+    .bind(source_id)
+    .bind(account_email)
+    .fetch_one(pool)
+    .await
+}
+
 /// 落一次连接流程。总数与这个人的在途数都在同一条插入里判，满了就不插，回 `None`
 pub(super) async fn record_flow(
     pool: &sqlx::PgPool,
@@ -117,7 +147,8 @@ pub async fn connect(
     Path((kb_id, source_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<Json<Value>> {
     require_kb(&state, &user, kb_id, Role::Editor).await?;
-    drive_source(&state, kb_id, source_id).await?;
+    let source = drive_source(&state, kb_id, source_id).await?;
+    refuse_someone_elses_connection(&source, user.id)?;
     let cfg = configured()?;
     let (flow_state, verifier) = record_flow(&state.pool, user.id, source_id)
         .await?
@@ -176,6 +207,7 @@ pub async fn callback(
                     "session" => "This window is not signed in to Utopia as the person who started the connection. Close it and start again from the source settings.",
                     "expired" => "This connection attempt has expired. Close this window and start again.",
                     "scope" => "Google did not grant read access to Drive. Close this window, connect again and allow it.",
+                    "taken" => "Someone else connected this source while you were on Google's page. Close this window.",
                     _ => "Google could not be reached or refused the request. Close this window and try again.",
                 },
             )
@@ -225,6 +257,13 @@ pub(super) async fn finish(
                 "user is no longer an editor of the knowledge base".to_string(),
             )
         })?;
+    // 同意页上的这几分钟里，别人可能先连上了
+    refuse_someone_elses_connection(&source, user.id).map_err(|_| {
+        (
+            "taken",
+            "someone else connected this source in the meantime".to_string(),
+        )
+    })?;
 
     let cfg = google_drive::oauth_config().ok_or(("unavailable", "not configured".to_string()))?;
     let grant = google_drive::exchange_code(&cfg, &code, &verifier)
@@ -241,12 +280,6 @@ pub(super) async fn finish(
             )
         })?;
 
-    // 换了一个人连：上一个人选的文件夹是照他的 Drive 选的，不留给新的人
-    let drop_folders: &[&str] = if google_drive::connected_by(&source.config) == Some(user.id) {
-        &[]
-    } else {
-        &["folders"]
-    };
     let grant_keys = json!({
         "refresh_token": grant.refresh_token,
         "account_email": grant.account_email,
@@ -254,7 +287,7 @@ pub(super) async fn finish(
         "connected_at": chrono::Utc::now().to_rfc3339(),
         "connected_by": user.id,
     });
-    utopia_store::sources::patch_config(&state.pool, source_id, &grant_keys, drop_folders)
+    utopia_store::sources::patch_config(&state.pool, source_id, &grant_keys, &[])
         .await
         .map_err(|e| ("unavailable", format!("saving the grant: {e}")))?;
     state.emit_source(source.kb_id);
@@ -272,7 +305,8 @@ pub(super) async fn finish(
     Ok(())
 }
 
-/// 断开：删掉刷新令牌，并请 Google 把它作废。作废失败不拦着——库里已经没有它了
+/// 断开：删掉刷新令牌，并请 Google 把它作废——除非同一个账号还连着别的来源
+///（[`grant_still_used`]），或者不知道是哪个账号。作废失败不拦着：库里已经没有它了
 pub async fn disconnect(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -281,17 +315,30 @@ pub async fn disconnect(
     require_kb(&state, &user, kb_id, Role::Editor).await?;
     let source = drive_source(&state, kb_id, source_id).await?;
     let token = source.config["refresh_token"].as_str().map(String::from);
+    let account = source.config["account_email"].as_str().map(String::from);
     utopia_store::sources::patch_config(&state.pool, source_id, &json!({}), CONNECTION_KEYS)
         .await?;
-    if let Some(token) = token {
+    let revoke = match (token, account) {
+        (Some(token), Some(account))
+            if !grant_still_used(&state.pool, source_id, &account).await? =>
+        {
+            Some(token)
+        }
+        _ => None,
+    };
+    if let Some(token) = revoke {
         let revoked = reqwest::Client::new()
             .post("https://oauth2.googleapis.com/revoke")
             .form(&[("token", token.as_str())])
             .timeout(std::time::Duration::from_secs(10))
             .send()
             .await;
-        if let Err(e) = revoked {
-            tracing::warn!(error = %e, "Google 刷新令牌作废失败，库里已删除");
+        match revoked {
+            Ok(resp) if resp.status().is_success() => {}
+            Ok(resp) => {
+                tracing::warn!(status = %resp.status(), "Google 拒绝作废刷新令牌，库里已删除")
+            }
+            Err(e) => tracing::warn!(error = %e, "Google 刷新令牌作废失败，库里已删除"),
         }
     }
     state.emit_source(kb_id);

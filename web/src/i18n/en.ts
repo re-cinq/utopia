@@ -129,6 +129,8 @@ export const en = {
       "The Memory source is part of the knowledge base and stays.",
     google_drive_not_configured:
       "Google Drive is not set up on this server. An administrator sets UTOPIA_GOOGLE_DRIVE_CLIENT_ID, _CLIENT_SECRET and _REDIRECT_URI.",
+    google_drive_connected_by_someone_else:
+      "This source reads someone else's Google Drive. Disconnect it first, then connect your own.",
     google_drive_not_connector:
       "Only the person who connected this Google Drive can choose its folders.",
     google_drive_not_connected: "Connect a Google account first.",
@@ -805,6 +807,12 @@ export const en = {
       remove: "Remove",
       saveFolders: "Save folders and sync",
       saved: "Folders saved. A sync has started.",
+      disconnectConfirm: (account: string, mine: boolean) =>
+        mine
+          ? `Stop reading your Google Drive (${account})? Its access and the chosen folders are removed here, and connecting again starts from scratch.`
+          : `Stop reading ${account}'s Google Drive? Someone else connected it, and only they chose its folders. Its access and those folders are removed here.`,
+      unnamedAccount: "the connected account",
+      cancel: "Cancel",
       disconnected: "Google Drive disconnected.",
     },
     tokenField: "GitHub token (optional, never shown again)",

@@ -118,7 +118,9 @@ impl Fixture {
 
 fn denied_code<T>(result: ApiResult<T>) -> Option<&'static str> {
     match result {
-        Err(ApiErr(AppError::CodedForbidden { code, .. })) => Some(code),
+        Err(ApiErr(AppError::CodedForbidden { code, .. } | AppError::Invalid { code, .. })) => {
+            Some(code)
+        }
         _ => None,
     }
 }
@@ -289,5 +291,93 @@ async fn a_sync_stops_once_the_connected_person_is_no_longer_an_editor() -> anyh
         (says_reconnect(&while_editor), says_reconnect(&after)),
         (false, true)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_colleague_cannot_reconnect_the_connected_persons_drive() -> anyhow::Result<()> {
+    let Some(fx) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let started = connect(
+        State(fx.state.clone()),
+        AuthUser(fx.colleague.clone()),
+        Path((fx.kb, fx.source)),
+    )
+    .await;
+    assert_eq!(
+        denied_code(started),
+        Some("google_drive_connected_by_someone_else")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_callback_after_someone_else_connected_is_refused() -> anyhow::Result<()> {
+    let Some(fx) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let (flow_state, _) = record_flow(&fx.pool, fx.colleague.id, fx.source)
+        .await?
+        .expect("room for a flow");
+    assert_eq!(fx.callback(Some(&fx.colleague), &flow_state).await, "taken");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_grant_is_kept_while_another_source_uses_the_same_account() -> anyhow::Result<()> {
+    let Some(fx) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let account = format!("{}@drive.test", Uuid::now_v7());
+    let other = utopia_store::sources::create(
+        &fx.pool,
+        fx.kb,
+        "google_drive",
+        "Other Drive",
+        &json!({}),
+        None,
+        None,
+        None,
+    )
+    .await?
+    .id;
+    for id in [fx.source, other] {
+        let grant = json!({ "refresh_token": "1//grant", "account_email": account });
+        utopia_store::sources::patch_config(&fx.pool, id, &grant, &[]).await?;
+    }
+    let while_other_connected = grant_still_used(&fx.pool, fx.source, &account).await?;
+    utopia_store::sources::patch_config(&fx.pool, other, &json!({}), CONNECTION_KEYS).await?;
+    let after_other_disconnected = grant_still_used(&fx.pool, fx.source, &account).await?;
+    assert_eq!(
+        (while_other_connected, after_other_disconnected),
+        (true, false)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_drive_source_cannot_be_created_without_an_oauth_client() -> anyhow::Result<()> {
+    let Some(fx) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let created = super::super::sources_routes::create(
+        State(fx.state.clone()),
+        crate::auth::SessionOrToken {
+            user: fx.connector.clone(),
+            pat: None,
+        },
+        Path(fx.kb),
+        Json(super::super::sources_routes::CreateBody {
+            kind: "google_drive".into(),
+            name: "Drive".into(),
+            config: json!({}),
+            icon: None,
+            sync_interval_minutes: None,
+            sync_cron: None,
+        }),
+    )
+    .await;
+    assert_eq!(denied_code(created), Some("google_drive_not_configured"));
     Ok(())
 }

@@ -13,7 +13,7 @@ import { api, type SourceView } from "../api";
 import { fetchMe } from "../authSession";
 import { S } from "../i18n";
 import { toast } from "../toast";
-import { Button, Checkbox, Chip, IconButton, LinkButton } from "../ui";
+import { Button, Checkbox, Chip, DangerConfirm, IconButton, LinkButton } from "../ui";
 
 type Entry = { id: string; name: string };
 
@@ -35,6 +35,8 @@ export function GoogleDrivePanel({ kbId, source }: { kbId: string; source: Sourc
   // 浏览路径：空 = 第一层（我的云端硬盘、与我共享、共享云端硬盘）
   const [path, setPath] = useState<Entry[]>([]);
   const [waiting, setWaiting] = useState(false);
+  // 断开会丢掉连接者的令牌与文件夹：先问一句，说清断开的是谁的 Drive
+  const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
   const popup = useRef<Window | null>(null);
   const startedFrom = useRef<string | null>(null);
 
@@ -92,6 +94,7 @@ export function GoogleDrivePanel({ kbId, source }: { kbId: string; source: Sourc
   const disconnect = useMutation({
     mutationFn: () => api.googleDriveDisconnect(kbId, source.id),
     onSuccess: () => {
+      setConfirmingDisconnect(false);
       toast.success(G.disconnected);
       queryClient.invalidateQueries({ queryKey: ["sources", kbId] });
     },
@@ -141,21 +144,36 @@ export function GoogleDrivePanel({ kbId, source }: { kbId: string; source: Sourc
               variant="secondary"
               size="sm"
               disabled={disconnect.isPending}
-              onClick={() => disconnect.mutate()}
+              onClick={() => setConfirmingDisconnect(true)}
             >
               {G.disconnect}
             </Button>
           )}
-          <Button
-            variant={connectedAt ? "secondary" : "primary"}
-            size="sm"
-            disabled={connect.isPending || waiting}
-            onClick={() => connect.mutate()}
-          >
-            {connectedAt ? G.reconnect : G.connect}
-          </Button>
+          {/* 别人连着的只能先断开再连：重连会换掉他的 Drive，服务器也会拒绝 */}
+          {(!connectedAt || mine) && (
+            <Button
+              variant={connectedAt ? "secondary" : "primary"}
+              size="sm"
+              disabled={connect.isPending || waiting}
+              onClick={() => connect.mutate()}
+            >
+              {connectedAt ? G.reconnect : G.connect}
+            </Button>
+          )}
         </div>
       </div>
+
+      {confirmingDisconnect && (
+        <DangerConfirm
+          title={G.disconnect}
+          hint={G.disconnectConfirm(cfg.account_email ?? G.unnamedAccount, mine)}
+          confirmLabel={G.disconnect}
+          cancelLabel={G.cancel}
+          busy={disconnect.isPending}
+          onConfirm={() => disconnect.mutate()}
+          onCancel={() => setConfirmingDisconnect(false)}
+        />
+      )}
 
       {connectedAt && !mine && (
         <>

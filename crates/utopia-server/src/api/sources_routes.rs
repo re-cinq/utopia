@@ -109,11 +109,16 @@ pub async fn create(
     let user = caller.user;
     require_kb(&state, &user, kb_id, Role::Editor).await?;
     validate_rss_config(&body.kind, &body.config)?;
-    let config = if config_is_drive_owned(&body.kind) {
-        json!({})
-    } else {
-        body.config
-    };
+    let drive = config_is_drive_owned(&body.kind);
+    // 没配 OAuth 客户端的部署连不上 Google，建出来也只会一直失败（0074 决定 2）
+    if drive && crate::google_drive::oauth_config().is_none() {
+        return Err(utopia_core::AppError::invalid(
+            "google_drive_not_configured",
+            "Google Drive is not configured on this server",
+        )
+        .into());
+    }
+    let config = if drive { json!({}) } else { body.config };
     let source = utopia_store::sources::create(
         &state.pool,
         kb_id,

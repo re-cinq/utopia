@@ -75,6 +75,7 @@ const MAX_RETRIES: u32 = 3;
 const JSON_LIMIT: usize = 4 * 1024 * 1024;
 
 /// 部署级的 OAuth 客户端。三项都得有，缺一项就当没配
+#[derive(Clone)]
 pub struct OAuthConfig {
     pub client_id: String,
     pub client_secret: String,
@@ -350,9 +351,17 @@ fn export_as(mime: &str) -> Option<(&'static str, &'static str)> {
 /// 拿着一个访问令牌的 Drive 客户端
 pub struct Drive {
     http: reqwest::Client,
-    token: String,
+    token: std::sync::Mutex<String>,
+    /// 访问令牌一小时就过期，一轮同步可以更长：遇到 401 凭刷新令牌换一枚新的，再试一次
+    renewal: Option<Renewal>,
     // 私有地址入口让 HTTP 测试走真实的遍历逻辑，不增加用户配置
     api_root: String,
+}
+
+struct Renewal {
+    cfg: OAuthConfig,
+    refresh_token: String,
+    token_url: String,
 }
 
 impl Drive {
@@ -362,12 +371,18 @@ impl Drive {
         let token = access_token_at(&http, TOKEN_URL, cfg, refresh_token).await?;
         Ok(Self {
             http,
-            token,
+            token: std::sync::Mutex::new(token),
+            renewal: Some(Renewal {
+                cfg: cfg.clone(),
+                refresh_token: refresh_token.into(),
+                token_url: TOKEN_URL.into(),
+            }),
             api_root: API_ROOT.into(),
         })
     }
 
-    /// 发一次 GET。429 与 5xx 退避重试；其余非 2xx 带上 Google 自己的 message 报错，
+    /// 发一次 GET。429 与 5xx 退避重试；401 换一枚访问令牌再试一次（只一次：换来的也被拒，
+    /// 就是授权本身出了问题）；其余非 2xx 带上 Google 自己的 message 报错，
     /// 状态码与 `reason` 留在错误里给调用方分辨（404 = 打不开）
     async fn get(
         &self,
@@ -378,15 +393,24 @@ impl Drive {
         let url = reqwest::Url::parse_with_params(url, query)
             .with_context(|| format!("google drive {what}: building the URL"))?;
         let mut attempt = 0u32;
+        let mut renewed = false;
         loop {
+            let token = self.token.lock().expect("token lock").clone();
             let resp = self
                 .http
                 .get(url.clone())
-                .bearer_auth(&self.token)
+                .bearer_auth(&token)
                 .send()
                 .await
                 .with_context(|| format!("google drive {what}"))?;
             let status = resp.status();
+            if let (StatusCode::UNAUTHORIZED, false, Some(r)) = (status, renewed, &self.renewal) {
+                renewed = true;
+                let fresh =
+                    access_token_at(&self.http, &r.token_url, &r.cfg, &r.refresh_token).await?;
+                *self.token.lock().expect("token lock") = fresh;
+                continue;
+            }
             if (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
                 && attempt < MAX_RETRIES
             {
