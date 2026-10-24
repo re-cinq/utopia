@@ -342,8 +342,12 @@ async fn a_grant_is_kept_while_another_source_uses_the_same_account() -> anyhow:
     )
     .await?
     .id;
-    for id in [fx.source, other] {
-        let grant = json!({ "refresh_token": "1//grant", "account_email": account });
+    // 同一个邮箱，大小写不同：Google 账号不分大小写
+    for (id, email) in [
+        (fx.source, account.clone()),
+        (other, account.to_uppercase()),
+    ] {
+        let grant = json!({ "refresh_token": "1//grant", "account_email": email });
         utopia_store::sources::patch_config(&fx.pool, id, &grant, &[]).await?;
     }
     let while_other_connected = grant_still_used(&fx.pool, fx.source, &account).await?;
@@ -380,4 +384,17 @@ async fn a_drive_source_cannot_be_created_without_an_oauth_client() -> anyhow::R
     .await;
     assert_eq!(denied_code(created), Some("google_drive_not_configured"));
     Ok(())
+}
+
+#[test]
+fn a_reconnect_keeps_the_grant_only_for_the_same_account() {
+    assert_eq!(
+        [
+            same_account(Some("Bruno@re-cinq.com"), Some("bruno@re-cinq.com")),
+            same_account(Some("bruno@re-cinq.com"), Some("ana@re-cinq.com")),
+            same_account(None, Some("bruno@re-cinq.com")),
+            same_account(None, None),
+        ],
+        [true, false, false, false]
+    );
 }

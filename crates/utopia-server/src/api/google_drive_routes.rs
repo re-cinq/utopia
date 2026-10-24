@@ -42,6 +42,7 @@ const CONNECTION_KEYS: &[&str] = &[
     "account_email",
     "connected_at",
     "connected_by",
+    "connected_by_name",
     "folders",
 ];
 /// 一个来源最多选多少个文件夹。选得更多的，选它们共同的上级
@@ -98,12 +99,46 @@ pub(super) async fn grant_still_used(
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM sources
           WHERE kind = 'google_drive' AND id <> $1
-            AND config->>'account_email' = $2 AND config ? 'refresh_token')",
+            AND lower(config->>'account_email') = lower($2) AND config ? 'refresh_token')",
     )
     .bind(source_id)
     .bind(account_email)
     .fetch_one(pool)
     .await
+}
+
+/// 重连之后还是不是同一个 Google 账号。邮箱不分大小写；有一边不知道就当换了：
+/// 换了账号，上一个账号里选的文件夹不能照着新账号去读
+pub(super) fn same_account(previous: Option<&str>, now: Option<&str>) -> bool {
+    matches!((previous, now), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b))
+}
+
+/// 请 Google 作废一枚刷新令牌，除非同一个账号还连着别的来源（[`grant_still_used`]）。
+/// 不知道是哪个账号就不作废。失败只记一笔：库里已经没有它了
+async fn revoke_unless_still_used(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    token: &str,
+    account: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let Some(account) = account else {
+        return Ok(());
+    };
+    if grant_still_used(pool, source_id, account).await? {
+        return Ok(());
+    }
+    let revoked = reqwest::Client::new()
+        .post("https://oauth2.googleapis.com/revoke")
+        .form(&[("token", token)])
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
+    match revoked {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => tracing::warn!(status = %resp.status(), "Google 拒绝作废刷新令牌，库里已删除"),
+        Err(e) => tracing::warn!(error = %e, "Google 刷新令牌作废失败，库里已删除"),
+    }
+    Ok(())
 }
 
 /// 落一次连接流程。总数与这个人的在途数都在同一条插入里判，满了就不插，回 `None`
@@ -280,16 +315,29 @@ pub(super) async fn finish(
             )
         })?;
 
+    let previous_token = source.config["refresh_token"].as_str();
+    let previous_account = source.config["account_email"].as_str();
+    // 连上的人换了一个 Google 账号：上一个账号里选的文件夹不留，它的授权在没别人用时作废。
+    // 同一个账号绝不作废——Google 作废的是整份授权，刚换来的新令牌也会跟着失效
+    let changed = !same_account(previous_account, grant.account_email.as_deref());
     let grant_keys = json!({
         "refresh_token": grant.refresh_token,
         "account_email": grant.account_email,
         // 列表里看不见令牌，界面凭这一项知道「连上了」：没验证过的邮箱不显示，不能拿它当标志
         "connected_at": chrono::Utc::now().to_rfc3339(),
         "connected_by": user.id,
+        // 断开前问一句时说清是谁的 Drive；库的成员列表只给管理员，编辑者那边查不到名字
+        "connected_by_name": user.display_name,
     });
-    utopia_store::sources::patch_config(&state.pool, source_id, &grant_keys, &[])
+    let dropped: &[&str] = if changed { &["folders"] } else { &[] };
+    utopia_store::sources::patch_config(&state.pool, source_id, &grant_keys, dropped)
         .await
         .map_err(|e| ("unavailable", format!("saving the grant: {e}")))?;
+    if let (true, Some(token)) = (changed, previous_token) {
+        revoke_unless_still_used(&state.pool, source_id, token, previous_account)
+            .await
+            .map_err(|e| ("unavailable", format!("checking the previous grant: {e}")))?;
+    }
     state.emit_source(source.kb_id);
     // 审计不落令牌，只记连上的是哪个 Google 账号
     let _ = utopia_store::audit::record(
@@ -305,8 +353,7 @@ pub(super) async fn finish(
     Ok(())
 }
 
-/// 断开：删掉刷新令牌，并请 Google 把它作废——除非同一个账号还连着别的来源
-///（[`grant_still_used`]），或者不知道是哪个账号。作废失败不拦着：库里已经没有它了
+/// 断开：删掉刷新令牌与选的文件夹，再按 [`revoke_unless_still_used`] 请 Google 作废
 pub async fn disconnect(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -314,32 +361,16 @@ pub async fn disconnect(
 ) -> ApiResult<Json<Value>> {
     require_kb(&state, &user, kb_id, Role::Editor).await?;
     let source = drive_source(&state, kb_id, source_id).await?;
-    let token = source.config["refresh_token"].as_str().map(String::from);
-    let account = source.config["account_email"].as_str().map(String::from);
     utopia_store::sources::patch_config(&state.pool, source_id, &json!({}), CONNECTION_KEYS)
         .await?;
-    let revoke = match (token, account) {
-        (Some(token), Some(account))
-            if !grant_still_used(&state.pool, source_id, &account).await? =>
-        {
-            Some(token)
-        }
-        _ => None,
-    };
-    if let Some(token) = revoke {
-        let revoked = reqwest::Client::new()
-            .post("https://oauth2.googleapis.com/revoke")
-            .form(&[("token", token.as_str())])
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await;
-        match revoked {
-            Ok(resp) if resp.status().is_success() => {}
-            Ok(resp) => {
-                tracing::warn!(status = %resp.status(), "Google 拒绝作废刷新令牌，库里已删除")
-            }
-            Err(e) => tracing::warn!(error = %e, "Google 刷新令牌作废失败，库里已删除"),
-        }
+    if let Some(token) = source.config["refresh_token"].as_str() {
+        revoke_unless_still_used(
+            &state.pool,
+            source_id,
+            token,
+            source.config["account_email"].as_str(),
+        )
+        .await?;
     }
     state.emit_source(kb_id);
     let _ = utopia_store::audit::record(
