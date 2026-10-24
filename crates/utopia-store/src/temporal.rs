@@ -1180,11 +1180,13 @@ pub async fn rehome_tx(
                             valid_from, valid_from_precision, valid_to, valid_to_precision,
                             confidence, derived_by_rule, supersedes,
                             attested_from, attested_to, end_derived,
-                            from_statement_id, implied, corrected_ends, end_after_period)
+                            from_statement_id, implied, layer, phrase,
+                            corrected_ends, end_after_period)
          SELECT $1, kb_id, COALESCE($3, subject_id), predicate_id, COALESCE($4, object_id),
                 object_value, valid_from, valid_from_precision, valid_to, valid_to_precision,
                 confidence, derived_by_rule, id, attested_from, attested_to, end_derived,
-                from_statement_id, implied, corrected_ends, end_after_period
+                -- 搬回源实体的陈述还是陈述（RC-004 后记），与 `rewrite_end_tx` 同一条
+                from_statement_id, implied, layer, phrase, corrected_ends, end_after_period
          FROM facts WHERE id = $2",
     )
     .bind(moved)
@@ -1329,12 +1331,14 @@ pub async fn correct_interval(
                             valid_from, valid_from_precision,
                             valid_to, valid_to_precision, confidence, supersedes,
                             attested_from, attested_to,
-                            from_statement_id, implied, corrected_ends, end_after_period)
+                            from_statement_id, implied, layer, phrase,
+                            corrected_ends, end_after_period)
          SELECT $1, kb_id, subject_id, predicate_id, object_id, object_value,
                 $3, $4, $5, $6, confidence, id,
                 attested_from,
                 CASE WHEN $6::text = 'unknown' THEN COALESCE(attested_to, now()) END,
-                from_statement_id, implied,
+                -- 人改了区间的陈述还是陈述（RC-004 后记），与 `rewrite_end_tx` 同一条
+                from_statement_id, implied, layer, phrase,
                 CASE WHEN start_marked AND end_marked THEN 'both'
                      WHEN start_marked THEN 'start'
                      WHEN end_marked THEN 'end' END,

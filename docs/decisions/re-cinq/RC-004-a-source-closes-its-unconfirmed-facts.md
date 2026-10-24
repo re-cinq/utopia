@@ -23,3 +23,7 @@ A `statements` source ([0054](../0054-a-source-may-push-statements-in-the-open-c
 - The pusher can empty its own part of the Review queue. History is kept: nothing is rejected or deleted.
 - A fact attested by two sources stays in the queue for a person.
 - `rehome_tx` and the time correction in `temporal.rs` still write their rows without `layer` and `phrase`. They are left for another change.
+
+## Note, 2026-10-24: every rewrite keeps the statement layer
+
+`rehome_tx` (undoing a merge moves a rewritten row back to its source entity) and `correct_interval` (`PATCH /kbs/{kb}/facts/{id}`) now copy `layer` and `phrase` too. Before, either one turned an open statement into a typed row with no predicate, and the next recompute retired its typed row without building it again. These are the only rewrites that copy a row of `facts`; the other inserts write new rows. The last consequence above no longer holds.
