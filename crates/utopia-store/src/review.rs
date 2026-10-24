@@ -25,12 +25,25 @@ pub const LOW_CONFIDENCE_BELOW: f32 = 0.75;
 /// 上界那一句是「闭合」这个出路的前提：闭合是作废+改写，修正行把证据一起复制下来
 /// （`temporal::close_superseded`），少了它，刚闭合的行照样满足判据——队列永远清不掉，
 /// 再点一次只会撞上「区间已闭合」。判据与 0022 说同一句话：「结束不知哪天」不是开放。
+///
+/// 最后一句是类型化行的（RC-005）：它的证据是物化那一刻从陈述抄来的，陈述后来在新分块上
+/// 再被说出，抄本不跟着长。所以有陈述来源的行与它的陈述同判：哪条来源陈述现行、开放、
+/// 证据落在活分块上，它就不算待确认。走 `typed_fact_sources` 与 `fact_evidence` 的主键。
 pub const UNCONFIRMED_FACT: &str = "f.valid_to IS NULL AND f.valid_to_precision IS NULL
                AND EXISTS (SELECT 1 FROM fact_evidence fe WHERE fe.fact_id = f.id)
                AND NOT EXISTS (SELECT 1 FROM fact_evidence fe
                                  JOIN chunks c ON c.id = fe.chunk_id
                                 WHERE fe.fact_id = f.id
-                                  AND c.superseded_at IS NULL)";
+                                  AND c.superseded_at IS NULL)
+               AND NOT EXISTS (SELECT 1 FROM typed_fact_sources ts
+                                 JOIN facts st ON st.id = ts.statement_id
+                                WHERE ts.fact_id = f.id
+                                  AND st.invalidated_at IS NULL
+                                  AND st.valid_to IS NULL AND st.valid_to_precision IS NULL
+                                  AND EXISTS (SELECT 1 FROM fact_evidence se
+                                                JOIN chunks sc ON sc.id = se.chunk_id
+                                               WHERE se.fact_id = st.id
+                                                 AND sc.superseded_at IS NULL))";
 
 pub async fn counts(pool: &PgPool, kb_id: Uuid) -> AppResult<ReviewCounts> {
     let sql = format!(

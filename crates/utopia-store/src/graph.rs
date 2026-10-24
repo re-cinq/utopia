@@ -2052,14 +2052,14 @@ pub async fn low_confidence_facts(
 ///
 /// **「现行」这一条不能少。** 闭合是作废+改写，修正行带着原证据（`temporal::close_superseded`），
 /// 只看证据存活性的话，刚闭合的行立刻回到这一档——那个出路等于不存在。
-/// WHERE 与 `review::UNCONFIRMED_FACT` 同一套（0022：「结束不知哪天」不是开放）。
+/// WHERE 就是 `review::UNCONFIRMED_FACT`（0022：「结束不知哪天」不是开放；RC-005：类型化行跟陈述判）。
 pub async fn stale_facts(
     pool: &PgPool,
     kb_id: Uuid,
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<FactReviewItem>> {
-    let rows: Vec<FactReviewItem> = sqlx::query_as(
+    let rows: Vec<FactReviewItem> = sqlx::query_as(&format!(
         "SELECT f.id, s.canonical_name AS subject_name, COALESCE(r.label, fact_surface_predicate(f.id)) AS predicate_label,
                 COALESCE(o.canonical_name, f.object_value->>'summary') AS object_name,
                 f.valid_from, f.valid_to, f.confidence,
@@ -2070,15 +2070,11 @@ pub async fn stale_facts(
          JOIN entities s ON s.id = f.subject_id
          LEFT JOIN relation_types r ON r.id = f.predicate_id
          LEFT JOIN entities o ON o.id = f.object_id
-         WHERE f.kb_id = $1 AND f.invalidated_at IS NULL
-           AND f.valid_to IS NULL AND f.valid_to_precision IS NULL
-           AND EXISTS (SELECT 1 FROM fact_evidence fe WHERE fe.fact_id = f.id)
-           AND NOT EXISTS (SELECT 1 FROM fact_evidence fe
-                           JOIN chunks c ON c.id = fe.chunk_id
-                           WHERE fe.fact_id = f.id AND c.superseded_at IS NULL)
+         WHERE f.kb_id = $1 AND f.invalidated_at IS NULL AND {unconfirmed}
          ORDER BY f.recorded_at DESC, f.id DESC
          LIMIT $2 OFFSET $3",
-    )
+        unconfirmed = crate::review::UNCONFIRMED_FACT,
+    ))
     .bind(kb_id)
     .bind(limit)
     .bind(offset)
