@@ -39,6 +39,7 @@ mod rdf;
 mod readers;
 mod retrieval;
 mod rss_full_content;
+mod scenario_packs;
 mod search_recovery;
 mod state;
 mod ticket;
