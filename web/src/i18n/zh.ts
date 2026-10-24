@@ -737,11 +737,12 @@ export const zh: Strings = {
       remove: "移除",
       saveFolders: "保存并同步",
       saved: "文件夹已保存，同步已开始。",
-      disconnectConfirm: (account: string, mine: boolean) =>
+      disconnectConfirm: (account: string, mine: boolean, connector: string) =>
         mine
           ? `停止读取你的 Google Drive（${account}）？这里会删掉它的授权和选好的文件夹，再连接要从头选。`
-          : `停止读取 ${account} 的 Google Drive？这是别人连上的，文件夹也是他选的。这里会删掉它的授权和那些文件夹。`,
+          : `停止读取 ${connector} 连上的 Google Drive（${account}）？文件夹只有 ${connector} 选过。这里会删掉它的授权和那些文件夹。`,
       unnamedAccount: "已连接的账号",
+      someoneElse: "别人",
       cancel: "取消",
       disconnected: "Google Drive 已断开。",
     },

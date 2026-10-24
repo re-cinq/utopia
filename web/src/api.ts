@@ -253,6 +253,8 @@ export interface SourceView {
     connected_at?: string;
     /** google_drive：连上的那个 Utopia 用户；浏览与选文件夹只给他 */
     connected_by?: string;
+    /** google_drive：连上的那个人连接时的名字，断开前的确认里用 */
+    connected_by_name?: string;
     /** false = 这个来源下的文档只检索、不抽取（schema 文档，0035 决定 7）；缺省抽取 */
     extract?: boolean;
   } | null;
