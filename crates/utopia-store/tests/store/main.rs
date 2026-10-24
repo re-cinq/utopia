@@ -97,6 +97,7 @@ mod a_signature_holds_on_every_path;
 mod a_signature_vector_lasts_while_its_text_does;
 mod a_similar_name_is_proposed_not_merged;
 mod a_single_name_candidate_is_not_counted;
+mod a_source_closes_its_unconfirmed_facts;
 mod a_source_decay_is_set_and_cleared_by_update;
 mod a_source_decays_only_when_asked;
 mod a_source_kind_is_listed_once;

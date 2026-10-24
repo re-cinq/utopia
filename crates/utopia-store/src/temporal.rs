@@ -1091,12 +1091,15 @@ async fn rewrite_end_tx(
                             valid_from, valid_from_precision, valid_from_grade,
                             valid_to, valid_to_precision, confidence, supersedes,
                             attested_from, attested_by, attested_to, end_derived,
-                            from_statement_id, implied, corrected_ends, end_after_period)
+                            from_statement_id, implied, layer, phrase,
+                            corrected_ends, end_after_period)
          SELECT $1, kb_id, subject_id, predicate_id, object_id, object_value,
                 valid_from, valid_from_precision, valid_from_grade, $3, $4, confidence, id,
                 attested_from, attested_by,
                 CASE WHEN $4::text = 'unknown' THEN COALESCE($5, now()) END, $6,
-                from_statement_id, implied,
+                -- 开放陈述关上后还是陈述（RC-004）：少了这两列，修正行成了没有谓词的类型化行，
+                -- 物化再也读不到它
+                from_statement_id, implied, layer, phrase,
                 -- 终点在这里被重新写下（文档说了终点，或时间线推了一个），人改过的终点就不在了；
                 -- 起点那一半照旧
                 CASE corrected_ends WHEN 'both' THEN 'start' WHEN 'end' THEN NULL

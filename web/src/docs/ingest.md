@@ -162,6 +162,20 @@ Two things to know before wiring a system to it:
 
 The response is the API push's: `{ "action": "created" }` · `updated` · `unchanged` · `marked_missing` · `duplicate` (with `duplicate_of`). It is never `moved`: the stored document carries its `external_id`, so two identities never share content.
 
+### Closing what a source stopped stating
+
+The stale statements a source leaves behind can be closed in batches by the system that pushes them:
+
+```
+POST {your-utopia-base}/api/v1/kbs/{kb_id}/sources/{source_id}/close-unconfirmed
+Authorization: Bearer utp_pat_…
+Content-Type: application/json
+
+{ "limit": 1000 }
+```
+
+It closes up to `limit` (1–5000, default 1000) facts that are still open and that this source alone attested, in versions it has since replaced. Each one ends at the moment its last attesting version was replaced, to the second, the same way closing it on the Review page does: the old row stays in history. Facts with evidence from another source, Utopia's own name facts, and typed facts that follow an open statement are left alone; the typed facts are rebuilt closed by the recompute this queues. The credential is a write token (or session) of an editor of the base. The answer is `{ "closed": n, "skipped": n, "remaining": n }`: `skipped` counts facts that start after that moment and are left for a person, and `remaining` counts what a further call would close. Call it until `remaining` is `0`.
+
 ---
 
 ## Reading a pushed document back

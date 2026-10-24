@@ -52,6 +52,7 @@ pub mod test_db;
 pub mod time_mentions;
 pub mod tokens;
 pub mod type_bindings;
+pub mod unconfirmed;
 pub mod vector_index;
 pub mod workspaces;
 pub mod world_axis;
