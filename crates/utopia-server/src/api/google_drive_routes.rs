@@ -113,6 +113,12 @@ pub(super) fn same_account(previous: Option<&str>, now: Option<&str>) -> bool {
     matches!((previous, now), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b))
 }
 
+/// 重连之后作废不作废上一份授权：两边的账号都知道、而且不是同一个时才作废。
+/// 有一边不知道，就可能是同一个账号——作废会连刚换来的新令牌一起作废（0074 决定 5）
+pub(super) fn revokes_previous(previous: Option<&str>, now: Option<&str>) -> bool {
+    previous.is_some() && now.is_some() && !same_account(previous, now)
+}
+
 /// 请 Google 作废一枚刷新令牌，除非同一个账号还连着别的来源（[`grant_still_used`]）。
 /// 不知道是哪个账号就不作废。失败只记一笔：库里已经没有它了
 async fn revoke_unless_still_used(
@@ -333,7 +339,8 @@ pub(super) async fn finish(
     utopia_store::sources::patch_config(&state.pool, source_id, &grant_keys, dropped)
         .await
         .map_err(|e| ("unavailable", format!("saving the grant: {e}")))?;
-    if let (true, Some(token)) = (changed, previous_token) {
+    let revoke = revokes_previous(previous_account, grant.account_email.as_deref());
+    if let (true, Some(token)) = (revoke, previous_token) {
         revoke_unless_still_used(&state.pool, source_id, token, previous_account)
             .await
             .map_err(|e| ("unavailable", format!("checking the previous grant: {e}")))?;

@@ -398,3 +398,16 @@ fn a_reconnect_keeps_the_grant_only_for_the_same_account() {
         [true, false, false, false]
     );
 }
+
+#[test]
+fn a_reconnect_revokes_the_previous_grant_only_when_both_accounts_are_known_and_differ() {
+    assert_eq!(
+        [
+            revokes_previous(Some("bruno@re-cinq.com"), Some("ana@re-cinq.com")),
+            revokes_previous(Some("bruno@re-cinq.com"), Some("Bruno@re-cinq.com")),
+            revokes_previous(Some("bruno@re-cinq.com"), None),
+            revokes_previous(None, Some("ana@re-cinq.com")),
+        ],
+        [true, false, false, false]
+    );
+}
