@@ -492,6 +492,11 @@ pub fn router(state: AppState, cfg: &AppConfig) -> Router {
             "/kbs/{id}/sources/{source_id}/missing/cleanup",
             post(sources_routes::cleanup_missing),
         )
+        // 来源关上自己不再陈述的事实（RC-004），写令牌可用
+        .route(
+            "/kbs/{id}/sources/{source_id}/close-unconfirmed",
+            post(sources_routes::close_unconfirmed),
+        )
         .route(
             "/documents/{id}/extractions",
             get(documents_routes::extractions),

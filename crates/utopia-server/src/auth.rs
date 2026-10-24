@@ -182,6 +182,9 @@ impl FromRequestParts<AppState> for AuthUser {
 ///
 /// 按推送时的 `external_id` 读回一篇文档（#1276）也是文档原件，开给令牌的理由写在决定 7。
 ///
+/// 来源关上自己不再陈述的事实（`close-unconfirmed`，fork 的 RC-004）：推陈述的客户端
+/// 只有令牌。
+///
 /// 令牌只收窄：`pat` 在的时候，路由先问 [`Self::require_write`] 或
 /// [`Self::reaches`]，角色照旧由 `require_kb` 与工作区角色判。
 pub struct SessionOrToken {

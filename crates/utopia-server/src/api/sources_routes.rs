@@ -364,6 +364,63 @@ pub async fn cleanup_missing(
 #[path = "sources_cleanup_tests.rs"]
 mod cleanup_tests;
 
+/// 一批至多关这么多条：每条是一笔带锁的作废+改写，一次请求不该占着库太久
+const CLOSE_UNCONFIRMED_MAX: i64 = 5000;
+
+#[derive(Deserialize)]
+pub struct CloseUnconfirmedBody {
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// 来源关上自己不再陈述的事实（RC-004）。写令牌可用：推陈述的就是一个自动化客户端，
+/// 它推完一轮接着清自己留下的待确认
+pub async fn close_unconfirmed(
+    State(state): State<AppState>,
+    caller: SessionOrToken,
+    Path((kb_id, source_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<CloseUnconfirmedBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    caller.require_write(Some(kb_id))?;
+    require_kb(&state, &caller.user, kb_id, Role::Editor).await?;
+    source_in_kb(&state, kb_id, source_id).await?;
+    let limit = body.limit.unwrap_or(1000);
+    if !(1..=CLOSE_UNCONFIRMED_MAX).contains(&limit) {
+        return Err(utopia_core::AppError::invalid(
+            "bad_limit",
+            format!("limit is between 1 and {CLOSE_UNCONFIRMED_MAX}"),
+        )
+        .into());
+    }
+    let batch =
+        utopia_store::unconfirmed::close_of_source(&state.pool, kb_id, source_id, limit).await?;
+    let _ = utopia_store::audit::record(
+        &state.pool,
+        Some(kb_id),
+        caller.user.id,
+        "source.close_unconfirmed",
+        "source",
+        Some(source_id),
+        utopia_store::audit::via_token(
+            json!({ "source_id": source_id, "closed": batch.closed, "skipped": batch.skipped }),
+            caller.token_id(),
+        ),
+    )
+    .await;
+    if batch.closed > 0 {
+        state.emit_review(kb_id);
+    }
+    Ok(Json(json!({
+        "closed": batch.closed,
+        "skipped": batch.skipped,
+        "remaining": batch.remaining,
+    })))
+}
+
+#[cfg(test)]
+#[path = "sources_close_unconfirmed_tests.rs"]
+mod close_unconfirmed_tests;
+
 pub async fn delete(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
