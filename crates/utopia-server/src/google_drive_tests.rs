@@ -50,7 +50,11 @@ async fn mount_children(server: &MockServer, parent: &str, files: serde_json::Va
         .await;
 }
 
-fn id_token(claims: serde_json::Value) -> String {
+/// Google 签的 ID token 一小时后过期；没写 `exp` 的按刚签发算
+fn id_token(mut claims: serde_json::Value) -> String {
+    if claims.get("exp").is_none() {
+        claims["exp"] = json!(Utc::now().timestamp() + 3600);
+    }
     format!(
         "{}.{}.sig",
         URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256"}"#),
@@ -110,6 +114,30 @@ async fn a_walk_descends_skips_what_cannot_be_read_and_counts_each_file_once() -
         Some("2026-10-01T09:30:00+00:00".into())
     );
     assert_eq!(listing.files[1].marker(), "abc", "二进制文件用 md5");
+    Ok(())
+}
+
+/// Drive 回来的 id 要拼进查询与地址：不合字符表的文件夹不进、文件不收
+#[tokio::test]
+async fn ids_from_drive_outside_the_id_alphabet_are_skipped() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    mount_folder(&server, "top", false).await;
+    mount_children(
+        &server,
+        "top",
+        json!([
+            {"id": "x' or name contains '", "name": "Sneaky", "mimeType": FOLDER_MIME},
+            {"id": "../../about", "name": "notes.pdf", "mimeType": "application/pdf",
+             "size": "10", "md5Checksum": "a"},
+            {"id": "ok1", "name": "fine.pdf", "mimeType": "application/pdf",
+             "size": "10", "md5Checksum": "b"}
+        ]),
+    )
+    .await;
+
+    let listing = drive(&server).walk(&["top".to_string()]).await?;
+    let ids: Vec<&str> = listing.files.iter().map(|f| f.id.as_str()).collect();
+    assert_eq!((ids, listing.skipped), (vec!["ok1"], 2));
     Ok(())
 }
 
@@ -551,6 +579,11 @@ fn an_id_token_must_be_googles_and_ours() {
     let other_issuer = id_token(json!({"iss": "https://evil.example", "aud": ours,
                                         "email": "a@b.c", "email_verified": true}));
     assert!(id_token_email(&other_issuer, &ours).is_err());
+
+    let expired = id_token(json!({"iss": "accounts.google.com", "aud": ours,
+                                   "email": "a@b.c", "email_verified": true,
+                                   "exp": Utc::now().timestamp() - 60}));
+    assert!(id_token_email(&expired, &ours).is_err());
 }
 
 /// 配置里的文件夹：对象或字符串都认，id 不合字符表的丢掉

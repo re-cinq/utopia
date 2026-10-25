@@ -272,6 +272,12 @@ fn id_token_email(id_token: &str, client_id: &str) -> anyhow::Result<Option<Stri
         claims["aud"].as_str() == Some(client_id),
         "google id_token was issued to a different client"
     );
+    anyhow::ensure!(
+        claims["exp"]
+            .as_i64()
+            .is_some_and(|exp| exp > Utc::now().timestamp()),
+        "google id_token has expired"
+    );
     Ok(match claims["email_verified"].as_bool() {
         Some(true) => claims["email"].as_str().map(String::from),
         _ => None,
@@ -610,6 +616,11 @@ impl Drive {
                 else {
                     continue;
                 };
+                // Drive 回来的 id 之后要拼进查询和地址：与选中的文件夹同一个字符集，不合的不收
+                if !valid_id(id) {
+                    listing.skipped += 1;
+                    continue;
+                }
                 if mime == FOLDER_MIME {
                     if depth + 1 > MAX_DEPTH {
                         listing.truncated = true;
@@ -703,6 +714,11 @@ impl Drive {
 
     /// 一个文件的字节：Google 格式导出，其余原样下载
     pub async fn content(&self, file: &DriveFile) -> anyhow::Result<Content> {
+        anyhow::ensure!(
+            valid_id(&file.id),
+            "google drive: file id {:?} is not a Drive id",
+            file.id
+        );
         if let Some((mime, ext)) = export_as(&file.mime) {
             let url = format!("{}/files/{}/export", self.api_root, file.id);
             let resp = self.get("export", &url, &[("mimeType", mime)]).await?;

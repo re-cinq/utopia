@@ -808,11 +808,12 @@ export const en = {
       remove: "Remove",
       saveFolders: "Save folders and sync",
       saved: "Folders saved. A sync has started.",
-      disconnectConfirm: (account: string, mine: boolean) =>
+      disconnectConfirm: (account: string, mine: boolean, connector: string) =>
         mine
           ? `Stop reading your Google Drive (${account})? Its access and the chosen folders are removed here, and connecting again starts from scratch.`
-          : `Stop reading ${account}'s Google Drive? Someone else connected it, and only they chose its folders. Its access and those folders are removed here.`,
+          : `Stop reading the Google Drive ${connector} connected (${account})? Only ${connector} chose its folders. Its access and those folders are removed here.`,
       unnamedAccount: "the connected account",
+      someoneElse: "someone else",
       cancel: "Cancel",
       disconnected: "Google Drive disconnected.",
     },

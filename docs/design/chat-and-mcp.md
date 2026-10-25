@@ -75,12 +75,15 @@ the prompt through retrieval; a conventions document works today where a rule wo
 graph lookups share the turn's embedding cache (#971). The search route answers with each hit's RRF score, its
 1-based rank in each channel, `vector_used` (false when the vector channel was skipped) and
 `offset`/`has_more` paging to a depth of 100; a pushed source's hit carries its `external_id`. An
-RRF score ranks hits within one query only; it is not comparable across queries (#1271). The body
-may name a `source_id` of the base (another base's source is a 404) and, with it, up to 8
-`external_id_prefixes` of at most 256 bytes; a prefix without a `source_id` is refused. Both channels
-then recall only from that source's documents, live at `as_of`, whose `external_id` starts with one
-of the prefixes, so the base's other documents cannot take the recall a filter after fusion would
-lose (2026-10-19).
+RRF score ranks hits within one query only; it is not comparable across queries (#1271). Every
+page fuses 100 candidates per channel where chat fuses 24, so the search page can rank the same
+query differently from chat and from before #1271. Pages join up only while the base is unchanged
+between requests, and each channel counts its ranks before the final `as_of` filter, so a
+historical page can skip rank numbers. The body may name a `source_id` of the base (another base's
+source is a 404) and, with it, up to 8 `external_id_prefixes` of at most 256 bytes; a prefix without a
+`source_id` is refused. Both channels then recall only from that source's documents, live at `as_of`,
+whose `external_id` starts with one of the prefixes, so the base's other documents cannot take the
+recall a filter after fusion would lose (2026-10-19).
 
 A search that returns a document of a source that decays counts as a use of it, in the background and
 never failing the read ([RC-003](../decisions/re-cinq/RC-003-a-source-may-decay.md)): `search_chunks`
