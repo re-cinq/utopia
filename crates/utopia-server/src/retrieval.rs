@@ -24,6 +24,9 @@ use uuid::Uuid;
 
 const RECALL_PER_CHANNEL: usize = 24;
 
+/// 翻页最深到第几条（#1271）：再深就是在拿检索当导出用
+pub const MAX_DEPTH: usize = 100;
+
 pub struct SearchOpts {
     pub top_k: usize,
     pub offset: usize,
@@ -71,14 +74,26 @@ pub async fn hybrid(
         as_of,
         documents: None,
     };
-    let page = hybrid_scored(state, kb_id, workspace_id, query, opts, embeddings).await?;
-    Ok(page
-        .results
+    let (hits, _) = fused_hits(
+        state,
+        kb_id,
+        workspace_id,
+        query,
+        RECALL_PER_CHANNEL,
+        &opts,
+        embeddings,
+    )
+    .await?;
+    Ok(hits
         .into_iter()
+        .take(top_k)
         .map(|hit| hit.chunk.chunk)
         .collect())
 }
 
+/// 一页命中（#1271）。每一页都向每路要同样的 `MAX_DEPTH` 条，所以各页切的是
+/// 同一张融合表：页与页不重不漏。到了 `MAX_DEPTH` 的那一页没有下一页（再翻就是 422），
+/// `has_more` 是 false
 pub async fn hybrid_scored(
     state: &AppState,
     kb_id: Uuid,
@@ -94,9 +109,40 @@ pub async fn hybrid_scored(
             vector_used: false,
         });
     }
-    // 每路多取一条：页尾之后还有没有，得在召回里看得见
-    let depth = opts.offset + opts.top_k;
-    let recall = (depth + 1).max(RECALL_PER_CHANNEL);
+    let (hits, vector_used) = fused_hits(
+        state,
+        kb_id,
+        workspace_id,
+        query,
+        MAX_DEPTH,
+        &opts,
+        embeddings,
+    )
+    .await?;
+    let end = opts.offset + opts.top_k;
+    let has_more = end < MAX_DEPTH && hits.len() > end;
+    let results = hits
+        .into_iter()
+        .skip(opts.offset)
+        .take(opts.top_k)
+        .collect();
+    Ok(SearchPage {
+        results,
+        has_more,
+        vector_used,
+    })
+}
+
+/// 两路各取 `per_channel` 条、RRF 融合、按记录轴过滤、陈旧的降过分的整张表，连同向量那一路跑了没有
+async fn fused_hits(
+    state: &AppState,
+    kb_id: Uuid,
+    workspace_id: Uuid,
+    query: &str,
+    per_channel: usize,
+    opts: &SearchOpts,
+    embeddings: Option<&mut llm_util::EmbedCache>,
+) -> AppResult<(Vec<ScoredChunk>, bool)> {
     let bm25 = {
         let search = state.search.clone();
         let kb = kb_id.to_string();
@@ -106,14 +152,22 @@ pub async fn hybrid_scored(
             .as_ref()
             .map(|ids| ids.iter().map(Uuid::to_string).collect());
         tokio::task::spawn_blocking(move || {
-            search.search(&kb, &query, recall, documents.as_deref())
+            search.search(&kb, &query, per_channel, documents.as_deref())
         })
     };
     // `join!` 不是 `try_join!`：向量那一路失败是降级不是错误（见 vector_channel），
     // `try_join!` 会把模型故障变成检索报错
     let (bm25, vector) = tokio::join!(
         bm25,
-        vector_channel(state, kb_id, workspace_id, query, recall, &opts, embeddings)
+        vector_channel(
+            state,
+            kb_id,
+            workspace_id,
+            query,
+            per_channel,
+            opts,
+            embeddings
+        )
     );
     let bm25 = bm25
         .map_err(|e| utopia_core::AppError::Other(anyhow::anyhow!("BM25 检索线程退出：{e}")))?
@@ -132,9 +186,8 @@ pub async fn hybrid_scored(
             .collect();
     let ids: Vec<Uuid> = fused.iter().map(|(id, _)| *id).collect();
     let live = utopia_store::documents::chunks_by_ids(&state.pool, kb_id, &ids, opts.as_of).await?;
-    let has_more = live.len() > depth;
     let mut fused: HashMap<Uuid, utopia_search::Fused> = fused.into_iter().collect();
-    let mut scored: Vec<ScoredChunk> = live
+    let mut hits: Vec<ScoredChunk> = live
         .into_iter()
         .filter_map(|chunk| {
             let f = fused.remove(&chunk.chunk.id)?;
@@ -148,22 +201,10 @@ pub async fn hybrid_scored(
         })
         .collect();
     // 陈旧的先降分再翻页：久没人读的文档才可能被挤出这一页，而不是只在页内挪位置
-    let document_ids: Vec<Uuid> = scored
-        .iter()
-        .map(|hit| hit.chunk.chunk.document_id)
-        .collect();
+    let document_ids: Vec<Uuid> = hits.iter().map(|hit| hit.chunk.chunk.document_id).collect();
     let stale = utopia_store::decay::stale_documents(&state.pool, &document_ids).await?;
-    demote_stale(&mut scored, &stale);
-    let results = scored
-        .into_iter()
-        .skip(opts.offset)
-        .take(opts.top_k)
-        .collect();
-    Ok(SearchPage {
-        results,
-        has_more,
-        vector_used,
-    })
+    demote_stale(&mut hits, &stale);
+    Ok((hits, vector_used))
 }
 
 /// 一次检索交出去的文档记一笔（RC-003）。放到后台写：失败只记日志，不拖慢也不打断这次读。
@@ -214,7 +255,7 @@ async fn vector_channel(
     kb_id: Uuid,
     workspace_id: Uuid,
     query: &str,
-    recall: usize,
+    per_channel: usize,
     opts: &SearchOpts,
     cache: Option<&mut llm_util::EmbedCache>,
 ) -> AppResult<Option<Vec<String>>> {
@@ -246,7 +287,7 @@ async fn vector_channel(
         &state.pool,
         kb_id,
         &vector,
-        recall as i64,
+        per_channel as i64,
         opts.as_of,
         opts.documents.as_deref(),
     )

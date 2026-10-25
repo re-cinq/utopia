@@ -166,7 +166,11 @@ export function GoogleDrivePanel({ kbId, source }: { kbId: string; source: Sourc
       {confirmingDisconnect && (
         <DangerConfirm
           title={G.disconnect}
-          hint={G.disconnectConfirm(cfg.account_email ?? G.unnamedAccount, mine)}
+          hint={G.disconnectConfirm(
+            cfg.account_email ?? G.unnamedAccount,
+            mine,
+            cfg.connected_by_name ?? G.someoneElse,
+          )}
           confirmLabel={G.disconnect}
           cancelLabel={G.cancel}
           busy={disconnect.isPending}

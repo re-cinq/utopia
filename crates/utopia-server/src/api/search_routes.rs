@@ -10,13 +10,13 @@ use crate::error::ApiResult;
 use crate::retrieval;
 use crate::state::AppState;
 
-/// 翻页最深到第几条：每路召回随页深加长，再深就是在拿检索当导出用（#1271）
-const MAX_DEPTH: usize = 100;
 /// 前缀最多几条、每条多长：它们进的是一条 SQL 的数组参数，不是让人塞一份清单
 const MAX_PREFIXES: usize = 8;
 const MAX_PREFIX_BYTES: usize = 256;
 
+/// 不认识的字段答 422：过滤条件还没做，悄悄忽略一个 `filters` 会让调用方以为它生效了
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SearchReq {
     pub q: String,
     #[serde(default)]
@@ -81,14 +81,13 @@ pub async fn search(
     if q.is_empty() {
         return Err(AppError::invalid("empty_query", "Search query cannot be empty").into());
     }
-    super::documents_routes::require_reader_kb(&state, &reader, kb_id).await?;
-    let kb = utopia_store::kbs::get(&state.pool, kb_id).await?;
+    let kb = super::documents_routes::require_reader_kb(&state, &reader, kb_id).await?;
 
     let top_k = req.top_k.unwrap_or(10).min(50);
-    if req.offset.saturating_add(top_k) > MAX_DEPTH {
+    if req.offset.saturating_add(top_k) > retrieval::MAX_DEPTH {
         return Err(AppError::invalid(
             "page_too_deep",
-            format!("offset + top_k may not exceed {MAX_DEPTH}"),
+            format!("offset + top_k may not exceed {}", retrieval::MAX_DEPTH),
         )
         .into());
     }
