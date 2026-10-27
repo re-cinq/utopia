@@ -115,6 +115,7 @@ mod a_token_is_the_person_but_not_all_of_them;
 mod a_trimmed_description_is_not_stale;
 mod a_typed_fact_is_as_confirmed_as_its_statement;
 mod a_viewer_never_sees_a_credential;
+mod a_wide_embedding_is_ranked_at_full_precision;
 mod a_wrong_time_can_be_corrected;
 mod adopting_an_iri_adopts_the_shape;
 mod an_admin_grants_system_admin;

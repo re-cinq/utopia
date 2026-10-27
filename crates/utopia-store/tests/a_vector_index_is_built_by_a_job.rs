@@ -106,7 +106,7 @@ async fn the_first_write_of_a_dimension_queues_one_build() -> anyhow::Result<()>
         assert_eq!(queued(&pool, too_wide).await?, 0);
         let err = vector_index::build(&pool, Target::Chunks, too_wide)
             .await
-            .expect_err("HNSW on vector holds up to 2000 dims");
+            .expect_err("HNSW on halfvec holds up to 4000 dims");
         assert!(
             matches!(err, utopia_core::AppError::Validation(_)),
             "是 Validation，分发层据此判 Terminal：{err:?}"

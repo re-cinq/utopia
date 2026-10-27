@@ -3104,13 +3104,14 @@ pub async fn nearest_typed_entities(
              JOIN entity_types t ON t.id = e.type_id
              WHERE e.kb_id = $1 AND e.merged_into IS NULL AND e.id <> $2
                AND e.profile_embedding IS NOT NULL AND {same_dims}
-             ORDER BY {distance}
+             ORDER BY {order}
              LIMIT $4
          )
          -- 次序在外层再排一遍，并列由实体 id 定（`vector_index::RESORT`，#652）
          SELECT canonical_name, type_id, key, distance, same_document
          FROM nearest ORDER BY {resort}",
         distance = crate::vector_index::distance("e.profile_embedding", 3, dims),
+        order = crate::vector_index::index_order("e.profile_embedding", 3, dims),
         resort = crate::vector_index::RESORT,
         same_dims = crate::vector_index::same_dims("e.profile_embedding", dims),
     ))

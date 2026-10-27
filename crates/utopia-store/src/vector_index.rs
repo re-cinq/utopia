@@ -11,8 +11,9 @@
 //! 1. **维度写成字面量。** `vector_dims(col) = $2` 绑参数时自定义计划能用索引，
 //!    generic plan 退回顺扫；sqlx 的预处理语句跑五次就切 generic，第六次起索引
 //!    悄悄失效。用 [`same_dims`] / [`distance`] 把整数写进 SQL。
-//! 2. **两侧都 cast 到 `vector(N)`。** 索引建在表达式 `col::vector(N)` 上，
-//!    `ORDER BY` 必须一字不差地写同一个表达式。
+//! 2. **`ORDER BY` 一字不差地写索引的表达式。** 用 [`index_order`]：索引建在
+//!    `col::vector(N)`（超过 [`VECTOR_MAX_DIMS`] 时是 `col::halfvec(N)`）上，
+//!    写成别的样子索引就用不上。选出来的距离用 [`distance`]，永远是全精度。
 //! 3. **`hnsw.iterative_scan = relaxed_order`。** HNSW 先取 `ef_search` 个候选再过
 //!    WHERE；一张按 kb 分租的表上，小库的行在候选里占不到几个，`LIMIT 10` 会回
 //!    三行甚至零行（实测 1 万行的库在 6 万行的表上：关着回 3/24，开着回满）。
@@ -64,10 +65,24 @@ async fn unlock_build(mut conn: sqlx::pool::PoolConnection<Postgres>) {
     }
 }
 
-/// pgvector 的 HNSW 对 `vector` 类型的上限。超过的维度（text-embedding-3-large
-/// 是 3072）不建索引，查询照常走精确路径。`halfvec` 能到 4000，但那是另一种
-/// 精度，等有人用到再说
-pub const MAX_DIMS: usize = 2000;
+/// pgvector 的 HNSW 对 `vector` 类型的上限
+pub const VECTOR_MAX_DIMS: usize = 2000;
+
+/// 能建索引的上限：`halfvec` 的。超过 [`VECTOR_MAX_DIMS`] 的维度（text-embedding-3-large
+/// 是 3072）索引存半精度，它只负责挑出候选；候选的距离与最终次序仍按 `vector` 全精度
+/// 算（[`distance`] 加外层 [`RESORT`]），所以半精度只可能影响「谁进候选」，不改分数。
+/// 没有索引时这种维度每一问都扫全库（3072 维、二十多万个名字向量，一问几十秒）。
+/// 再宽的不建索引，查询照常走精确路径
+pub const MAX_DIMS: usize = 4000;
+
+/// 索引里存的类型：能用 `vector` 就用，放不下才降到 `halfvec`
+fn index_type(dims: usize) -> &'static str {
+    if dims > VECTOR_MAX_DIMS {
+        "halfvec"
+    } else {
+        "vector"
+    }
+}
 
 /// 哪一列。两张表同一套机制，名字不同而已
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -122,9 +137,16 @@ pub fn same_dims(column: &str, dims: usize) -> String {
     format!("vector_dims({column}) = {dims}")
 }
 
-/// `<=>` 两侧都 cast 到字面维度（规矩 1、2）；`param` 是查询向量的参数号
+/// 全精度的距离：选出来、给外层排的那一列。`param` 是查询向量的参数号
 pub fn distance(column: &str, param: usize, dims: usize) -> String {
     format!("{column}::vector({dims}) <=> ${param}::vector({dims})")
+}
+
+/// `ORDER BY` 写的表达式，与索引一字不差（规矩 1、2）。不超过 [`VECTOR_MAX_DIMS`] 时
+/// 就是 [`distance`]；超过时是半精度，只用来让索引挑候选
+pub fn index_order(column: &str, param: usize, dims: usize) -> String {
+    let ty = index_type(dims);
+    format!("{column}::{ty}({dims}) <=> ${param}::{ty}({dims})")
 }
 
 /// 近邻查询的外层次序（#652）。里层照规矩 2 写 `ORDER BY {distance} LIMIT n` 让索引
@@ -243,7 +265,7 @@ pub async fn build_as_owner(
 pub async fn build(pool: &PgPool, target: Target, dims: usize) -> AppResult<Built> {
     if dims == 0 || dims > MAX_DIMS {
         return Err(AppError::Validation(format!(
-            "{dims} dims: HNSW on vector holds up to {MAX_DIMS}"
+            "{dims} dims: HNSW on halfvec holds up to {MAX_DIMS}"
         )));
     }
     let name = index_name(target, dims);
@@ -273,10 +295,11 @@ pub async fn build(pool: &PgPool, target: Target, dims: usize) -> AppResult<Buil
         conn.execute(
             format!(
                 "CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} ON {table} \
-                 USING hnsw (({col}::vector({dims})) vector_cosine_ops) WHERE {pred}",
+                 USING hnsw (({col}::{ty}({dims})) {ty}_cosine_ops) WHERE {pred}",
                 table = target.table(),
                 col = target.column(),
                 pred = same_dims(target.column(), dims),
+                ty = index_type(dims),
             )
             .as_str(),
         )
@@ -378,6 +401,22 @@ mod tests {
         assert_eq!(
             distance("c.embedding", 2, 1024),
             "c.embedding::vector(1024) <=> $2::vector(1024)"
+        );
+    }
+
+    #[test]
+    fn a_dimension_wider_than_vector_orders_by_halfvec_and_scores_by_vector() {
+        assert_eq!(
+            index_order("c.embedding", 2, 2000),
+            "c.embedding::vector(2000) <=> $2::vector(2000)"
+        );
+        assert_eq!(
+            index_order("c.embedding", 2, 3072),
+            "c.embedding::halfvec(3072) <=> $2::halfvec(3072)"
+        );
+        assert_eq!(
+            distance("c.embedding", 2, 3072),
+            "c.embedding::vector(3072) <=> $2::vector(3072)"
         );
     }
 
