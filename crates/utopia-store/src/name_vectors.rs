@@ -161,6 +161,7 @@ pub async fn nearest(pool: &PgPool, kb_id: Uuid, query: &[f32], k: usize) -> App
         return Ok(Vec::new());
     }
     let distance = vector_index::distance("v.embedding", 2, dims);
+    let order = vector_index::index_order("v.embedding", 2, dims);
     let same_dims = vector_index::same_dims("v.embedding", dims);
     let sql = format!(
         // 外层次序照 `vector_index::RESORT` 的规矩（`distance + 0, id`），列名限定到 CTE：
@@ -169,7 +170,7 @@ pub async fn nearest(pool: &PgPool, kb_id: Uuid, query: &[f32], k: usize) -> App
              SELECT v.fact_id AS id, v.entity_id, ({distance}) AS distance
                FROM name_vectors v
               WHERE v.kb_id = $1 AND {same_dims}
-              ORDER BY {distance}
+              ORDER BY {order}
               LIMIT $3
          )
          SELECT n.entity_id, n.id AS fact_id,
@@ -184,13 +185,17 @@ pub async fn nearest(pool: &PgPool, kb_id: Uuid, query: &[f32], k: usize) -> App
           ORDER BY n.distance + 0, n.id
           LIMIT $4",
     );
+    // 规矩 3：有了索引，小库在共享表上不开 iterative_scan 会回不满
+    let mut tx = pool.begin().await?;
+    vector_index::relaxed_order(pool, &mut tx).await?;
     let rows: Vec<Near> = sqlx::query_as(&sql)
         .bind(kb_id)
         .bind(Vector::from(query.to_vec()))
         .bind((k * 4) as i64)
         .bind(k as i64)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(rows)
 }
 

@@ -1918,7 +1918,7 @@ pub async fn vector_search(
              SELECT id, {distance} AS distance FROM chunks c
              WHERE c.kb_id = $1 AND c.embedding IS NOT NULL AND {live}
                AND {same_dims}{only}
-             ORDER BY {distance}
+             ORDER BY {order}
              LIMIT $3
          )
          SELECT id FROM nearest ORDER BY {resort}",
@@ -1930,6 +1930,7 @@ pub async fn vector_search(
         },
         same_dims = crate::vector_index::same_dims("c.embedding", dims),
         distance = crate::vector_index::distance("c.embedding", 2, dims),
+        order = crate::vector_index::index_order("c.embedding", 2, dims),
         resort = crate::vector_index::RESORT,
     ))
     .bind(kb_id)
