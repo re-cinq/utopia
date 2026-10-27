@@ -200,7 +200,7 @@ fn is_known(name: &str) -> bool {
 /// 返回 `Some(job id)` = 这一次排上了。
 ///
 /// 索引在的话记在进程里，往后只是一次 HashSet 查找；不在的时候每次写入一次目录
-/// 查询加一次「没排着才排」的插入——建索引那一两分钟里写入照常，代价可忽略。
+/// 查询加一次「没排着、也没在建才排」的插入——建索引的那段时间里写入照常，代价可忽略。
 /// 超过 [`MAX_DIMS`] 的维度什么都不排：建不了，查询走精确路径
 pub async fn request(pool: &PgPool, target: Target, dims: usize) -> AppResult<Option<i64>> {
     if dims == 0 || dims > MAX_DIMS {
@@ -214,10 +214,11 @@ pub async fn request(pool: &PgPool, target: Target, dims: usize) -> AppResult<Op
         remember(&name);
         return Ok(None);
     }
-    crate::jobs::enqueue_unless_queued(
+    crate::jobs::enqueue_unless_pending(
         pool,
         JOB_KIND,
         serde_json::json!({ "table": target.key(), "dims": dims }),
+        std::time::Duration::ZERO,
     )
     .await
 }

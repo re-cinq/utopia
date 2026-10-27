@@ -79,6 +79,16 @@ async fn the_first_write_of_a_dimension_queues_one_build() -> anyhow::Result<()>
         let second = vector_index::request(&pool, Target::Chunks, DIMS).await?;
         assert_eq!(second, None, "队列里已经有一条，不再排");
         assert_eq!(queued(&pool, DIMS).await?, 1);
+        // worker 认领了它、正在建：再写也不排。排上的每一条都会占一个 worker 名额，
+        // 在建索引的咨询锁上空等到前一条建完（3072 维的库上一建一个多小时）
+        sqlx::query("UPDATE jobs SET status = 'running' WHERE kind = $1 AND payload->>'dims' = $2")
+            .bind(JOB_KIND)
+            .bind(DIMS.to_string())
+            .execute(&pool)
+            .await?;
+        let while_building = vector_index::request(&pool, Target::Chunks, DIMS).await?;
+        assert_eq!(while_building, None, "正在建的时候不再排");
+        assert_eq!(queued(&pool, DIMS).await?, 0);
 
         let built = vector_index::build(&pool, Target::Chunks, DIMS).await?;
         assert!(built.created);
