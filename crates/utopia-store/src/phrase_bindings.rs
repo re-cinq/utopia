@@ -115,7 +115,12 @@ pub async fn signatures<'e>(
 }
 
 /// 一篇文档里活着的开放陈述落在哪些签名上（键同 [`PhraseSignature::key`]）。推送来的
-/// 文档抽完，本体只判这些签名（#1242）；别的签名还是对齐器的
+/// 文档抽完，本体只判这些签名（#1242）；别的签名还是对齐器的。
+///
+/// 证据按 `fact_evidence.document_id` 找（`fact_evidence_document_idx`），不经 `chunks`：
+/// `fact_evidence.chunk_id` 没有索引，经 chunk 找要全表扫一遍证据，830 万行的库上每篇
+/// 文档 12 秒，推送一阵时几十份同时跑，把数据库顶在 CPU 上限（#1471）；按文档列走索引
+/// 是 0.16 秒，行一样——证据的 document_id 写入时就等于它 chunk 的文档
 pub async fn signature_keys_of_document(
     pool: &PgPool,
     kb_id: Uuid,
@@ -128,8 +133,8 @@ pub async fn signature_keys_of_document(
       LEFT JOIN entities o ON o.id = f.object_id
           WHERE f.kb_id = $1 AND f.layer = 'open' AND f.invalidated_at IS NULL
             AND f.phrase IS NOT NULL AND btrim(f.phrase) <> ''
-            AND EXISTS (SELECT 1 FROM fact_evidence fe JOIN chunks c ON c.id = fe.chunk_id
-                         WHERE fe.fact_id = f.id AND c.document_id = $2)",
+            AND EXISTS (SELECT 1 FROM fact_evidence fe
+                         WHERE fe.fact_id = f.id AND fe.document_id = $2)",
         phrase = phrase_sql("f.phrase")
     );
     Ok(sqlx::query_as(&sql)
