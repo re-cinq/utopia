@@ -937,7 +937,9 @@ pub(crate) async fn embed_names_job(state: &AppState, kb_id: Uuid) -> anyhow::Re
     if filled > 0 {
         tracing::info!(%kb_id, names = filled, "名字向量已补");
     }
-    if i64::try_from(filled).unwrap_or(i64::MAX) >= NAME_VECTOR_PENDING {
+    // 补了名字就再排一份：这一份跑着时抽完的文档撞上「正在跑」不再排（见排它的那处），
+    // 它们写下的名字由下一份补；一批满了更是可能还有。只排着一份，所以这最多多跑一遍空的
+    if filled > 0 {
         utopia_store::jobs::enqueue_unless_queued(
             &state.pool,
             "embed_names",
@@ -1288,12 +1290,15 @@ pub(crate) async fn run_open(
     }
     // 名字向量：这篇新写的名字事实，向量补上（0041 决定 3 通道 2）。补在一份按库去重的
     // `embed_names` 任务里（#1296）：找还没有向量的名字要扫全库的名字事实，一阵推送几百篇
-    // 时每篇扫一遍是推送最贵的几笔之一；排着一份就不再排，它跑一遍补上这一阵写下的名字
+    // 时每篇扫一遍是推送最贵的几笔之一；排着**或正在跑**的一份就不再排——只看排着的，
+    // 第一份一开跑，之后抽完的每篇都再排一份，一份跑几小时时（身份名多的库，#1472）
+    // 十几份串在它后面各扫一遍；跑着的那份结束时若还有没补的会自己再排（`embed_names_job`）
     if settings.is_some() && embed.is_some() {
-        utopia_store::jobs::enqueue_unless_queued(
+        utopia_store::jobs::enqueue_unless_pending(
             pool,
             "embed_names",
             serde_json::json!({ "kb_id": kb_id }),
+            std::time::Duration::ZERO,
         )
         .await?;
     }
