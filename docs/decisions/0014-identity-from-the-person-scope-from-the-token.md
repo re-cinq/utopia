@@ -162,6 +162,12 @@ push documents in.
   join them, and so does reading a pushed document back by its `external_id` (#1276). The
   ontology and a class's instances follow (#1265), then a document's extractions and the
   base's export (#1266). 2026-10-24: chunk search joins them (#1271).
+- 2026-11-02: a service that sets up a push source also has to keep it tidy, and that still
+  took a session. A write token may now rename, delete, re-extract and clean up the missing
+  documents of a `statements` or `api` source, with the same guards as creating one. Other
+  kinds stay session-only and are refused with `token_source_kind`, since changing a `url`
+  source's address from a leaked token would point the server at any address. The audit rows
+  carry `detail.token_id`.
 
 ## Open questions
 
