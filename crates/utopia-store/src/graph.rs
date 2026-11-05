@@ -1795,6 +1795,7 @@ pub async fn entity_detail(
                  AND NOT EXISTS (SELECT 1 FROM fact_evidence fe
                                  JOIN chunks c ON c.id = fe.chunk_id
                                  WHERE fe.fact_id = f.id AND {chunk_live})
+                 AND NOT {awaits} AND NOT {follows_its_statement}
                 ) AS stale,
                 (f.supersedes IS NOT NULL) AS corrected,
                 f.end_derived, f.end_after_period, {corrected_ends} AS corrected_ends,
@@ -1851,6 +1852,8 @@ pub async fn entity_detail(
         holds_to = crate::world_axis::facts_holds_to("f"),
         subject = crate::record_axis::owner_at("f", "subject_id", as_of.map(|_| 3), false),
         object = crate::record_axis::owner_at("f", "object_id", as_of.map(|_| 3), true),
+        awaits = crate::review::AWAITS_A_NEW_VERSION,
+        follows_its_statement = crate::review::FOLLOWS_ITS_STATEMENT,
         chunk_live = crate::record_axis::chunk_live_at("c", as_of.map(|_| 3)),
         violation_open = crate::record_axis::violation_open_at("v", as_of.map(|_| 3)),
         conflict_open = crate::record_axis::conflict_open_at("c", as_of.map(|_| 3)),
