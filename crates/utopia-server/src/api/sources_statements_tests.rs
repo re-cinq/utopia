@@ -91,16 +91,16 @@ fn the_door_refuses_what_the_contract_has_no_slot_for() {
     refuse(fat, "limit is 65536");
 }
 
-struct Fixture {
-    pool: sqlx::PgPool,
-    state: crate::state::AppState,
+pub(super) struct Fixture {
+    pub(super) pool: sqlx::PgPool,
+    pub(super) state: crate::state::AppState,
     app: axum::Router,
     org: Uuid,
-    kb: Uuid,
+    pub(super) kb: Uuid,
     user: Uuid,
-    source: Uuid,
+    pub(super) source: Uuid,
     api_source: Uuid,
-    token: String,
+    pub(super) token: String,
     api_token: String,
     /// 编辑者的会话令牌：查看和轮换密钥走会话认证，不走推送密钥
     session: String,
@@ -108,7 +108,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn new() -> anyhow::Result<Option<Self>> {
+    pub(super) async fn new() -> anyhow::Result<Option<Self>> {
         let Some(url) = utopia_store::test_db::url() else {
             return Ok(None);
         };
@@ -168,7 +168,7 @@ impl Fixture {
         }))
     }
 
-    async fn push(
+    pub(super) async fn push(
         &self,
         source: Uuid,
         token: &str,
@@ -252,7 +252,7 @@ impl Fixture {
         read_back(self.app.clone(), self.kb, self.source, token, external_id).await
     }
 
-    async fn cleanup(self) -> anyhow::Result<()> {
+    pub(super) async fn cleanup(self) -> anyhow::Result<()> {
         sqlx::query("DELETE FROM organizations WHERE id = $1")
             .bind(self.org)
             .execute(&self.pool)

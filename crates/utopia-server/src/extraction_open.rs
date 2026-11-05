@@ -1276,6 +1276,14 @@ pub(crate) async fn run_open(
             serde_json::json!({ "kb_id": kb_id }),
         )
         .await?;
+        // 条目就是契约（RC-006）：新版本每一块都读过了，它不再陈述的事实在这里闭合
+        if incomplete.is_none() {
+            let closing =
+                utopia_store::unconfirmed::close_of_document(pool, kb_id, document_id).await?;
+            if closing.closed > 0 {
+                tracing::info!(%document_id, closed = closing.closed, "推送条目的新版本闭合了它不再陈述的事实");
+            }
+        }
     }
     // 队列里多了东西才叫醒人：Review 的计数与对话里那张确认卡都靠这一声
     if pending_count > 0 {
