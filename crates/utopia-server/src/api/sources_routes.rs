@@ -997,6 +997,10 @@ pub async fn re_extract(
 mod statements_tests;
 
 #[cfg(test)]
+#[path = "sources_repush_tests.rs"]
+mod repush_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{keep_secrets, validate_rss_config, UpdateBody};
     use serde_json::json;

@@ -77,6 +77,7 @@ mod a_plan_step_follows_its_premise;
 mod a_proof_reaches_the_sentence;
 mod a_purge_is_final;
 mod a_purge_judges_its_blobs_once;
+mod a_pushed_item_closes_what_its_new_version_stopped_stating;
 mod a_qualifier_is_not_the_edges_identity;
 mod a_question_picks_its_definitions;
 mod a_reader_keeps_its_key_for_its_provider;
