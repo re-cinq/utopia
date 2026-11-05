@@ -157,6 +157,8 @@ pub struct ExportClass {
     pub iri: Option<String>,
     pub parents: Vec<Uuid>,
     pub disjoint: Vec<Uuid>,
+    /// The `utopia:*` display hints (RC-008), written back one literal per entry
+    pub display_hints: serde_json::Value,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -183,6 +185,8 @@ pub struct ExportRelation {
     pub sub_property_of: Option<Uuid>,
     pub domains: Vec<Uuid>,
     pub ranges: Vec<Uuid>,
+    /// The `utopia:*` display hints (RC-008), written back one literal per entry
+    pub display_hints: serde_json::Value,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -303,7 +307,7 @@ pub async fn classes(
     kb_id: Uuid,
 ) -> AppResult<Vec<ExportClass>> {
     let classes: Vec<ExportClass> = sqlx::query_as(
-        "SELECT t.id, t.key, t.label, t.description, t.iri,
+        "SELECT t.id, t.key, t.label, t.description, t.iri, t.display_hints,
                 COALESCE(ARRAY(SELECT p.parent_id FROM entity_type_parents p
                                 WHERE p.child_id = t.id ORDER BY p.parent_id), '{}') AS parents,
                 COALESCE(ARRAY(SELECT CASE WHEN d.a_id = t.id THEN d.b_id ELSE d.a_id END
@@ -339,7 +343,7 @@ pub async fn relations(
         "SELECT r.id, r.key, r.label, r.description, r.iri, r.kind, r.datatype, r.unit,
                 r.temporal, r.functional, r.inverse_functional,
                 r.is_transitive, r.is_symmetric, r.is_asymmetric, r.is_irreflexive,
-                r.inverse_of, r.sub_property_of,
+                r.inverse_of, r.sub_property_of, r.display_hints,
                 COALESCE(ARRAY(SELECT d.entity_type_id FROM relation_type_domains d
                                 WHERE d.relation_type_id = r.id ORDER BY 1), '{}') AS domains,
                 COALESCE(ARRAY(SELECT g.entity_type_id FROM relation_type_ranges g

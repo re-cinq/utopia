@@ -60,6 +60,7 @@ async fn every_axiom_survives_the_bulk_insert() -> anyhow::Result<()> {
                 asymmetric: a,
                 irreflexive: r,
                 temporal: "state".into(),
+                display_hints: serde_json::json!({}),
             }
         };
         // 一条全真、一条全假：全假那条守的是"没声明的不该被写成真"

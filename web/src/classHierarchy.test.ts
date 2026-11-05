@@ -45,6 +45,7 @@ const entityType = (id: string, parents: string[]): EntityTypeView => ({
   disjoint: [],
   primary_parent: parents[0] ?? null,
   description: "",
+  display_hints: {},
   usage: 0,
 });
 

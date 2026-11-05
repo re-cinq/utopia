@@ -1602,6 +1602,7 @@ mod tests {
             datatype: None,
             unit: None,
             qualifiers: Vec::new(),
+            display_hints: serde_json::json!({}),
             usage: 0,
         }
     }

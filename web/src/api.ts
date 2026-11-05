@@ -1305,6 +1305,8 @@ export interface EntityTypeView {
   /** 左栏画树时挂在哪一支下。不参与语义，只管展示 */
   primary_parent: string | null;
   description: string;
+  /** How the type asks to be shown (RC-008): the `utopia:*` literals of its ontology file */
+  display_hints: Record<string, string>;
   usage: number;
 }
 
@@ -1336,6 +1338,8 @@ export interface RelationTypeView {
   qualifiers: string[];
   datatype: "text" | "number" | "date" | "bool" | null;
   unit: string | null;
+  /** How the property asks to be shown (RC-008): the `utopia:*` literals of its ontology file */
+  display_hints: Record<string, string>;
   usage: number;
 }
 

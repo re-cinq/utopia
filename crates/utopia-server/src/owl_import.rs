@@ -168,6 +168,16 @@ impl ImportPlan {
     }
 }
 
+/// The parser's hint map as the flat object the store keeps (RC-008)
+fn display_hints_json(hints: &std::collections::BTreeMap<String, String>) -> serde_json::Value {
+    serde_json::Value::Object(
+        hints
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect(),
+    )
+}
+
 /// 解析文件并对着现有本体算出计划。不写任何东西。
 pub async fn plan(
     state: &AppState,
@@ -441,27 +451,25 @@ pub async fn apply(
     // 1500 个属性）是五千次 fsync——实测导入 45 秒。同样的行数放进一条
     // UNNEST 语句是 536 毫秒。Update 与 Aligned 留在下面逐条走：它们在
     // 空库上是个位数，而且各自要读一次现状，批不起来。
-    let new_classes: Vec<(String, String, String, String)> = plan
+    let new_classes: Vec<utopia_store::ontology::BulkClass> = plan
         .classes
         .iter()
         .filter(|i| i.disposition == Disposition::Create)
         .filter_map(|i| by_iri.get(i.iri.as_str()).map(|c| (i, *c)))
         // key 用 item 的：对齐表判为同名不同义时它是改过的那个
-        .map(|(i, c)| {
-            (
-                i.key.clone(),
-                c.label.clone(),
-                c.description.clone(),
-                c.iri.clone(),
-            )
+        .map(|(i, c)| utopia_store::ontology::BulkClass {
+            key: i.key.clone(),
+            label: c.label.clone(),
+            description: c.description.clone(),
+            iri: c.iri.clone(),
+            display_hints: display_hints_json(&c.display_hints),
         })
         .collect();
     let created_ids =
         utopia_store::ontology::create_entity_types_bulk(&state.pool, kb_id, &new_classes).await?;
-    for (key, label, _, iri) in &new_classes {
-        let _ = label;
-        if let Some(id) = created_ids.get(key) {
-            id_of.insert(iri.clone(), *id);
+    for c in &new_classes {
+        if let Some(id) = created_ids.get(&c.key) {
+            id_of.insert(c.iri.clone(), *id);
             created_classes += 1;
         }
     }
@@ -482,6 +490,7 @@ pub async fn apply(
                     &c.iri,
                     &c.label,
                     &c.description,
+                    &display_hints_json(&c.display_hints),
                 )
                 .await?;
                 let id = match updated {
@@ -611,6 +620,7 @@ pub async fn apply(
                 &domains,
                 &ranges,
                 p.temporal.as_deref(),
+                &display_hints_json(&p.display_hints),
             )
             .await?
             {
@@ -634,6 +644,7 @@ pub async fn apply(
             irreflexive: p.irreflexive,
             // 本体用 `utopia:temporal` 说了的照它说的（0031）；没说的是 state
             temporal: p.temporal.as_deref().unwrap_or("state").to_string(),
+            display_hints: display_hints_json(&p.display_hints),
         });
         pending_links.push((p.key.clone(), domains, ranges));
     }
@@ -682,6 +693,7 @@ pub async fn apply(
     // **这里只执行，不重新判断**——两处各判一次就会分叉，而分叉意味着
     // 预览说的和实际做的不是一回事
     let mut created_attrs = 0usize;
+    let mut updated_attrs = 0usize;
     let mut new_attrs: Vec<utopia_store::ontology::BulkRelation> = Vec::new();
     let mut pending_attr_domains: Vec<(String, Vec<Uuid>)> = Vec::new();
     for item in &plan.attributes {
@@ -707,6 +719,27 @@ pub async fn apply(
         if domain_ids.is_empty() {
             continue;
         }
+        // An attribute this file already brought in is refreshed like a relation is
+        // (RC-008 needs its hints to follow the file); the bulk insert below would
+        // only skip it on the key conflict
+        if item.disposition == Disposition::Update {
+            if utopia_store::ontology::update_relation_from_import(
+                &state.pool,
+                kb_id,
+                &p.iri,
+                &p.label,
+                &p.description,
+                &domain_ids,
+                &[],
+                None,
+                &display_hints_json(&p.display_hints),
+            )
+            .await?
+            {
+                updated_attrs += 1;
+            }
+            continue;
+        }
         new_attrs.push(utopia_store::ontology::BulkRelation {
             key: p.key.clone(),
             label: p.label.clone(),
@@ -724,6 +757,7 @@ pub async fn apply(
             irreflexive: false,
             // 属性建成 state，页面也不给别的选（0031 的「未决」里那一条）
             temporal: "state".to_string(),
+            display_hints: display_hints_json(&p.display_hints),
         });
         pending_attr_domains.push((p.key.clone(), domain_ids));
     }
@@ -754,6 +788,7 @@ pub async fn apply(
         "relations_updated": updated_rels,
         "attributes_seen": plan.attributes.len(),
         "attributes_created": created_attrs,
+        "attributes_updated": updated_attrs,
         "attributes_skipped": plan.attr_skips(),
         "classes_without_description": plan.classes_without_description,
         "functional_relations": plan.functional_relations,

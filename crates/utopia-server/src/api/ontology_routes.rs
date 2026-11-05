@@ -147,6 +147,9 @@ pub struct EntityTypeReq {
     /// 语义指引，注入抽取 prompt
     #[serde(default)]
     pub description: Option<String>,
+    /// How the type is shown (RC-008): a flat object of string values. Absent = untouched
+    #[serde(default)]
+    pub display_hints: Option<serde_json::Value>,
 }
 
 /// 编辑器或导入改了本体之后：先补向量索引，再排对齐。
@@ -218,6 +221,9 @@ pub async fn create_entity_type(
     if let Some(d) = req.disjoint.as_deref() {
         utopia_store::ontology::set_disjoint_for(&state.pool, kb_id, id, d).await?;
     }
+    if let Some(h) = &req.display_hints {
+        utopia_store::ontology::set_type_display_hints(&state.pool, kb_id, id, h).await?;
+    }
     // 审计只记不阻断
     let _ = utopia_store::audit::record(
         &state.pool,
@@ -258,6 +264,9 @@ pub async fn update_entity_type(
     .await?;
     if let Some(d) = req.disjoint.as_deref() {
         utopia_store::ontology::set_disjoint_for(&state.pool, kb_id, id, d).await?;
+    }
+    if let Some(h) = &req.display_hints {
+        utopia_store::ontology::set_type_display_hints(&state.pool, kb_id, id, h).await?;
     }
     let _ = utopia_store::audit::record(
         &state.pool,
@@ -354,6 +363,9 @@ pub struct RelationTypeReq {
     pub datatype: Option<String>,
     #[serde(default)]
     pub unit: Option<String>,
+    /// How the property is shown (RC-008): a flat object of string values. Absent = untouched
+    #[serde(default)]
+    pub display_hints: Option<serde_json::Value>,
 }
 
 impl RelationTypeReq {
@@ -409,6 +421,9 @@ pub async fn create_relation_type(
     if let Some(q) = req.qualifiers.as_deref() {
         utopia_store::ontology::set_relation_qualifiers(&state.pool, kb_id, id, q).await?;
     }
+    if let Some(h) = &req.display_hints {
+        utopia_store::ontology::set_relation_display_hints(&state.pool, kb_id, id, h).await?;
+    }
     // 多了一个属性：判成 none / undecided 的签名也许对得上了（0044 对齐第二片）。
     // 先补它的向量，短名单才看得见它
     reindex_then_align(&state, kb_id, "align_phrases").await?;
@@ -449,6 +464,9 @@ pub async fn update_relation_type(
     .await?;
     if let Some(q) = req.qualifiers.as_deref() {
         utopia_store::ontology::set_relation_qualifiers(&state.pool, kb_id, id, q).await?;
+    }
+    if let Some(h) = &req.display_hints {
+        utopia_store::ontology::set_relation_display_hints(&state.pool, kb_id, id, h).await?;
     }
     // 属性改了定义或域/值域：绑到它的签名过期，判成 none 的也许对得上了。
     // 标签或描述改了向量也陈了，先重嵌（只改域/值域的话补齐任务一查就退）
