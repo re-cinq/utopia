@@ -1896,8 +1896,8 @@ async fn set_embeddings_for_input(
 /// 只是大致按距离，而距离并列时精确路径和 HNSW 各排各的——同一问两种计划回的
 /// 居首不同（#652）。并列由 id 定
 ///
-/// `documents`：只在这些文档的块里找。条件写在近邻 CTE 里面，`LIMIT` 数的就只是
-/// 允许的块——放到外层，库里别的块会先占满名额
+/// `documents`：只在这些文档的块里找。条件在近邻 CTE 里面，`LIMIT` 数的就只是
+/// 允许的块；放到外层，库里别的块会先占满名额
 pub async fn vector_search(
     pool: &PgPool,
     kb_id: Uuid,
@@ -1944,27 +1944,24 @@ pub async fn vector_search(
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
-/// 检索的文档过滤：库里某个来源当时活着的文档，`prefixes` 给了就只要
-/// `external_id` 以其中之一开头的。`external_key` 是 `{kind}:{external_id}`，
-/// 比前缀用 `starts_with`——路径里的 `_` 和 `%` 进了 LIKE 就成了通配符
+/// 检索按来源过滤时允许的文档：库里这个来源当时活着的文档，给了 `key_prefix` 就只要
+/// `external_key` 以它开头的。比较用 `starts_with`：路径里的 `_` 和 `%` 进了 LIKE 就是通配符
 pub async fn ids_in_source(
     pool: &PgPool,
     kb_id: Uuid,
     source_id: Uuid,
-    prefixes: Option<&[String]>,
+    key_prefix: Option<&str>,
     as_of: Option<DateTime<Utc>>,
 ) -> AppResult<Vec<Uuid>> {
     let rows: Vec<(Uuid,)> = sqlx::query_as(&format!(
-        "SELECT d.id FROM documents d JOIN sources s ON s.id = d.source_id
+        "SELECT d.id FROM documents d
          WHERE d.kb_id = $1 AND d.source_id = $2 AND {doc_live}
-           AND ($3::text[] IS NULL OR EXISTS (
-                SELECT 1 FROM unnest($3::text[]) p
-                WHERE starts_with(d.external_key, s.kind || ':' || p)))",
+           AND ($3::text IS NULL OR starts_with(d.external_key, $3))",
         doc_live = crate::record_axis::document_live_at("d", as_of.map(|_| 4)),
     ))
     .bind(kb_id)
     .bind(source_id)
-    .bind(prefixes)
+    .bind(key_prefix)
     .bind(as_of)
     .fetch_all(pool)
     .await?;
@@ -1983,8 +1980,7 @@ pub async fn chunks_by_ids(
 ) -> AppResult<Vec<SourcedChunk>> {
     let rows: Vec<SourcedChunk> = sqlx::query_as(&format!(
         "SELECT c.id, c.document_id, c.seq, c.text, d.filename, d.source_id,
-                CASE WHEN s.kind IN ('api', 'statements')
-                     THEN substr(d.external_key, length(s.kind) + 2) END AS external_id
+                s.kind AS source_kind, d.external_key
          FROM chunks c JOIN documents d ON d.id = c.document_id
          LEFT JOIN sources s ON s.id = d.source_id
          WHERE c.kb_id = $1 AND c.id = ANY($2)

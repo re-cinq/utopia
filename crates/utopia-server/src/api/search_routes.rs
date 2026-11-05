@@ -10,11 +10,7 @@ use crate::error::ApiResult;
 use crate::retrieval;
 use crate::state::AppState;
 
-/// 前缀最多几条、每条多长：它们进的是一条 SQL 的数组参数，不是让人塞一份清单
-const MAX_PREFIXES: usize = 8;
-const MAX_PREFIX_BYTES: usize = 256;
-
-/// 不认识的字段答 422：过滤条件还没做，悄悄忽略一个 `filters` 会让调用方以为它生效了
+/// 不认识的字段答 422：悄悄忽略一个拼错的过滤条件，调用方会以为它生效了
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchReq {
@@ -27,13 +23,13 @@ pub struct SearchReq {
     /// 命中的是当时活着的块、当时还没被删的文档
     #[serde(default)]
     pub as_of: Option<String>,
-    /// 只检索这个来源的文档（必须属于本库，否则 404）
+    /// 只检索本库这个来源的文档；别的库的来源答 404
     #[serde(default)]
     pub source_id: Option<Uuid>,
-    /// 只检索 `external_id` 以其中之一开头的文档；前缀是相对 `source_id` 说的，
-    /// 所以没有 `source_id` 不收
+    /// 只检索 `external_id` 以它开头的文档。identity 是推送来源里的，所以要 `source_id`
+    /// 且它是推送来源，否则 422
     #[serde(default)]
-    pub external_id_prefixes: Option<Vec<String>>,
+    pub external_id_prefix: Option<String>,
     /// 这次检索算不算「用过」（RC-003）：默认算。探测、评测、健康检查传 false，不留痕
     #[serde(default = "record_by_default")]
     pub record: bool,
@@ -43,32 +39,35 @@ fn record_by_default() -> bool {
     true
 }
 
-fn check_prefixes(req: &SearchReq) -> Result<(), AppError> {
-    let Some(prefixes) = &req.external_id_prefixes else {
-        return Ok(());
+async fn source_filter(
+    state: &AppState,
+    kb_id: Uuid,
+    req: &SearchReq,
+) -> ApiResult<Option<retrieval::SourceFilter>> {
+    let source = match req.source_id {
+        Some(source_id) => {
+            Some(super::sources_routes::source_in_kb(state, kb_id, source_id).await?)
+        }
+        None => None,
     };
-    if req.source_id.is_none() {
+    let Some(prefix) = &req.external_id_prefix else {
+        return Ok(source.map(|source| retrieval::SourceFilter {
+            source_id: source.id,
+            key_prefix: None,
+        }));
+    };
+    let Some(source) = source.filter(|source| crate::pushed_keys::is_push_kind(&source.kind))
+    else {
         return Err(AppError::invalid(
-            "prefixes_need_source",
-            "external_id_prefixes requires source_id",
-        ));
-    }
-    if prefixes.is_empty() || prefixes.len() > MAX_PREFIXES {
-        return Err(AppError::invalid(
-            "bad_prefixes",
-            format!("external_id_prefixes takes 1 to {MAX_PREFIXES} entries"),
-        ));
-    }
-    if prefixes
-        .iter()
-        .any(|p| p.is_empty() || p.len() > MAX_PREFIX_BYTES)
-    {
-        return Err(AppError::invalid(
-            "bad_prefixes",
-            format!("each external_id prefix is 1 to {MAX_PREFIX_BYTES} bytes"),
-        ));
-    }
-    Ok(())
+            "prefix_needs_push_source",
+            "external_id_prefix needs the source_id of an API or Statements source",
+        )
+        .into());
+    };
+    Ok(Some(retrieval::SourceFilter {
+        source_id: source.id,
+        key_prefix: Some(crate::pushed_keys::pushed_key(&source, prefix)),
+    }))
 }
 
 pub async fn search(
@@ -91,29 +90,12 @@ pub async fn search(
         )
         .into());
     }
-    check_prefixes(&req)?;
     let as_of = super::graph_routes::parse_instant("as_of", req.as_of.as_deref())?;
-    let documents = match req.source_id {
-        Some(source_id) => {
-            super::sources_routes::source_in_kb(&state, kb_id, source_id).await?;
-            Some(
-                utopia_store::documents::ids_in_source(
-                    &state.pool,
-                    kb_id,
-                    source_id,
-                    req.external_id_prefixes.as_deref(),
-                    as_of,
-                )
-                .await?,
-            )
-        }
-        None => None,
-    };
     let opts = retrieval::SearchOpts {
         top_k,
         offset: req.offset,
         as_of,
-        documents,
+        filter: source_filter(&state, kb_id, &req).await?,
     };
     let page = retrieval::hybrid_scored(&state, kb_id, kb.workspace_id, q, opts, None).await?;
     if req.record {
