@@ -62,7 +62,13 @@ impl SearchIndex {
             .register(JIEBA, tantivy_jieba::JiebaTokenizer::new());
 
         let writer = index.writer(WRITER_HEAP)?;
-        let reader = index.reader()?;
+        // 每次写都在 writer 锁里自己 reload；再留着自动重载，那条异步重载可能晚到、
+        // 带着更旧的提交把刚写进去的文档又遮掉。这个进程握着唯一的 writer，
+        // 没有别人会提交，手动重载不会漏掉什么
+        let reader = index
+            .reader_builder()
+            .reload_policy(tantivy::ReloadPolicy::Manual)
+            .try_into()?;
         let analyzer = index
             .tokenizers()
             .get(JIEBA)
@@ -135,8 +141,7 @@ impl SearchIndex {
     /// 查询用与索引完全一致的 jieba analyzer 切词后按 OR 组合——
     /// 不能走 QueryParser：CJK 整句会被当成短语查询（要求词连续出现），召回归零。
     ///
-    /// `documents`：只在这些文档里找。它和 kb 一样是 `Must`，`limit` 数的就只是
-    /// 允许的块，而不是先取全库的前几名再筛
+    /// `documents`：只在这些文档里找。它和 kb 一样是 `Must`，`limit` 数的就只是允许的块
     pub fn search(
         &self,
         kb_id: &str,

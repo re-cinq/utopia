@@ -31,9 +31,14 @@ pub struct SearchOpts {
     pub top_k: usize,
     pub offset: usize,
     pub as_of: Option<chrono::DateTime<chrono::Utc>>,
-    /// 只在这些文档里检索。两路各自在召回**之内**过滤：每路只取前 `recall` 条，
-    /// 召回完再筛，要的文档早被库里别的东西挤出名额了。None 即全库
-    pub documents: Option<Vec<Uuid>>,
+    pub filter: Option<SourceFilter>,
+}
+
+/// 只检索一个来源的文档，给了 `key_prefix` 就只要 `external_key` 以它开头的（#1271）。
+/// 两路各在召回**之内**过滤：融合完再筛，库里别的命中早占满了每路的名额，页就短了
+pub struct SourceFilter {
+    pub source_id: Uuid,
+    pub key_prefix: Option<String>,
 }
 
 /// 一条命中连同它的分数（#1271）。`score` 是 RRF 总分，只在同一次查询里能排先后，
@@ -42,6 +47,8 @@ pub struct SearchOpts {
 pub struct ScoredChunk {
     #[serde(flatten)]
     pub chunk: SourcedChunk,
+    /// 推送来源的文档才有：推送方给的那个 id，好让它拿回去对自己的记录
+    pub external_id: Option<String>,
     pub score: f64,
     /// 来自一个会衰减的源、且久没被检索：分已经乘过 [`utopia_store::decay::STALE_SEARCH_WEIGHT`]。
     /// 不衰减的库这一格永远是 false，不进响应
@@ -68,19 +75,16 @@ pub async fn hybrid(
     as_of: Option<chrono::DateTime<chrono::Utc>>,
     embeddings: Option<&mut llm_util::EmbedCache>,
 ) -> AppResult<Vec<ChunkView>> {
-    let opts = SearchOpts {
-        top_k,
-        offset: 0,
-        as_of,
-        documents: None,
-    };
     let (hits, _) = fused_hits(
         state,
         kb_id,
         workspace_id,
         query,
-        RECALL_PER_CHANNEL,
-        &opts,
+        Recall {
+            per_channel: RECALL_PER_CHANNEL,
+            as_of,
+            documents: None,
+        },
         embeddings,
     )
     .await?;
@@ -102,20 +106,29 @@ pub async fn hybrid_scored(
     opts: SearchOpts,
     embeddings: Option<&mut llm_util::EmbedCache>,
 ) -> AppResult<SearchPage> {
-    if opts.documents.as_ref().is_some_and(Vec::is_empty) {
-        return Ok(SearchPage {
-            results: Vec::new(),
-            has_more: false,
-            vector_used: false,
-        });
-    }
+    let documents = match &opts.filter {
+        Some(filter) => Some(
+            utopia_store::documents::ids_in_source(
+                &state.pool,
+                kb_id,
+                filter.source_id,
+                filter.key_prefix.as_deref(),
+                opts.as_of,
+            )
+            .await?,
+        ),
+        None => None,
+    };
     let (hits, vector_used) = fused_hits(
         state,
         kb_id,
         workspace_id,
         query,
-        MAX_DEPTH,
-        &opts,
+        Recall {
+            per_channel: MAX_DEPTH,
+            as_of: opts.as_of,
+            documents: documents.as_deref(),
+        },
         embeddings,
     )
     .await?;
@@ -133,41 +146,38 @@ pub async fn hybrid_scored(
     })
 }
 
-/// 两路各取 `per_channel` 条、RRF 融合、按记录轴过滤、陈旧的降过分的整张表，连同向量那一路跑了没有
+/// 每一路怎么召回：取几条、按哪一刻、只在哪些文档里（None 即全库）
+#[derive(Clone, Copy)]
+struct Recall<'a> {
+    per_channel: usize,
+    as_of: Option<chrono::DateTime<chrono::Utc>>,
+    documents: Option<&'a [Uuid]>,
+}
+
+/// 两路按 `recall` 各取一份、RRF 融合、按记录轴过滤后的整张表，连同向量那一路跑了没有
 async fn fused_hits(
     state: &AppState,
     kb_id: Uuid,
     workspace_id: Uuid,
     query: &str,
-    per_channel: usize,
-    opts: &SearchOpts,
+    recall: Recall<'_>,
     embeddings: Option<&mut llm_util::EmbedCache>,
 ) -> AppResult<(Vec<ScoredChunk>, bool)> {
     let bm25 = {
         let search = state.search.clone();
         let kb = kb_id.to_string();
         let query = query.to_string();
-        let documents: Option<Vec<String>> = opts
+        let documents: Option<Vec<String>> = recall
             .documents
-            .as_ref()
             .map(|ids| ids.iter().map(Uuid::to_string).collect());
-        tokio::task::spawn_blocking(move || {
-            search.search(&kb, &query, per_channel, documents.as_deref())
-        })
+        let limit = recall.per_channel;
+        tokio::task::spawn_blocking(move || search.search(&kb, &query, limit, documents.as_deref()))
     };
     // `join!` 不是 `try_join!`：向量那一路失败是降级不是错误（见 vector_channel），
     // `try_join!` 会把模型故障变成检索报错
     let (bm25, vector) = tokio::join!(
         bm25,
-        vector_channel(
-            state,
-            kb_id,
-            workspace_id,
-            query,
-            per_channel,
-            opts,
-            embeddings
-        )
+        vector_channel(state, kb_id, workspace_id, query, recall, embeddings)
     );
     let bm25 = bm25
         .map_err(|e| utopia_core::AppError::Other(anyhow::anyhow!("BM25 检索线程退出：{e}")))?
@@ -185,14 +195,22 @@ async fn fused_hits(
             .filter_map(|f| Some((f.id.parse().ok()?, f)))
             .collect();
     let ids: Vec<Uuid> = fused.iter().map(|(id, _)| *id).collect();
-    let live = utopia_store::documents::chunks_by_ids(&state.pool, kb_id, &ids, opts.as_of).await?;
+    let live =
+        utopia_store::documents::chunks_by_ids(&state.pool, kb_id, &ids, recall.as_of).await?;
     let mut fused: HashMap<Uuid, utopia_search::Fused> = fused.into_iter().collect();
     let mut hits: Vec<ScoredChunk> = live
         .into_iter()
         .filter_map(|chunk| {
             let f = fused.remove(&chunk.chunk.id)?;
+            let external_id = chunk
+                .source_kind
+                .as_deref()
+                .zip(chunk.external_key.as_deref())
+                .and_then(|(kind, key)| crate::pushed_keys::pushed_identity(kind, key))
+                .map(str::to_string);
             Some(ScoredChunk {
                 chunk,
+                external_id,
                 score: f.score,
                 stale: false,
                 bm25_rank: position(&f.ranks, 0),
@@ -255,8 +273,7 @@ async fn vector_channel(
     kb_id: Uuid,
     workspace_id: Uuid,
     query: &str,
-    per_channel: usize,
-    opts: &SearchOpts,
+    recall: Recall<'_>,
     cache: Option<&mut llm_util::EmbedCache>,
 ) -> AppResult<Option<Vec<String>>> {
     let vector = match cache.as_deref().and_then(|c| c.get(query)).cloned() {
@@ -287,9 +304,9 @@ async fn vector_channel(
         &state.pool,
         kb_id,
         &vector,
-        per_channel as i64,
-        opts.as_of,
-        opts.documents.as_deref(),
+        recall.per_channel as i64,
+        recall.as_of,
+        recall.documents,
     )
     .await?;
     Ok(Some(ids.into_iter().map(|id| id.to_string()).collect()))

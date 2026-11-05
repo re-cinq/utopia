@@ -12,6 +12,7 @@ use uuid::Uuid;
 use super::graph_routes::require_kb;
 use crate::auth::{AuthUser, SessionOrToken};
 use crate::error::ApiResult;
+use crate::pushed_keys::{is_push_kind, pushed_key};
 use crate::state::AppState;
 
 /// 生成 api 来源的推送密钥。
@@ -186,19 +187,6 @@ pub async fn create(
     Ok(Json(
         json!({ "source": mask_secrets(source), "ingest_token": ingest_token }),
     ))
-}
-
-/// 有推送密钥的来源：`api` 推文档，`statements` 推陈述（0054）。两种的密钥同一套
-/// 生成、查看、轮换
-pub(crate) fn is_push_kind(kind: &str) -> bool {
-    matches!(kind, "api" | "statements")
-}
-
-/// The `external_key` a push source files a pushed identity under (`api:…`, `statements:…`).
-/// The push handlers write it and the read by `external_id` (#1276) looks it up, so the two
-/// cannot drift apart.
-pub(crate) fn pushed_key(source: &utopia_core::models::Source, identity: &str) -> String {
-    format!("{}:{identity}", source.kind)
 }
 
 /// 查看推送密钥（Editor；列表响应从不携带，查看走这里）。
@@ -443,6 +431,10 @@ pub async fn close_unconfirmed(
 #[cfg(test)]
 #[path = "sources_close_unconfirmed_tests.rs"]
 mod close_unconfirmed_tests;
+
+#[cfg(test)]
+#[path = "sources_checkpoint_tests.rs"]
+mod checkpoint_tests;
 
 pub async fn delete(
     State(state): State<AppState>,
@@ -1084,6 +1076,7 @@ mod tests {
             last_sync_status: "never".into(),
             last_sync_error: None,
             last_sync_added: 0,
+            sync_checkpoint: None,
             ingest_token: Some("utp_x".into()),
             created_at: chrono::Utc::now(),
         };
