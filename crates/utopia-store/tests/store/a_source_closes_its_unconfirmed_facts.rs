@@ -44,10 +44,10 @@ async fn a_source_closes_only_the_facts_it_alone_stopped_stating() -> anyhow::Re
              INSERT INTO documents(id,kb_id,filename,sha256,source_id) VALUES
                   ('{doc}','{kb}','a.md','sha-a','{source}'),
                   ('{other_doc}','{kb}','b.md','sha-b','{other}');
-             INSERT INTO chunks(id,kb_id,document_id,seq,text,doc_version,superseded_at) VALUES
-                  ('{old}','{kb}','{doc}',0,'v1','1','2025-06-01T12:34:56.789Z'),
-                  ('{live}','{kb}','{doc}',1,'v2','2',NULL),
-                  ('{elsewhere}','{kb}','{other_doc}',0,'b','1','2025-06-01T12:00:00Z');
+             INSERT INTO chunks(id,kb_id,document_id,seq,text,doc_version,superseded_at,extracted_at) VALUES
+                  ('{old}','{kb}','{doc}',0,'v1','1','2025-06-01T12:34:56.789Z',now()),
+                  ('{live}','{kb}','{doc}',1,'v2','2',NULL,now()),
+                  ('{elsewhere}','{kb}','{other_doc}',0,'b','1','2025-06-01T12:00:00Z',now());
              INSERT INTO facts (id,kb_id,subject_id,object_id,layer,phrase,confidence,
                                 valid_from,valid_from_precision) VALUES
                   ('{statement}','{kb}','{ada}','{port}','open','is based in',0.9,'2020-01-01','day'),

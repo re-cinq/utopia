@@ -47,8 +47,8 @@ async fn a_typed_fact_is_unconfirmed_only_once_its_statement_is() -> anyhow::Res
              INSERT INTO sources(id,kb_id,kind,name) VALUES ('{source}','{kb}','statements','mirror');
              INSERT INTO documents(id,kb_id,filename,sha256,source_id)
                   VALUES ('{doc}','{kb}','a.md','sha-a','{source}');
-             INSERT INTO chunks(id,kb_id,document_id,seq,text,doc_version) VALUES
-                  ('{first}','{kb}','{doc}',0,'v1','1'), ('{second}','{kb}','{doc}',1,'v2','2');
+             INSERT INTO chunks(id,kb_id,document_id,seq,text,doc_version,extracted_at) VALUES
+                  ('{first}','{kb}','{doc}',0,'v1','1',now()), ('{second}','{kb}','{doc}',1,'v2','2',now());
              INSERT INTO facts (id,kb_id,subject_id,object_id,layer,phrase,confidence)
                   VALUES ('{statement}','{kb}','{ada}','{port}','open','is based in',0.9);
              INSERT INTO facts (id,kb_id,subject_id,predicate_id,object_id,confidence)

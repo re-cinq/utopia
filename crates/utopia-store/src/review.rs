@@ -19,6 +19,28 @@ use uuid::Uuid;
 /// 迟早分叉成「徽标说 12 条，点进去 9 条」。
 pub const LOW_CONFIDENCE_BELOW: f32 = 0.75;
 
+macro_rules! awaits_a_new_version {
+    () => {
+        "EXISTS (SELECT 1 FROM fact_evidence fe
+                   JOIN chunks c ON c.document_id = fe.document_id
+                  WHERE fe.fact_id = f.id AND c.superseded_at IS NULL AND c.extracted_at IS NULL)"
+    };
+}
+
+macro_rules! follows_its_statement {
+    () => {
+        "EXISTS (SELECT 1 FROM typed_fact_sources ts
+                   JOIN facts st ON st.id = ts.statement_id
+                  WHERE ts.fact_id = f.id
+                    AND st.invalidated_at IS NULL
+                    AND st.valid_to IS NULL AND st.valid_to_precision IS NULL
+                    AND EXISTS (SELECT 1 FROM fact_evidence se
+                                  JOIN chunks sc ON sc.id = se.chunk_id
+                                 WHERE se.fact_id = st.id
+                                   AND sc.superseded_at IS NULL))"
+    };
+}
+
 /// 「待确认」的判据，写成 SQL 片段，`counts` 与总览（`review_summary`）共用：
 /// 有证据、但证据所在的分块全被新版本取代了，**而且这条事实至今仍成立**。别名固定用 `f`。
 ///
@@ -29,21 +51,26 @@ pub const LOW_CONFIDENCE_BELOW: f32 = 0.75;
 /// 最后一句是类型化行的（RC-005）：它的证据是物化那一刻从陈述抄来的，陈述后来在新分块上
 /// 再被说出，抄本不跟着长。所以有陈述来源的行与它的陈述同判：哪条来源陈述现行、开放、
 /// 证据落在活分块上，它就不算待确认。走 `typed_fact_sources` 与 `fact_evidence` 的主键。
-pub const UNCONFIRMED_FACT: &str = "f.valid_to IS NULL AND f.valid_to_precision IS NULL
+pub const UNCONFIRMED_FACT: &str = concat!(
+    "f.valid_to IS NULL AND f.valid_to_precision IS NULL
                AND EXISTS (SELECT 1 FROM fact_evidence fe WHERE fe.fact_id = f.id)
                AND NOT EXISTS (SELECT 1 FROM fact_evidence fe
                                  JOIN chunks c ON c.id = fe.chunk_id
                                 WHERE fe.fact_id = f.id
                                   AND c.superseded_at IS NULL)
-               AND NOT EXISTS (SELECT 1 FROM typed_fact_sources ts
-                                 JOIN facts st ON st.id = ts.statement_id
-                                WHERE ts.fact_id = f.id
-                                  AND st.invalidated_at IS NULL
-                                  AND st.valid_to IS NULL AND st.valid_to_precision IS NULL
-                                  AND EXISTS (SELECT 1 FROM fact_evidence se
-                                                JOIN chunks sc ON sc.id = se.chunk_id
-                                               WHERE se.fact_id = st.id
-                                                 AND sc.superseded_at IS NULL))";
+               AND NOT ",
+    awaits_a_new_version!(),
+    "
+               AND NOT ",
+    follows_its_statement!(),
+);
+
+/// 事实引用的某个文档有一块现行分块还没人读：新版本写下了、还没抽取。它开口之前，
+/// 它可能没再提的东西还谈不上「没了」。
+pub const AWAITS_A_NEW_VERSION: &str = awaits_a_new_version!();
+
+/// 类型化行跟它的陈述同判（RC-005），见 [`UNCONFIRMED_FACT`]。
+pub const FOLLOWS_ITS_STATEMENT: &str = follows_its_statement!();
 
 pub async fn counts(pool: &PgPool, kb_id: Uuid) -> AppResult<ReviewCounts> {
     let sql = format!(
