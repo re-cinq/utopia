@@ -23,7 +23,10 @@ macro_rules! awaits_a_new_version {
     () => {
         "EXISTS (SELECT 1 FROM fact_evidence fe
                    JOIN chunks c ON c.document_id = fe.document_id
-                  WHERE fe.fact_id = f.id AND c.superseded_at IS NULL AND c.extracted_at IS NULL)"
+                   JOIN documents d ON d.id = fe.document_id
+                  WHERE fe.fact_id = f.id AND c.superseded_at IS NULL AND c.extracted_at IS NULL
+                    AND (d.graph_status IN ('queued', 'extracting')
+                         OR d.status IN ('pending', 'parsing', 'indexing', 'embedding')))"
     };
 }
 
@@ -66,7 +69,8 @@ pub const UNCONFIRMED_FACT: &str = concat!(
 );
 
 /// 事实引用的某个文档有一块现行分块还没人读：新版本写下了、还没抽取。它开口之前，
-/// 它可能没再提的东西还谈不上「没了」。
+/// 它可能没再提的东西还谈不上「没了」。只等还会被读的版本：还在摄入，或排着队、正在抽取。
+/// 抽取关着、跳过或失败的版本没人会读，等它就是永远等。
 pub const AWAITS_A_NEW_VERSION: &str = awaits_a_new_version!();
 
 /// 类型化行跟它的陈述同判（RC-005），见 [`UNCONFIRMED_FACT`]。
