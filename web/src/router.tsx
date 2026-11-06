@@ -13,6 +13,7 @@ import { Chat } from "./pages/Chat";
 import { DocViewer } from "./pages/DocViewer";
 import { DocsPage } from "./pages/Docs";
 import { Graph } from "./pages/Graph";
+import { Chain } from "./pages/Chain";
 import { Library } from "./pages/Library";
 import { Login } from "./pages/Login";
 import { Privacy, Terms } from "./pages/Legal";
@@ -115,6 +116,17 @@ const graphRoute = createRoute({
     at: typeof search.at === "string" ? search.at : undefined,
   }),
   component: Graph,
+});
+
+const chainRoute = createRoute({
+  getParentRoute: () => kbRoute,
+  path: "chain",
+  /* RC-008: the entity whose type's `chain_first` the page follows. Reached from the
+     graph panel's "Open chain", not a tab of its own */
+  validateSearch: (search: Record<string, unknown>): { entity?: string } => ({
+    entity: typeof search.entity === "string" ? search.entity : undefined,
+  }),
+  component: Chain,
 });
 
 const docRoute = createRoute({
@@ -312,6 +324,7 @@ const routeTree = rootRoute.addChildren([
       chatRoute.addChildren([chatConversationRoute]),
       searchRoute,
       graphRoute,
+      chainRoute,
       docRoute,
       libraryRoute,
       reviewRoute,

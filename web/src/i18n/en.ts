@@ -3,6 +3,24 @@
 //
 // 加新文案时先加在这里，再补其余语言包——顺序反了会得到一个类型错误，那正是本意。
 export const en = {
+  hinted: {
+    openChain: "Open chain",
+    children: (n: number) => `Contains (${n})`,
+    loadChildren: "Show what it contains",
+    noNested: "Nothing nested",
+    within: "Within",
+    openLink: "Open link",
+    ranges: "Ranges",
+  },
+  chain: {
+    title: "Chain",
+    from: (name: string) => `From ${name}`,
+    openInGraph: "Open in graph",
+    emptyNone: (label: string) => `Nothing along ${label}`,
+    emptyUnloaded: "Loading…",
+    noStart: "Pick an entity in the graph to follow its chain.",
+    noHints: "This entity's type declares no chain.",
+  },
   expressionDraft: {
     title: "Expression draft exploration",
     unsaved: "Unsaved draft only. Nothing here is saved to the knowledge base. Unit compatibility is not checked.",
