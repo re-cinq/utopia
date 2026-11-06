@@ -78,6 +78,10 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-body-size: 200m
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
 
+# Volume-filling alerts, for a cluster that runs the Prometheus operator.
+alerts:
+  enabled: false
+
 network:
   ingressControllerNamespace: ingress-nginx
   cnpgOperatorNamespace: cnpg-system
