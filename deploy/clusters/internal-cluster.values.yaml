@@ -22,7 +22,7 @@ database:
   # Migration from n8n-cluster: born from its utopia-db primary, exposed on
   # this address for the move. replica goes to false at the cutover.
   restore:
-    host: LEGACY_DB_IP
+    host: 34.78.84.105
     replica: true
 
 network:
