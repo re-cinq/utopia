@@ -23,7 +23,7 @@ database:
   # this address for the move. replica goes to false at the cutover.
   restore:
     host: 34.78.84.105
-    replica: true
+    replica: false
 
 network:
   ingressControllerNamespace: ingress-nginx
