@@ -43,3 +43,6 @@ network:
     # pocket-utopia pushes Pocket transcripts in once an hour (re-cinq/pocket-utopia).
     - namespace: pocket-utopia
       podLabels: { app: pocket-utopia }
+
+alerts:
+  enabled: true

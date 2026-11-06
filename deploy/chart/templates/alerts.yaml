@@ -1,0 +1,28 @@
+{{- if .Values.alerts.enabled }}
+{{- $ratio := printf "kubelet_volume_stats_used_bytes{namespace=%q} / kubelet_volume_stats_capacity_bytes{namespace=%q}" .Release.Namespace .Release.Namespace }}
+{{- $runbook := "PVC {{ $labels.persistentvolumeclaim }} is {{ $value | humanizePercentage }} full. On the database volume (utopia-db-*) it is mostly superseded chunks kept after re-ingests (deeplethe/utopia#1481): raise database.storage in deploy/clusters/<cluster>.values.yaml. On utopia-data it is the service's own files: raise data.size. standard-rwo grows in place." }}
+# No Alertmanager yet: these show on Prometheus' Alerts page and in Grafana.
+# On 2026-11-05 the database volume filled and nobody noticed until writes failed.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: utopia-volumes
+spec:
+  groups:
+    - name: utopia-volumes
+      rules:
+        - alert: UtopiaVolumeFilling
+          expr: {{ $ratio }} > 0.8
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: "Utopia volume {{ `{{ $labels.persistentvolumeclaim }}` }} is {{ `{{ $value | humanizePercentage }}` }} full"
+            description: {{ $runbook | quote }}
+        - alert: UtopiaVolumeFull
+          expr: {{ $ratio }} > 0.95
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "Utopia volume {{ `{{ $labels.persistentvolumeclaim }}` }} is {{ `{{ $value | humanizePercentage }}` }} full, writes will fail soon"
+            description: {{ $runbook | quote }}
+{{- end }}
