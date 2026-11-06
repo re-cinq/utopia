@@ -1,5 +1,5 @@
 # re:cinq's internal cluster. Argo CD deploys this file's values into the
-# `utopia` namespace on every merge to main (re-cinq/infrastructure,
+# `utopia` namespace on every merge to re-dev, the default branch (re-cinq/infrastructure,
 # docs/deploying.md). A new image lands by changing `digest` here.
 
 hostname: utopia.gcp.re-cinq.com
