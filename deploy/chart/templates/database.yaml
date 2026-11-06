@@ -1,0 +1,36 @@
+# One-instance CNPG cluster. Utopia migrates as the owner, so `utopia` owns the
+# database; CREATE EXTENSION is the one superuser step and runs at init. The
+# runtime role utopia_app is created before the first migration because
+# migration 0010 grants it the business tables only when it already exists.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: utopia-db
+spec:
+  instances: 1
+  imageName: {{ .Values.database.image }}
+  bootstrap:
+    initdb:
+      database: utopia
+      owner: utopia
+      secret: { name: utopia-db-credentials }
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector
+        - DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'utopia_app') THEN CREATE ROLE utopia_app LOGIN; END IF; END $$
+        - GRANT CONNECT ON DATABASE utopia TO utopia_app
+  managed:
+    roles:
+      - name: utopia_app
+        ensure: present
+        login: true
+        inherit: true
+        passwordSecret: { name: utopia-app-db-credentials }
+  # Grows in place; never shrinks.
+  storage:
+    size: {{ .Values.database.size }}
+  resources:
+    {{- toYaml .Values.database.resources | nindent 4 }}
+  postgresql:
+    shared_preload_libraries: [vector]
+    parameters:
+      {{- toYaml .Values.database.parameters | nindent 6 }}

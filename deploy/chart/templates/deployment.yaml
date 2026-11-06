@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: utopia
+  labels: { app: utopia }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: utopia }
+  template:
+    metadata:
+      labels: { app: utopia }
+    spec:
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      # The image declares no USER. The binary writes only the data volume,
+      # which fsGroup makes writable for this uid, and /tmp for PDF and OCR work.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: utopia
+          image: {{ include "utopia.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          ports:
+            - name: http
+              containerPort: 1516
+          env:
+            - name: UTOPIA_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: utopia-db-credentials, key: password } }
+            - name: UTOPIA_APP_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: utopia-app-db-credentials, key: password } }
+            # Runtime as the restricted role, migrations as the owner.
+            - name: UTOPIA_DATABASE_URL
+              value: postgres://utopia_app:$(UTOPIA_APP_DB_PASSWORD)@utopia-db-rw.{{ .Release.Namespace }}.svc.cluster.local:5432/utopia
+            - name: UTOPIA_MIGRATION_URL
+              value: postgres://utopia:$(UTOPIA_DB_PASSWORD)@utopia-db-rw.{{ .Release.Namespace }}.svc.cluster.local:5432/utopia
+            # Seeded from Secret Manager: a lost disk loses files, not every stored credential.
+            - name: UTOPIA_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: utopia-app, key: secret-key } }
+            - name: UTOPIA_BIND_ADDR
+              value: 0.0.0.0:1516
+            - name: UTOPIA_WEB_DIST
+              value: /app/web-dist
+            - name: UTOPIA_DATA_DIR
+              value: /app/data
+            - name: UTOPIA_OPEN_REGISTRATION
+              value: "false"
+            - name: UTOPIA_COOKIE_SECURE
+              value: "true"
+            - name: UTOPIA_PASSWORD_LOGIN
+              value: "false"
+            - name: UTOPIA_OIDC_ISSUER
+              value: {{ .Values.oidc.issuer }}
+            - name: UTOPIA_OIDC_ALLOWED_DOMAINS
+              value: {{ .Values.oidc.allowedDomains }}
+            - name: UTOPIA_OIDC_REDIRECT_URI
+              value: {{ include "utopia.url" . }}/api/v1/auth/oidc/callback
+            - name: UTOPIA_OIDC_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: utopia-oauth, key: client-id } }
+            - name: UTOPIA_OIDC_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: utopia-oauth, key: client-secret } }
+            # The Google Drive source uses the same OAuth client.
+            - name: UTOPIA_GOOGLE_DRIVE_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: utopia-oauth, key: client-id } }
+            - name: UTOPIA_GOOGLE_DRIVE_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: utopia-oauth, key: client-secret } }
+            - name: UTOPIA_GOOGLE_DRIVE_REDIRECT_URI
+              value: {{ include "utopia.url" . }}/api/v1/google-drive/callback
+            {{- range $name, $value := .Values.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+          volumeMounts:
+            - { name: data, mountPath: /app/data }
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            httpGet: { path: /api/v1/health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/v1/health, port: http }
+            # Migrations run at start.
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: utopia-data }
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: utopia
+  labels: { app: utopia }
+spec:
+  selector: { app: utopia }
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
