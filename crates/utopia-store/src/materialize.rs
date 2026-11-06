@@ -190,26 +190,32 @@ async fn materialize_in_tx(
     .rows_affected();
 
     // 1. 删不再成立的来源：陈述死了、行死了、签名没绑着、属性或方向变了、陈述带了 mood
+    //    The sources that still hold are collected once and the rest are deleted against that
+    //    set: as a correlated NOT EXISTS the planner guessed one row for the binding match and
+    //    rescanned it per source, which ran for twelve hours on a base of 690k sources and
+    //    takes two minutes this way. Same conditions, same rows.
     sqlx::query(&format!(
-        "DELETE FROM typed_fact_sources src
+        "WITH holding AS MATERIALIZED (
+             SELECT src.fact_id, src.statement_id
+               FROM typed_fact_sources src
+               JOIN facts t ON t.id = src.fact_id AND t.kb_id = $1 AND t.invalidated_at IS NULL
+               JOIN facts s ON s.id = src.statement_id AND s.kb_id = $1
+                           AND s.invalidated_at IS NULL
+               JOIN entities se ON se.id = s.subject_id
+          LEFT JOIN entities oe ON oe.id = s.object_id
+               JOIN phrase_bindings b ON {MATCH}
+              WHERE b.status = 'bound'
+                AND b.relation_type_id = t.predicate_id
+                AND ((b.direction = 'forward' AND t.subject_id = s.subject_id)
+                  OR (b.direction = 'reverse' AND t.subject_id = s.object_id))
+                AND NOT EXISTS (SELECT 1 FROM statement_qualifiers q
+                                 WHERE q.fact_id = s.id AND q.role = 'mood'))
+         DELETE FROM typed_fact_sources src
           USING facts t
           WHERE src.fact_id = t.id AND t.kb_id = $1
-            AND NOT EXISTS (
-                SELECT 1
-                  FROM facts s
-                  JOIN entities se ON se.id = s.subject_id
-             LEFT JOIN entities oe ON oe.id = s.object_id
-                  JOIN phrase_bindings b ON {MATCH}
-                 WHERE s.id = src.statement_id
-                   AND s.kb_id = $1
-                   AND s.invalidated_at IS NULL
-                   AND t.invalidated_at IS NULL
-                   AND b.status = 'bound'
-                   AND b.relation_type_id = t.predicate_id
-                   AND ((b.direction = 'forward' AND t.subject_id = s.subject_id)
-                     OR (b.direction = 'reverse' AND t.subject_id = s.object_id))
-                   AND NOT EXISTS (SELECT 1 FROM statement_qualifiers q
-                                    WHERE q.fact_id = s.id AND q.role = 'mood'))"
+            AND NOT EXISTS (SELECT 1 FROM holding h
+                             WHERE h.fact_id = src.fact_id
+                               AND h.statement_id = src.statement_id)"
     ))
     .persistent(false)
     .bind(kb_id)
