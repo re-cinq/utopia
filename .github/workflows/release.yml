@@ -208,3 +208,37 @@ jobs:
             | jq -e '[.manifests[].platform | select(.os == "linux") | .architecture]
                      | contains(["amd64", "arm64"])' >/dev/null \
             || { echo "::error::$ref does not carry both linux/amd64 and linux/arm64"; exit 1; }
+
+  # 把刚发布的镜像写进集群的 values 文件：Argo CD 盯着 re-dev，合并即部署
+  # （re-cinq/infrastructure, docs/deploying.md）。只改 digest 一行，不碰别的。
+  deploy:
+    needs: merge
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: re-dev
+          fetch-depth: 0
+
+      - name: Resolve the manifest list digest
+        id: digest
+        run: |
+          set -euo pipefail
+          ref="${{ needs.merge.outputs.image }}:${{ needs.merge.outputs.version }}"
+          digest=$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$ref" | tr -d '"')
+          [[ "$digest" == sha256:* ]] || { echo "::error::no digest for $ref"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Point the internal cluster at it
+        run: |
+          set -euo pipefail
+          f=deploy/clusters/internal-cluster.values.yaml
+          sed -i -E "s|^(  tag: ).*|\1${{ needs.merge.outputs.version }}|; s|^(  digest: ).*|\1${{ steps.digest.outputs.digest }}|" "$f"
+          git diff --quiet -- "$f" && { echo "already deployed"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Deploy ${{ needs.merge.outputs.version }} to the internal cluster" -- "$f"
+          git push origin HEAD:re-dev
+

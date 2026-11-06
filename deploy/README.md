@@ -4,7 +4,7 @@ The Helm chart re:cinq runs Utopia with, and one values file per cluster.
 
 `chart/` renders Utopia, its CNPG Postgres, the data volume, the ingress, the network policies and the ExternalSecrets that read credentials from the cluster's Secret Manager. `clusters/<name>.values.yaml` is what Argo CD on that cluster deploys, on every merge to `re-dev`, the default branch. The convention is described in re-cinq/infrastructure, `docs/deploying.md`.
 
-To ship a new image, change `image.digest` in the cluster's values file and merge.
+To ship a new image, push a `v*` tag (or run the Release workflow by hand with a tag name): the workflow builds the image, then commits its tag and digest into the cluster's values file on `re-dev`, and Argo CD deploys that commit. To roll back, change `image.digest` back by hand and merge.
 
 Render locally:
 
