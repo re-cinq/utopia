@@ -52,6 +52,10 @@ spec:
               value: /app/web-dist
             - name: UTOPIA_DATA_DIR
               value: /app/data
+            {{- range $name, $value := .Values.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
             - name: UTOPIA_OPEN_REGISTRATION
               value: "false"
             - name: UTOPIA_COOKIE_SECURE
@@ -75,10 +79,6 @@ spec:
               valueFrom: { secretKeyRef: { name: utopia-oauth, key: client-secret } }
             - name: UTOPIA_GOOGLE_DRIVE_REDIRECT_URI
               value: {{ include "utopia.url" . }}/api/v1/google-drive/callback
-            {{- range $name, $value := .Values.env }}
-            - name: {{ $name }}
-              value: {{ $value | quote }}
-            {{- end }}
           volumeMounts:
             - { name: data, mountPath: /app/data }
             - { name: tmp, mountPath: /tmp }
