@@ -13,6 +13,12 @@ image:
 data:
   size: 20Gi
 
+# Secrets still live in the old project's Secret Manager (re5-n8n-platform);
+# the cluster reads it as the legacy store. Drop this once they are copied to
+# re-cinq-internal, which the default store reads.
+secrets:
+  store: gcp-secret-manager-legacy
+
 database:
   size: 80Gi
   backup:
