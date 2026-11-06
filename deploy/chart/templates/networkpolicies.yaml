@@ -1,0 +1,86 @@
+# Only the ingress controller and the listed in-cluster callers reach the app.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: utopia-ingress-only
+spec:
+  podSelector:
+    matchLabels: { app: utopia }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Values.network.ingressControllerNamespace }} }
+    {{- range .Values.network.allowFrom }}
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .namespace }} }
+          podSelector:
+            matchLabels: {{ toJson .podLabels }}
+      ports:
+        - { protocol: TCP, port: 1516 }
+    {{- end }}
+---
+# The app's way out: DNS (both NodeLocal DNSCache and kube-dns), its database,
+# and the public internet on 80 and 443. Every private and in-cluster range is
+# excluded so an endpoint typed into the admin page cannot reach other workloads.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: utopia-egress
+spec:
+  podSelector:
+    matchLabels: { app: utopia }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: node-local-dns }
+        - ipBlock: { cidr: 169.254.20.10/32 }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - podSelector:
+            matchLabels: { cnpg.io/cluster: utopia-db }
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - {{ .Values.network.clusterServicesCidr }}
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 80 }
+---
+# The database answers the app and the CNPG operator, nobody else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: utopia-db-ingress-only
+spec:
+  podSelector:
+    matchLabels: { cnpg.io/cluster: utopia-db }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: utopia }
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Values.network.cnpgOperatorNamespace }} }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: cloudnative-pg }

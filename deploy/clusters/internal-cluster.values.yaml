@@ -1,0 +1,36 @@
+# re:cinq's internal cluster (project re-cinq-internal). Argo CD deploys this
+# file's values into the `utopia` namespace on every merge to re-dev, the
+# default branch (re-cinq/infrastructure, docs/deploying.md). A new image
+# lands by changing `digest` here.
+
+hostname: utopia.gcp.re-cinq.com
+
+image:
+  repository: ghcr.io/re-cinq/utopia
+  tag: 0.1.0-re.30
+  digest: sha256:77957331e566d626cc86d43ae1dac81682c376017fe6d9d1c4ebc71d0cbfd89b
+
+data:
+  size: 20Gi
+
+database:
+  size: 80Gi
+  backup:
+    bucket: utopia-db-backups-re-cinq-internal
+    serviceAccount: utopia-db-backup@re-cinq-internal.iam.gserviceaccount.com
+    serverName: utopia-db-internal
+  # Migration from n8n-cluster: born from its utopia-db primary, exposed on
+  # this address for the move. replica goes to false at the cutover.
+  restore:
+    host: 34.78.84.105
+    replica: true
+
+network:
+  ingressControllerNamespace: ingress-nginx
+  cnpgOperatorNamespace: cnpg-system
+  clusterServicesCidr: 10.89.0.0/22
+  # lore-api mirrors each repository's spec and ADR graph into Utopia over the
+  # cluster network (ADR-052 in re-cinq/lore).
+  allowFrom:
+    - namespace: lore-api
+      podLabels: { app: lore-api }

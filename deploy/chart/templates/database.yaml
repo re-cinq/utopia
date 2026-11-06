@@ -1,0 +1,78 @@
+# One-instance CNPG cluster. Utopia migrates as the owner, so `utopia` owns the
+# database; CREATE EXTENSION is the one superuser step and runs at init. The
+# runtime role utopia_app is created before the first migration because
+# migration 0010 grants it the business tables only when it already exists.
+#
+# With database.restore.host set, the cluster is born with pg_basebackup
+# from that primary (TLS client certificate of its streaming_replica user)
+# instead of initdb, and keeps streaming from it as a replica while
+# database.restore.replica is true. Flipping replica to false promotes it
+# (deploy/README.md, Cutover).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: utopia-db
+spec:
+  instances: 1
+  imageName: {{ .Values.database.image }}
+  {{- with .Values.database.backup.serviceAccount }}
+  serviceAccountTemplate:
+    metadata:
+      annotations:
+        iam.gke.io/gcp-service-account: {{ . }}
+  {{- end }}
+  bootstrap:
+    {{- if .Values.database.restore.host }}
+    pg_basebackup:
+      source: legacy
+    {{- else }}
+    initdb:
+      database: utopia
+      owner: utopia
+      secret: { name: utopia-db-credentials }
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector
+        - DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'utopia_app') THEN CREATE ROLE utopia_app LOGIN; END IF; END $$
+        - GRANT CONNECT ON DATABASE utopia TO utopia_app
+    {{- end }}
+  {{- if .Values.database.restore.host }}
+  externalClusters:
+    - name: legacy
+      connectionParameters:
+        host: {{ .Values.database.restore.host | quote }}
+        port: "5432"
+        user: streaming_replica
+        dbname: postgres
+        sslmode: verify-ca
+      sslKey: { name: legacy-db-replication, key: tls.key }
+      sslCert: { name: legacy-db-replication, key: tls.crt }
+      sslRootCert: { name: legacy-db-ca, key: ca.crt }
+  replica:
+    enabled: {{ .Values.database.restore.replica }}
+    source: legacy
+  {{- end }}
+  {{- if .Values.database.backup.bucket }}
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      enabled: true
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: utopia-db
+        serverName: {{ .Values.database.backup.serverName }}
+  {{- end }}
+  managed:
+    roles:
+      - name: utopia_app
+        ensure: present
+        login: true
+        inherit: true
+        passwordSecret: { name: utopia-app-db-credentials }
+  # Grows in place; never shrinks.
+  storage:
+    size: {{ .Values.database.size }}
+  resources:
+    {{- toYaml .Values.database.resources | nindent 4 }}
+  postgresql:
+    shared_preload_libraries: [vector]
+    parameters:
+      {{- toYaml .Values.database.parameters | nindent 6 }}

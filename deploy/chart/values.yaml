@@ -1,0 +1,90 @@
+# Defaults render a working chart; a cluster's file under deploy/clusters/
+# sets hostname, image and sizes. Secret VALUES never live here: each entry
+# under `secrets` names a key in the project's Secret Manager, read through
+# the External Secrets ClusterSecretStore.
+
+image:
+  repository: ghcr.io/re-cinq/utopia
+  tag: latest
+  # A digest pins the bytes; set it and the tag is ignored.
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecret: ghcr-pull-secret
+
+hostname: utopia.example.com
+
+# Google sign-in is the only way in. Password login and open registration stay off.
+oidc:
+  issuer: https://accounts.google.com
+  allowedDomains: re-cinq.com
+
+resources:
+  requests: { cpu: 250m, memory: 512Mi }
+  limits: { cpu: "1", memory: 2Gi }
+
+# Uploaded files, the search index and the key cache. One disk, one writer:
+# the Deployment recreates rather than rolls.
+data:
+  size: 20Gi
+  storageClass: standard-rwo
+
+# Extra environment for the app container. Values here are plain strings.
+env:
+  UTOPIA_DB_MAX_CONNECTIONS: "32"
+
+database:
+  image: ghcr.io/cloudnative-pg/postgresql:16-bookworm
+  size: 80Gi
+  resources:
+    requests: { cpu: "2", memory: 8Gi }
+    limits: { cpu: "4", memory: 8Gi }
+  parameters:
+    shared_buffers: 2GB
+    effective_cache_size: 6GB
+    work_mem: 16MB
+  # Base backups nightly plus continuous WAL, into a GCS bucket the cluster's
+  # Kubernetes service account reaches through Workload Identity (the Google
+  # service account is bound in re-cinq/infrastructure, projects/internal).
+  # Empty bucket: no backups.
+  backup:
+    bucket: ""
+    serviceAccount: ""
+    serverName: utopia-db
+    retention: 14d
+  # Born with pg_basebackup from another CNPG primary instead of initdb.
+  # `host` reaches that primary on 5432; the secrets legacy-db-replication
+  # (tls.crt, tls.key of its streaming_replica user) and legacy-db-ca
+  # (ca.crt) are copied from its namespace by hand. `replica` keeps streaming
+  # until flipped to false, which promotes this cluster. Leave `host` set for
+  # the life of the cluster: bootstrap only matters at creation.
+  restore:
+    host: ""
+    replica: true
+
+secrets:
+  store: gcp-secret-manager
+  dbPassword: lore-utopia-db-password
+  appDbPassword: lore-utopia-app-db-password
+  secretKey: lore-utopia-secret-key
+  oauthClientId: lore-utopia-oauth-client-id
+  oauthClientSecret: lore-utopia-oauth-client-secret
+  cookieSecret: lore-utopia-cookie-secret
+  ghcrPullSecret: lore-ghcr-pull-secret
+
+ingress:
+  className: nginx-ingress
+  clusterIssuer: letsencrypt-prod
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 200m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+
+network:
+  ingressControllerNamespace: ingress-nginx
+  cnpgOperatorNamespace: cnpg-system
+  # This cluster's Service range, fenced off from the app's egress with the
+  # private ranges, so an endpoint typed into the admin page stays outside.
+  clusterServicesCidr: 10.0.0.0/8
+  # In-cluster callers allowed to reach the app pod on its port.
+  allowFrom: []
+  #  - namespace: lore-api
+  #    podLabels: { app: lore-api }
