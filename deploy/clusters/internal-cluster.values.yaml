@@ -34,3 +34,6 @@ network:
   allowFrom:
     - namespace: lore-api
       podLabels: { app: lore-api }
+    # pocket-utopia pushes Pocket transcripts in once an hour (re-cinq/pocket-utopia).
+    - namespace: pocket-utopia
+      podLabels: { app: pocket-utopia }
