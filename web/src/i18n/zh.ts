@@ -10,6 +10,24 @@
 import type { Strings } from "./en";
 
 export const zh: Strings = {
+  hinted: {
+    openChain: "打开链路",
+    children: (n) => `包含（${n}）`,
+    loadChildren: "展开包含的内容",
+    noNested: "没有嵌套的内容",
+    within: "位于",
+    openLink: "打开链接",
+    ranges: "范围",
+  },
+  chain: {
+    title: "链路",
+    from: (name) => `从 ${name} 出发`,
+    openInGraph: "在图谱中打开",
+    emptyNone: (label) => `沿 ${label} 没有内容`,
+    emptyUnloaded: "加载中…",
+    noStart: "在图谱里选一个实体，再沿它的链路走。",
+    noHints: "这个实体的类型没有声明链路。",
+  },
   expressionDraft: {
     title: "表达式草稿探索",
     unsaved: "仅为未保存的草稿，不会写入知识库，也不检查单位兼容性。",

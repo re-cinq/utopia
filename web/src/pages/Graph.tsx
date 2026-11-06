@@ -61,6 +61,8 @@ import {
   softMutedNode,
 } from "./graphCanvas";
 import { EntityHistory } from "./EntityHistory";
+import { HintedPanel } from "./hinted/HintedPanel";
+import { hasHints, hintsOf } from "./hinted/hints";
 import { EntityDialog, FactTimeDialog } from "./graphDialogs";
 import { fmtTime } from "../time";
 import { NextStep, nextStep, useReadiness } from "./NextStep";
@@ -2858,6 +2860,12 @@ function EntityPanel({
     queryKey: ["entity", kbId, entityId],
     queryFn: () => api.entityDetail(kbId, entityId),
   });
+  // RC-008: a type that declares how it is shown gets the hinted panel body
+  const ontology = useQuery({ queryKey: ["ontology", kbId], queryFn: () => api.ontology(kbId) });
+  const hints = useMemo(() => (ontology.data ? hintsOf(ontology.data) : null), [ontology.data]);
+  const hinted =
+    !!hints && !!detail.data && hasHints(detail.data.entity.type_key, detail.data.facts, hints);
+  const navigateTo = useNavigate();
   const [openFact, setOpenFact] = useState<string | null>(null);
   // 推出来的那些。**单独一个键，不掺进 facts**——混在一个列表里，用户看不出
   // 「文档里写的」和「引擎推的」的区别
@@ -3042,7 +3050,36 @@ function EntityPanel({
         {view === "relations" && (detail.data?.names.length ?? 0) > 1 && (
           <NameSection kbId={kbId} entityId={entityId} names={detail.data!.names} />
         )}
+        {view === "relations" && hinted && hints && detail.data && (
+          <HintedPanel
+            kbId={kbId}
+            entity={detail.data.entity}
+            facts={detail.data.facts}
+            hints={hints}
+            onNavigate={onNavigate}
+            onOpenChain={() =>
+              navigateTo({ to: "/kb/$kbId/chain", params: { kbId }, search: { entity: entityId } })
+            }
+            renderRow={(f) => (
+              <FactRow
+                key={f.id}
+                kbId={kbId}
+                dir={f.direction}
+                fact={f}
+                past={sections[f.direction].past.includes(f)}
+                open={openFact === f.id}
+                onToggle={() => setOpenFact(openFact === f.id ? null : f.id)}
+                pinned={pinnedFact === f.id}
+                onPointFact={onPointFact}
+                onFocusFact={onFocusFact}
+                onPointEntity={onPointEntity}
+                onNavigate={onNavigate}
+              />
+            )}
+          />
+        )}
         {view === "relations" &&
+          !hinted &&
           (["out", "in"] as const).map((dir) => {
             const { rows, past } = sections[dir];
             if (rows.length === 0 && past.length === 0) return null;
