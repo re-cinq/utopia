@@ -156,6 +156,9 @@ jobs:
   merge:
     runs-on: ubuntu-latest
     needs: build
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/download-artifact@v4
         with:
