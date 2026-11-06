@@ -1,0 +1,11 @@
+# Voluntary disruptions (node scale-down, upgrades) wait for a replica that
+# never exists, so they never happen on their own; the Recreate rollout is
+# the only planned restart.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: utopia
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: utopia }

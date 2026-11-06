@@ -11,6 +11,9 @@ spec:
   template:
     metadata:
       labels: { app: utopia }
+      annotations:
+        # One replica on one disk: the node autoscaler must not move it.
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
     spec:
       imagePullSecrets:
         - name: {{ .Values.image.pullSecret }}
@@ -21,6 +24,9 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        # The data volume holds hundreds of thousands of files; chowning them
+        # all on every start costs minutes.
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: utopia
