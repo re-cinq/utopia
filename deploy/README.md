@@ -9,5 +9,5 @@ To ship a new image, change `image.digest` in the cluster's values file and merg
 Render locally:
 
 ```sh
-helm template utopia deploy/chart -n utopia -f deploy/clusters/n8n-cluster.values.yaml
+helm template utopia deploy/chart -n utopia -f deploy/clusters/internal-cluster.values.yaml
 ```

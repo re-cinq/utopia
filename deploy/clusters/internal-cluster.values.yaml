@@ -1,6 +1,7 @@
-# re:cinq's internal cluster. Argo CD deploys this file's values into the
-# `utopia` namespace on every merge to re-dev, the default branch (re-cinq/infrastructure,
-# docs/deploying.md). A new image lands by changing `digest` here.
+# re:cinq's internal cluster (project re-cinq-internal). Argo CD deploys this
+# file's values into the `utopia` namespace on every merge to re-dev, the
+# default branch (re-cinq/infrastructure, docs/deploying.md). A new image
+# lands by changing `digest` here.
 
 hostname: utopia.gcp.re-cinq.com
 
@@ -17,9 +18,8 @@ database:
 
 network:
   ingressControllerNamespace: ingress-nginx
-  # The CNPG operator ships with the n8n stack on this cluster.
-  cnpgOperatorNamespace: n8n
-  clusterServicesCidr: 34.118.224.0/22
+  cnpgOperatorNamespace: cnpg-system
+  clusterServicesCidr: 10.89.0.0/22
   # lore-api mirrors each repository's spec and ADR graph into Utopia over the
   # cluster network (ADR-052 in re-cinq/lore).
   allowFrom:
