@@ -19,10 +19,10 @@ database:
     bucket: utopia-db-backups-re-cinq-internal
     serviceAccount: utopia-db-backup@re-cinq-internal.iam.gserviceaccount.com
     serverName: utopia-db-internal
-  # Migration from n8n-cluster: the legacy utopia-db backs up into the same
-  # bucket under its own name. replica goes to false at the cutover.
+  # Migration from n8n-cluster: born from its utopia-db primary, exposed on
+  # this address for the move. replica goes to false at the cutover.
   restore:
-    from: utopia-db
+    host: LEGACY_DB_IP
     replica: true
 
 network:

@@ -51,12 +51,14 @@ database:
     serviceAccount: ""
     serverName: utopia-db
     retention: 14d
-  # Born from another server's backup in the same bucket instead of initdb.
-  # `from` is that server's name in the bucket; `replica` keeps replaying its
-  # WAL until flipped to false, which promotes this cluster. Leave `from` set
-  # for the life of the cluster: bootstrap only matters at creation.
+  # Born with pg_basebackup from another CNPG primary instead of initdb.
+  # `host` reaches that primary on 5432; the secrets legacy-db-replication
+  # (tls.crt, tls.key of its streaming_replica user) and legacy-db-ca
+  # (ca.crt) are copied from its namespace by hand. `replica` keeps streaming
+  # until flipped to false, which promotes this cluster. Leave `host` set for
+  # the life of the cluster: bootstrap only matters at creation.
   restore:
-    from: ""
+    host: ""
     replica: true
 
 secrets:

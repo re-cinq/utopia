@@ -3,10 +3,11 @@
 # runtime role utopia_app is created before the first migration because
 # migration 0010 grants it the business tables only when it already exists.
 #
-# With database.restore.from set, the cluster is born from that server's
-# barman backup in the shared object store instead of initdb, and keeps
-# replaying its WAL as a replica while database.restore.replica is true.
-# Flipping replica to false promotes it (deploy/README.md, Cutover).
+# With database.restore.host set, the cluster is born with pg_basebackup
+# from that primary (TLS client certificate of its streaming_replica user)
+# instead of initdb, and keeps streaming from it as a replica while
+# database.restore.replica is true. Flipping replica to false promotes it
+# (deploy/README.md, Cutover).
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -21,8 +22,8 @@ spec:
         iam.gke.io/gcp-service-account: {{ . }}
   {{- end }}
   bootstrap:
-    {{- if .Values.database.restore.from }}
-    recovery:
+    {{- if .Values.database.restore.host }}
+    pg_basebackup:
       source: legacy
     {{- else }}
     initdb:
@@ -34,14 +35,18 @@ spec:
         - DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'utopia_app') THEN CREATE ROLE utopia_app LOGIN; END IF; END $$
         - GRANT CONNECT ON DATABASE utopia TO utopia_app
     {{- end }}
-  {{- if .Values.database.restore.from }}
+  {{- if .Values.database.restore.host }}
   externalClusters:
     - name: legacy
-      plugin:
-        name: barman-cloud.cloudnative-pg.io
-        parameters:
-          barmanObjectName: utopia-db
-          serverName: {{ .Values.database.restore.from }}
+      connectionParameters:
+        host: {{ .Values.database.restore.host | quote }}
+        port: "5432"
+        user: streaming_replica
+        dbname: postgres
+        sslmode: verify-ca
+      sslKey: { name: legacy-db-replication, key: tls.key }
+      sslCert: { name: legacy-db-replication, key: tls.crt }
+      sslRootCert: { name: legacy-db-ca, key: ca.crt }
   replica:
     enabled: {{ .Values.database.restore.replica }}
     source: legacy
