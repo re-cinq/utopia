@@ -42,6 +42,22 @@ database:
     shared_buffers: 2GB
     effective_cache_size: 6GB
     work_mem: 16MB
+  # Base backups nightly plus continuous WAL, into a GCS bucket the cluster's
+  # Kubernetes service account reaches through Workload Identity (the Google
+  # service account is bound in re-cinq/infrastructure, projects/internal).
+  # Empty bucket: no backups.
+  backup:
+    bucket: ""
+    serviceAccount: ""
+    serverName: utopia-db
+    retention: 14d
+  # Born from another server's backup in the same bucket instead of initdb.
+  # `from` is that server's name in the bucket; `replica` keeps replaying its
+  # WAL until flipped to false, which promotes this cluster. Leave `from` set
+  # for the life of the cluster: bootstrap only matters at creation.
+  restore:
+    from: ""
+    replica: true
 
 secrets:
   store: gcp-secret-manager

@@ -1,0 +1,33 @@
+{{- if .Values.database.backup.bucket }}
+# Where utopia-db keeps its base backups and WAL, through the barman-cloud
+# plugin with Workload Identity. The same bucket holds the legacy server's
+# backups that database.restore reads.
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: utopia-db
+spec:
+  retentionPolicy: {{ .Values.database.backup.retention }}
+  configuration:
+    destinationPath: gs://{{ .Values.database.backup.bucket }}/
+    googleCredentials:
+      gkeEnvironment: true
+    data:
+      compression: gzip
+      jobs: 2
+    wal:
+      compression: gzip
+      maxParallel: 2
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: utopia-db-daily
+spec:
+  schedule: "0 0 2 * * *"
+  backupOwnerReference: self
+  cluster: { name: utopia-db }
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+{{- end }}

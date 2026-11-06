@@ -15,6 +15,15 @@ data:
 
 database:
   size: 80Gi
+  backup:
+    bucket: utopia-db-backups-re-cinq-internal
+    serviceAccount: utopia-db-backup@re-cinq-internal.iam.gserviceaccount.com
+    serverName: utopia-db-internal
+  # Migration from n8n-cluster: the legacy utopia-db backs up into the same
+  # bucket under its own name. replica goes to false at the cutover.
+  restore:
+    from: utopia-db
+    replica: true
 
 network:
   ingressControllerNamespace: ingress-nginx
