@@ -615,6 +615,9 @@ pub struct EntityTypeView {
     /// 不可满足的类——一个类继承了两个互斥的祖先，就永远不可能有实例（0002）
     pub disjoint: Vec<Uuid>,
     pub description: String,
+    /// How the type asks to be shown (RC-008): a flat object of string values, the
+    /// `utopia:*` literals its ontology file declared. `{}` when it says nothing
+    pub display_hints: serde_json::Value,
     pub usage: i64,
 }
 
@@ -653,6 +656,8 @@ pub struct RelationTypeView {
     /// attribute 专用：text | number | date | bool
     pub datatype: Option<String>,
     pub unit: Option<String>,
+    /// How the property asks to be shown (RC-008): a flat object of string values
+    pub display_hints: serde_json::Value,
     pub usage: i64,
 }
 

@@ -23,6 +23,9 @@ pub struct OwlClass {
     /// `owl:disjointWith` 的对端 IRI。**两个方向都收**——公理是对称的,
     /// 而词表通常只写一遍
     pub disjoint_with: Vec<String>,
+    /// How the type asks to be shown (RC-008): the `utopia:panel` / `utopia:chain_first`
+    /// literals, keyed by the bare word. Empty when the file says nothing.
+    pub display_hints: BTreeMap<String, String>,
 }
 
 /// 投影出来的一个属性（对象属性 → 关系，数据属性 → 属性）。
@@ -66,6 +69,9 @@ pub struct OwlProperty {
     /// 导入端从前不读——一份本体自己说「这条关系是一个时刻」，导进来还是 `state`。
     /// 没写或写了别的值都是 `None`，落库时按 `state`；数据属性读了也不用
     pub temporal: Option<String>,
+    /// How the property asks to be shown (RC-008): `utopia:role`, `utopia:tones`,
+    /// `utopia:chain_next` literals, keyed by the bare word. Empty when the file says nothing.
+    pub display_hints: BTreeMap<String, String>,
 }
 
 /// 一次解析的结果。`unprojected` 是**报告**不是错误——见模块文档。
@@ -91,6 +97,9 @@ const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
 const OWL: &str = "http://www.w3.org/2002/07/owl#";
 /// 我们自己的注解命名空间，与导出端（`utopia-server::rdf`）同一个
 const UTOPIA_NS: &str = "urn:utopia:ns:";
+/// The `utopia:*` literals that say how a type is shown (RC-008). Any other `utopia:*`
+/// word stays reported as unprojected, so a typo in a file is visible in the preview.
+pub const HINT_KEYS: [&str; 5] = ["panel", "chain_first", "role", "tones", "chain_next"];
 
 /// schema.org 自己那套 domain/range。**不是标准词汇**，所以写死在这里，
 /// 但值得认：schema.org 及派生词汇表一个 `rdfs:domain` 都没有，
@@ -351,6 +360,8 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
     // `utopia:temporal` 说的时间语义；只认三个值
     let mut temporal: BTreeMap<String, String> = BTreeMap::new();
     let utopia_temporal = format!("{UTOPIA_NS}temporal");
+    // subject → the display hints it declares (RC-008); the first value of a key wins
+    let mut hints: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let known = |p: &str| {
         p == RDF_TYPE
             || p == format!("{RDFS}label")
@@ -380,6 +391,10 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
             .as_ref()
             .map(|(v, _)| v.as_str())
             .filter(|v| p == utopia_temporal && matches!(*v, "state" | "event" | "eternal"));
+        let declared_hint = p
+            .strip_prefix(UTOPIA_NS)
+            .filter(|word| HINT_KEYS.contains(word))
+            .and_then(|word| t.object_lit.as_ref().map(|(v, _)| (word, v.as_str())));
         if p == format!("{RDFS}label") {
             if let Some(l) = &t.object_lit {
                 labels.entry(t.subject.clone()).or_default().push(l.clone());
@@ -461,6 +476,12 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
             }
         } else if let Some(v) = declared_temporal {
             temporal.entry(t.subject.clone()).or_insert(v.to_string());
+        } else if let Some((word, v)) = declared_hint {
+            hints
+                .entry(t.subject.clone())
+                .or_default()
+                .entry(word.to_string())
+                .or_insert(v.to_string());
         } else if !known(p) {
             // 报告而不是丢弃：预览页要能说清"这个文件里还有什么我们没消费"
             *proj.unprojected.entry(p.to_string()).or_insert(0) += 1;
@@ -556,6 +577,7 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
                 d.dedup();
                 d
             },
+            display_hints: hints.get(iri).cloned().unwrap_or_default(),
             iri: iri.clone(),
         });
     }
@@ -600,6 +622,7 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
             ranges: rs,
             ranges_union: union_ranged.contains(iri),
             temporal: temporal.get(iri).cloned(),
+            display_hints: hints.get(iri).cloned().unwrap_or_default(),
             iri: iri.clone(),
         });
     }
@@ -1799,6 +1822,101 @@ ex:met a owl:ObjectProperty ; rdfs:label "met" ; utopia:temporal "sometimes" .
         // 三个值以外的不猜：留空并按谓词报告出来，只有 `met` 那一条，预览页能说清它没进来
         assert_eq!(by("met").temporal, None);
         assert_eq!(p.unprojected.get("urn:utopia:ns:temporal"), Some(&1));
+    }
+
+    const HINTED: &str = r#"
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix utopia: <urn:utopia:ns:> .
+@prefix ex: <http://example.org/> .
+
+ex:Claim a owl:Class ; rdfs:label "claim" ; utopia:panel "quote" ; utopia:chain_first "out:checked_by" .
+ex:Plain a owl:Class ; rdfs:label "plain" .
+ex:outcome a owl:DatatypeProperty ; rdfs:label "outcome" ; rdfs:domain ex:Claim ;
+    utopia:role "status" ; utopia:tones "passed=ok,failed=danger" .
+ex:lines a owl:DatatypeProperty ; rdfs:label "lines" ; rdfs:domain ex:Claim ; utopia:role "range" .
+ex:checked_by a owl:ObjectProperty ; rdfs:label "checked by" ; rdfs:domain ex:Claim ; rdfs:range ex:Plain ;
+    utopia:chain_next "in:changes" ; utopia:colour "red" .
+ex:twice a owl:ObjectProperty ; rdfs:label "twice" ; utopia:role "children" ; utopia:role "membership" .
+"#;
+
+    fn hinted() -> OwlProjection {
+        project(HINTED.as_bytes(), RdfFormat::Turtle).expect("解析")
+    }
+
+    fn hints_of(p: &OwlProjection, key: &str) -> BTreeMap<String, String> {
+        p.classes
+            .iter()
+            .find(|c| c.key == key)
+            .map(|c| c.display_hints.clone())
+            .or_else(|| {
+                p.properties
+                    .iter()
+                    .find(|x| x.key == key)
+                    .map(|x| x.display_hints.clone())
+            })
+            .unwrap_or_else(|| panic!("没有 {key}"))
+    }
+
+    fn pairs(items: &[(&str, &str)]) -> BTreeMap<String, String> {
+        items
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// A class says how its panel looks and where its chain starts (RC-008)
+    #[test]
+    fn a_class_annotated_with_utopia_panel_keeps_the_hint() {
+        let p = hinted();
+        assert_eq!(
+            hints_of(&p, "claim"),
+            pairs(&[("panel", "quote"), ("chain_first", "out:checked_by")])
+        );
+        assert!(
+            hints_of(&p, "plain").is_empty(),
+            "nothing declared, nothing kept"
+        );
+    }
+
+    #[test]
+    fn a_property_annotated_with_utopia_role_and_tones_keeps_both() {
+        let p = hinted();
+        assert_eq!(
+            hints_of(&p, "outcome"),
+            pairs(&[("role", "status"), ("tones", "passed=ok,failed=danger")])
+        );
+        assert_eq!(
+            hints_of(&p, "checked_by"),
+            pairs(&[("chain_next", "in:changes")])
+        );
+    }
+
+    #[test]
+    fn a_qualifier_attribute_annotated_with_utopia_role_range_keeps_the_hint() {
+        let p = hinted();
+        assert_eq!(hints_of(&p, "lines"), pairs(&[("role", "range")]));
+    }
+
+    /// `utopia:colour` is not a word this record knows: it is neither kept nor lost
+    /// silently, the preview reports it under its own predicate
+    #[test]
+    fn an_unknown_utopia_annotation_is_reported_as_unprojected_and_not_stored() {
+        let p = hinted();
+        assert!(!hints_of(&p, "checked_by").contains_key("colour"));
+        assert_eq!(p.unprojected.get("urn:utopia:ns:colour"), Some(&1));
+        assert!(
+            !p.unprojected
+                .keys()
+                .any(|k| k.ends_with(":role") || k.ends_with(":panel")),
+            "a kept hint is not reported as unprojected"
+        );
+    }
+
+    #[test]
+    fn a_hint_given_twice_keeps_the_first_value() {
+        let p = hinted();
+        assert_eq!(hints_of(&p, "twice"), pairs(&[("role", "children")]));
     }
 }
 

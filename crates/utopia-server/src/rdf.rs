@@ -348,6 +348,21 @@ pub fn emit_class(sink: &mut Sink, vocab: &Vocabulary, c: &ExportClass) -> std::
             sink.r(&iri, &owl("disjointWith"), &o)?;
         }
     }
+    emit_display_hints(sink, &iri, &c.display_hints)
+}
+
+/// The display hints go back as the literals they came from (RC-008): one
+/// `utopia:<key> "<value>"` per entry, so an export re-imports to the same hints.
+fn emit_display_hints(
+    sink: &mut Sink,
+    iri: &NamedNode,
+    hints: &serde_json::Value,
+) -> std::io::Result<()> {
+    for (key, value) in hints.as_object().into_iter().flatten() {
+        if let Some(v) = value.as_str() {
+            sink.l(iri, &utopia(key), &text(v))?;
+        }
+    }
     Ok(())
 }
 
@@ -400,6 +415,7 @@ pub fn emit_relation(
     // 事实没有日期——读的人不看这一条，会把前者读成一天的状态、后者读成从不知何时起。
     // `state` 也写：导入把「没写」读成「不动」，不写它，改回 state 的关系重导入后还是 event
     sink.l(&iri, &utopia("temporal"), &text(r.temporal.clone()))?;
+    emit_display_hints(sink, &iri, &r.display_hints)?;
     for d in &r.domains {
         if let Some(c) = vocab.class(*d) {
             let c = c.clone();
@@ -994,6 +1010,7 @@ mod tests {
             iri: iri.map(str::to_string),
             parents: vec![],
             disjoint: vec![],
+            display_hints: serde_json::json!({}),
         }
     }
 
@@ -1018,6 +1035,7 @@ mod tests {
             sub_property_of: None,
             domains: vec![],
             ranges: vec![],
+            display_hints: serde_json::json!({}),
         }
     }
 
@@ -1608,6 +1626,55 @@ mod tests {
             "urn:utopia:ns:temporal",
             "\"state\""
         ));
+    }
+
+    /// RC-008: what a file declared about how a type is shown comes back out of the export
+    /// as the same literals, and the import reads them again
+    #[test]
+    fn display_hints_round_trip_through_the_export() {
+        let names = Names::new(kb(), None).unwrap();
+        let mut claim = class(1, "claim", Some("http://example.org/Claim"));
+        claim.display_hints =
+            serde_json::json!({"panel": "quote", "chain_first": "out:checked_by"});
+        let mut outcome = relation(
+            2,
+            "outcome",
+            Some("http://example.org/outcome"),
+            "attribute",
+        );
+        outcome.display_hints =
+            serde_json::json!({"role": "status", "tones": "passed=ok,failed=danger"});
+        let vocab = vocabulary(
+            &names,
+            std::slice::from_ref(&claim),
+            std::slice::from_ref(&outcome),
+        );
+        let buf = SharedBuf::default();
+        let mut sink = Sink::new(Format::Turtle, buf.clone());
+        emit_class(&mut sink, &vocab, &claim).unwrap();
+        emit_relation(&mut sink, &vocab, &outcome).unwrap();
+        sink.finish().unwrap();
+        let bytes = buf.take();
+        let read = utopia_ingest::ontology_rdf::project(
+            &bytes,
+            utopia_ingest::ontology_rdf::RdfFormat::Turtle,
+        )
+        .expect("导出的文件必须解析得回来");
+        let pairs = |items: &[(&str, &str)]| -> std::collections::BTreeMap<String, String> {
+            items
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            read.classes[0].display_hints,
+            pairs(&[("panel", "quote"), ("chain_first", "out:checked_by")])
+        );
+        assert_eq!(
+            read.properties[0].display_hints,
+            pairs(&[("role", "status"), ("tones", "passed=ok,failed=danger")])
+        );
+        assert!(read.unprojected.is_empty(), "{:?}", read.unprojected);
     }
 
     #[test]

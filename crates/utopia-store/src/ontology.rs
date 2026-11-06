@@ -13,6 +13,7 @@ use uuid::Uuid;
 pub async fn entity_type_views(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<EntityTypeView>> {
     Ok(sqlx::query_as(
         "SELECT t.id, t.key, t.label, t.color, t.shape, t.builtin, t.description,
+                t.display_hints,
                 ARRAY(SELECT p.parent_id FROM entity_type_parents p
                       WHERE p.child_id = t.id) AS parents,
                 (SELECT p.parent_id FROM entity_type_parents p
@@ -220,7 +221,7 @@ pub async fn relation_type_views(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Re
         "SELECT r.id, r.key, r.label, r.temporal, r.functional, r.inverse_functional,
                 r.is_transitive, r.is_symmetric, r.is_asymmetric, r.is_irreflexive,
                 r.inverse_of, r.sub_property_of,
-                r.builtin, r.description,
+                r.builtin, r.description, r.display_hints,
                 r.kind, r.datatype, r.unit,
                 ARRAY(SELECT d.entity_type_id FROM relation_type_domains d
                       WHERE d.relation_type_id = r.id) AS domains,
@@ -279,6 +280,64 @@ fn validate_temporal(temporal: &str) -> AppResult<()> {
         return Err(AppError::Validation(
             "temporal must be state / event / eternal".into(),
         ));
+    }
+    Ok(())
+}
+
+/// Display hints (RC-008) are a flat object of string values: one `utopia:<key> "<value>"`
+/// literal per entry, exactly what the export writes back. The page, the import and the
+/// bulk insert all pass through here, as `temporal` passes through `validate_temporal`.
+pub fn validate_display_hints(hints: &serde_json::Value) -> AppResult<()> {
+    let flat = hints
+        .as_object()
+        .is_some_and(|o| o.values().all(serde_json::Value::is_string));
+    if !flat {
+        return Err(AppError::Validation(
+            "display_hints must be an object of string values".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Replace a class's display hints. A page edit that says nothing about them leaves
+/// them alone (the route only calls this on `Some`), the same rule as `set_disjoint_for`.
+pub async fn set_type_display_hints(
+    pool: &PgPool,
+    kb_id: Uuid,
+    id: Uuid,
+    hints: &serde_json::Value,
+) -> AppResult<()> {
+    set_display_hints(pool, "entity_types", kb_id, id, hints).await
+}
+
+/// Replace a relation's or attribute's display hints; see [`set_type_display_hints`].
+pub async fn set_relation_display_hints(
+    pool: &PgPool,
+    kb_id: Uuid,
+    id: Uuid,
+    hints: &serde_json::Value,
+) -> AppResult<()> {
+    set_display_hints(pool, "relation_types", kb_id, id, hints).await
+}
+
+async fn set_display_hints(
+    pool: &PgPool,
+    table: &str,
+    kb_id: Uuid,
+    id: Uuid,
+    hints: &serde_json::Value,
+) -> AppResult<()> {
+    validate_display_hints(hints)?;
+    let res = sqlx::query(&format!(
+        "UPDATE {table} SET display_hints = $3 WHERE kb_id = $1 AND id = $2"
+    ))
+    .bind(kb_id)
+    .bind(id)
+    .bind(hints)
+    .execute(pool)
+    .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound);
     }
     Ok(())
 }
@@ -1058,19 +1117,25 @@ pub async fn create_entity_type_with_iri(
 /// 重导入时按 IRI 更新标签与描述。**key 不动**——它可能已经被抽取出的实体
 /// 和提示词引用，改它等于把已有数据的引用打断；上游改 label 是常态，
 /// 而 IRI 才是身份。
+///
+/// **`display_hints` are overwritten** (RC-008): the file is the truth about how a type
+/// is shown, so a file that says nothing clears what an earlier one said.
 pub async fn update_type_from_import(
     pool: &PgPool,
     kb_id: Uuid,
     iri: &str,
     label: &str,
     description: &str,
+    display_hints: &serde_json::Value,
 ) -> AppResult<Option<Uuid>> {
+    validate_display_hints(display_hints)?;
     let row: Option<(Uuid,)> = sqlx::query_as(
         "UPDATE entity_types
          SET label = $3,
              -- 空描述不覆盖已有的：上游可能没写 rdfs:comment，而本地可能
              -- 已经被人按自己的语料调过，那份调整比空值有价值
              description = CASE WHEN $4 = '' THEN description ELSE $4 END,
+             display_hints = $5,
              updated_at = now()
          WHERE kb_id = $1 AND iri = $2 RETURNING id",
     )
@@ -1078,6 +1143,7 @@ pub async fn update_type_from_import(
     .bind(iri)
     .bind(label)
     .bind(description)
+    .bind(display_hints)
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|(id,)| id))
@@ -1139,6 +1205,8 @@ pub async fn create_relation_with_iri(
 /// 人在页面上改过的就留着；写了的照本体，与 domain/range 同一个道理。
 /// 真改了就推 `updated_at`，与页面上改一样：0053 的短语绑定依据读它，
 /// state 与非 state 决定短语怎么绑，旧值下做的决定要能被重审。
+/// **`display_hints` are always overwritten** (RC-008), unlike `temporal`: they are
+/// display, not a judgement a person may have made, and the file is the truth about them.
 #[allow(clippy::too_many_arguments)]
 pub async fn update_relation_from_import(
     pool: &PgPool,
@@ -1149,16 +1217,19 @@ pub async fn update_relation_from_import(
     domains: &[Uuid],
     ranges: &[Uuid],
     temporal: Option<&str>,
+    display_hints: &serde_json::Value,
 ) -> AppResult<bool> {
     if let Some(t) = temporal {
         validate_temporal(t)?;
     }
+    validate_display_hints(display_hints)?;
     let row: Option<(Uuid,)> = sqlx::query_as(
         "UPDATE relation_types
             SET label = $3,
                 description = CASE WHEN $4 = '' THEN description ELSE $4 END,
                 temporal = COALESCE($5::text, temporal),
-                updated_at = CASE WHEN $5::text <> temporal THEN now() ELSE updated_at END
+                updated_at = CASE WHEN $5::text <> temporal THEN now() ELSE updated_at END,
+                display_hints = $6
           WHERE kb_id = $1 AND iri = $2
           RETURNING id",
     )
@@ -1167,6 +1238,7 @@ pub async fn update_relation_from_import(
     .bind(label)
     .bind(description)
     .bind(temporal)
+    .bind(display_hints)
     .fetch_optional(pool)
     .await?;
     let Some((id,)) = row else {
@@ -1635,18 +1707,20 @@ pub async fn has_relation_type_vectors(
 pub async fn create_entity_types_bulk(
     pool: &PgPool,
     kb_id: Uuid,
-    rows: &[(String, String, String, String)],
+    rows: &[BulkClass],
 ) -> AppResult<std::collections::HashMap<String, Uuid>> {
     if rows.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
-    for (key, ..) in rows {
-        validate_key(key)?;
+    for r in rows {
+        validate_key(&r.key)?;
+        validate_display_hints(&r.display_hints)?;
     }
-    let keys: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
-    let labels: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
-    let descs: Vec<&str> = rows.iter().map(|r| r.2.as_str()).collect();
-    let iris: Vec<&str> = rows.iter().map(|r| r.3.as_str()).collect();
+    let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+    let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+    let descs: Vec<&str> = rows.iter().map(|r| r.description.as_str()).collect();
+    let iris: Vec<&str> = rows.iter().map(|r| r.iri.as_str()).collect();
+    let hints: Vec<&serde_json::Value> = rows.iter().map(|r| &r.display_hints).collect();
     // 颜色在 Rust 侧按 key 算好，跟着 UNNEST 一起进去——
     // SQL 里调不到 Rust 函数，而这一批正是导入大本体走的路
     let colours: Vec<&str> = keys
@@ -1655,10 +1729,12 @@ pub async fn create_entity_types_bulk(
         .collect();
     let shapes: Vec<&str> = iris.iter().map(|i| crate::palette::shape_for(i)).collect();
     let out: Vec<(Uuid, String)> = sqlx::query_as(
-        "INSERT INTO entity_types (id, kb_id, key, label, color, shape, description, iri)
-         SELECT gen_random_uuid(), $1, k, l, c, s, d, i
-         FROM UNNEST($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
-              AS t(k, l, d, i, c, s)
+        "INSERT INTO entity_types
+             (id, kb_id, key, label, color, shape, description, iri, display_hints)
+         SELECT gen_random_uuid(), $1, k, l, c, s, d, i, h
+         FROM UNNEST($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[],
+                     $8::jsonb[])
+              AS t(k, l, d, i, c, s, h)
          ON CONFLICT (kb_id, key) DO NOTHING
          RETURNING id, key",
     )
@@ -1669,9 +1745,20 @@ pub async fn create_entity_types_bulk(
     .bind(&iris)
     .bind(&colours)
     .bind(&shapes)
+    .bind(&hints)
     .fetch_all(pool)
     .await?;
     Ok(out.into_iter().map(|(id, k)| (k, id)).collect())
+}
+
+/// A class to create in one bulk insert; see [`create_entity_types_bulk`].
+pub struct BulkClass {
+    pub key: String,
+    pub label: String,
+    pub description: String,
+    pub iri: String,
+    /// The `utopia:*` display hints the file declared (RC-008), `{}` for none
+    pub display_hints: serde_json::Value,
 }
 
 /// 批量建关系/属性时的一行。
@@ -1700,6 +1787,8 @@ pub struct BulkRelation {
     /// `state` / `event` / `eternal`（0031）。OWL 自己没有这个概念，标准词表里的对象
     /// 属性全是 `state`；只有本体用 `utopia:temporal` 说了的才不是——导出端写的那一条
     pub temporal: String,
+    /// The `utopia:*` display hints the file declared (RC-008), `{}` for none
+    pub display_hints: serde_json::Value,
 }
 
 /// 一次插完一批关系或属性，返回 key → id。语义同 [`create_entity_types_bulk`]。
@@ -1718,6 +1807,7 @@ pub async fn create_relation_types_bulk(
     for r in rows {
         validate_key(&r.key)?;
         validate_temporal(&r.temporal)?;
+        validate_display_hints(&r.display_hints)?;
     }
     let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
     // 导入来的词表自己就可能不一致（unece.org 里 `brandName` 与
@@ -1735,17 +1825,18 @@ pub async fn create_relation_types_bulk(
     let asyms: Vec<bool> = rows.iter().map(|r| r.asymmetric).collect();
     let irrefs: Vec<bool> = rows.iter().map(|r| r.irreflexive).collect();
     let temporals: Vec<&str> = rows.iter().map(|r| r.temporal.as_str()).collect();
+    let hints: Vec<&serde_json::Value> = rows.iter().map(|r| &r.display_hints).collect();
     let out: Vec<(Uuid, String)> = sqlx::query_as(
         "INSERT INTO relation_types
              (id, kb_id, key, label, temporal, functional, inverse_functional,
               description, kind, datatype, iri,
-              is_transitive, is_symmetric, is_asymmetric, is_irreflexive)
+              is_transitive, is_symmetric, is_asymmetric, is_irreflexive, display_hints)
          SELECT gen_random_uuid(), $1, k, l, tm, fu, iv, d, kind, dt, i,
-                tr, sy, asym, irr
+                tr, sy, asym, irr, h
          FROM UNNEST($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[],
                      $8::bool[], $9::bool[], $10::bool[], $11::bool[], $12::bool[], $13::bool[],
-                     $14::text[])
-              AS t(k, l, d, i, kind, dt, fu, iv, tr, sy, asym, irr, tm)
+                     $14::text[], $15::jsonb[])
+              AS t(k, l, d, i, kind, dt, fu, iv, tr, sy, asym, irr, tm, h)
          ON CONFLICT (kb_id, key) DO NOTHING
          RETURNING id, key",
     )
@@ -1763,6 +1854,7 @@ pub async fn create_relation_types_bulk(
     .bind(&asyms)
     .bind(&irrefs)
     .bind(&temporals)
+    .bind(&hints)
     .fetch_all(pool)
     .await?;
     Ok(out.into_iter().map(|(id, k)| (k, id)).collect())
@@ -2095,6 +2187,21 @@ pub async fn link_property_axioms_bulk(
     let inv = run("inverse_of", inverse).await?;
     let sub = run("sub_property_of", sub_property).await?;
     Ok((inv, sub))
+}
+
+#[cfg(test)]
+mod display_hint_tests {
+    use super::validate_display_hints;
+    use serde_json::json;
+
+    #[test]
+    fn a_flat_object_of_strings_is_accepted_and_a_nested_value_is_refused() {
+        assert!(validate_display_hints(&json!({})).is_ok());
+        assert!(validate_display_hints(&json!({"panel": "card", "role": "status"})).is_ok());
+        assert!(validate_display_hints(&json!({"tones": {"passed": "ok"}})).is_err());
+        assert!(validate_display_hints(&json!({"panel": 1})).is_err());
+        assert!(validate_display_hints(&json!(["card"])).is_err());
+    }
 }
 
 #[cfg(test)]
