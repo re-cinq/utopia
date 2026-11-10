@@ -1,7 +1,8 @@
-//! An old version keeps no vector (RC-007): a chunk superseded longer ago than the cutoff
-//! loses its vector, and its row too when no evidence, pending fact or time mention refers
-//! to it. A chunk superseded more recently, a live one, and one evidence still points at,
-//! keep what they have.
+//! An old version keeps no vector: a chunk superseded longer ago than the cutoff
+//! loses its vector, and its row too when no evidence, pending fact, time mention or
+//! statement qualifier refers to it. A chunk superseded more recently, a live one, and
+//! one evidence still points at, keep what they have. So does every chunk of a deleted
+//! document, which a restore makes live again.
 
 use chrono::{Duration, Utc};
 use pgvector::Vector;
@@ -25,13 +26,13 @@ async fn rows(pool: &PgPool, kb: Uuid) -> anyhow::Result<Vec<Row>> {
 }
 
 #[tokio::test]
-async fn a_chunk_superseded_ten_days_ago_is_gone_and_a_cited_one_keeps_only_its_text(
+async fn a_chunk_superseded_ten_days_ago_is_gone_and_a_cited_or_qualified_one_keeps_only_its_text(
 ) -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
         return Ok(());
     };
     let pool = PgPool::connect(&url).await?;
-    let [org, ws, kb, class, ada, bea, fact, doc, live, recent, old, cited] =
+    let [org, ws, kb, class, ada, bea, fact, doc, live, recent, old, cited, qualified] =
         std::array::from_fn(|_| Uuid::now_v7());
     let now = Utc::now();
     let run = async {
@@ -53,6 +54,7 @@ async fn a_chunk_superseded_ten_days_ago_is_gone_and_a_cited_one_keeps_only_its_
             (recent, 1, Some(now - Duration::days(2))),
             (old, 2, Some(now - Duration::days(10))),
             (cited, 3, Some(now - Duration::days(10))),
+            (qualified, 4, Some(now - Duration::days(10))),
         ] {
             sqlx::query(
                 "INSERT INTO chunks (id, kb_id, document_id, seq, text, embedding, superseded_at)
@@ -74,12 +76,17 @@ async fn a_chunk_superseded_ten_days_ago_is_gone_and_a_cited_one_keeps_only_its_
             .bind(doc)
             .execute(&pool)
             .await?;
+        sqlx::query("INSERT INTO statement_qualifiers (fact_id, role, value, chunk_id) VALUES ($1, 'since', '\"2020\"', $2)")
+            .bind(fact)
+            .bind(qualified)
+            .execute(&pool)
+            .await?;
 
         let pruned = prune_superseded(&pool, kb, Duration::days(7)).await?;
         assert_eq!(
             pruned,
             Pruned {
-                vectors_cleared: 2,
+                vectors_cleared: 3,
                 chunks_deleted: 1
             }
         );
@@ -98,6 +105,10 @@ async fn a_chunk_superseded_ten_days_ago_is_gone_and_a_cited_one_keeps_only_its_
                     id: cited,
                     has_vector: false
                 },
+                Row {
+                    id: qualified,
+                    has_vector: false
+                },
             ]
         );
         let evidence: (i64,) =
@@ -111,6 +122,68 @@ async fn a_chunk_superseded_ten_days_ago_is_gone_and_a_cited_one_keeps_only_its_
             prune_superseded(&pool, kb, Duration::days(7)).await?,
             Pruned::default(),
             "a second pass finds nothing"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+
+    sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
+        .bind(kb)
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await?;
+    run
+}
+
+#[tokio::test]
+async fn a_document_restored_after_ten_days_in_the_trash_still_has_its_vector() -> anyhow::Result<()>
+{
+    let Some(url) = utopia_store::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPool::connect(&url).await?;
+    let [org, ws, kb, doc, chunk] = std::array::from_fn(|_| Uuid::now_v7());
+    let run = async {
+        sqlx::raw_sql(&format!(
+            "INSERT INTO organizations(id,name) VALUES ('{org}','prune-trash');
+             INSERT INTO workspaces(id,org_id,name) VALUES ('{ws}','{org}','prune-trash');
+             INSERT INTO knowledge_bases(id,workspace_id,name) VALUES ('{kb}','{ws}','prune-trash');
+             INSERT INTO documents(id,kb_id,filename,sha256) VALUES ('{doc}','{kb}','a.md','sha-{doc}');"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO chunks (id, kb_id, document_id, seq, text, embedding)
+             VALUES ($1, $2, $3, 0, 'chunk 0', $4)",
+        )
+        .bind(chunk)
+        .bind(kb)
+        .bind(doc)
+        .bind(Vector::from(vec![0.1, 0.2, 0.3]))
+        .execute(&pool)
+        .await?;
+        utopia_store::documents::delete(&pool, kb, doc, None).await?;
+        sqlx::query("UPDATE chunks SET superseded_at = $2 WHERE id = $1")
+            .bind(chunk)
+            .bind(Utc::now() - Duration::days(10))
+            .execute(&pool)
+            .await?;
+
+        assert_eq!(
+            prune_superseded(&pool, kb, Duration::days(7)).await?,
+            Pruned::default(),
+            "a deleted document's chunks are left whole"
+        );
+        utopia_store::documents::restore(&pool, kb, doc).await?;
+        assert_eq!(
+            rows(&pool, kb).await?,
+            vec![Row {
+                id: chunk,
+                has_vector: true
+            }]
         );
         Ok::<_, anyhow::Error>(())
     }
