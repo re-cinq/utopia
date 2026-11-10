@@ -36,3 +36,9 @@ What refers to a superseded chunk, read from the schema and the code that writes
 ## Open questions
 
 - Whether evidence on a superseded chunk of a fact that is already closed could be moved to the fact's `facts` row (a quote and a document version), so the chunk row can go too.
+
+*Revised 2026-11-10.* Three corrections, found while proposing this upstream (deeplethe/utopia#1492):
+
+- **A deleted document is left whole, vectors included.** Deleting a document supersedes its live chunks and restoring it makes them live again, so a vector cleared in between brought the document back unsearchable by meaning. Both halves of the job now skip a deleted document.
+- **A chunk a role word points at keeps its row.** Since upstream's migration 0121 `statement_qualifiers` references `chunks` and cascades, so deleting such a chunk would silently take its role words with it.
+- **The index is no longer asked for.** `vector_index::request` only queues a build when the index for a dimension is missing, and a prune cannot make it go missing.
