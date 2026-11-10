@@ -1133,6 +1133,8 @@ export interface StatementQualifier {
   value: unknown | null;
   entity_id: string | null;
   entity_name: string | null;
+  /** 说这个值的那几块（0070）：两块活着的块说法不同，各自一条 */
+  chunk_ids: string[];
 }
 
 export interface EntityFact {
