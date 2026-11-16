@@ -1,7 +1,7 @@
 //! 一个来源关上自己不再陈述的事实（RC-004）。
 //!
 //! 推陈述的来源每次重推，旧版分块被取代；不再被说出的那条事实只剩停在旧分块上的证据，
-//! 落进审核的「待确认」（[`crate::review::UNCONFIRMED_FACT`]）一直不走。这里成批关上它们：
+//! 落进审核的「待确认」（[`crate::review::unconfirmed_fact`]）一直不走。这里成批关上它们：
 //! 终点是它最后一条证据被取代的那一刻，走 [`crate::temporal::close_superseded`]——与
 //! 审核里人点「闭合」同一条作废+改写，历史留着，不撤销也不否决。
 
@@ -45,7 +45,7 @@ fn candidates(scope: Scope) -> String {
                              WHERE fe.fact_id = f.id AND {key} IS DISTINCT FROM $2)
             AND (f.layer = 'open'
                  OR NOT EXISTS (SELECT 1 FROM typed_fact_sources s WHERE s.fact_id = f.id))",
-        unconfirmed = crate::review::UNCONFIRMED_FACT,
+        unconfirmed = crate::review::unconfirmed_fact(),
         not_a_name = crate::names::not_a_name("f"),
         key = key,
     )
