@@ -1,10 +1,11 @@
-//! 新版本写下了、还没被读：它引用的事实不算过期，也不被关。
+//! 新版本写下了、还没被读：它引用的事实不算过期，也不进审核队列。
 //! 新版本被读过而没再提这条事实，才算它不再被陈述。
 //! 没人会去读的新版本（抽取关着、跳过或失败）不让事实等：等下去就是永远。
+//! 回放不问这一句：分块哪天被读没有历史，重抽会把它挪走。
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
-use utopia_store::{graph, unconfirmed};
+use utopia_store::{documents, graph, review};
 use uuid::Uuid;
 
 /// 新版本写下的那一刻：旧分块在这时被取代
@@ -13,8 +14,8 @@ const REPUSHED: &str = "2025-06-01T12:34:56Z";
 struct Seeded {
     kb: Uuid,
     org: Uuid,
-    source: Uuid,
     ada: Uuid,
+    doc: Uuid,
     fresh: Uuid,
     said: Uuid,
 }
@@ -56,8 +57,8 @@ async fn seed(pool: &PgPool, status: &str, graph_status: &str) -> anyhow::Result
     Ok(Seeded {
         kb,
         org,
-        source,
         ada,
+        doc,
         fresh,
         said,
     })
@@ -85,6 +86,10 @@ async fn is_listed_stale(pool: &PgPool, seeded: &Seeded) -> anyhow::Result<bool>
     Ok(listed.iter().any(|item| item.id == seeded.said))
 }
 
+async fn is_counted_unconfirmed(pool: &PgPool, seeded: &Seeded) -> anyhow::Result<bool> {
+    Ok(review::counts(pool, seeded.kb).await?.unconfirmed == 1)
+}
+
 async fn drop_seeded(pool: &PgPool, seeded: &Seeded) -> anyhow::Result<()> {
     let Seeded { kb, org, .. } = seeded;
     sqlx::raw_sql(&format!(
@@ -98,8 +103,7 @@ async fn drop_seeded(pool: &PgPool, seeded: &Seeded) -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn a_fact_is_neither_stale_nor_closed_until_the_new_version_has_been_read(
-) -> anyhow::Result<()> {
+async fn a_fact_is_not_stale_until_the_new_version_has_been_read() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
         return Ok(());
     };
@@ -114,11 +118,9 @@ async fn a_fact_is_neither_stale_nor_closed_until_the_new_version_has_been_read(
             !is_listed_stale(&pool, &seeded).await?,
             "the review queue must not list a fact whose new version is unread"
         );
-        let waiting = unconfirmed::close_of_source(&pool, seeded.kb, seeded.source, 1000).await?;
-        assert_eq!(
-            (waiting.closed, waiting.remaining),
-            (0, 0),
-            "a close run in the gap must close nothing"
+        assert!(
+            !is_counted_unconfirmed(&pool, &seeded).await?,
+            "the review badge must not count a fact whose new version is unread"
         );
 
         let read_at: DateTime<Utc> = Utc::now();
@@ -135,10 +137,9 @@ async fn a_fact_is_neither_stale_nor_closed_until_the_new_version_has_been_read(
             is_listed_stale(&pool, &seeded).await?,
             "the review queue lists it once the version has spoken"
         );
-        let closing = unconfirmed::close_of_source(&pool, seeded.kb, seeded.source, 1000).await?;
-        assert_eq!(
-            closing.closed, 1,
-            "the close run closes what the read version dropped"
+        assert!(
+            is_counted_unconfirmed(&pool, &seeded).await?,
+            "the review badge counts it once the version has spoken"
         );
         anyhow::Ok(())
     }
@@ -165,9 +166,10 @@ async fn a_fact_does_not_wait_for_a_version_nobody_will_read() -> anyhow::Result
                 is_stale(&pool, &seeded).await?,
                 "{status}/{graph_status}: no extraction is coming, so the unread version holds nothing back"
             );
-            let closing =
-                unconfirmed::close_of_source(&pool, seeded.kb, seeded.source, 1000).await?;
-            assert_eq!(closing.closed, 1, "{status}/{graph_status}: the close run closes it");
+            assert!(
+                is_listed_stale(&pool, &seeded).await?,
+                "{status}/{graph_status}: the review queue lists it"
+            );
             anyhow::Ok(())
         }
         .await;
@@ -189,10 +191,9 @@ async fn a_fact_waits_while_its_new_version_is_still_being_ingested() -> anyhow:
             !is_stale(&pool, &seeded).await?,
             "a re-push resets graph_status to none until ingest queues the extraction"
         );
-        let waiting = unconfirmed::close_of_source(&pool, seeded.kb, seeded.source, 1000).await?;
-        assert_eq!(
-            waiting.closed, 0,
-            "nothing closes before the version is queued"
+        assert!(
+            !is_listed_stale(&pool, &seeded).await?,
+            "the review queue lists nothing before the version is queued"
         );
         anyhow::Ok(())
     }
@@ -202,7 +203,36 @@ async fn a_fact_waits_while_its_new_version_is_still_being_ingested() -> anyhow:
 }
 
 #[tokio::test]
-async fn a_replay_to_the_day_before_the_new_version_was_read_shows_the_fact_still_waiting(
+async fn a_fact_whose_evidence_names_no_document_still_waits_for_the_new_version(
+) -> anyhow::Result<()> {
+    let Some(url) = utopia_store::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPool::connect(&url).await?;
+    let seeded = seed(&pool, "ready", "queued").await?;
+    let run = async {
+        sqlx::query("UPDATE fact_evidence SET document_id = NULL WHERE fact_id = $1")
+            .bind(seeded.said)
+            .execute(&pool)
+            .await?;
+        assert_eq!(
+            (
+                is_stale(&pool, &seeded).await?,
+                is_listed_stale(&pool, &seeded).await?,
+                is_counted_unconfirmed(&pool, &seeded).await?,
+            ),
+            (false, false, false),
+            "the document is found through the cited chunk"
+        );
+        anyhow::Ok(())
+    }
+    .await;
+    drop_seeded(&pool, &seeded).await?;
+    run
+}
+
+#[tokio::test]
+async fn a_replay_to_june_15_shows_the_fact_stale_after_a_later_forced_re_extract(
 ) -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
         return Ok(());
@@ -210,7 +240,7 @@ async fn a_replay_to_the_day_before_the_new_version_was_read_shows_the_fact_stil
     let pool = PgPool::connect(&url).await?;
     let seeded = seed(&pool, "ready", "done").await?;
     let run = async {
-        sqlx::query("UPDATE chunks SET extracted_at = '2025-06-03T00:00:00Z' WHERE id = $1")
+        sqlx::query("UPDATE chunks SET extracted_at = '2025-06-02T00:00:00Z' WHERE id = $1")
             .bind(seeded.fresh)
             .execute(&pool)
             .await?;
@@ -218,14 +248,28 @@ async fn a_replay_to_the_day_before_the_new_version_was_read_shows_the_fact_stil
             let (pool, seeded) = (&pool, &seeded);
             async move { is_stale_as_of(pool, seeded, Some(day.parse()?)).await }
         };
+        let replayed = (
+            stale_on("2025-05-31T00:00:00Z").await?,
+            stale_on("2025-06-15T00:00:00Z").await?,
+        );
+        assert_eq!(
+            replayed,
+            (false, true),
+            "before the re-push, and after the new version was read without the fact"
+        );
+
+        documents::queue_extraction_one(&pool, seeded.doc).await?;
         assert_eq!(
             (
                 stale_on("2025-05-31T00:00:00Z").await?,
-                stale_on("2025-06-02T00:00:00Z").await?,
-                stale_on("2025-06-04T00:00:00Z").await?,
+                stale_on("2025-06-15T00:00:00Z").await?,
             ),
-            (false, false, true),
-            "before the re-push, between the re-push and its reading, after the reading"
+            replayed,
+            "a re-extract moves extracted_at, and the replay reads the same as before it"
+        );
+        assert!(
+            !is_stale(&pool, &seeded).await?,
+            "today the version is being read again, so the fact waits for it"
         );
         anyhow::Ok(())
     }

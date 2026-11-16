@@ -42,3 +42,10 @@ What refers to a superseded chunk, read from the schema and the code that writes
 - **A deleted document is left whole, vectors included.** Deleting a document supersedes its live chunks and restoring it makes them live again, so a vector cleared in between brought the document back unsearchable by meaning. Both halves of the job now skip a deleted document.
 - **A chunk a role word points at keeps its row.** Since upstream's migration 0121 `statement_qualifiers` references `chunks` and cascades, so deleting such a chunk would silently take its role words with it.
 - **The index is no longer asked for.** `vector_index::request` only queues a build when the index for a dimension is missing, and a prune cannot make it go missing.
+
+*Revised 2026-11-16.* Upstream took this in a narrower shape (deeplethe/utopia#1492, [0019](../0019-the-second-clock-can-be-rewound.md) revised), and the fork now runs that shape.
+
+- **Only the vector goes.** The job no longer deletes a row, cited or not. The second paragraph of the decision above no longer holds.
+- **It is opt-in.** Nothing runs unless the deployment sets `UTOPIA_SUPERSEDED_VECTOR_DAYS`, clamped to 1 to 3650 days. Until our cluster sets it, no vector is cleared there.
+- **The job payload must carry `days`.** A job queued without it fails instead of defaulting to seven.
+- Upstream's migration 0126 creates the same index as 9009, so on our databases it is a no-op.

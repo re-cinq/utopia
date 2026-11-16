@@ -1900,7 +1900,10 @@ pub async fn entity_detail(
         holds_to = crate::world_axis::facts_holds_to("f"),
         subject = crate::record_axis::owner_at("f", "subject_id", as_of.map(|_| 3), false),
         object = crate::record_axis::owner_at("f", "object_id", as_of.map(|_| 3), true),
-        awaits = crate::review::awaits_a_new_version_at(as_of.map(|_| 3)),
+        awaits = match as_of {
+            Some(_) => "false",
+            None => crate::review::awaits_a_new_version(),
+        },
         follows_its_statement = crate::review::FOLLOWS_ITS_STATEMENT,
         chunk_live = crate::record_axis::chunk_live_at("c", as_of.map(|_| 3)),
         violation_open = crate::record_axis::violation_open_at("v", as_of.map(|_| 3)),
@@ -2103,7 +2106,7 @@ pub async fn low_confidence_facts(
 ///
 /// **「现行」这一条不能少。** 闭合是作废+改写，修正行带着原证据（`temporal::close_superseded`），
 /// 只看证据存活性的话，刚闭合的行立刻回到这一档——那个出路等于不存在。
-/// WHERE 就是 `review::UNCONFIRMED_FACT`（0022：「结束不知哪天」不是开放；RC-005：类型化行跟陈述判）。
+/// WHERE 就是 `review::unconfirmed_fact`（0022：「结束不知哪天」不是开放；RC-005：类型化行跟陈述判）。
 pub async fn stale_facts(
     pool: &PgPool,
     kb_id: Uuid,
@@ -2124,7 +2127,7 @@ pub async fn stale_facts(
          WHERE f.kb_id = $1 AND f.invalidated_at IS NULL AND {unconfirmed}
          ORDER BY f.recorded_at DESC, f.id DESC
          LIMIT $2 OFFSET $3",
-        unconfirmed = crate::review::UNCONFIRMED_FACT,
+        unconfirmed = crate::review::unconfirmed_fact(),
     ))
     .bind(kb_id)
     .bind(limit)
@@ -2391,7 +2394,7 @@ pub async fn entity_history(
                         THEN 'merged' ELSE 'rejected' END AS kind
             FROM ef
             WHERE ef.invalidated_at IS NOT NULL
-              AND NOT EXISTS (SELECT 1 FROM facts s WHERE s.supersedes = ef.id)
+              AND NOT EXISTS (SELECT 1 FROM facts s WHERE s.kb_id = $1 AND s.supersedes = ef.id)
         ),
         -- 改类不是事实：没有谓词、没有对方、没有方向。它来自 entity_retypes，
         -- 一行最多产出两个事件——改动本身，以及撤销。
@@ -2589,7 +2592,7 @@ pub async fn graph_changes(
                         THEN 'merged' ELSE 'rejected' END AS kind
             FROM facts f
             WHERE f.kb_id = $1 AND f.invalidated_at >= $2 AND f.invalidated_at < $3
-              AND NOT EXISTS (SELECT 1 FROM facts s WHERE s.supersedes = f.id)
+              AND NOT EXISTS (SELECT 1 FROM facts s WHERE s.kb_id = $1 AND s.supersedes = f.id)
               AND ($4::uuid IS NULL OR f.subject_id = $4 OR f.object_id = $4)
         )";
     Ok(sqlx::query_as(&format!(
