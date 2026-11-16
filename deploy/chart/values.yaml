@@ -62,6 +62,10 @@ database:
     replica: true
 
 secrets:
+  # false renders no ExternalSecret: the Secrets (utopia-db-credentials,
+  # utopia-app-db-credentials, utopia-app, utopia-oauth and the pull secret)
+  # must then already exist in the namespace, for a cluster with no secret store.
+  external: true
   store: gcp-secret-manager
   dbPassword: lore-utopia-db-password
   appDbPassword: lore-utopia-app-db-password
