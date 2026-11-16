@@ -13,6 +13,10 @@ image:
 data:
   size: 20Gi
 
+# A superseded chunk keeps its vector for a week (RC-007). Unset, nothing is cleared.
+env:
+  UTOPIA_SUPERSEDED_VECTOR_DAYS: "7"
+
 database:
   size: 80Gi
   backup:

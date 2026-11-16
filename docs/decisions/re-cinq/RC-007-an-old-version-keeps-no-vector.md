@@ -46,6 +46,6 @@ What refers to a superseded chunk, read from the schema and the code that writes
 *Revised 2026-11-16.* Upstream took this in a narrower shape (deeplethe/utopia#1492, [0019](../0019-the-second-clock-can-be-rewound.md) revised), and the fork now runs that shape.
 
 - **Only the vector goes.** The job no longer deletes a row, cited or not. The second paragraph of the decision above no longer holds.
-- **It is opt-in.** Nothing runs unless the deployment sets `UTOPIA_SUPERSEDED_VECTOR_DAYS`, clamped to 1 to 3650 days. Until our cluster sets it, no vector is cleared there.
+- **It is opt-in.** Nothing runs unless the deployment sets `UTOPIA_SUPERSEDED_VECTOR_DAYS`, clamped to 1 to 3650 days. Our cluster sets it to 7 in `deploy/clusters/internal-cluster.values.yaml`, so the window of this record stands.
 - **The job payload must carry `days`.** A job queued without it fails instead of defaulting to seven.
 - Upstream's migration 0126 creates the same index as 9009, so on our databases it is a no-op.
