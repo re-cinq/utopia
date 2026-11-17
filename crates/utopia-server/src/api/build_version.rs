@@ -4,7 +4,9 @@ pub(super) fn build_version() -> &'static str {
 
 // An unset Docker ARG reaches the compiler as an empty string, not as absent.
 fn baked_or_cargo<'a>(baked: Option<&'a str>, cargo_version: &'a str) -> &'a str {
-    baked.filter(|version| !version.is_empty()).unwrap_or(cargo_version)
+    baked
+        .filter(|version| !version.is_empty())
+        .unwrap_or(cargo_version)
 }
 
 #[cfg(test)]
