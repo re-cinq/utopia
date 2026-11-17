@@ -470,6 +470,20 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
             }
             Ok(())
         }
+        // RC-010：删除、撤销删除留下的见证重算，在来源行之外的事务里做
+        "reattest_facts" => {
+            let kb_id: Uuid = job
+                .payload
+                .get("kb_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+            let fact_ids: Vec<Uuid> =
+                serde_json::from_value(job.payload.get("fact_ids").cloned().unwrap_or_default())?;
+            utopia_store::documents::reattest_facts(&st.pool, kb_id, &fact_ids).await?;
+            st.emit_graph(kb_id);
+            Ok(())
+        }
         "extract_document" => {
             let id = payload_document_id(&job.payload)?;
             extraction::extract_document(st, id, payload_proposer(&job.payload)).await

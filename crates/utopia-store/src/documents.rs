@@ -56,7 +56,7 @@ pub async fn create_from_upload(
     .fetch_optional(&mut *tx)
     .await?;
     let document = if let Some(id) = deleted {
-        let document = restore_tx(&mut tx, kb_id, id).await?;
+        let (document, _) = restore_tx(&mut tx, kb_id, id).await?;
         crate::jobs::enqueue_with_max_attempts_tx(
             &mut tx,
             "process_document",
@@ -1155,7 +1155,7 @@ pub async fn delete(
     // 作废的事实可能是别的值的后任：它走了，关在它开始时的前任要重新接上；没作废、只是
     // 少了这份证据的，排序用的日期也可能变。牵连的时间线先按固定顺序锁上，再作废任何一行
     // （与撤回合并同一个顺序，见 temporal 模块头）
-    let (cited, timelines) = lock_cited_timelines(&mut tx, kb_id, id, &[]).await?;
+    let (cited, _timelines) = lock_cited_timelines(&mut tx, kb_id, id, &[]).await?;
     // 先打了墓碑再算：这篇文档此刻已经算「已删除」，所以只剩它作出处的事实才落网；
     // 另一篇活着的文档里也有证据的一条不动——删一份重复上传不该掀掉半张图
     let facts: Vec<(Uuid,)> = sqlx::query_as(
@@ -1183,8 +1183,7 @@ pub async fn delete(
     .await?;
     let chunk_ids: Vec<Uuid> = chunks.into_iter().map(|(c,)| c).collect();
     let fact_ids: Vec<Uuid> = facts.into_iter().map(|(f,)| f).collect();
-    reattest_tx(&mut tx, kb_id, &cited).await?;
-    crate::temporal::tidy_timelines_tx(&mut tx, kb_id, &timelines).await?;
+    let reattest = defer_reattest_tx(&mut tx, kb_id, &cited).await?;
     let deletion_id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO document_deletions
@@ -1202,6 +1201,7 @@ pub async fn delete(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    settle_reattest(pool, reattest).await?;
     Ok(DeletionReport {
         deletion_id,
         invalidated_facts: fact_ids.len(),
@@ -1274,6 +1274,65 @@ async fn reattest_tx(
     Ok(())
 }
 
+/// 删除、撤销删除排下的见证重算（RC-010）：事实 id 与那份任务。
+#[derive(Debug)]
+pub struct DeferredReattest {
+    kb_id: Uuid,
+    fact_ids: Vec<Uuid>,
+    job_id: i64,
+}
+
+/// 见证重算不在删除的事务里做（RC-010）：那个事务从锁来源行开始，重算一篇引用上千条事实
+/// 的文档要几十秒，同一来源的每一次推送都排在这把锁后面。这里只排一份 `reattest_facts`，
+/// 和作废一起提交——进程在提交之后退出，任务还在
+async fn defer_reattest_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    kb_id: Uuid,
+    fact_ids: &[Uuid],
+) -> AppResult<Option<DeferredReattest>> {
+    if fact_ids.is_empty() {
+        return Ok(None);
+    }
+    let job_id = crate::jobs::enqueue_with_max_attempts_tx(
+        tx,
+        "reattest_facts",
+        serde_json::json!({ "kb_id": kb_id, "fact_ids": fact_ids }),
+        3,
+    )
+    .await?;
+    Ok(Some(DeferredReattest {
+        kb_id,
+        fact_ids: fact_ids.to_vec(),
+        job_id,
+    }))
+}
+
+/// 提交之后、来源行已经放开，当场把排下的重算做掉，返回时见证与时间线已经跟上，和从前
+/// 同一个承诺；做完撤掉还没被认领的那份任务。被 worker 先认领了也无妨：重算只写不同的值
+async fn settle_reattest(pool: &PgPool, deferred: Option<DeferredReattest>) -> AppResult<()> {
+    let Some(deferred) = deferred else {
+        return Ok(());
+    };
+    reattest_facts(pool, deferred.kb_id, &deferred.fact_ids).await?;
+    sqlx::query("DELETE FROM jobs WHERE id = $1 AND status = 'queued'")
+        .bind(deferred.job_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 这些事实的见证按还在的证据重算，它们的时间线随后理顺（`reattest_facts` 任务，RC-010）。
+/// 自己一个事务：先按固定顺序锁时间线（与删除同一个顺序），不碰来源行
+pub async fn reattest_facts(pool: &PgPool, kb_id: Uuid, fact_ids: &[Uuid]) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+    let timelines = crate::temporal::timelines_of(&mut *tx, kb_id, fact_ids, None).await?;
+    crate::temporal::lock_timelines(&mut tx, kb_id, &timelines).await?;
+    reattest_tx(&mut tx, kb_id, fact_ids).await?;
+    crate::temporal::tidy_timelines_tx(&mut tx, kb_id, &timelines).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// 引用这篇文档的现存事实，连同它们所在的唯一性时间线，锁上之后返回。
 ///
 /// **锁上之后再读一遍**（#679 第三轮评审）：等锁的时候，时间线重算可能把其中一行改写成了
@@ -1325,8 +1384,9 @@ async fn lock_cited_timelines(
 /// 都不在名单里。三条路都从这里走：人点撤销、同步撞见墓碑、同内容重传
 pub async fn restore(pool: &PgPool, kb_id: Uuid, id: Uuid) -> AppResult<Document> {
     let mut tx = pool.begin().await?;
-    let document = restore_tx(&mut tx, kb_id, id).await?;
+    let (document, reattest) = restore_tx(&mut tx, kb_id, id).await?;
     tx.commit().await?;
+    settle_reattest(pool, reattest).await?;
     Ok(document)
 }
 
@@ -1334,7 +1394,7 @@ async fn restore_tx(
     tx: &mut Transaction<'_, Postgres>,
     kb_id: Uuid,
     id: Uuid,
-) -> AppResult<Document> {
+) -> AppResult<(Document, Option<DeferredReattest>)> {
     lock_document_source_tx(tx, id).await?;
     // 文档和这次删除作废的事实共用同一个事务时间，清墓碑前先记住它。
     let deleted_at = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
@@ -1408,7 +1468,7 @@ async fn restore_tx(
     let restored: Vec<Uuid> = fact_ids.iter().chain(&shared_ids).copied().collect();
     // 复活的事实回到各自的时间线上；一直引用着这篇文档的事实，排序用的日期也回来了。
     // 先锁、再复活、再重算（同删除）；等锁期间若又作废，不覆盖新的决定。
-    let (cited, timelines) = lock_cited_timelines(tx, kb_id, id, &restored).await?;
+    let (cited, _timelines) = lock_cited_timelines(tx, kb_id, id, &restored).await?;
     sqlx::query(
         "UPDATE facts SET invalidated_at = NULL
           WHERE invalidated_at IS NOT NULL
@@ -1422,16 +1482,16 @@ async fn restore_tx(
     .execute(&mut **tx)
     .await?;
     let touched: Vec<Uuid> = cited.iter().chain(&restored).copied().collect();
-    reattest_tx(tx, kb_id, &touched).await?;
-    crate::temporal::tidy_timelines_tx(tx, kb_id, &timelines).await?;
+    let reattest = defer_reattest_tx(tx, kb_id, &touched).await?;
     sqlx::query("UPDATE document_deletions SET reverted_at = now() WHERE id = $1")
         .bind(deletion_id)
         .execute(&mut **tx)
         .await?;
-    Ok(sqlx::query_as("SELECT * FROM documents WHERE id = $1")
+    let document = sqlx::query_as("SELECT * FROM documents WHERE id = $1")
         .bind(id)
         .fetch_one(&mut **tx)
-        .await?)
+        .await?;
+    Ok((document, reattest))
 }
 
 /// 一次真删的产出。`blobs` 是这篇（连同历史版本）独占的原文指纹——别处还引用的
