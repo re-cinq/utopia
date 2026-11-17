@@ -22,6 +22,8 @@
 //!   过滤——修正行、重复行都按全库找，会改到别的测试正在物化、改写的行。
 //! - `a_row_a_rule_implied_follows_its_statements`：把迁移 0101 原样跑一遍，同样不按 kb
 //!   过滤——它按来源重算全库类型化行的见证，会改到别的测试正在物化的行。
+//! - `a_document_waits_for_one_extraction`：把迁移 9011 原样跑一遍，它删全库排着的重复抽取，
+//!   不按 kb 过滤，会删掉别的测试正排着的抽取。
 //! - `a_due_base_is_queued_once`：`queue_due_inferences` 扫全库到期的库。0050 起新建的库开着
 //!   推理又从没推过，别的测试刚建的库全算到期，会被它排上推理任务——数自己库任务的测试
 //!   （比如 lib 单元测试里的 `phrase_bindings_delivery_tests`）就会多数出一个。
@@ -135,6 +137,7 @@ mod an_evicted_document_is_remembered_until_it_is_restored;
 mod an_exact_name_search_returns_only_that_entity;
 mod an_exploration_says_what_it_covered;
 mod an_export_carries_the_whole_ledger;
+mod an_extraction_is_queued_once_per_document;
 mod an_identity_name_attaches_by_its_exact_name;
 mod an_instance_list_names_what_a_type_lacks;
 mod an_old_version_keeps_no_vector;

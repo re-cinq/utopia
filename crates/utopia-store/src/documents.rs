@@ -1095,9 +1095,8 @@ pub async fn finish_processing_if_current(
     .execute(&mut *tx)
     .await?;
     if graph_status == Some("queued") {
-        crate::jobs::enqueue_with_max_attempts_tx(
+        crate::jobs::enqueue_extraction_tx(
             &mut tx,
-            "extract_document",
             serde_json::json!({ "document_id": input.document.id }),
             3,
         )

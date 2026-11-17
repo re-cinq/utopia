@@ -187,6 +187,46 @@ pub async fn enqueue_with_max_attempts_tx(
     Ok(id)
 }
 
+/// 排一份 `extract_document`，除非同一篇文档已经有一份排着（RC-009）。
+///
+/// 抽取只带文档 id、跑的时候读当下的块，所以排着的第二份读到的和第一份一样；按
+/// `document_id` 比而不按整份载荷，两处入队的载荷不同。在跑的那份不算：它可能在新版本
+/// 写入之前就读完了。返回 `None` = 并进了排着的那份。
+pub async fn enqueue_extraction(
+    pool: &PgPool,
+    payload: serde_json::Value,
+    max_attempts: i32,
+) -> AppResult<Option<i64>> {
+    let mut tx = pool.begin().await?;
+    let id = enqueue_extraction_tx(&mut tx, payload, max_attempts).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// 同 [`enqueue_extraction`]，排在调用方的事务里。
+pub async fn enqueue_extraction_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    payload: serde_json::Value,
+    max_attempts: i32,
+) -> AppResult<Option<i64>> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "INSERT INTO jobs (kind, payload, max_attempts)
+         SELECT 'extract_document', $1, $2
+          WHERE NOT EXISTS (SELECT 1 FROM jobs
+                             WHERE kind = 'extract_document' AND status = 'queued'
+                               AND payload->>'document_id' = $1->>'document_id')
+         RETURNING id",
+    )
+    .bind(payload)
+    .bind(max_attempts)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if row.is_some() {
+        notify_worker_tx(tx).await?;
+    }
+    Ok(row.map(|(id,)| id))
+}
+
 /// 同 [`enqueue_with_max_attempts_tx`]，但 `after` 之后才到期。从插入这一刻
 /// （`clock_timestamp()`）算起：`now()` 是事务开始的时刻，事务长了，提交时延迟已经用掉
 pub async fn enqueue_with_max_attempts_after_tx(
