@@ -237,11 +237,19 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: read
     steps:
       - uses: actions/checkout@v4
         with:
           ref: re-dev
           fetch-depth: 0
+
+      # The package is private: without a login GHCR answers the digest lookup with 401.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve the manifest list digest
         id: digest
