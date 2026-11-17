@@ -49,6 +49,7 @@ mod a_deferred_job_does_not_spend_its_budget;
 mod a_definition_can_be_written_by_hand;
 mod a_deleted_document_no_longer_attests;
 mod a_deletion_is_an_event;
+mod a_deletion_reattests_after_its_source;
 mod a_derivation_follows_the_second_clock;
 mod a_described_thing_is_an_entity_without_a_name;
 mod a_dirty_ledger_stops_the_migration;
