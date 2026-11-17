@@ -8,6 +8,7 @@ import { S } from "../i18n";
 import { GithubMark } from "../ui";
 import { AlertBell } from "./AlertBell";
 import { UserMenu } from "./UserMenu";
+import { versionLabel } from "./versionLabel";
 
 export function HeaderActions({
   link,
@@ -37,7 +38,7 @@ export function HeaderActions({
           className="u-pill"
         >
           <GithubMark size={13} />
-          {version && <span className="u-num text-fine">v{version}</span>}
+          {version && <span className="u-num text-fine">{versionLabel(version)}</span>}
         </a>
       </div>
       {user ? (

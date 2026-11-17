@@ -2,6 +2,7 @@ mod admin_routes;
 mod agent;
 mod alerts_routes;
 mod auth_routes;
+mod build_version;
 mod chat;
 mod chat_context;
 mod datasource_routes;
@@ -664,7 +665,7 @@ pub fn router(state: AppState, cfg: &AppConfig) -> Router {
 }
 
 async fn health() -> Json<serde_json::Value> {
-    Json(json!({ "status": "ok", "name": "utopia", "version": env!("CARGO_PKG_VERSION") }))
+    Json(json!({ "status": "ok", "name": "utopia", "version": build_version::build_version() }))
 }
 
 /// P0 队列验证端点：入队一个 noop 任务（后续里程碑移除）。

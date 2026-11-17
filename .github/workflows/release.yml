@@ -63,6 +63,17 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
 
+      # The version the UI shows: v0.1.0-re.32 becomes re.32, any other tag loses only its v.
+      - id: label
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          case "$version" in
+            *-re.*) echo "label=re.${version##*-re.}" ;;
+            *) echo "label=$version" ;;
+          esac >> "$GITHUB_OUTPUT"
+
       # 先只 load 到本地跑一遍。"镜像构建成功"证明不了"容器能起来"——
       # glibc 跨发行版不匹配就是构建全绿、启动即死。
       # 缓存按平台分 scope：两个架构的层互不相干，混在一个 scope 里只会互相挤掉。
@@ -74,10 +85,13 @@ jobs:
           platforms: ${{ matrix.platform }}
           load: true
           tags: utopia:smoke
+          build-args: UTOPIA_VERSION=${{ steps.label.outputs.label }}
           cache-from: type=gha,scope=release-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
 
       - name: Smoke test — boot it, migrate, register a user
+        env:
+          VERSION_LABEL: ${{ steps.label.outputs.label }}
         run: |
           set -euo pipefail
           docker network create smoke
@@ -111,6 +125,9 @@ jobs:
             sleep 2
           done
           if [ -z "$ok" ]; then echo "::error::container never became healthy"; docker logs app; exit 1; fi
+          if ! grep -qF "\"version\":\"$VERSION_LABEL\"" /tmp/h.json; then
+            echo "::error::health does not report version $VERSION_LABEL"; cat /tmp/h.json; exit 1
+          fi
 
           # 注册一次，把迁移 + argon2 + JWT 签发整条链路真正走一遍
           code=$(curl -s -o /tmp/reg.json -w '%{http_code}' -m 10 \
@@ -134,6 +151,7 @@ jobs:
           file: docker/Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: UTOPIA_VERSION=${{ steps.label.outputs.label }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=release-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}

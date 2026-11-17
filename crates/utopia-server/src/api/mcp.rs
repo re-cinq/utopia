@@ -185,7 +185,7 @@ pub async fn handle(
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "utopia", "version": env!("CARGO_PKG_VERSION") },
+                "serverInfo": { "name": "utopia", "version": super::build_version::build_version() },
             }),
         ),
         // 通知没有 id，按规范不该回响应体；但 HTTP 这一侧总得回点什么，
