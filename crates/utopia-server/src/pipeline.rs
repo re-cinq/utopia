@@ -311,14 +311,14 @@ pub async fn memory_ingest(
 
     if settings.as_ref().is_some_and(|s| s.chat_ready()) {
         utopia_store::documents::set_graph_status(&state.pool, document_id, "queued").await?;
-        utopia_store::jobs::enqueue(
+        utopia_store::jobs::enqueue_extraction(
             &state.pool,
-            "extract_document",
             serde_json::json!({
                 "document_id": document_id,
                 "proposed_by": proposer.user_id,
                 "proposed_token": proposer.token_id,
             }),
+            3,
         )
         .await?;
     }
