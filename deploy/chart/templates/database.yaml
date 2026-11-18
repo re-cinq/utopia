@@ -36,7 +36,7 @@ spec:
       secret: { name: utopia-db-credentials }
       postInitApplicationSQL:
         - CREATE EXTENSION IF NOT EXISTS vector
-        - DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'utopia_app') THEN CREATE ROLE utopia_app LOGIN; END IF; END $$
+        - CREATE ROLE utopia_app LOGIN
         - GRANT CONNECT ON DATABASE utopia TO utopia_app
     {{- end }}
   {{- if .Values.database.restore.host }}

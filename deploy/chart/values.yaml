@@ -103,6 +103,8 @@ ingress:
   clusterIssuer: ""
   # true: annotate the host for external-dns.
   externalDns: false
+  # false: no tls section, for a host served over plain HTTP.
+  tls: true
   # Controller-specific settings, e.g. body size and read timeout.
   annotations: {}
 
