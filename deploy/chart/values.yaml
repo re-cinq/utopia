@@ -20,7 +20,8 @@ image:
 
 hostname: utopia.example.com
 
-# Google sign-in is the only way in. Password login and open registration stay off.
+# Single sign-on is the only way in. Password login and open registration stay off.
+# Any OpenID Connect issuer works; for Microsoft Entra see deploy/README.md.
 oidc:
   issuer: https://accounts.google.com
   allowedDomains: re-cinq.com

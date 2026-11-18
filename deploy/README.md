@@ -12,6 +12,17 @@ Render locally:
 helm template utopia deploy/chart -n utopia -f deploy/clusters/internal-cluster.values.yaml
 ```
 
+## Sign-in with Microsoft Entra
+
+Not yet run against a real Entra tenant. What the code needs from it:
+
+- `oidc.issuer` is `https://login.microsoftonline.com/<tenant id>/v2.0`, with the tenant's GUID and not its domain name: the tokens carry the GUID.
+- `oidc.allowedDomains` lists the email domains whose people get an account on first sign-in.
+- The app registration is single-tenant, has the redirect URI `https://<hostname>/api/v1/auth/oidc/callback`, and its client id and secret go in the `utopia-oauth` Secret.
+- Under Token configuration, the ID token carries the optional claims `email` and `xms_edov`. Entra sends no `email_verified`; `xms_edov` is its statement that the owner of the email's domain is verified, and Utopia opens an account only when it is true.
+
+A person whose token has no `email`, or no true `xms_edov`, is sent back to the login page and gets no account.
+
 ## Backups and restore
 
 `database.backup.objectStore` (a barman ObjectStore `configuration`, here GCS) sends a nightly base backup and continuous WAL through the barman-cloud plugin. The cluster's Kubernetes service account `utopia-db` reaches the bucket through Workload Identity; the Google service account and the bucket are defined in re-cinq/infrastructure, `projects/internal/database-backups.tf`.
