@@ -159,6 +159,23 @@ jobs:
       # 那边同样有库、同样设了 UTOPIA_TEST_REQUIRE_DB。曾经放在这里是因为只有这个 job
       # 有库，代价是同一批测试二进制编两遍；这个 job 现在只管迁移本身能不能跑、能不能重放
 
+  # The chart under deploy/ is applied by Argo CD on every merge to re-dev, and
+  # installed by others with their own values: it must lint and render with the
+  # defaults and with the internal cluster's values.
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: Lint
+        run: helm lint deploy/chart
+      - name: Render with the defaults
+        run: helm template utopia deploy/chart -n utopia > /dev/null
+      - name: Render with the internal cluster's values
+        run: helm template utopia deploy/chart -n utopia -f deploy/clusters/internal-cluster.values.yaml > /dev/null
+
   web:
     runs-on: ubuntu-latest
     defaults:

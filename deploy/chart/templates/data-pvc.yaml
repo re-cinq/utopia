@@ -4,7 +4,9 @@ metadata:
   name: utopia-data
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: {{ .Values.data.storageClass }}
+  {{- with .Values.data.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
   resources:
     requests:
       storage: {{ .Values.data.size }}
