@@ -9,18 +9,46 @@ image:
   repository: ghcr.io/re-cinq/utopia
   tag: 0.1.0-re.35
   digest: sha256:737e04c76ca0cfdf061cf68acb9626d59c098502e0962590312127bd8f76fa6c
+  pullSecret: ghcr-pull-secret
+
+googleDrive:
+  enabled: true
 
 data:
   size: 20Gi
+  storageClass: standard-rwo
+
+ingress:
+  className: nginx-ingress
+  clusterIssuer: letsencrypt-prod
+  externalDns: true
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 200m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+
+# One replica on one disk: the budget deliberately blocks node scale-down.
+podDisruptionBudget:
+  enabled: true
 
 # A superseded chunk keeps its vector for a week (RC-007). Unset, nothing is cleared.
 env:
   UTOPIA_SUPERSEDED_VECTOR_DAYS: "7"
 
 database:
+  # Still the floating tag: pinning the digest restarts the database, so that waits for a planned window.
+  image: ghcr.io/cloudnative-pg/postgresql:16-bookworm
   size: 80Gi
   backup:
-    bucket: utopia-db-backups-re-cinq-internal
+    objectStore:
+      destinationPath: gs://utopia-db-backups-re-cinq-internal/
+      googleCredentials:
+        gkeEnvironment: true
+      data:
+        compression: gzip
+        jobs: 2
+      wal:
+        compression: gzip
+        maxParallel: 2
     serviceAccount: utopia-db-backup@re-cinq-internal.iam.gserviceaccount.com
     serverName: utopia-db-internal
   # Migration from n8n-cluster: born from its utopia-db primary, exposed on
@@ -33,6 +61,7 @@ network:
   ingressControllerNamespace: ingress-nginx
   cnpgOperatorNamespace: cnpg-system
   clusterServicesCidr: 10.89.0.0/22
+  nodeLocalDnsAddress: 169.254.20.10/32
   # lore-api mirrors each repository's spec and ADR graph into Utopia over the
   # cluster network (ADR-052 in re-cinq/lore).
   allowFrom:

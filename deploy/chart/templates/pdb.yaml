@@ -1,3 +1,4 @@
+{{- if .Values.podDisruptionBudget.enabled }}
 # Voluntary disruptions (node scale-down, upgrades) wait for a replica that
 # never exists, so they never happen on their own; the Recreate rollout is
 # the only planned restart.
@@ -9,3 +10,4 @@ spec:
   minAvailable: 1
   selector:
     matchLabels: { app: utopia }
+{{- end }}

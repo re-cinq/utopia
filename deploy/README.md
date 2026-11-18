@@ -14,7 +14,7 @@ helm template utopia deploy/chart -n utopia -f deploy/clusters/internal-cluster.
 
 ## Backups and restore
 
-`database.backup` sends a nightly base backup and continuous WAL to a GCS bucket through the barman-cloud plugin. The cluster's Kubernetes service account `utopia-db` reaches the bucket through Workload Identity; the Google service account and the bucket are defined in re-cinq/infrastructure, `projects/internal/database-backups.tf`.
+`database.backup.objectStore` (a barman ObjectStore `configuration`, here GCS) sends a nightly base backup and continuous WAL through the barman-cloud plugin. The cluster's Kubernetes service account `utopia-db` reaches the bucket through Workload Identity; the Google service account and the bucket are defined in re-cinq/infrastructure, `projects/internal/database-backups.tf`.
 
 `database.restore.host` names another CNPG primary to be born from, with `pg_basebackup` over TLS as its `streaming_replica` user. While `database.restore.replica` is true the cluster streams from that primary and serves reads only. Setting it to false promotes the cluster; Utopia then runs its migrations and serves writes. Leave `host` set afterwards: CNPG reads `bootstrap` only when the cluster is created.
 

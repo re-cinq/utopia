@@ -1,7 +1,13 @@
-# Defaults render a working chart; a cluster's file under deploy/clusters/
-# sets hostname, image and sizes. Secret VALUES never live here: each entry
-# under `secrets` names a key in the project's Secret Manager, read through
-# the External Secrets ClusterSecretStore.
+# Defaults render a working chart on any Kubernetes cluster; a cluster's file
+# under deploy/clusters/ sets hostname, image, sizes and whatever its cloud
+# needs. Secret VALUES never live here: each entry under `secrets` names a key
+# in a secret store read through External Secrets, or `secrets.external: false`
+# leaves the Secrets to you.
+
+# Where the pods run. Either set here, or once for every chart of a release
+# under `global`; a value set here wins.
+nodeSelector: {}
+tolerations: []
 
 image:
   repository: ghcr.io/re-cinq/utopia
@@ -9,7 +15,8 @@ image:
   # A digest pins the bytes; set it and the tag is ignored.
   digest: ""
   pullPolicy: IfNotPresent
-  pullSecret: ghcr-pull-secret
+  # Name of an image pull secret; empty when the image is public.
+  pullSecret: ""
 
 hostname: utopia.example.com
 
@@ -17,6 +24,10 @@ hostname: utopia.example.com
 oidc:
   issuer: https://accounts.google.com
   allowedDomains: re-cinq.com
+
+# The Google Drive source reuses the OIDC client; it needs Google as the issuer.
+googleDrive:
+  enabled: false
 
 resources:
   requests: { cpu: 250m, memory: 512Mi }
@@ -26,15 +37,19 @@ resources:
 # the Deployment recreates rather than rolls.
 data:
   size: 20Gi
-  storageClass: standard-rwo
+  # Empty: the cluster's default storage class.
+  storageClass: ""
 
 # Extra environment for the app container. Values here are plain strings.
 env:
   UTOPIA_DB_MAX_CONNECTIONS: "32"
 
 database:
-  image: ghcr.io/cloudnative-pg/postgresql:16-bookworm
+  # Pinned by digest; the digest wins over the tag.
+  image: ghcr.io/cloudnative-pg/postgresql:16-bookworm@sha256:bf0b0ec764b26fbb9136476ed29ad92abdc1277d0465194b8bf420f0116b974d
   size: 80Gi
+  # Empty: the cluster's default storage class.
+  storageClass: ""
   resources:
     requests: { cpu: "2", memory: 8Gi }
     limits: { cpu: "4", memory: 8Gi }
@@ -42,12 +57,17 @@ database:
     shared_buffers: 2GB
     effective_cache_size: 6GB
     work_mem: 16MB
-  # Base backups nightly plus continuous WAL, into a GCS bucket the cluster's
-  # Kubernetes service account reaches through Workload Identity (the Google
-  # service account is bound in re-cinq/infrastructure, projects/internal).
-  # Empty bucket: no backups.
+  # Base backups nightly plus continuous WAL through the barman-cloud plugin.
+  # `objectStore` is the `configuration` of a barman ObjectStore, passed through
+  # as written (GCS, S3 or Azure Blob); empty: no backups. Example, GCS:
+  #   objectStore:
+  #     destinationPath: gs://my-bucket/
+  #     googleCredentials: { gkeEnvironment: true }
+  #     data: { compression: gzip, jobs: 2 }
+  #     wal: { compression: gzip, maxParallel: 2 }
   backup:
-    bucket: ""
+    objectStore: {}
+    # Annotation target for GKE Workload Identity; empty elsewhere.
     serviceAccount: ""
     serverName: utopia-db
     retention: 14d
@@ -75,23 +95,36 @@ secrets:
   cookieSecret: lore-utopia-cookie-secret
   ghcrPullSecret: lore-ghcr-pull-secret
 
+# The controller must allow request bodies up to 200 MB and long-lived connections.
 ingress:
-  className: nginx-ingress
-  clusterIssuer: letsencrypt-prod
-  annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: 200m
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  # Empty: the cluster's default ingress class.
+  className: ""
+  # cert-manager ClusterIssuer; empty: no cert-manager annotation.
+  clusterIssuer: ""
+  # true: annotate the host for external-dns.
+  externalDns: false
+  # Controller-specific settings, e.g. body size and read timeout.
+  annotations: {}
+
+# The app is a single replica on one disk, so a budget of minAvailable 1 blocks
+# every voluntary eviction. Turn it on to hold the node-drain for a person.
+podDisruptionBudget:
+  enabled: false
 
 # Volume-filling alerts, for a cluster that runs the Prometheus operator.
 alerts:
   enabled: false
 
 network:
-  ingressControllerNamespace: ingress-nginx
+  ingressControllerNamespace: traefik
   cnpgOperatorNamespace: cnpg-system
   # This cluster's Service range, fenced off from the app's egress with the
   # private ranges, so an endpoint typed into the admin page stays outside.
   clusterServicesCidr: 10.0.0.0/8
+  # Address of a NodeLocal DNSCache, when the cluster runs one (usually 169.254.20.10/32).
+  nodeLocalDnsAddress: ""
+  # Web sources may be plain http:// URLs, so egress allows port 80 as well as 443.
+  allowPlainHttp: true
   # In-cluster callers allowed to reach the app pod on its port.
   allowFrom: []
   #  - namespace: lore-api

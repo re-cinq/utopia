@@ -2,14 +2,22 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: utopia
+  {{- if or .Values.ingress.clusterIssuer .Values.ingress.externalDns .Values.ingress.annotations }}
   annotations:
-    cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer }}
+    {{- with .Values.ingress.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ . }}
+    {{- end }}
+    {{- if .Values.ingress.externalDns }}
     external-dns.alpha.kubernetes.io/hostname: {{ .Values.hostname }}
+    {{- end }}
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+  {{- end }}
 spec:
-  ingressClassName: {{ .Values.ingress.className }}
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
   tls:
     - hosts: [{{ .Values.hostname }}]
       secretName: utopia-tls
