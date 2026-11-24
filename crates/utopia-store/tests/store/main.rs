@@ -127,6 +127,7 @@ mod a_wrong_time_can_be_corrected;
 mod adopting_an_iri_adopts_the_shape;
 mod an_admin_grants_system_admin;
 mod an_agent_can_record;
+mod an_alias_counts_only_as_a_known_as_name;
 mod an_attribute_value_is_read_in_its_unit;
 mod an_automatic_merge_is_gated_by_what_it_can_undo;
 mod an_axiom_that_moved_closes_its_findings;

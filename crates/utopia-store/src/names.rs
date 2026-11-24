@@ -116,13 +116,21 @@ pub fn has_name_in(entity: &str, kb: usize, names: usize) -> String {
 }
 
 /// [`has_name_in`] 的子查询本身：有这些名字之一的实体的 id
+///
+/// **值的查找放在 `OFFSET 0` 围栏里先跑。** 规划器看不到部分索引
+/// `facts_value_text_idx` 的表达式统计，任何值都按库行数的 0.5% 估，反而选了
+/// `known_as` 谓词索引，把这个库所有名字事实读一遍再按值过滤（生产上 71,665 个缓冲区，
+/// 先按值查是 23 个）。围栏让规划器不能把值过滤并进后面的谓词连接。
 pub fn named_ids(kb: usize, names: usize) -> String {
     format!(
-        "SELECT nf.subject_id FROM facts nf
-                   JOIN relation_types nr ON nr.id = nf.predicate_id
-                  WHERE nf.kb_id = ${kb} AND nr.kb_id = ${kb} AND nr.builtin AND nr.key = '{KNOWN_AS}'
-                    AND nf.invalidated_at IS NULL AND nf.object_value IS NOT NULL
-                    AND lower(nf.object_value->>'value') = ANY(${names})"
+        "SELECT v.subject_id FROM (
+                    SELECT nf.subject_id, nf.predicate_id FROM facts nf
+                     WHERE nf.kb_id = ${kb} AND nf.invalidated_at IS NULL
+                       AND nf.object_value IS NOT NULL
+                       AND lower(nf.object_value->>'value') = ANY(${names})
+                    OFFSET 0) v
+                   JOIN relation_types nr ON nr.id = v.predicate_id
+                  WHERE nr.kb_id = ${kb} AND nr.builtin AND nr.key = '{KNOWN_AS}'"
     )
 }
 
