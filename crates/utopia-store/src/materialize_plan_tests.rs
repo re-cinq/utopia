@@ -148,3 +148,103 @@ fn entity_rows_read(node: &serde_json::Value) -> u64 {
             .as_array()
             .map_or(0, |children| children.iter().map(entity_rows_read).sum())
 }
+
+const OTHER_BASES_FACTS: u32 = 600_000;
+const BASE_STATEMENTS: u32 = 300;
+const ENTITY_SOURCED_FACTS: u32 = 30_000;
+
+#[tokio::test]
+async fn attestation_sync_reads_only_the_facts_of_its_base() -> anyhow::Result<()> {
+    let Some(url) = crate::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await?;
+    let (base, other_base, rule) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    let mut tx = pool.begin().await?;
+    for table in [
+        "facts",
+        "typed_fact_sources",
+        "implied_fact_sources",
+        "implication_rules",
+    ] {
+        sqlx::raw_sql(&format!(
+            "CREATE TEMP TABLE {table} (LIKE public.{table} INCLUDING ALL) ON COMMIT DROP"
+        ))
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::raw_sql(&format!(
+        "INSERT INTO facts (id, kb_id, subject_id, object_value, layer, phrase, attested_from)
+              SELECT gen_random_uuid(), '{other_base}', gen_random_uuid(), '1'::jsonb, 'open',
+                     'phrase ' || (n % 50), now()
+                FROM generate_series(1, {OTHER_BASES_FACTS}) n;
+         INSERT INTO facts (id, kb_id, subject_id, object_value, layer, phrase, attested_from)
+              SELECT gen_random_uuid(), '{base}', gen_random_uuid(), '1'::jsonb, 'open',
+                     'statement ' || n, now() - make_interval(days => n)
+                FROM generate_series(1, {BASE_STATEMENTS}) n;
+         -- one typed fact per statement, attested at a time that is not its statement's
+         INSERT INTO facts (id, kb_id, subject_id, object_value, layer, phrase, attested_from)
+              SELECT gen_random_uuid(), '{base}', gen_random_uuid(), '1'::jsonb, 'typed',
+                     'typed ' || n, now()
+                FROM generate_series(1, {BASE_STATEMENTS}) n;
+         INSERT INTO typed_fact_sources (fact_id, statement_id)
+              SELECT t.id, s.id
+                FROM (SELECT id, row_number() OVER () n FROM facts WHERE kb_id = '{base}' AND layer = 'typed') t
+                JOIN (SELECT id, row_number() OVER () n FROM facts WHERE kb_id = '{base}' AND layer = 'open') s
+                  USING (n);
+         -- facts a kind-word rule implies: their sources are entities, no statement to attest
+         INSERT INTO implication_rules (id, kb_id, trigger, phrase, conclude_property_id, status)
+              VALUES ('{rule}', '{base}', 'kind_word', 'kind', gen_random_uuid(), 'approved');
+         INSERT INTO facts (id, kb_id, subject_id, object_value, layer, phrase, implied)
+              SELECT gen_random_uuid(), '{base}', gen_random_uuid(), '1'::jsonb, 'typed', 'kind ' || n, true
+                FROM generate_series(1, {ENTITY_SOURCED_FACTS}) n;
+         INSERT INTO implied_fact_sources (fact_id, rule_id, entity_id)
+              SELECT id, '{rule}', gen_random_uuid() FROM facts WHERE kb_id = '{base}' AND implied;
+         ANALYZE pg_temp.facts; ANALYZE pg_temp.typed_fact_sources;
+         ANALYZE pg_temp.implied_fact_sources; ANALYZE pg_temp.implication_rules"
+    ))
+    .execute(&mut *tx)
+    .await?;
+
+    let plan: serde_json::Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        super::TYPED_ATTESTATION_SQL
+    ))
+    .persistent(false)
+    .bind(base)
+    .bind(None::<&[Uuid]>)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+
+    let read = rows_read_from(&plan[0]["Plan"], "facts");
+    let base_facts = u64::from(BASE_STATEMENTS * 2 + ENTITY_SOURCED_FACTS);
+    assert!(
+        read < base_facts * 10,
+        "{read} facts rows read for a base of {base_facts} facts among {OTHER_BASES_FACTS} others: {plan:#}"
+    );
+    Ok(())
+}
+/// Rows the plan read from `relation`, counting what filters threw away, over all loops.
+fn rows_read_from(node: &serde_json::Value, relation: &str) -> u64 {
+    let own_rows = if node["Relation Name"].as_str() == Some(relation) {
+        let loops = node["Actual Loops"].as_u64().unwrap_or(1);
+        ["Actual Rows", "Rows Removed by Filter"]
+            .iter()
+            .map(|field| node[*field].as_u64().unwrap_or(0))
+            .sum::<u64>()
+            * loops
+    } else {
+        0
+    };
+    own_rows
+        + node["Plans"].as_array().map_or(0, |children| {
+            children
+                .iter()
+                .map(|child| rows_read_from(child, relation))
+                .sum()
+        })
+}

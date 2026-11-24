@@ -416,6 +416,33 @@ async fn materialize_in_tx(
     ))
 }
 
+const TYPED_ATTESTATION_SQL: &str = "UPDATE facts t
+            SET attested_from = src.at, attested_by = src.by
+           FROM (SELECT u.fact_id,
+                        min(u.attested_from) AS at,
+                        (array_agg(u.attested_by ORDER BY u.attested_from NULLS LAST, u.statement_id))[1] AS by
+                   FROM (SELECT ts.fact_id, ts.statement_id,
+                                CASE WHEN k.invalidated_at IS NULL THEN k.attested_from END AS attested_from,
+                                CASE WHEN k.invalidated_at IS NULL THEN k.attested_by END AS attested_by
+                           FROM typed_fact_sources ts
+                           JOIN facts k ON k.id = ts.statement_id AND k.kb_id = $1
+                         UNION ALL
+                         -- 规则的来源按规则的库筛：类别词规则的来源是实体，没有陈述
+                         SELECT i.fact_id, i.statement_id, s.attested_from, s.attested_by
+                           FROM implied_fact_sources i
+                           JOIN implication_rules r ON r.id = i.rule_id AND r.kb_id = $1
+                      LEFT JOIN facts s ON s.id = i.statement_id AND s.kb_id = $1
+                                       AND s.invalidated_at IS NULL) u
+                  GROUP BY u.fact_id) src
+          WHERE t.id = src.fact_id AND t.kb_id = $1 AND t.layer = 'typed'
+            AND t.invalidated_at IS NULL
+            AND ($2::uuid[] IS NULL OR t.id = ANY($2))
+            AND (t.implied
+                 OR EXISTS (SELECT 1 FROM typed_fact_sources ts WHERE ts.fact_id = t.id))
+            AND (t.attested_from IS DISTINCT FROM src.at
+                 OR t.attested_by IS DISTINCT FROM src.by)
+          RETURNING t.id";
+
 /// 类型化行的见证 = 它的来源陈述里最早的那个见证，连同那条日期的名字；来源陈述一条见证
 /// 都没有的，它也没有（任何时点都成立，0064 决定 5）。来源陈述有两处：物化进这一行的
 /// （`typed_fact_sources`），和规则读出这一行的（`implied_fact_sources`）；类别词规则的
@@ -436,36 +463,12 @@ pub async fn sync_typed_attestation<'e>(
     kb_id: Uuid,
     only: Option<&[Uuid]>,
 ) -> AppResult<Vec<Uuid>> {
-    let moved = sqlx::query_scalar(
-        "UPDATE facts t
-            SET attested_from = src.at, attested_by = src.by
-           FROM (SELECT u.fact_id,
-                        min(s.attested_from) AS at,
-                        (array_agg(s.attested_by ORDER BY s.attested_from NULLS LAST, s.id))[1] AS by
-                   FROM (SELECT ts.fact_id, ts.statement_id
-                           FROM typed_fact_sources ts
-                           JOIN facts k ON k.id = ts.statement_id AND k.kb_id = $1
-                         UNION ALL
-                         -- 规则的来源按规则的库筛：类别词规则的来源是实体，没有陈述
-                         SELECT i.fact_id, i.statement_id
-                           FROM implied_fact_sources i
-                           JOIN implication_rules r ON r.id = i.rule_id AND r.kb_id = $1) u
-              LEFT JOIN facts s ON s.id = u.statement_id AND s.invalidated_at IS NULL
-                  GROUP BY u.fact_id) src
-          WHERE t.id = src.fact_id AND t.kb_id = $1 AND t.layer = 'typed'
-            AND t.invalidated_at IS NULL
-            AND ($2::uuid[] IS NULL OR t.id = ANY($2))
-            AND (t.implied
-                 OR EXISTS (SELECT 1 FROM typed_fact_sources ts WHERE ts.fact_id = t.id))
-            AND (t.attested_from IS DISTINCT FROM src.at
-                 OR t.attested_by IS DISTINCT FROM src.by)
-          RETURNING t.id",
-    )
-    .persistent(false)
-    .bind(kb_id)
-    .bind(only)
-    .fetch_all(ex)
-    .await?;
+    let moved = sqlx::query_scalar(TYPED_ATTESTATION_SQL)
+        .persistent(false)
+        .bind(kb_id)
+        .bind(only)
+        .fetch_all(ex)
+        .await?;
     Ok(moved)
 }
 
