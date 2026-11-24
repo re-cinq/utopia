@@ -145,3 +145,27 @@ fn evidence_rows_visited(node: &serde_json::Value) -> u64 {
             .map(|children| children.iter().map(evidence_rows_visited).sum::<u64>())
             .unwrap_or(0)
 }
+
+/// 删文档时按块找出处（`lock_cited_timelines`）从 `chunks` 连到 `fact_evidence.chunk_id`；
+/// 没有这一列的索引时，每次调用都顺扫整张证据表。关掉顺扫，看规划器有没有索引可走。
+#[tokio::test]
+async fn the_evidence_of_a_chunk_is_found_by_an_index() -> anyhow::Result<()> {
+    let Some(url) = crate::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPool::connect(&url).await?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await?;
+    let plan: Vec<String> =
+        sqlx::query_scalar("EXPLAIN SELECT fact_id FROM fact_evidence WHERE chunk_id = $1")
+            .bind(Uuid::now_v7())
+            .fetch_all(&mut *tx)
+            .await?;
+    tx.rollback().await?;
+
+    let plan = plan.join("\n");
+    assert!(plan.contains("fact_evidence_chunk_idx"), "{plan}");
+    Ok(())
+}
