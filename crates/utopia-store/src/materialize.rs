@@ -239,36 +239,11 @@ async fn materialize_in_tx(
 
     // 3. 该有而没有的（陈述, 绑定）对：陈述活着、签名绑着、没 mood、还没有活着的行以它为来源
     //    且谓词相同。reverse 只对两样东西之间的关系有意义（字面值当不了主语）
-    let due: Vec<Due> = sqlx::query_as(&format!(
-        "SELECT s.id AS statement, b.relation_type_id AS property, b.direction,
-                s.subject_id, s.object_id, oe.canonical_name AS object_name, s.object_value,
-                s.valid_from, s.valid_from_precision, s.valid_from_grade,
-                s.valid_to, s.valid_to_precision,
-                s.attested_from, s.confidence, b.marks,
-                rt.temporal, rt.kind, {SHAPE}
-           FROM facts s
-           JOIN entities se ON se.id = s.subject_id
-      LEFT JOIN entities oe ON oe.id = s.object_id
-           JOIN phrase_bindings b ON {MATCH}
-           JOIN relation_types rt ON rt.id = b.relation_type_id
-          WHERE s.kb_id = $1 AND s.layer = 'open' AND s.invalidated_at IS NULL
-            AND b.status = 'bound'
-            AND (b.direction = 'forward' OR s.object_id IS NOT NULL)
-            AND {NO_MOOD}
-            -- 勘误撤过的（陈述, 属性）不再算（0044 决定 7）：撤销要站得住
-            AND NOT EXISTS (SELECT 1 FROM errata_actions ea
-                             WHERE ea.statement_id = s.id AND ea.predicate_id = b.relation_type_id
-                               AND ea.status = 'applied' AND ea.action IN ('retract', 'revise'))
-            AND NOT EXISTS (SELECT 1 FROM typed_fact_sources src JOIN facts t ON t.id = src.fact_id
-                             WHERE src.statement_id = s.id AND t.invalidated_at IS NULL
-                               AND t.predicate_id = b.relation_type_id)
-          ORDER BY s.id",
-        NO_MOOD = no_mood_spoken(),
-    ))
-    .persistent(false)
-    .bind(kb_id)
-    .fetch_all(&mut **tx)
-    .await?;
+    let due: Vec<Due> = sqlx::query_as(&due_sql())
+        .persistent(false)
+        .bind(kb_id)
+        .fetch_all(&mut **tx)
+        .await?;
 
     let (mut added, mut merged) = (0u64, 0u64);
     // 绑上了却按 datatype 读不出的值：(陈述, 属性, 原文的字)，收尾时记成丢弃行
@@ -839,6 +814,48 @@ pub async fn count(pool: &PgPool, kb_id: Uuid) -> AppResult<i64> {
     .bind(kb_id)
     .fetch_one(pool)
     .await?)
+}
+
+/// 步骤 3 的语句：该有而没有的（陈述, 绑定）对。
+/// 从已绑定的绑定出发，先只取措辞对得上的开放陈述（两个 CTE 各算一遍），再连实体。
+/// 规整后的措辞连接规划器估不出行数，会对每条绑定把所有实体重读一遍：
+/// 测试里 30 万实体读了 900 万行，生产上 85–93 秒。条件和结果行都没变。
+fn due_sql() -> String {
+    format!(
+        "WITH bound AS MATERIALIZED (
+             SELECT b.* FROM phrase_bindings b WHERE b.kb_id = $1 AND b.status = 'bound'),
+         stmts AS MATERIALIZED (
+             SELECT s.*, {NORM} AS norm
+               FROM facts s
+              WHERE s.kb_id = $1 AND s.layer = 'open' AND s.invalidated_at IS NULL
+                AND {NORM} IN (SELECT phrase FROM bound))
+         SELECT s.id AS statement, b.relation_type_id AS property, b.direction,
+                s.subject_id, s.object_id, oe.canonical_name AS object_name, s.object_value,
+                s.valid_from, s.valid_from_precision, s.valid_from_grade,
+                s.valid_to, s.valid_to_precision,
+                s.attested_from, s.confidence, b.marks,
+                rt.temporal, rt.kind, {SHAPE}
+           FROM stmts s
+           JOIN bound b ON b.phrase = s.norm
+           JOIN entities se ON se.id = s.subject_id
+      LEFT JOIN entities oe ON oe.id = s.object_id
+           JOIN relation_types rt ON rt.id = b.relation_type_id
+          WHERE b.subject_type_id IS NOT DISTINCT FROM se.type_id
+            AND b.object_is_value = (s.object_id IS NULL)
+            AND (s.object_id IS NULL OR b.object_type_id IS NOT DISTINCT FROM oe.type_id)
+            AND (b.direction = 'forward' OR s.object_id IS NOT NULL)
+            AND {NO_MOOD}
+            -- 勘误撤过的（陈述, 属性）不再算（0044 决定 7）：撤销要站得住
+            AND NOT EXISTS (SELECT 1 FROM errata_actions ea
+                             WHERE ea.statement_id = s.id AND ea.predicate_id = b.relation_type_id
+                               AND ea.status = 'applied' AND ea.action IN ('retract', 'revise'))
+            AND NOT EXISTS (SELECT 1 FROM typed_fact_sources src JOIN facts t ON t.id = src.fact_id
+                             WHERE src.statement_id = s.id AND t.invalidated_at IS NULL
+                               AND t.predicate_id = b.relation_type_id)
+          ORDER BY s.id",
+        NORM = kind_word_sql("s.phrase"),
+        NO_MOOD = no_mood_spoken(),
+    )
 }
 
 /// 步骤 1 的语句：仍然成立的来源只算一遍（CTE），再用反连接删掉其余的。
