@@ -4,6 +4,7 @@
 
 use sqlx::PgPool;
 use std::sync::LazyLock;
+use utopia_store::graph::{insert_value_fact, Validity};
 use utopia_store::names::record;
 use utopia_store::resolution::{resolve_identity_name, Resolution};
 use uuid::Uuid;
@@ -120,4 +121,55 @@ pub fn attached_to(resolution: &Resolution, holder: Uuid) -> bool {
 /// Whether the mention got an entity of its own instead of `holder`.
 pub fn created_apart_from(resolution: &Resolution, holder: Uuid) -> bool {
     resolution.created && resolution.entity_id != holder
+}
+
+// --- alias side: only the tests of `known_as` facts use what follows ---
+
+/// A live entity of another name that is also known as `alias`.
+pub async fn known_as(
+    pool: &PgPool,
+    kb: Uuid,
+    type_id: Option<Uuid>,
+    alias: &str,
+) -> anyhow::Result<Uuid> {
+    let id = holder(pool, kb, type_id, &format!("{alias}-was")).await?;
+    record(pool, kb, id, alias, None, None).await?;
+    Ok(id)
+}
+
+/// A live project that carries `value` as a text attribute under a relation type of its own
+/// (`key`, builtin or not), and has no name fact at all.
+pub async fn valued_under(
+    pool: &PgPool,
+    kb: Uuid,
+    project: Uuid,
+    key: &str,
+    builtin: bool,
+    value: &str,
+) -> anyhow::Result<Uuid> {
+    let (entity, predicate) = (
+        self::entity(pool, kb, Some(project), &format!("{value}-was")).await?,
+        Uuid::now_v7(),
+    );
+    sqlx::query(
+        "INSERT INTO relation_types (id, kb_id, key, label, kind, datatype, builtin)
+         VALUES ($1, $2, $3, $3, 'attribute', 'text', $4)",
+    )
+    .bind(predicate)
+    .bind(kb)
+    .bind(key)
+    .bind(builtin)
+    .execute(pool)
+    .await?;
+    insert_value_fact(
+        pool,
+        kb,
+        entity,
+        Some(predicate),
+        &serde_json::json!({ "value": value }),
+        Validity::default(),
+        1.0,
+    )
+    .await?;
+    Ok(entity)
 }

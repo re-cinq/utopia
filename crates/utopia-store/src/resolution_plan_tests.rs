@@ -113,3 +113,64 @@ fn rows_visited(node: &serde_json::Value) -> u64 {
             .map(|children| children.iter().map(rows_visited).sum::<u64>())
             .unwrap_or(0)
 }
+
+/// 生产库的形状：一个库里上百万条现行事实、几百种关系，known_as 只占百分之一，别名各不相同。
+/// 部分索引 `facts_value_text_idx` 的统计规划器不用，值的行数估成库行数的 0.5%（这里五千行），
+/// 而关系索引按“库行数 / 关系种类数”估成几行，于是规划器宁可把整个 known_as 读一遍再按值过滤。
+const RELATION_KINDS: i32 = 300;
+const MOST_BUFFERS_TOUCHED: u64 = 200;
+
+#[tokio::test]
+async fn an_alias_is_found_by_its_value_not_by_walking_every_name() -> anyhow::Result<()> {
+    if crate::test_db::url().is_none() {
+        return Ok(());
+    }
+    let kb = Uuid::now_v7();
+    let mut tx = temp_copies(&["relation_types", "facts"]).await?;
+    for sql in [
+        "INSERT INTO relation_types (id, kb_id, key, label, builtin)
+         SELECT gen_random_uuid(), $1, CASE WHEN kind = 0 THEN 'known_as' ELSE 'relation ' || kind END,
+                'relation', kind = 0
+           FROM generate_series(0, $2) kind",
+        "INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_value)
+         SELECT gen_random_uuid(), $1, gen_random_uuid(), nr.id,
+                jsonb_build_object('value', CASE WHEN f.kind = 0 THEN 'alias ' || f.n ELSE 'other ' || f.n END)
+           FROM (SELECT n, CASE WHEN n % 100 = 0 THEN 0 ELSE 1 + n % $2 END AS kind
+                   FROM generate_series(1, 1000000) n) f
+           JOIN relation_types nr ON nr.key = CASE WHEN f.kind = 0 THEN 'known_as' ELSE 'relation ' || f.kind END",
+    ] {
+        sqlx::query(sql)
+            .bind(kb)
+            .bind(RELATION_KINDS)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::raw_sql("ANALYZE pg_temp.relation_types; ANALYZE pg_temp.facts")
+        .execute(&mut *tx)
+        .await?;
+    let plan: serde_json::Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        crate::names::named_ids(1, 2)
+    ))
+    .bind(kb)
+    .bind(vec!["alias 500000".to_string()])
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+
+    let root = &plan[0]["Plan"];
+    let touched = [
+        "Shared Hit Blocks",
+        "Local Hit Blocks",
+        "Shared Read Blocks",
+        "Local Read Blocks",
+    ]
+    .iter()
+    .map(|field| root[*field].as_u64().unwrap_or(0))
+    .sum::<u64>();
+    assert!(
+        touched < MOST_BUFFERS_TOUCHED,
+        "{touched} buffers touched: {plan}"
+    );
+    Ok(())
+}
