@@ -112,3 +112,79 @@ async fn a_repush_keeps_a_statement_another_item_still_states() -> anyhow::Resul
     );
     f.cleanup().await
 }
+
+#[tokio::test]
+async fn an_extracted_item_remembers_the_fact_of_each_statement() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let body = item(
+        "obs-1",
+        &[("is based in", "Port Ellen"), ("visited", "Oslo")],
+    );
+    let doc = push_and_extract(&f, &body, "created").await?;
+
+    let rows: Vec<(i32, String, String)> = sqlx::query_as(
+        "SELECT w.ord, w.key, f.phrase
+         FROM pushed_statement_writes w
+         JOIN chunks c ON c.id = w.chunk_id
+         JOIN facts f ON f.id = w.fact_id
+         WHERE c.document_id = $1 AND c.superseded_at IS NULL AND f.invalidated_at IS NULL
+         ORDER BY w.ord",
+    )
+    .bind(doc)
+    .fetch_all(&f.pool)
+    .await?;
+
+    let expected: Vec<(i32, String, String)> = body["s"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(ord, statement)| {
+            (
+                ord as i32,
+                serde_json::to_string(statement).unwrap(),
+                statement[2].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(rows, expected);
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn an_extracted_item_remembers_the_entity_of_each_name() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let body = item("obs-1", &[("is based in", "Port Ellen")]);
+    let doc = push_and_extract(&f, &body, "created").await?;
+
+    let mut rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT h.key, e.canonical_name
+         FROM pushed_entity_handles h
+         JOIN chunks c ON c.id = h.chunk_id
+         JOIN entities e ON e.id = h.entity_id
+         WHERE c.document_id = $1 AND c.superseded_at IS NULL",
+    )
+    .bind(doc)
+    .fetch_all(&f.pool)
+    .await?;
+    rows.sort();
+
+    let mut expected: Vec<(String, String)> = body["e"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entity| {
+            (
+                serde_json::to_string(entity).unwrap(),
+                entity[0].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(rows, expected);
+    f.cleanup().await
+}

@@ -37,6 +37,7 @@ pub mod palette;
 pub mod paths;
 pub mod pending;
 pub mod phrase_bindings;
+pub mod pushed_memo;
 pub mod reasoning;
 pub mod record_axis;
 pub mod resolution;
