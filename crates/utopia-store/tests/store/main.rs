@@ -122,6 +122,7 @@ mod a_timeline_is_recomputed_from_the_rows_it_has;
 mod a_token_is_the_person_but_not_all_of_them;
 mod a_trimmed_description_is_not_stale;
 mod a_typed_fact_is_as_confirmed_as_its_statement;
+mod a_typed_row_is_attested_by_its_live_statements;
 mod a_viewer_never_sees_a_credential;
 mod a_wide_embedding_is_ranked_at_full_precision;
 mod a_wrong_time_can_be_corrected;
