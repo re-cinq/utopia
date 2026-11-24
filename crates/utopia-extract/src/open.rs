@@ -56,6 +56,8 @@ pub struct OpenEntity {
     pub kind: String,
     /// 原文点了名（true）还是只描述了（false）
     pub named: bool,
+    /// where it stood in the reply's `e` array; a malformed or repeated neighbour is dropped
+    pub raw_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +80,9 @@ pub struct OpenStatement {
     pub ended: Option<String>,
     /// the sentence of the passage that states it, verbatim
     pub quote: Option<String>,
+    /// where it stood in the reply's `s` array; a malformed neighbour is dropped, so this is not
+    /// its position in `OpenExtraction::statements`
+    pub raw_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -546,7 +551,12 @@ fn parse_entity(arr: &[Value]) -> Option<OpenEntity> {
         Some(Value::Number(n)) => n.as_f64() != Some(0.0),
         _ => true,
     };
-    Some(OpenEntity { name, kind, named })
+    Some(OpenEntity {
+        name,
+        kind,
+        named,
+        raw_index: 0,
+    })
 }
 
 /// `[quote, subject, phrase, object, value, qualifiers, when, ended]`。八格都得在：短了的
@@ -567,6 +577,7 @@ fn parse_statement(arr: &[Value]) -> Option<OpenStatement> {
         when: opt_text(&arr[6]),
         ended: opt_text(&arr[7]),
         quote: opt_text(&arr[0]),
+        raw_index: 0,
     })
 }
 
@@ -611,15 +622,17 @@ pub fn parse_open_response(raw: &str) -> anyhow::Result<OpenExtraction> {
         ..Default::default()
     };
     let mut seen = HashSet::new();
-    for item in items(&value, "e") {
+    for (raw_index, item) in items(&value, "e").iter().enumerate() {
         match item.as_array().and_then(|a| parse_entity(a)) {
-            Some(e) if seen.insert(name_key(&e.name)) => out.entities.push(e),
+            Some(e) if seen.insert(name_key(&e.name)) => {
+                out.entities.push(OpenEntity { raw_index, ..e })
+            }
             _ => out.skipped += 1,
         }
     }
-    for item in items(&value, "s") {
+    for (raw_index, item) in items(&value, "s").iter().enumerate() {
         match item.as_array().and_then(|a| parse_statement(a)) {
-            Some(s) => out.statements.push(s),
+            Some(s) => out.statements.push(OpenStatement { raw_index, ..s }),
             None => out.skipped += 1,
         }
     }

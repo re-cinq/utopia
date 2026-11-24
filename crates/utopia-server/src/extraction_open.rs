@@ -267,6 +267,28 @@ async fn call_and_parse_one_chunk(
     }))
 }
 
+/// 推送块里 `e` / `s` 两个数组的规范键，按原始位置排列（9012 的记忆键）
+struct PushedRaw {
+    entities: Vec<String>,
+    statements: Vec<String>,
+}
+
+impl PushedRaw {
+    fn parse(chunk_text: &str) -> Self {
+        let payload: serde_json::Value = serde_json::from_str(chunk_text).unwrap_or_default();
+        let keys = |field: &str| -> Vec<String> {
+            payload[field]
+                .as_array()
+                .map(|items| items.iter().map(|item| item.to_string()).collect())
+                .unwrap_or_default()
+        };
+        Self {
+            entities: keys("e"),
+            statements: keys("s"),
+        }
+    }
+}
+
 /// 一个分块的后半步：把解析出来的回复写成陈述、名字和证据（#588 cut 1）。
 ///
 /// **要按分块顺序跑**：前面的块认下的实体（`doc_entities`、`known_by_name`）、描述出来的
@@ -309,6 +331,7 @@ async fn apply_open_extraction(
     let mut local: HashMap<String, Uuid> = HashMap::new();
     // 被描述的东西：先记下名字和类别词，等陈述指到它再建（见 `place`）
     let mut deferred: HashMap<String, (String, String)> = HashMap::new();
+    let pushed_raw = pushed.then(|| PushedRaw::parse(&chunk.text));
     for e in &extraction.entities {
         let name = e.name.trim();
         if name.is_empty() {
@@ -360,6 +383,12 @@ async fn apply_open_extraction(
                 )
                 .await;
             }
+            if let Some(key) = pushed_raw
+                .as_ref()
+                .and_then(|raw| raw.entities.get(e.raw_index))
+            {
+                utopia_store::pushed_memo::remember_entity(pool, chunk.id, key, id).await?;
+            }
             touched_names.insert(name_key(name));
             if !doc_entities.iter().any(|(x, _, _)| *x == id) {
                 doc_entities.push((id, kind.to_string(), name.to_string()));
@@ -374,6 +403,7 @@ async fn apply_open_extraction(
     }
 
     // ---- 陈述 ----
+    // 推送来的陈述按原始位置记下它写出的事实：再推时没变的陈述可以直接沿用旧事实
     for s in &extraction.statements {
         let phrase = s.phrase.trim();
         if phrase.is_empty() {
@@ -651,6 +681,13 @@ async fn apply_open_extraction(
             confidence,
         )
         .await?;
+        if let Some(key) = pushed_raw
+            .as_ref()
+            .and_then(|raw| raw.statements.get(s.raw_index))
+        {
+            utopia_store::pushed_memo::remember(pool, chunk.id, s.raw_index as i32, key, fact_id)
+                .await?;
+        }
         // 表层谓词也写短语：今天的读路径都从 `fact_surface_predicate` 取名字
         utopia_store::graph::add_evidence_located(
             pool,
