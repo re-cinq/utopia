@@ -24,6 +24,14 @@ pub struct Job {
     pub locked_at: DateTime<Utc>,
 }
 
+/// `enqueue_unless_pending` 的 SQL（文本未改，仅提出来供计划测试使用）。
+const ENQUEUE_UNLESS_PENDING_SQL: &str = "INSERT INTO jobs (kind, payload, run_at)
+         SELECT $1, $2, now() + make_interval(secs => $3)
+          WHERE NOT EXISTS (SELECT 1 FROM jobs
+                             WHERE kind = $1 AND md5(payload::text) = md5($2::text) AND payload = $2
+                               AND status IN ('queued', 'running'))
+         RETURNING id";
+
 /// 同种任务、同样载荷已经排着就不再排：一批文档各自抽完都想触发同一个库级任务
 /// （类型消解、对账），排十次跑十次是浪费，而且后九次看到的是第一次跑完的库。
 /// 返回 None = 已有一条在排队
@@ -44,19 +52,12 @@ pub async fn enqueue_unless_pending(
     after: Duration,
 ) -> AppResult<Option<i64>> {
     let mut tx = pool.begin().await?;
-    let row: Option<(i64,)> = sqlx::query_as(
-        "INSERT INTO jobs (kind, payload, run_at)
-         SELECT $1, $2, now() + make_interval(secs => $3)
-          WHERE NOT EXISTS (SELECT 1 FROM jobs
-                             WHERE kind = $1 AND payload = $2
-                               AND status IN ('queued', 'running'))
-         RETURNING id",
-    )
-    .bind(kind)
-    .bind(payload)
-    .bind(after.as_secs_f64())
-    .fetch_optional(&mut *tx)
-    .await?;
+    let row: Option<(i64,)> = sqlx::query_as(ENQUEUE_UNLESS_PENDING_SQL)
+        .bind(kind)
+        .bind(payload)
+        .bind(after.as_secs_f64())
+        .fetch_optional(&mut *tx)
+        .await?;
     if row.is_some() {
         notify_worker_tx(&mut tx).await?;
     }
@@ -86,7 +87,7 @@ pub async fn enqueue_unless_queued_tx(
     let row: Option<(i64,)> = sqlx::query_as(
         "INSERT INTO jobs (kind, payload)
          SELECT $1, $2
-          WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = $1 AND payload = $2 AND status = 'queued')
+          WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = $1 AND md5(payload::text) = md5($2::text) AND payload = $2 AND status = 'queued')
          RETURNING id",
     )
     .bind(kind)
@@ -111,7 +112,7 @@ pub async fn enqueue_unless_queued_after(
     let row: Option<(i64,)> = sqlx::query_as(
         "INSERT INTO jobs (kind, payload, run_at)
          SELECT $1, $2, now() + make_interval(secs => $3)
-          WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = $1 AND payload = $2 AND status = 'queued')
+          WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = $1 AND md5(payload::text) = md5($2::text) AND payload = $2 AND status = 'queued')
          RETURNING id",
     )
     .bind(kind)
@@ -633,6 +634,39 @@ async fn persist_with_retry(
     }
 }
 
+/// 已完成任务的保留期。此前 done 的行永不删除：内部集群攒到 250 万行、924 MB，
+/// 每条 jobs 查询都在为它们买单。failed 的不删，因为 `requeue_failed` 要读它们。
+const DONE_JOB_RETENTION: Duration = Duration::from_secs(14 * 24 * 3600);
+
+/// 清理已完成任务的间隔。
+const DONE_JOB_PRUNE_EVERY: Duration = Duration::from_secs(3600);
+
+/// 每条 DELETE 语句最多删多少行：每批一条独立的短语句，不开长事务。
+const PRUNE_BATCH: i64 = 5000;
+
+/// 删除 `updated_at` 早于保留期的 done 任务，返回删除总数。
+pub async fn prune_done(pool: &PgPool, older_than: Duration) -> AppResult<u64> {
+    let cutoff = Utc::now() - older_than;
+    let mut total = 0u64;
+    loop {
+        let deleted = sqlx::query(
+            "DELETE FROM jobs WHERE id IN (
+                 SELECT id FROM jobs WHERE status = 'done' AND updated_at < $1
+                 ORDER BY id LIMIT $2)",
+        )
+        .bind(cutoff)
+        .bind(PRUNE_BATCH)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        total += deleted;
+        if deleted < PRUNE_BATCH as u64 {
+            return Ok(total);
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
 /// 常规名额全占满之后，还能再认领几个不调对话模型的任务（#1300）。
 ///
 /// 光排序不够：抽取等模型许可的时候照样占着 worker 名额。本地模型上名额常被等许可的
@@ -675,9 +709,21 @@ where
         "jobs worker 已启动"
     );
     let mut listener = listen_for_jobs(&pool).await;
+    let mut last_prune: Option<std::time::Instant> = None;
     loop {
         if pool.is_closed() {
             return;
+        }
+        if last_prune.is_none_or(|at| at.elapsed() >= DONE_JOB_PRUNE_EVERY) {
+            last_prune = Some(std::time::Instant::now());
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                match prune_done(&pool, DONE_JOB_RETENTION).await {
+                    Ok(0) => {}
+                    Ok(count) => tracing::info!(count, "清理已完成的旧任务"),
+                    Err(e) => tracing::error!(error = %e, "清理已完成的旧任务失败"),
+                }
+            });
         }
         let cap = concurrency.load(Ordering::Relaxed).max(1);
         // 常规名额满了就只往保留通道里认领，通道也满了才歇
@@ -742,6 +788,10 @@ mod writeback_tests;
 #[cfg(test)]
 #[path = "jobs_claim_tests.rs"]
 mod claim_tests;
+
+#[cfg(test)]
+#[path = "jobs_plan_tests.rs"]
+mod plan_tests;
 
 #[cfg(test)]
 mod tests {
