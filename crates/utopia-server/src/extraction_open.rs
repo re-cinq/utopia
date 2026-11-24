@@ -289,6 +289,14 @@ impl PushedRaw {
     }
 }
 
+/// 再推时从上一版沿用下来的东西：没变的陈述（块内原始位置 → 事实）和没变的具名实体
+/// （规范键 → 实体）。沿用的直接用旧结果，不再走消解和落事实
+#[derive(Default)]
+struct Carried {
+    statements: HashMap<usize, Uuid>,
+    entities: HashMap<String, Uuid>,
+}
+
 /// 一个分块的后半步：把解析出来的回复写成陈述、名字和证据（#588 cut 1）。
 ///
 /// **要按分块顺序跑**：前面的块认下的实体（`doc_entities`、`known_by_name`）、描述出来的
@@ -310,6 +318,7 @@ async fn apply_open_extraction(
     pushed: bool,
     identity: bool,
     await_nod: bool,
+    carried: &Carried,
     proposer: Proposer,
     pending_count: &mut usize,
     statement_count: &mut usize,
@@ -342,31 +351,42 @@ async fn apply_open_extraction(
         if local.contains_key(&key) {
             continue;
         }
+        let carried = pushed_raw
+            .as_ref()
+            .and_then(|raw| raw.entities.get(e.raw_index))
+            .and_then(|key| carried.entities.get(key).copied());
         let id = if e.named {
-            let bound = bound_types
-                .get(&utopia_store::type_bindings::normalize(kind))
-                .copied();
-            let id = resolve_handle(
-                pool,
-                kb_id,
-                bound,
-                name,
-                ctx,
-                name_vecs.get(&key).map(Vec::as_slice),
-                evidence.get(&key).map(String::as_str),
-                identity,
-                &mut response_claims,
-                handled_by_name,
-                ambiguous_bare_cache,
-                needs_adjudication,
-                human_reviews_found,
-            )
-            .await?;
-            // 模型说它是什么（「a British film」里的 film）：存成它自己的说法，
-            // 类的绑定等对齐来做
-            if !kind.is_empty() {
-                let _ = utopia_store::resolution::set_specific_type(pool, id, kind).await;
-            }
+            let id = match carried {
+                Some(id) => id,
+                None => {
+                    let bound = bound_types
+                        .get(&utopia_store::type_bindings::normalize(kind))
+                        .copied();
+                    let id = resolve_handle(
+                        pool,
+                        kb_id,
+                        bound,
+                        name,
+                        ctx,
+                        name_vecs.get(&key).map(Vec::as_slice),
+                        evidence.get(&key).map(String::as_str),
+                        identity,
+                        &mut response_claims,
+                        handled_by_name,
+                        ambiguous_bare_cache,
+                        needs_adjudication,
+                        human_reviews_found,
+                    )
+                    .await?;
+                    // 模型说它是什么（「a British film」里的 film）：存成它自己的说法，
+                    // 类的绑定等对齐来做
+                    if !kind.is_empty() {
+                        let _ = utopia_store::resolution::set_specific_type(pool, id, kind).await;
+                    }
+                    touched_names.insert(name_key(name));
+                    id
+                }
+            };
             // 名字就在这一块原文里时，给名字事实补出处（0041）。记忆日志里的不补：
             // 那一句算不算出处，要等人点头（0018）
             if !await_nod && span_in_quote(name, &chunk.text) {
@@ -389,7 +409,6 @@ async fn apply_open_extraction(
             {
                 utopia_store::pushed_memo::remember_entity(pool, chunk.id, key, id).await?;
             }
-            touched_names.insert(name_key(name));
             if !doc_entities.iter().any(|(x, _, _)| *x == id) {
                 doc_entities.push((id, kind.to_string(), name.to_string()));
                 known_by_name.entry(key.clone()).or_insert(id);
@@ -405,6 +424,17 @@ async fn apply_open_extraction(
     // ---- 陈述 ----
     // 推送来的陈述按原始位置记下它写出的事实：再推时没变的陈述可以直接沿用旧事实
     for s in &extraction.statements {
+        if let Some(&fact_id) = carried.statements.get(&s.raw_index) {
+            let time_words =
+                locate_time_words(state, kb_id, document_id, chunk, None, pushed, s).await;
+            for (words, start, role) in &time_words {
+                utopia_store::time_mentions::record(
+                    pool, kb_id, fact_id, chunk.id, words, *start, role,
+                )
+                .await?;
+            }
+            continue;
+        }
         let phrase = s.phrase.trim();
         if phrase.is_empty() {
             continue;
@@ -588,35 +618,8 @@ async fn apply_open_extraction(
                 None => qualifiers.push((role, Some(serde_json::json!(text)), None)),
             }
         }
-        // 时间词：起与止各是一条提及，必须原样在这条陈述的引文里
-        let mut time_words: Vec<(&str, i32, &str)> = Vec::new();
-        for (role, words) in [("when", s.when.as_deref()), ("ended", s.ended.as_deref())]
-            .into_iter()
-            .filter_map(|(role, words)| Some((role, words?.trim())))
-            .filter(|(_, w)| !w.is_empty())
-        {
-            // 推送来的陈述没有引文：条目自己就是证据（0054 决定 4），这一块就是这一份
-            // 载荷，时间词在块里找。走 `locate_time` 会在 `quote?` 上退出，起止就都丢了
-            let located = if pushed {
-                locate(&chunk.text, words).map(|(start, _)| start)
-            } else {
-                locate_time(&chunk.text, quote, words)
-            };
-            match located {
-                Some(start) => time_words.push((words, start, role)),
-                None => {
-                    drop_signal(
-                        state,
-                        kb_id,
-                        document_id,
-                        reason::TIME_NOT_IN_QUOTE,
-                        "a time mention's words are not in the statement's own sentence",
-                        Some(words),
-                    )
-                    .await;
-                }
-            }
-        }
+        let time_words =
+            locate_time_words(state, kb_id, document_id, chunk, quote, pushed, s).await;
         if await_nod {
             // 记忆日志：一切原样进待确认表（0015），人点头时 `pending::confirm` 才把它
             // 落成开放陈述——同样的短语、限定、时间词、引文偏移
@@ -811,6 +814,47 @@ pub(crate) fn dated_at(doc: &Document) -> Option<chrono::DateTime<chrono::Utc>> 
     } else {
         None
     }
+}
+
+/// 一条陈述的时间词：起与止各是一条提及，必须原样在这条陈述的引文里
+async fn locate_time_words<'a>(
+    state: &AppState,
+    kb_id: Uuid,
+    document_id: Uuid,
+    chunk: &ChunkForExtract,
+    quote: Option<(&str, Option<(i32, i32)>)>,
+    pushed: bool,
+    s: &'a utopia_extract::open::OpenStatement,
+) -> Vec<(&'a str, i32, &'static str)> {
+    let mut time_words = Vec::new();
+    for (role, words) in [("when", s.when.as_deref()), ("ended", s.ended.as_deref())]
+        .into_iter()
+        .filter_map(|(role, words)| Some((role, words?.trim())))
+        .filter(|(_, w)| !w.is_empty())
+    {
+        // 推送来的陈述没有引文：条目自己就是证据（0054 决定 4），这一块就是这一份
+        // 载荷，时间词在块里找。走 `locate_time` 会在 `quote?` 上退出，起止就都丢了
+        let located = if pushed {
+            locate(&chunk.text, words).map(|(start, _)| start)
+        } else {
+            locate_time(&chunk.text, quote, words)
+        };
+        match located {
+            Some(start) => time_words.push((words, start, role)),
+            None => {
+                drop_signal(
+                    state,
+                    kb_id,
+                    document_id,
+                    reason::TIME_NOT_IN_QUOTE,
+                    "a time mention's words are not in the statement's own sentence",
+                    Some(words),
+                )
+                .await;
+            }
+        }
+    }
+    time_words
 }
 
 /// 一段字在块里的**字符**偏移（起、止）。字符不是字节：界面和 SQL 的 `substr` 都按字符数，
@@ -1204,6 +1248,22 @@ pub(crate) async fn run_open(
                 ..entry.clone()
             });
         }
+        // 再推时没变的陈述和名字沿用上一版（只在推送路径、且不等人点头时）
+        let carried = if pushed && !await_nod {
+            Carried {
+                statements: utopia_store::pushed_memo::carry_over(
+                    pool,
+                    document_id,
+                    chunk.id,
+                    &PushedRaw::parse(&chunk.text).statements,
+                )
+                .await?,
+                entities: utopia_store::pushed_memo::carried_entities(pool, document_id, chunk.id)
+                    .await?,
+            }
+        } else {
+            Carried::default()
+        };
         apply_open_extraction(
             state,
             pool,
@@ -1218,6 +1278,7 @@ pub(crate) async fn run_open(
             pushed,
             identity,
             await_nod,
+            &carried,
             proposer,
             &mut pending_count,
             &mut statement_count,
