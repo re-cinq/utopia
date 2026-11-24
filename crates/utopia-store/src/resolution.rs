@@ -366,6 +366,20 @@ async fn kept_apart_from(pool: &PgPool, kb_id: Uuid, entity_id: Uuid) -> AppResu
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
+/// [`resolve_identity_name`] 的持有者查询：`$1` 库、`$2` 声明的类、`$3` 小写的写法们。
+/// 单独成函数是为了让计划测试 EXPLAIN 同一段文本。
+pub(crate) fn identity_holders_sql() -> String {
+    format!(
+        "SELECT e.id, e.canonical_name, e.type_id, e.profile_embedding, e.profile_n,
+                TRUE AS exact_name
+           FROM entities e
+          WHERE e.kb_id = $1 AND e.merged_into IS NULL AND e.description IS NULL
+            AND (e.type_id IS NULL OR e.type_id = $2)
+            AND {named}",
+        named = crate::names::has_name_or_alias_in("e", 1, 3),
+    )
+}
+
 /// 0071 决定 2、3：恰有一个活着的同名持有者（类为声明的类或无类）时，不看画像，直接归并；
 /// 没有就新建，哪怕该名字在别的类下已有（类型漂移审核照留）；两个及以上走原来的画像路径。
 /// 持有者按本名或名字事实认（合并会把输家的名字作为 known_as 移给存活者）。
@@ -381,23 +395,15 @@ pub async fn resolve_identity_name(
     let normalized = normalize_name(raw_name);
     let name = fold_markdown_markers(&normalized);
     let spellings = vec![normalized.to_lowercase(), name.to_lowercase()];
-    let holders: Vec<Candidate> = sqlx::query_as(&format!(
-        "SELECT e.id, e.canonical_name, e.type_id, e.profile_embedding, e.profile_n,
-                TRUE AS exact_name
-           FROM entities e
-          WHERE e.kb_id = $1 AND e.merged_into IS NULL AND e.description IS NULL
-            AND (e.type_id IS NULL OR e.type_id = $2)
-            AND (lower(e.canonical_name) = ANY($3) OR {named})",
-        named = crate::names::has_name_in("e", 1, 3),
-    ))
-    .bind(kb_id)
-    .bind(type_id)
-    .bind(&spellings)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .filter(|holder: &Candidate| !exclude.contains(&holder.id))
-    .collect();
+    let holders: Vec<Candidate> = sqlx::query_as(&identity_holders_sql())
+        .bind(kb_id)
+        .bind(type_id)
+        .bind(&spellings)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .filter(|holder: &Candidate| !exclude.contains(&holder.id))
+        .collect();
     match holders.as_slice() {
         [holder] => {
             match context {
@@ -532,8 +538,8 @@ async fn resolve_by_name(
            -- 被描述的东西没有名字（0044）：它的 canonical_name 只是显示用的描述，
            -- 不是召回的桥——两篇文档里描述得一样的两个东西不能因此接到一起
            AND e.description IS NULL
-           AND (lower(e.canonical_name) = ANY($3) OR {named})",
-        named = crate::names::has_name_in("e", 1, 3),
+           AND {named}",
+        named = crate::names::has_name_or_alias_in("e", 1, 3),
         exact_named = crate::names::has_name_in("e", 1, 4),
     ))
     .bind(kb_id)
@@ -1195,8 +1201,8 @@ async fn resolve_type_drift(
          WHERE e.kb_id = $1 AND e.type_id IS DISTINCT FROM $2 AND e.merged_into IS NULL
            -- 被描述的东西不参与名字召回（0044），同上
            AND e.description IS NULL
-           AND (lower(e.canonical_name) = ANY($3) OR {named})",
-        named = crate::names::has_name_in("e", 1, 3),
+           AND {named}",
+        named = crate::names::has_name_or_alias_in("e", 1, 3),
     ))
     .bind(kb_id)
     .bind(type_id)
@@ -1516,7 +1522,7 @@ pub async fn existing_by_name(
                      WHERE f.kb_id = e.kb_id AND (f.subject_id = e.id OR f.object_id = e.id) AND f.invalidated_at IS NULL AND {not_name}) DESC,
                    e.created_at
           LIMIT 1",
-        named = crate::names::has_name_in("e", 1, 2),
+        named = crate::names::has_name_or_alias_in("e", 1, 2),
         not_name = crate::names::not_a_name("f"),
     ))
     .bind(kb_id)
@@ -3370,3 +3376,7 @@ mod same_type_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "resolution_plan_tests.rs"]
+mod plan_tests;

@@ -126,6 +126,22 @@ pub fn named_ids(kb: usize, names: usize) -> String {
     )
 }
 
+/// 召回用：实体 `{entity}` 的规范名（没被合并的）或现行名字事实是第 `${names}` 个参数里的
+/// 小写名字之一。
+///
+/// 规范名与别名写成一个 id 集合，各走各的索引（`entities_kb_name_idx`、
+/// `facts_value_text_idx`）。写成 `lower(canonical_name) = ANY(..) OR {has_name_in}` 的话
+/// 一边是子查询，规划器只能把库里的实体扫一遍。
+pub fn has_name_or_alias_in(entity: &str, kb: usize, names: usize) -> String {
+    format!(
+        "{entity}.id IN (SELECT x.id FROM entities x
+                       WHERE x.kb_id = ${kb} AND lower(x.canonical_name) = ANY(${names})
+                         AND x.merged_into IS NULL
+                      UNION ALL {})",
+        named_ids(kb, names)
+    )
+}
+
 /// 查找用：实体 `{entity}` 有一条现行的名字事实 ILIKE 第 `${param}` 个参数。
 pub fn has_name_like(entity: &str, param: usize) -> String {
     format!(
