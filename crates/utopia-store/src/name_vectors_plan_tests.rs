@@ -14,58 +14,54 @@ async fn pending_reads_the_name_facts_through_the_predicate_index() -> anyhow::R
         return Ok(());
     };
     let pool = PgPool::connect(&url).await?;
-    let (org, ws, kb) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-    let (named, other, thing) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     let mut tx = pool.begin().await?;
-    for (sql, ids) in [
-        ("SET LOCAL enable_seqscan = off", vec![]),
-        (
-            "INSERT INTO organizations (id, name) VALUES ($1, 'plan')",
-            vec![org],
-        ),
-        (
-            "INSERT INTO workspaces (id, org_id, name) VALUES ($1, $2, 'plan')",
-            vec![ws, org],
-        ),
-        (
-            "INSERT INTO knowledge_bases (id, workspace_id, name) VALUES ($1, $2, 'plan')",
-            vec![kb, ws],
-        ),
-        (
-            "INSERT INTO relation_types (id, kb_id, key, label, builtin)
-             VALUES ($1, $3, 'known_as', 'known as', true), ($2, $3, 'mentions', 'mentions', false)",
-            vec![named, other, kb],
-        ),
-        (
-            "INSERT INTO entities (id, kb_id, canonical_name) VALUES ($1, $2, 'thing')",
-            vec![thing, kb],
-        ),
-        (
-            "INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_value)
-             SELECT gen_random_uuid(), $1, $2, CASE WHEN n % 10 = 0 THEN $3 ELSE $4 END,
-                    jsonb_build_object('value', 'v' || n)
-               FROM generate_series(1, 2000) n",
-            vec![kb, thing, named, other],
-        ),
-        ("ANALYZE facts", vec![]),
-    ] {
-        let mut q = sqlx::query(sql);
-        for id in ids {
-            q = q.bind(id);
-        }
-        q.execute(&mut *tx).await?;
-    }
-    let plan: Vec<String> = sqlx::query_scalar(&format!("EXPLAIN {PENDING_SQL}"))
-        .bind(kb)
-        .bind(crate::names::KNOWN_AS)
-        .bind(64_i64)
-        .fetch_all(&mut *tx)
+    sqlx::raw_sql(
+        "CREATE TEMP TABLE facts (LIKE public.facts INCLUDING ALL) ON COMMIT DROP;
+         CREATE TEMP TABLE relation_types (LIKE public.relation_types INCLUDING ALL) ON COMMIT DROP;
+         CREATE TEMP TABLE name_vectors (LIKE public.name_vectors INCLUDING ALL) ON COMMIT DROP;
+         CREATE TEMP TABLE fact_evidence (LIKE public.fact_evidence INCLUDING ALL) ON COMMIT DROP;
+         CREATE TEMP TABLE documents (LIKE public.documents INCLUDING ALL) ON COMMIT DROP;
+         CREATE TEMP TABLE sources (LIKE public.sources INCLUDING ALL) ON COMMIT DROP;
+         INSERT INTO relation_types (id, kb_id, key, label, builtin)
+         VALUES (md5('known-as')::uuid, md5('kb')::uuid, 'known_as', 'known as', true),
+                (md5('mentions')::uuid, md5('kb')::uuid, 'mentions', 'mentions', false);
+         INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_value)
+         SELECT gen_random_uuid(), md5('kb')::uuid, md5('thing')::uuid,
+                CASE WHEN n % 10 = 0 THEN md5('known-as')::uuid ELSE md5('mentions')::uuid END,
+                jsonb_build_object('value', 'v' || n)
+           FROM generate_series(1, 2000) n;
+         ANALYZE pg_temp.facts;
+         ANALYZE pg_temp.relation_types;
+         ANALYZE pg_temp.name_vectors;
+         ANALYZE pg_temp.fact_evidence;
+         ANALYZE pg_temp.documents;
+         ANALYZE pg_temp.sources;",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let kb: Uuid = sqlx::query_scalar("SELECT md5('kb')::uuid")
+        .fetch_one(&mut *tx)
         .await?;
+    let plan: serde_json::Value =
+        sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {PENDING_SQL}"))
+            .bind(kb)
+            .bind(crate::names::KNOWN_AS)
+            .bind(64_i64)
+            .fetch_one(&mut *tx)
+            .await?;
     tx.rollback().await?;
 
-    let plan = plan.join("\n");
-    assert!(plan.contains("facts_live_predicate_idx"), "{plan}");
-    assert!(!plan.contains("Sort"), "{plan}");
+    // 两百条名字、一千八百条别的：以谓词为索引条件只读名字事实，顺扫或沿库索引会读满两千。
+    // 不查 Sort：空的证据一侧规划器爱排不排，与这里要守的无关
+    let visited = rows_visited(&plan[0]["Plan"], "facts");
+    assert!(
+        visited > 0 && visited <= 200,
+        "read {visited} facts: {plan}"
+    );
+    assert!(
+        plan.to_string().contains("(kb_id = ") && plan.to_string().contains("predicate_id = $0"),
+        "{plan}"
+    );
     Ok(())
 }
 
@@ -126,8 +122,98 @@ async fn dropping_vectors_reads_only_the_selected_documents_evidence() -> anyhow
     Ok(())
 }
 
+/// 补向量每篇文档都跑一次 `pending`：它列的是一个库的名字，核对身份证据时只该读这个库自己的
+/// 证据。别的库有一个很大的身份来源时，不能为了这个库的几十个候选把它的证据读一遍。
+/// 临时表复制迁移后的列和索引，统计只来自本例；比访问行数，不比耗时。
+#[tokio::test]
+async fn pending_names_read_only_their_own_bases_identity_evidence() -> anyhow::Result<()> {
+    let Some(url) = crate::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPool::connect(&url).await?;
+    let mut tx = pool.begin().await?;
+    sqlx::raw_sql(
+        "CREATE TEMP TABLE facts (LIKE public.facts INCLUDING ALL) ON COMMIT DROP;
+         CREATE TEMP TABLE relation_types (LIKE public.relation_types INCLUDING ALL) ON COMMIT DROP;
+         CREATE TEMP TABLE name_vectors (LIKE public.name_vectors INCLUDING ALL) ON COMMIT DROP;
+         CREATE TEMP TABLE fact_evidence (LIKE public.fact_evidence INCLUDING ALL) ON COMMIT DROP;
+         CREATE TEMP TABLE documents (LIKE public.documents INCLUDING ALL) ON COMMIT DROP;
+         CREATE TEMP TABLE sources (LIKE public.sources INCLUDING ALL) ON COMMIT DROP;
+         INSERT INTO relation_types (id, kb_id, key, label, builtin)
+         VALUES (md5('target-known-as')::uuid, md5('target')::uuid, 'known_as', 'known as', true),
+                (md5('other-known-as')::uuid, md5('other')::uuid, 'known_as', 'known as', true);
+         -- 目标库：三万条名字；前十条还没有向量，接着两万条有身份证据所以不留向量，其余有向量
+         INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_value)
+         SELECT md5('target-fact-' || n)::uuid, md5('target')::uuid, md5('thing')::uuid,
+                md5('target-known-as')::uuid, jsonb_build_object('value', 'name-' || n)
+           FROM generate_series(1, 30000) n;
+         INSERT INTO name_vectors (fact_id, kb_id, entity_id, embedding)
+         SELECT md5('target-fact-' || n)::uuid, md5('target')::uuid, md5('thing')::uuid, '[1,0,0]'::vector
+           FROM generate_series(20011, 30000) n;
+         INSERT INTO sources (id, kb_id, kind, name, config)
+         VALUES (md5('target-source')::uuid, md5('target')::uuid, 'statements', 'identity',
+                 '{\"names\": \"identity\"}');
+         INSERT INTO documents (id, kb_id, source_id, filename, sha256, external_key)
+         VALUES (md5('target-document')::uuid, md5('target')::uuid, md5('target-source')::uuid,
+                 'target-document', md5('target-document'), 'target');
+         INSERT INTO fact_evidence (fact_id, chunk_id, document_id)
+         SELECT md5('target-fact-' || n)::uuid, gen_random_uuid(), md5('target-document')::uuid
+           FROM generate_series(11, 20010) n;
+         -- 别的库：一个身份来源，五千篇文档，六万条证据落在它自己的名字上
+         INSERT INTO sources (id, kb_id, kind, name, config)
+         VALUES (md5('other-source')::uuid, md5('other')::uuid, 'statements', 'identity',
+                 '{\"names\": \"identity\"}');
+         INSERT INTO documents (id, kb_id, source_id, filename, sha256, external_key)
+         SELECT md5('other-document-' || n)::uuid, md5('other')::uuid, md5('other-source')::uuid,
+                'document-' || n, md5(n::text), n::text
+           FROM generate_series(1, 30000) n;
+         INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_value)
+         SELECT md5('other-fact-' || n)::uuid, md5('other')::uuid, md5('thing')::uuid,
+                md5('other-known-as')::uuid, jsonb_build_object('value', 'other-' || n)
+           FROM generate_series(1, 60000) n;
+         INSERT INTO fact_evidence (fact_id, chunk_id, document_id)
+         SELECT md5('other-fact-' || (n % 60000 + 1))::uuid, gen_random_uuid(),
+                md5('other-document-' || (n % 30000 + 1))::uuid
+           FROM generate_series(1, 300000) n;
+         ANALYZE pg_temp.facts;
+         ANALYZE pg_temp.relation_types;
+         ANALYZE pg_temp.fact_evidence;
+         ANALYZE pg_temp.documents;
+         ANALYZE pg_temp.sources;",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    let target: Uuid = sqlx::query_scalar("SELECT md5('target')::uuid")
+        .fetch_one(&mut *tx)
+        .await?;
+    let plan: serde_json::Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {PENDING_SQL}"
+    ))
+    .bind(target)
+    .bind(crate::names::KNOWN_AS)
+    // 上限比候选多：规划器不会指望读到前几行就停，而要算整个反连接的代价
+    .bind(10_000_i64)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+
+    let visited = evidence_rows_visited(&plan[0]["Plan"]);
+    // 目标库自己有两万条身份证据，读一遍它们是应当的；别的库的三十万条不该被读
+    let own_evidence = 20_010;
+    assert!(
+        visited < 2 * own_evidence,
+        "read {visited} evidence rows, the base has {own_evidence}: {plan}"
+    );
+    Ok(())
+}
+
 fn evidence_rows_visited(node: &serde_json::Value) -> u64 {
-    let own_rows = if node["Relation Name"] == "fact_evidence"
+    rows_visited(node, "fact_evidence")
+}
+
+fn rows_visited(node: &serde_json::Value, relation: &str) -> u64 {
+    let own_rows = if node["Relation Name"] == relation
         && node["Node Type"]
             .as_str()
             .is_some_and(|kind| kind.ends_with("Scan"))
@@ -142,7 +228,12 @@ fn evidence_rows_visited(node: &serde_json::Value) -> u64 {
     own_rows
         + node["Plans"]
             .as_array()
-            .map(|children| children.iter().map(evidence_rows_visited).sum::<u64>())
+            .map(|children| {
+                children
+                    .iter()
+                    .map(|child| rows_visited(child, relation))
+                    .sum::<u64>()
+            })
             .unwrap_or(0)
 }
 
