@@ -142,6 +142,10 @@ async fn prune_seeded(
     age: &str,
     count: i64,
 ) -> anyhow::Result<(u64, i64)> {
+    // prune_done sweeps every old done row of the shared jobs table, so two of these
+    // running together delete each other's rows and can deadlock on batch row locks.
+    static ONE_PRUNE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _only_prune_running = ONE_PRUNE_AT_A_TIME.lock().await;
     let url = crate::test_db::url().expect("db url checked by caller");
     let pool = PgPool::connect(&url).await?;
     let kind = format!("{kind_prefix}_{}", uuid::Uuid::now_v7().simple());
