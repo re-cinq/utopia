@@ -1,9 +1,9 @@
-//! 补向量每篇文档都跑一次 `pending`（#1296）：它得以谓词为索引条件走 `facts_live_predicate_idx`，
-//! 只读这个库的名字事实、按 id 顺序读，不用排序。改回 JOIN 时规划器会沿 `facts_kb_id_key` 读整个库。
+//! The vector backfill runs `pending` once per document (#1296): it reaches the index through the predicate as its index condition on `facts_live_predicate_idx`,
+//! reads only this library's name facts, in id order, with no sort. If it goes back to a JOIN, the planner reads the whole library along `facts_kb_id_key`.
 //!
-//! 规划器按统计选索引：库是空的时候几个索引代价一样，选哪个看运气（别的测试同时在写 facts，
-//! 选择就会翻）。所以这里在回滚的事务里造一个两千条事实、十分之一是名字的库并 ANALYZE，
-//! 比的是有数据时它走哪条路。
+//! The planner picks indexes by statistics: when the library is empty, several indexes cost the same and which one is chosen is luck (other tests write to facts at the same time,
+//! so the choice would flip). So here, inside a rolled-back transaction, we build a library of 2000 facts, one tenth of them names, and ANALYZE it,
+//! and check which path it takes with data present.
 use super::{DROP_FOR_DOCUMENT_SQL, DROP_FOR_SOURCE_SQL, PENDING_SQL};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -51,8 +51,8 @@ async fn pending_reads_the_name_facts_through_the_predicate_index() -> anyhow::R
             .await?;
     tx.rollback().await?;
 
-    // 两百条名字、一千八百条别的：以谓词为索引条件只读名字事实，顺扫或沿库索引会读满两千。
-    // 不查 Sort：空的证据一侧规划器爱排不排，与这里要守的无关
+    // 200 names and 1800 other facts: using the predicate as the index condition reads only name facts; a sequential scan or the library index would read all 2000.
+    // No check on Sort: on the empty evidence side the planner likes to sort or not sort, which is unrelated to what this guards.
     let visited = rows_visited(&plan[0]["Plan"], "facts");
     assert!(
         visited > 0 && visited <= 200,
@@ -65,9 +65,9 @@ async fn pending_reads_the_name_facts_through_the_predicate_index() -> anyhow::R
     Ok(())
 }
 
-/// 0071 的清向量每篇身份文档都走一次，不能读完别的文档的证据才挑中这一篇（#1408）。
-/// 临时表复制迁移后的列和索引，统计只来自本例，避免别的测试的写入改变查询计划。
-/// 这里约束选择性高的小来源；一次覆盖很多文档时，顺扫可能更便宜，应由规划器选择。
+/// 0071's clear-vectors step runs once for each identity document, and it must not read the evidence of other documents before it picks this one (#1408).
+/// The temporary table copies the migrated columns and indexes; statistics come only from this case, so other tests' writes do not change the query plan.
+/// This pins down a small, highly selective source; when one run covers many documents, a sequential scan may be cheaper, and the planner should choose.
 #[tokio::test]
 async fn dropping_vectors_reads_only_the_selected_documents_evidence() -> anyhow::Result<()> {
     let Some(url) = crate::test_db::url() else {
@@ -105,7 +105,7 @@ async fn dropping_vectors_reads_only_the_selected_documents_evidence() -> anyhow
         (DROP_FOR_DOCUMENT_SQL, document, 20),
         (DROP_FOR_SOURCE_SQL, source, 40),
     ] {
-        // 真正执行删除，但每次都回到相同的向量集合。比访问行数，不把机器快慢变成断言。
+        // It really runs the delete, but each time it goes back to the same vector set. It compares rows accessed, not machine speed, so the test is not an assertion about the hardware.
         sqlx::query("SAVEPOINT plan_case").execute(&mut *tx).await?;
         let plan: serde_json::Value =
             sqlx::query_scalar(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {query}"))
@@ -122,9 +122,9 @@ async fn dropping_vectors_reads_only_the_selected_documents_evidence() -> anyhow
     Ok(())
 }
 
-/// 补向量每篇文档都跑一次 `pending`：它列的是一个库的名字，核对身份证据时只该读这个库自己的
-/// 证据。别的库有一个很大的身份来源时，不能为了这个库的几十个候选把它的证据读一遍。
-/// 临时表复制迁移后的列和索引，统计只来自本例；比访问行数，不比耗时。
+/// The vector backfill runs `pending` once per document: it lists one library's names, and when checking identity evidence it should read only that library's own
+/// evidence. When another library has a very large identity source, it must not read through that library's evidence just to pick a few dozen candidates of this one.
+/// The temporary table copies the migrated columns and indexes; statistics come only from this case. Compare rows accessed, not elapsed time.
 #[tokio::test]
 async fn pending_names_read_only_their_own_bases_identity_evidence() -> anyhow::Result<()> {
     let Some(url) = crate::test_db::url() else {
@@ -192,14 +192,14 @@ async fn pending_names_read_only_their_own_bases_identity_evidence() -> anyhow::
     ))
     .bind(target)
     .bind(crate::names::KNOWN_AS)
-    // 上限比候选多：规划器不会指望读到前几行就停，而要算整个反连接的代价
+    // The limit is larger than the candidate count: the planner does not count on reading the first few rows and stopping, but computes the cost of the whole anti-join.
     .bind(10_000_i64)
     .fetch_one(&mut *tx)
     .await?;
     tx.rollback().await?;
 
     let visited = evidence_rows_visited(&plan[0]["Plan"]);
-    // 目标库自己有两万条身份证据，读一遍它们是应当的；别的库的三十万条不该被读
+    // The target library has 20,000 identity evidence rows of its own, and reading those is expected; another library's 300,000 should not be read.
     let own_evidence = 20_010;
     assert!(
         visited < 2 * own_evidence,
@@ -237,8 +237,8 @@ fn rows_visited(node: &serde_json::Value, relation: &str) -> u64 {
             .unwrap_or(0)
 }
 
-/// 删文档时按块找出处（`lock_cited_timelines`）从 `chunks` 连到 `fact_evidence.chunk_id`；
-/// 没有这一列的索引时，每次调用都顺扫整张证据表。关掉顺扫，看规划器有没有索引可走。
+/// When deleting a document, the source is found per block (`lock_cited_timelines`), linking from `chunks` to `fact_evidence.chunk_id`;
+/// without an index on that column, every call does a sequential scan of the whole evidence table. Turn off sequential scans to see whether the planner has an index it can use.
 #[tokio::test]
 async fn the_evidence_of_a_chunk_is_found_by_an_index() -> anyhow::Result<()> {
     let Some(url) = crate::test_db::url() else {

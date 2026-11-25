@@ -1,4 +1,4 @@
-//! 签名的陈述数和例句名额不随证据条数增长。
+//! The statement count and example-sentence slots of a signature do not grow with the number of evidence rows.
 use sqlx::PgPool;
 use utopia_store::{graph, phrase_bindings};
 use uuid::Uuid;
@@ -68,8 +68,8 @@ async fn multiple_evidence_does_not_multiply_statements_or_examples() -> anyhow:
                 .0,
             );
         }
-        // 同一陈述有三条证据，也只能占一个例句名额。最早的证据没有引用位置，
-        // 后来的完整位置必须优先；只按 chunk_id 排序会选错。
+        // One statement has three pieces of evidence, but it can take only one example-sentence slot. The earliest evidence has no citation position,
+        // so the later full position must win; sorting by chunk_id alone would pick the wrong one.
         for i in 0..3 {
             let (doc, chunk) = (Uuid::now_v7(), Uuid::now_v7());
             let text = if i == 2 {

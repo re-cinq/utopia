@@ -303,9 +303,9 @@ async fn bench_entity_detail_against_real_tables() -> anyhow::Result<()> {
     }
     samples.sort();
 
-    // 自建自拆：装的这一份语料到此为止。组织一删，工作区、库、文档、分块、事实
-    // 一路级联跟着走（外键都是 ON DELETE CASCADE）。**量完立刻拆**，不放到写报告
-    // 之后——报告写不出来也不该把上百万行留在别人的库里
+    // Build and tear down on our own: the corpus loaded in this run lasts only until here. Once the organisation is deleted, the workspace, KB, documents, chunks and facts
+    // all cascade away along with it (every foreign key is ON DELETE CASCADE). **Tear down immediately after measuring**, rather than leaving it until after
+    // the report — if the report cannot be written, that is no reason to leave millions of rows in someone else's DB
     sqlx::query("DELETE FROM organizations WHERE id = $1")
         .bind(_org_id)
         .execute(&pool)

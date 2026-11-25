@@ -1,11 +1,11 @@
-//! 没有类的实体也要撞得上同名者（0044 第一刀之后的实测）。
+//! Entities with no class must also meet their namesakes (measured after the first slice of 0044).
 //!
-//! 开放图谱里的实体都没有类：类由对齐来定，抽取只记文档的字。`resolve_mention` 的候选
-//! 查询从前写的是 `e.type_id = $2`，传 NULL 时这个条件永远不成立——于是同一个库里
-//! 「Securities and Exchange Commission」和它的全大写写法成了两个实体，只有建实体时
-//! 的精确同名匹配还兜得住。这里守的是：两次没有类的提及，写法只差大小写，落到同一个实体。
+//! Entities in the open graph all have no class: the class is set by alignment, and extraction only records the document's characters. The candidate
+//! query in `resolve_mention` used to be written `e.type_id = $2`, and when NULL was passed that condition never held — so in one store
+//! "Securities and Exchange Commission" and its all-caps spelling became two entities, and only exact same-name matching at entity creation caught it.
+//! Here what is guarded: two mentions with no class, whose spellings differ only in case, land on the same entity.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过。自建自拆，绝不碰已有的库。
+//! Skipped when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use sqlx::PgPool;
 use uuid::Uuid;

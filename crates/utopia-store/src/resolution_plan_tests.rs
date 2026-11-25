@@ -1,14 +1,14 @@
-//! 按名字找身份持有者（`resolve_identity_name`）每个实体都跑一次：本名分支和别名分支都得
-//! 按名字走索引读，否则生产库里一个名字要读完这个库所有无类实体和所有 known_as 事实。
+//! Finding the identity holder by name (`resolve_identity_name`) runs once per entity: both the primary-name branch and the alias branch must
+//! read through the name index, otherwise in a production store one name would read every untyped entity and every known_as fact in the store.
 //!
-//! 规划器按统计选路，而共享库里别的测试在同时写、ANALYZE 同样的表，统计会翻。所以这里用
-//! 临时表复制迁移后的列和索引（统计只来自本例），造两万个无类实体和两万条名字事实，
-//! 比的是真正执行时读了多少行，不是规划器挑了哪个索引；关掉顺扫和哈希、归并连接，
-//! 剩下的路只有按索引找，估算偏了也不会把整个库读一遍。
+//! The planner chooses its path from statistics, while other tests in the shared store write to the same tables and ANALYZE them, so the statistics shift. So here we
+//! copy the migrated columns and indexes into a temporary table (so the statistics come only from this case), create twenty thousand untyped entities and twenty thousand name facts,
+//! and compare how many rows are actually read during execution, not which index the planner picked; with sequential scan, hash and merge joins turned off,
+//! the only path left is lookup by index, and even if the estimate is off, the whole store is not read.
 use super::identity_holders_sql;
 use uuid::Uuid;
 
-/// 两个名字各只对上一行；顺扫两万个实体或名字事实会远超这个数。
+/// Each name matches exactly one row; a sequential scan of twenty thousand entities or name facts would far exceed this number.
 const MOST_NAME_ROWS_READ: u64 = 50;
 
 /// A connection that sees only temp copies of `tables` (their columns and indexes, none of the
@@ -114,9 +114,9 @@ fn rows_visited(node: &serde_json::Value) -> u64 {
             .unwrap_or(0)
 }
 
-/// 生产库的形状：一个库里上百万条现行事实、几百种关系，known_as 只占百分之一，别名各不相同。
-/// 部分索引 `facts_value_text_idx` 的统计规划器不用，值的行数估成库行数的 0.5%（这里五千行），
-/// 而关系索引按“库行数 / 关系种类数”估成几行，于是规划器宁可把整个 known_as 读一遍再按值过滤。
+/// Shape of the production store: a store with millions of current facts and hundreds of relation kinds, known_as only one percent, and every alias different.
+/// The planner does not use the statistics of the partial index `facts_value_text_idx`, so it estimates the rows for a value at 0.5% of the store's rows (here, five thousand rows),
+/// while the relation index estimates by "store rows / relation kinds" as a few rows, so the planner would rather read the whole known_as and filter by value.
 const RELATION_KINDS: i32 = 300;
 const MOST_BUFFERS_TOUCHED: u64 = 200;
 

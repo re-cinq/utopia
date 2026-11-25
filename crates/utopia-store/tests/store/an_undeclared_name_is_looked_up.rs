@@ -1,5 +1,5 @@
-//! `existing_by_name`（#559）：一个没声明的主宾是不是库里已经有的东西。
-//! 不问类型，认别名，并掉的不算；没有就是没有。
+//! `existing_by_name` (#559): whether an undeclared subject or object is something already in the library.
+//! It does not ask about type, matches aliases, and a merged-away entity does not count; if there is no match, there is none.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -35,8 +35,8 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         .bind(kb)
         .execute(pool)
         .await?;
-    // 有类型的、带别名的一个；并掉的一个（同名，不该被找到）。
-    // 别名是一条名字事实（0041），不再是 entities 上的一列
+    // One with a type and an alias; one that was merged away (same name, must not be found).
+    // An alias is a name fact (0041), no longer a column on entities
     sqlx::query(
         "INSERT INTO entities (id, kb_id, type_id, canonical_name)
          VALUES ($1, $2, $3, 'Acme Corporation')",

@@ -164,7 +164,7 @@ async fn editing_what_a_rule_says_opens_a_version_and_a_conclusion_names_it() ->
             "the conclusion names the version it was drawn under"
         );
 
-        // 改名、改描述、开关：定义没变，不开版本
+        // Rename, change description, toggle: definition unchanged, so no version is opened
         business_rules::update(
             &pool,
             f.kb,
@@ -182,8 +182,8 @@ async fn editing_what_a_rule_says_opens_a_version_and_a_conclusion_names_it() ->
             "a label is not the definition"
         );
 
-        // 阈值 3000 → 2500：定义变了，版本 2 开、版本 1 关。W-1（3200）仍然满足，
-        // 结论没变，行留着，改指版本 2
+        // Threshold 3000 → 2500: definition changed, version 2 opened and version 1 closed. W-1 (3200) still satisfies it,
+        // conclusion unchanged, row kept, now pointing at version 2
         business_rules::update(
             &pool,
             f.kb,
@@ -219,7 +219,7 @@ async fn editing_what_a_rule_says_opens_a_version_and_a_conclusion_names_it() ->
         assert_eq!(same_row, derived, "the row is kept, not replaced");
         assert_eq!(under, Some(v2));
 
-        // 证明说得出凭哪一版、那一版怎么说
+        // Proves it can say which version the conclusion came from and how that version phrased it
         let proof = utopia_store::reasoning::proof(&pool, f.kb, derived)
             .await?
             .expect("the conclusion stands");
@@ -233,7 +233,7 @@ async fn editing_what_a_rule_says_opens_a_version_and_a_conclusion_names_it() ->
             serde_json::json!(2500.0)
         );
 
-        // 换个结论类：版本 3；结论换了，旧行作废、新行凭版本 3
+        // Different conclusion class: version 3; the conclusion changed, so the old row is voided and the new row comes from version 3
         business_rules::update(
             &pool,
             f.kb,
@@ -259,7 +259,7 @@ async fn editing_what_a_rule_says_opens_a_version_and_a_conclusion_names_it() ->
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
         assert_eq!((report.invalidated, report.inserted), (1, 1), "{report:?}");
 
-        // 历史：新的在前，带每一版此刻成立的条数和定义里提到的名字
+        // History: newest first, with each version's count of currently holding rows and the names mentioned in its definition
         let history = business_rules::versions(&pool, f.kb, rule).await?;
         assert_eq!(history.len(), 3);
         assert_eq!(history[0]["seq"], 3);
@@ -281,7 +281,7 @@ async fn editing_what_a_rule_says_opens_a_version_and_a_conclusion_names_it() ->
             "Gas-bearing well"
         );
 
-        // 不在这个库的规则：404，而不是空历史
+        // Rule not in this database: 404, not an empty history
         assert!(business_rules::versions(&pool, f.kb, Uuid::now_v7())
             .await
             .is_err());

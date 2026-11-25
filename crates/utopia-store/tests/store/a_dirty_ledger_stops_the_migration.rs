@@ -1,26 +1,26 @@
-//! 0070 的 §0 前置检查：往一个**已经有**跨库坏行的库上装
-//! 「出处不许跨库」的不变量，迁移必须确定性中止——报出是哪条边、坏了几行，
-//! 而不是装上之后替坏数据背书。
+//! 0070 §0 pre-check: installing the invariant "provenance must not cross KBs" onto a database that **already has** cross-KB bad rows
+//! — the migration must abort deterministically, reporting which edge is broken and how many rows,
+//! rather than installing and endorsing the bad data.
 //!
-//! 做法：开一个隔离库，按迁移文件顺序把 ≤0069 的逐个跑掉（每个一个事务，
-//! 与 sqlx::migrate 同一语义），手工塞进一条 0070 之前合法、之后非法的行，
-//! 再跑 0070 本体：
-//!   - 干净的 0069 库 → 0070 成功，触发器在场；
-//!   - 脏的 0069 库 → 0070 报错且报对边名，整个迁移随事务回滚——触发器一个不留。
+//! How: open an isolated database and run the migrations up to ≤0069 one by one in file order (each in its own transaction,
+//! the same semantics as sqlx::migrate), hand-insert a row that is legal before 0070 and illegal after it,
+//! then run 0070 itself:
+//!   - clean 0069 database → 0070 succeeds, trigger in place;
+//!   - dirty 0069 database → 0070 errors and names the edge, and the whole migration rolls back with its transaction — not a single trigger left behind.
 //!
-//! 建库失败（角色没权限的环境）与没有 UTOPIA_DATABASE_URL 一样处理：跳过。
+//! Failing to create the database (in an environment whose role lacks permission) is handled like a missing UTOPIA_DATABASE_URL: skipped.
 
 use sqlx::{Acquire, PgPool};
 use uuid::Uuid;
 
-/// 维护库的地址：`…/utopia` → `…/postgres`
+/// Address of the maintenance database: `…/utopia` → `…/postgres`
 fn admin_url() -> Option<String> {
     let url = utopia_store::test_db::url()?;
     let (head, _) = url.rsplit_once('/')?;
     Some(format!("{head}/postgres"))
 }
 
-/// 按文件顺序跑 ≤ `through` 的迁移，各自一个事务（与 sqlx::migrate 同一形状）
+/// Runs the migrations with version ≤ `through` in file order, each in its own transaction (same shape as sqlx::migrate)
 async fn migrate_to(pool: &PgPool, through: i64) -> anyhow::Result<()> {
     let migrator = sqlx::migrate!("../../migrations");
     let mut conn = pool.acquire().await?;
@@ -50,7 +50,7 @@ async fn migration_70(pool: &PgPool) -> Result<(), sqlx::Error> {
     }
 }
 
-/// 隔离库：建 → 迁到 0069 → 返回（库名, 连接池）。失败就地跳过
+/// Isolated database: create → migrate to 0069 → return (database name, pool). On failure, skip in place
 async fn scratch(suffix: &str) -> Option<(String, PgPool)> {
     let admin = admin_url()?;
     let admin_pool = PgPool::connect(&admin).await.ok()?;
@@ -85,8 +85,8 @@ async fn drop_scratch(name: &str) {
     }
 }
 
-/// 0070 之前合法的最小坏账：库 A 的文档+段落+实体+事实，库 B 的实体与段落——
-/// 证据行把 A 的事实配到 B 的段落上
+/// The smallest bad case that is legal before 0070: KB A's document, chunk, entity, and fact, and KB B's entity and chunk —
+/// an evidence row pairs A's fact with B's chunk
 async fn seed_dirty(pool: &PgPool) -> anyhow::Result<()> {
     let (org, ws, a, b) = (
         Uuid::now_v7(),
@@ -134,7 +134,7 @@ async fn seed_dirty(pool: &PgPool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
     }
-    // B 库自己的段落——0070 之前把它配到 A 的事实上，什么都不会拦
+    // B's own chunk — before 0070, nothing stops it being paired with A's fact
     sqlx::query(
         "INSERT INTO chunks (id, kb_id, document_id, seq, text) VALUES ($1, $2, $3, 0, 'x')",
     )
@@ -154,7 +154,7 @@ async fn seed_dirty(pool: &PgPool) -> anyhow::Result<()> {
     .bind(ent_a)
     .execute(pool)
     .await?;
-    // 坏行：A 的事实配 B 的段落
+    // Bad row: A's fact paired with B's chunk
     sqlx::query("INSERT INTO fact_evidence (fact_id, chunk_id) VALUES ($1, $2)")
         .bind(fact_a)
         .bind(chunk_b)

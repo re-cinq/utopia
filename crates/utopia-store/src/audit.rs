@@ -1,5 +1,5 @@
-//! 审计日志：谁在何时对什么做了什么。纯审计——只记录与展示，不承载回滚等衍生功能。
-//! 普通事件由调用方尽力记录；审核裁决用 `record_on` 与图修改一起提交。
+//! Audit log: who did what to what, and when. Pure audit: it only records and displays, and carries no derived features such as rollback.
+//! Ordinary events are recorded by the caller on a best-effort basis; review verdicts are committed together with the graph change via `record_on`.
 
 use sqlx::PgPool;
 use utopia_core::models::AuditEventView;
@@ -27,8 +27,8 @@ pub async fn record(
     .await
 }
 
-/// 令牌代人做的动作在 detail 里记下是哪一枚（0014 决定 6）：撤销之前，管理员要查得出
-/// 这枚令牌做过什么。会话来的（None）原样返回
+/// The action performed on behalf of a token is recorded with which one it was in detail (0014 decision 6): before revoking, an admin must be able to tell
+/// what that token did. Session-originated calls (None) are returned as-is
 pub fn via_token(mut detail: serde_json::Value, token_id: Option<Uuid>) -> serde_json::Value {
     if let (Some(token_id), Some(fields)) = (token_id, detail.as_object_mut()) {
         fields.insert(
@@ -39,11 +39,11 @@ pub fn via_token(mut detail: serde_json::Value, token_id: Option<Uuid>) -> serde
     detail
 }
 
-/// 请求的来源信息。由 HTTP 层在每个请求外层 scope 进 [`CLIENT`]，`record_opt`
-/// 自行读取——否则 25 个调用点每一个都要多带两个与业务无关的参数。
+/// The request's source info. The HTTP layer scopes it into [`CLIENT`] around each request, and `record_opt`
+/// reads it itself — otherwise each of the 25 call sites would have to carry two parameters unrelated to the business logic.
 ///
-/// 后台任务（攒批裁决、定时同步）不在任何请求之内，读到的是 None，本就该如此：
-/// 那些动作确实没有客户端。
+/// Background tasks (batched verdicts, scheduled syncs) are not inside any request, so they read None, which is exactly right:
+/// those actions really have no client.
 #[derive(Debug, Clone, Default)]
 pub struct ClientContext {
     pub ip: Option<String>,
@@ -54,12 +54,12 @@ tokio::task_local! {
     pub static CLIENT: ClientContext;
 }
 
-/// 取当前请求的来源；不在请求上下文中（后台任务）时返回全空。
+/// Gets the current request's source; returns all-empty when not inside a request context (background tasks).
 fn client_context() -> ClientContext {
     CLIENT.try_with(|c| c.clone()).unwrap_or_default()
 }
 
-/// 无人类操作者的系统事件（如 AI 裁决自动合并）走这里：actor 为 NULL。
+/// System events with no human actor (such as AI verdicts auto-merging) go through here: actor is NULL.
 pub async fn record_opt(
     pool: &PgPool,
     kb_id: Option<Uuid>,
@@ -93,8 +93,8 @@ pub async fn record_on(
     detail: serde_json::Value,
 ) -> AppResult<()> {
     let ctx = client_context();
-    // 身份快照：用户日后被删除时（0025 之后行会留下），台账仍认得出是谁，而不是
-    // 只剩一串 UUID。此刻查是可靠的——操作正在发生，人还在。
+    // Identity snapshot: when the user is later deleted (rows after 0025 keep it), the ledger can still tell who it was, rather than
+    // only a UUID. Looking this up now is reliable — the operation is happening, and the person is still around.
     let actor_label: Option<String> = match actor_id {
         Some(id) => {
             sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
@@ -125,7 +125,7 @@ pub async fn record_on(
     Ok(())
 }
 
-/// 审核决策台账：只取 review 域的动作（review./fact./conflict./merge.），服务端分页。
+/// Review decision ledger: only takes review-domain actions (review./fact./conflict./merge.), paginated server-side.
 pub async fn review_history(
     pool: &PgPool,
     kb_id: Uuid,
@@ -153,19 +153,19 @@ pub async fn review_history(
     Ok((rows, total))
 }
 
-/// 一个知识库的审计台账，**带分页与筛选**。
+/// A knowledge base's audit ledger, **with pagination and filtering**.
 ///
-/// 从前是固定最近 100 条、无分页无筛选——而台账是合规材料，「只看得到最近
-/// 一百条」等于查不了历史。三个筛选是按真实的查法挑的：
+/// It used to be fixed at the latest 100 entries, with no pagination and no filtering — but the ledger is compliance material, and "only able to see the latest
+/// one hundred" makes history impossible to query. The three filters were chosen from real ways of querying:
 ///
-/// - `action`：查一类动作（「谁改过类型」「有哪些拒绝」）。前缀匹配而不是
-///   全等，因为动作名本身分层（`entity.retyped` / `entity.renamed`），
-///   传 `entity.` 就能把一族捞出来
-/// - `actor`：查一个人做过什么。合规审计最常见的问题
-/// - `since` / `until`：查一段时间。事故复盘要的就是这个
+/// - `action`: query one class of action ("who changed a type", "what was rejected"). Prefix match rather than
+///   exact match, because action names are layered (`entity.retyped` / `entity.renamed`),
+///   so passing `entity.` pulls out a whole family
+/// - `actor`: query what one person did. The most common question in compliance audits
+/// - `since` / `until`: query a span of time. Incident reviews need exactly this
 ///
-/// 一并回总数，否则分页器不知道有几页——而「不知道有几页」正是这一档
-/// 从前那个 100 的翻版。
+/// Also returns the total, otherwise the pager does not know how many pages there are — and "not knowing how many pages" is the same
+/// as the 100 cap it replaces.
 #[allow(clippy::too_many_arguments)]
 pub async fn list_for_kb(
     pool: &PgPool,
@@ -177,8 +177,8 @@ pub async fn list_for_kb(
     limit: i64,
     offset: i64,
 ) -> AppResult<(Vec<AuditEventView>, i64)> {
-    // 四个筛选都写成「参数为空就不生效」，这样一条 SQL 覆盖全部组合——
-    // 拼字符串会在这里长出十六个分支，而每个分支都是一次注入面
+    // All four filters are written as "no effect when the parameter is empty", so one SQL statement covers every combination —
+    // string concatenation would grow sixteen branches here, and each branch is an injection surface
     const WHERE: &str = "WHERE e.kb_id = $1
            AND ($2::text IS NULL OR e.action LIKE $2 || '%')
            AND ($3::uuid IS NULL OR e.actor_id = $3)
@@ -213,8 +213,8 @@ pub async fn list_for_kb(
     Ok((rows, total))
 }
 
-/// 这个库的台账里出现过哪些动作。**筛选下拉要按实际有的填**——列一个
-/// 全部动作的硬编码清单，用户会看到一堆这个库从来没发生过的选项。
+/// The actions that have occurred in this KB's ledger. **Filter dropdowns must be filled from what actually exists** — a hardcoded
+/// list of all actions would show the user a pile of options that never happened in this KB.
 pub async fn actions_for_kb(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<String>> {
     Ok(
         sqlx::query_scalar("SELECT DISTINCT action FROM audit_events WHERE kb_id = $1 ORDER BY 1")

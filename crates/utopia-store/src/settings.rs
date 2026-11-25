@@ -3,8 +3,8 @@ use utopia_core::models::LlmSettings;
 use utopia_core::{secrets, AppError, AppResult};
 use uuid::Uuid;
 
-/// 出库即开封：四把 API key 在库里是封印的（`utopia_core::secrets`）。
-/// 任何返回 `LlmSettings` 的查询都从这里过
+/// Sealed on leaving the store: the four API keys are sealed in the database (`utopia_core::secrets`).
+/// Every query that returns `LlmSettings` passes through here
 fn opened(mut s: LlmSettings) -> AppResult<LlmSettings> {
     s.chat_api_key = secrets::open_opt(s.chat_api_key.as_deref()).map_err(AppError::Other)?;
     s.embed_api_key = secrets::open_opt(s.embed_api_key.as_deref()).map_err(AppError::Other)?;
@@ -23,7 +23,7 @@ pub async fn get(pool: &PgPool, workspace_id: Uuid) -> AppResult<Option<LlmSetti
     row.map(opened).transpose()
 }
 
-/// upsert；api_key 传 None 表示保留旧值（前端不回传密钥）。
+/// Upsert; passing None for api_key keeps the old value (the frontend does not send keys back).
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert(
     pool: &PgPool,
@@ -36,7 +36,7 @@ pub async fn upsert(
     embed_model: Option<&str>,
     embed_dim: Option<i32>,
 ) -> AppResult<LlmSettings> {
-    // 入库即封印；None 仍是 None（保留旧值）
+    // Sealed on entry to the database; None stays None (keeps the old value)
     let chat_api_key = secrets::seal_opt(chat_api_key);
     let embed_api_key = secrets::seal_opt(embed_api_key);
     let row: LlmSettings = sqlx::query_as(
@@ -68,8 +68,8 @@ pub async fn upsert(
     opened(row)
 }
 
-/// 对话模型的推理强度，单独改：它跟着对话模型那张卡走，但 `upsert` 的整体替换不认识它，
-/// 老调用方不传也不该把它清掉。`None` = 清空（回到端点默认）
+/// The reasoning effort of the chat model, changed on its own: it follows the chat model's card, but the whole-row replacement in `upsert` does not know about it,
+/// so an old caller that does not pass it should not clear it either. `None` = clear (back to the endpoint default)
 pub async fn set_chat_reasoning_effort(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -85,13 +85,13 @@ pub async fn set_chat_reasoning_effort(
     Ok(())
 }
 
-/// 版面识别服务的设置，单独存：它在管理页上是自己的一张卡片，存它不该碰对话和嵌入那几列
-/// （反过来也一样——`upsert` 不写这三列）。`api_key` 传 None 保留旧值；地址传 None = 关掉。
+/// Settings for the layout-recognition service, stored separately: it is its own card on the admin page, so saving it must not touch the chat and embedding columns
+/// (and the reverse too — `upsert` does not write these three columns). `api_key` None keeps the old value; address None = switch it off.
 ///
-/// `provider` 是 `mineru` 或 `ark`（0065）。**换供应商时旧密钥不保留**：留空保留密钥是给
-/// 「改地址、换后端」用的，把 MinerU 前面那层代理的密钥发给方舟不是任何人想要的。比较和写在
-/// 同一条 SQL 里，两次保存并发也不会把旧密钥带过去
-/// 老客户端不传 `provider`：已有设置保留供应商和未传的模型，新设置默认 MinerU。
+/// `provider` is `mineru` or `ark` (0065). **The old key is not kept when the provider changes**: keeping the key when left blank is meant for
+/// "change the address, switch the backend"; sending MinerU's proxy-layer key to Ark is not what anyone wants. The comparison and the write are in
+/// the same SQL statement, so two concurrent saves cannot carry the old key across
+/// An old client that does not pass `provider` keeps the existing provider and the model it did not pass; new settings default to MinerU.
 pub async fn upsert_ocr(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -129,7 +129,7 @@ pub async fn upsert_ocr(
     opened(row)
 }
 
-/// 转写模型的设置，跟版面识别服务一样单独存（管理页上各是一张卡片）
+/// Settings for the transcription model, stored separately like the layout-recognition service (each is its own card on the admin page)
 pub async fn upsert_transcribe(
     pool: &PgPool,
     workspace_id: Uuid,

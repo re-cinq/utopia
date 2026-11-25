@@ -1,18 +1,18 @@
-//! 互斥违规（asymmetry、functional、inverse_functional）打在真库上（#624、#634）。
+//! Mutually exclusive violations (asymmetry, functional, inverse_functional) hit against a real database (#624, #634).
 //!
-//! 纯逻辑那部分——全排列下同一个键、首尾相接不算、连通块成组——在 `utopia-reason`
-//! 里跑。这里钉的是只有过一遍取数与落库才看得见的四样：
+//! The pure-logic part (the same key across all permutations, ends meeting not counting, connected components forming groups) runs in `utopia-reason`.
+//! What is pinned here is the four things only visible after one pass of fetching and storage:
 //!
-//! 1. **接任不进 Review。** 从前 `run` 把区间剥掉再查：一次调薪、一次换负责人、一次
-//!    上下级对调，各进一行。区间是 `timed_edges` 从库里读出来的，这一段纯逻辑测不到
-//! 2. **宾语侧记成自己的种类。** 从前落库是 `functional`，人照着去主语那一侧找
-//! 3. **换一个取数顺序，裁决照样接得上。** 这是 #624 报的那个序列：裁成
-//!    `axiom_relaxed`，公理与事实都没变，只是堆里的顺序变了，重跑——从前插了一行新的
-//!    open、原来那行不重开
-//! 4. **认可管的是它见过的那几条。** 组里多一条，要人再看；那条撤了，认可照样管着
-//!    剩下的，哪怕组的首尾（也就是键）已经变了
+//! 1. **A successor does not enter Review.** Previously `run` stripped the intervals before checking: a raise, a change of owner, a
+//!    swap of superiors and subordinates, each entered a row. The intervals are read from the database by `timed_edges`, which pure logic cannot test
+//! 2. **The object side is recorded as its own kind.** Previously storage recorded `functional`, and a person following it looked on the subject side
+//! 3. **Changing the fetch order, the ruling still lines up.** This is the sequence #624 reported: a ruling became
+//!    `axiom_relaxed`; neither the axiom nor the facts changed, only the order in the heap did; on re-running, a new
+//!    open row was inserted, and the original row was not reopened
+//! 4. **An acceptance governs only the facts it has seen.** An extra one in the group needs a person to look; once it is retracted, the acceptance still governs
+//!    the rest, even if the group's ends (i.e. its key) have changed
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` it skips rather than fails. It sets up and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_store::reasoning;
@@ -104,7 +104,7 @@ async fn entity(pool: &PgPool, f: &Fixture, name: &str) -> anyhow::Result<Uuid> 
     Ok(id)
 }
 
-/// 一条关系事实，区间 `[from, to)`，按天。两端都不给就是「从证据那天起一直成立」
+/// A relation fact, interval `[from, to)`, by day. Both ends unspecified means "holds from the evidence day onward"
 async fn fact(
     pool: &PgPool,
     f: &Fixture,
@@ -139,7 +139,7 @@ async fn fact(
     Ok(id)
 }
 
-/// open 的违规：(kind, left, right, path)
+/// Open violations: (kind, left, right, path)
 async fn open(pool: &PgPool, f: &Fixture) -> anyhow::Result<Vec<(String, Uuid, Uuid, Vec<Uuid>)>> {
     Ok(sqlx::query_as(
         "SELECT kind, left_fact, right_fact, path FROM axiom_violations
@@ -186,7 +186,7 @@ async fn a_succession_stays_out_of_review_and_an_overlap_comes_in() -> anyhow::R
         );
         let (a, b) = (entity(&pool, &f, "A").await?, entity(&pool, &f, "B").await?);
 
-        // ---- 一、三种接任：调薪首尾相接，换负责人中间空了一年，上下级前后对调
+        // ---- 1. Three kinds of succession: a raise with ends meeting, a change of owner with a year-long gap in between, and a superior/subordinate swap in either order
         fact(
             &pool,
             &f,
@@ -220,7 +220,7 @@ async fn a_succession_stays_out_of_review_and_an_overlap_comes_in() -> anyhow::R
         assert_eq!(r.found, 0, "三次接任，没有一处矛盾");
         assert!(open(&pool, &f).await?.is_empty());
 
-        // ---- 二、重叠才是矛盾。宾语侧记成 inverse_functional
+        // ---- 2. Overlap alone is the contradiction. The object side is recorded as inverse_functional
         let doubled = fact(&pool, &f, (lin, f.salary, k40), Some("2024-06-01"), None).await?;
         let second_lead = fact(&pool, &f, (kim, f.leads, aurora), Some("2025-10-01"), None).await?;
         reasoning::run(&pool, f.kb).await?;
@@ -274,9 +274,9 @@ async fn a_decision_follows_the_clash_not_the_scan_order() -> anyhow::Result<()>
         .execute(&pool)
         .await?;
 
-        // 公理没放宽、事实没动，只把先读到的那条挪到堆的后面：一次什么都不改的
-        // UPDATE 会写一个新的行版本，顺序扫描于是先读到另一条。从前这就换了键——
-        // 插一行新的 open，裁过的那行不重开（#624 的复现序列）
+        // The axiom not relaxed, the facts not changed, only the one read first moved to the back of the heap: an UPDATE that changes nothing
+        // writes a new row version, so a sequential scan reads the other one first. Previously this swapped the key:
+        // inserted a new open row, and the ruled row was not reopened (the reproduction sequence for #624)
         sqlx::query("UPDATE facts SET confidence = confidence WHERE id = $1")
             .bind(ab)
             .execute(&pool)
@@ -332,15 +332,15 @@ async fn an_acceptance_covers_the_facts_it_saw() -> anyhow::Result<()> {
         );
         assert!(open(&pool, &f).await?.is_empty());
 
-        // ---- 组里多了一条认可时没见过的：那是新情况，要人再看
+        // ---- A fact added to the group that was not seen when accepted: that is a new situation, a person must look again
         let r = fact(&pool, &f, (lin, f.salary, z), Some("2024-03-01"), None).await?;
         reasoning::run(&pool, f.kb).await?;
         let rows = open(&pool, &f).await?;
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].3, sorted(vec![p, q, r]));
 
-        // ---- 那条撤了：剩下的仍是认可过的那两条。组的首尾可能已经换了，键跟着换，
-        // 认可照样管着——按事实比，不按键比
+        // ---- That one retracted: the remaining two that were accepted are still those. The ends of the group may have changed, and the key with them,
+        // the acceptance still governs: compared by fact, not by key
         sqlx::query("UPDATE facts SET invalidated_at = now() WHERE id = $1")
             .bind(r)
             .execute(&pool)

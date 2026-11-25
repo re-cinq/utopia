@@ -1,15 +1,15 @@
-//! 记录轴回退（0019 / #307），打在真库上。
+//! Record-axis rewind (0019 / #307), hit against a real database.
 //!
-//! 为什么非要连库：这道防御**整个活在 SQL 字符串里**。`cargo check` 看不见
-//! 一个漏写的 WHERE，clippy 也不会说一个字——0009 栽的正是这一跤（`NULL <> uuid`
-//! 不报错、只是什么都不选），`human_type_decisions` 那个测试就是那次留下的。
+//! Why it must hit a database: this defence **lives entirely inside SQL strings**. `cargo check` cannot see
+//! a missing WHERE clause, and clippy will not say a word either: 0009 tripped exactly here (`NULL <> uuid`
+//! reports no error and simply selects nothing), and the `human_type_decisions` test is what that episode left behind.
 //!
-//! 两个方向都要断言，因为它们会以不同的方式坏掉：
-//! - 撤掉的行在 `as_of = 现在` **不出现**（谓词写反了会让作废行全体复活）
-//! - 撤掉的行在作废时刻**之前出现**（谓词没接上就永远是"现在"，回放照旧空手）
-//! - `recorded_at` 晚于 T 的行在 T **不出现**（只写下界会让三月看见四月的修正）
+//! Both directions must be asserted, because they break in different ways:
+//! - A retracted row **does not appear** at `as_of = now` (a reversed predicate would resurrect every voided row)
+//! - A retracted row **appears before the moment it was voided** (if the predicate is not wired up it is always "now", and replay stays empty-handed)
+//! - A row with `recorded_at` later than T **does not appear** at T (writing only a lower bound would show March the April correction)
 //!
-//! 自建自拆：一次性 org/workspace/kb，跑完连 org 一起删。绝不碰已有的库。
+//! Sets up and tears down its own data: a one-off org/workspace/kb, removed together with the org after the run. Never touches an existing database.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -21,15 +21,15 @@ fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
 struct Fixture {
     kb: Uuid,
     zhang: Uuid,
-    /// 03-01 记下、03-20 被修正掉的那条断言
+    /// The assertion recorded on 03-01 and corrected away on 03-20
     retracted: Uuid,
-    /// 03-20 记下的修正行
+    /// The correction row recorded on 03-20
     correction: Uuid,
-    /// 03-05 推出、03-22 前提没了的派生
+    /// A derivation inferred on 03-05 whose premise went away on 03-22
     derived: Uuid,
 }
 
-/// 一个人接过一个项目，我们三月改了主意，引擎在这中间推过一条边。
+/// A person took over a project, and in March we changed our mind; the engine inferred an edge in between.
 async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     let (org, ws, kb) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     let (person, project) = (Uuid::now_v7(), Uuid::now_v7());
@@ -84,8 +84,8 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         (phoenix, project, "Project Phoenix"),
         (program, project, "Phoenix Program"),
     ] {
-        // **实体的出生时刻也要回填**：事实记在三月，实体却是"刚才"建的，那种账本
-        // 现实里不存在——而 #336 之后 T 时刻还没出生的实体不再出现在图上
+        // **Entity birth times must be backfilled too**: the fact is recorded in March, but the entity was created "just now"; that kind of ledger
+        // does not exist in reality, and after #336 an entity not yet born at moment T no longer appears on the graph
         sqlx::query(
             "INSERT INTO entities (id, kb_id, type_id, canonical_name, created_at)
              VALUES ($1, $2, $3, $4, $5)",
@@ -127,8 +127,8 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         .execute(pool)
         .await?;
 
-    // 派生也有两根轴（derived_at / invalidated_at）：回放的图上留着**当时**推出
-    // 的边，而不是今天这套规则的结论
+    // Derivations also have two axes (derived_at / invalidated_at): the replayed graph keeps the edges inferred **at that time**,
+    // rather than the conclusions of today's rules
     sqlx::query(
         "INSERT INTO rules (id, kb_id, predicate_id, kind) VALUES ($1, $2, $3, 'transitive')",
     )
@@ -186,7 +186,7 @@ async fn the_recording_axis_rewinds_on_every_graph_read() -> anyhow::Result<()> 
         async move { utopia_store::graph::overview(&pool, f.kb, 50, None, as_of.map(t)).await }
     };
 
-    // 1. 现在：修正行在，被它顶掉的断言不在，前提没了的派生也不在
+    // 1. Now: the correction row is there, the assertion it replaced is not, and the derivation whose premise went away is not either
     let (nodes, edges, _, total_edges) = overview(None).await?;
     assert_eq!(
         edge_ids(&edges),
@@ -199,8 +199,8 @@ async fn the_recording_axis_rewinds_on_every_graph_read() -> anyhow::Result<()> 
     };
     assert_eq!(degree(&nodes, f.zhang), Some(1));
 
-    // 2. 倒回 03-10：作废前的断言回来了，三月才推出的派生也在，
-    //    而 03-20 才记下的修正行**不该出现**——那是当时还没发生的事
+    // 2. Rewind to 03-10: the pre-void assertion is back, and the derivation inferred in March is also there,
+    //    but the correction row recorded on 03-20 **should not appear**: that is something that had not yet happened at that time
     let (nodes, edges, _, total_edges) = overview(Some("2026-03-10T00:00:00Z")).await?;
     assert_eq!(
         edge_ids(&edges),
@@ -217,16 +217,16 @@ async fn the_recording_axis_rewinds_on_every_graph_read() -> anyhow::Result<()> 
         "派生边要带 derived 位，界面靠它画出区别"
     );
 
-    // 3. 倒回 03-25：修正行已经记下，派生已经被推翻
+    // 3. Rewind to 03-25: the correction row is already recorded, and the derivation has been overturned
     let (_, edges, _, _) = overview(Some("2026-03-25T00:00:00Z")).await?;
     assert_eq!(edge_ids(&edges), vec![f.correction]);
 
-    // 4. 更早于一切：图是空的，而不是"退化成现在"
+    // 4. Earlier than everything: the graph is empty, rather than "degrading to now"
     let (_, edges, _, total_edges) = overview(Some("2026-02-01T00:00:00Z")).await?;
     assert!(edges.is_empty(), "02-01 我们还什么都没记下");
     assert_eq!(total_edges, 0);
 
-    // 5. 邻域铺开也按当时的边找邻居
+    // 5. Spreading the neighborhood also finds neighbors by the edges as they were then
     let (_, edges) = utopia_store::graph::neighborhood(
         &pool,
         f.kb,
@@ -240,8 +240,8 @@ async fn the_recording_axis_rewinds_on_every_graph_read() -> anyhow::Result<()> 
     let (_, edges) = utopia_store::graph::neighborhood(&pool, f.kb, f.zhang, 1, None, None).await?;
     assert_eq!(edge_ids(&edges), vec![f.correction]);
 
-    // 6. 点开节点，面板说的是**当时**的事实——回放的图上点开一个节点，
-    //    侧栏还答今天的事，两个说法就并排摆在同一个屏幕上
+    // 6. Open a node: the panel speaks of the facts **as they were then**; on a replayed graph, opening a node
+    //    while the sidebar still answers today's facts puts the two claims side by side on one screen
     let facts = |as_of: Option<&'static str>| {
         let pool = pool.clone();
         async move {
@@ -262,8 +262,8 @@ async fn the_recording_axis_rewinds_on_every_graph_read() -> anyhow::Result<()> 
     let before = facts(Some("2026-02-01T00:00:00Z")).await?;
     assert!(before.is_empty(), "记下之前不该有事实");
 
-    // #351：同一秒内先录入再更正。拿更正时刻退一整秒会跳过旧记录，
-    // 拿更正时刻本身则已经是新记录；工具提示的「前一微秒」必须能读回旧事实。
+    // #351: within the same second, record first and then correct. Going back a full second from the correction moment would skip the old record,
+    // while the correction moment itself is already the new record; the tooltip's "previous microsecond" must be able to read back the old fact
     let first = t("2026-03-20T02:43:53.382000Z");
     let changed = t("2026-03-20T02:43:53.382002Z");
     sqlx::query("UPDATE facts SET recorded_at = $2, invalidated_at = $3 WHERE id = $1")
@@ -314,7 +314,7 @@ async fn the_recording_axis_rewinds_on_every_graph_read() -> anyhow::Result<()> 
         );
     }
 
-    // 拆台：facts/entities/… 全是 ON DELETE CASCADE
+    // Teardown: facts/entities/… all use ON DELETE CASCADE
     let gone = sqlx::query(
         "DELETE FROM organizations WHERE id = (
              SELECT w.org_id FROM workspaces w

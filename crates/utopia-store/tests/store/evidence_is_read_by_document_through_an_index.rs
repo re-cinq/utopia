@@ -1,6 +1,6 @@
-//! 证据按文档读要走索引（re:cinq 迁移 9000）：`resolve_time` 每篇文档都按 `document_id`
-//! 读、改它的证据，勘误按文档挑候选，删文档时外键级联也按它找行。`fact_evidence` 的主键是
-//! `(fact_id, chunk_id)`，没有这条索引时每一次都扫全表——所有库的证据。
+//! Reading evidence by document must go through an index (re:cinq migration 9000): `resolve_time` picks candidates per document by `document_id`,
+//! reads and changes its evidence, reconciling picks candidates by document, and when a document is deleted the foreign-key cascade also finds rows through it. The primary key of `fact_evidence` is
+//! `(fact_id, chunk_id)`, and without this index every lookup would scan the whole table — the evidence of every store.
 use sqlx::PgPool;
 
 #[tokio::test]

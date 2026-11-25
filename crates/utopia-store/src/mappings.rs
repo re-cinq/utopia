@@ -1,25 +1,25 @@
-//! 语义层的「业务概念 → 数据资产」映射（见 `docs/decisions/0011`）。
+//! Semantic layer's "business concept → data asset" mappings (see `docs/decisions/0011`).
 //!
-//! 它从前是一条 `mapped_to` 事实，宾语是塞在 `object_value` 里的一份 JSON。
-//! 搬出来的理由写在 `concept_mappings` 的建表注释里，一句话：**它不是关于世界的断言，是配置**。
+//! It used to be a `mapped_to` fact, with the object a JSON document stuffed into `object_value`.
+//! The reason it was moved out is written in the comment on the `concept_mappings` CREATE TABLE, in one line: **it is not an assertion about the world, it is configuration**.
 //!
-//! 与账本的区别在这里就能看见：这张表**允许原地改**。`confirm` 改的是
-//! 「这条配置生效了没有」，不是「我们对世界的认知变了」——所以它不需要
-//! append-only，改之前的那一版进 `concept_mapping_revisions` 留痕即可。
+//! The difference from the ledger is visible right here: this table **allows in-place edits**. `confirm` changes
+//! "whether this configuration has taken effect", not "our understanding of the world has changed" -- so it does not need
+//! to be append-only; the version before the change goes into `concept_mapping_revisions` as a record.
 
 use sqlx::PgPool;
 use utopia_core::models::{ConceptMapping, MappingRevision};
 use utopia_core::{AppError, AppResult};
 use uuid::Uuid;
 
-/// 探索任务提议一条映射。
+/// The exploration task proposes a mapping.
 ///
-/// **同一个 (概念, 源) 只有一条**，由主键管——从前这条唯一性藏在 `object_value`
-/// 内部，数据库看不见，只能靠确认流程显式闭合。
+/// **There is only one per (concept, source)**, enforced by the primary key -- previously this uniqueness was hidden inside `object_value`,
+/// invisible to the database, and could only be closed off explicitly by the confirmation flow.
 ///
-/// 已经有人表过态的不覆盖：重跑探索会再次算出被拒绝过的那条，不加这一句
-/// 它就被刷回待看，等于每跑一次都把人的否决抹掉一次（`ontology_proposals`
-/// 那边踩过同一个坑，见 `ontology_proposals`）。
+/// Entries that someone has already decided on are not overwritten: a rerun of exploration would recompute the one that was rejected, and without this line
+/// it would be reset to pending review, which means every run wipes out a person's rejection (`ontology_proposals`
+/// hit the same trap there, see `ontology_proposals`).
 #[allow(clippy::too_many_arguments)]
 pub async fn propose(
     pool: &PgPool,
@@ -33,13 +33,13 @@ pub async fn propose(
     summary: Option<&str>,
     derived: bool,
 ) -> AppResult<(Uuid, bool)> {
-    // **`DO UPDATE ... WHERE` 不满足时 `RETURNING` 一行都不返回。**
+    // **When the `DO UPDATE ... WHERE` condition is not met, `RETURNING` returns no rows at all.**
     //
-    // 这是 Postgres 的实情而不是直觉：条件挡住更新，那一行就不算被这条语句
-    // 动过，于是也不出现在 RETURNING 里。测试当场撞上——第二次提议一条已被
-    // 拒绝的映射，`fetch_one` 报「no rows returned」。
+    // This is how Postgres actually behaves, not intuition: when the condition blocks the update, that row does not count as
+    // touched by this statement, so it does not appear in RETURNING. The test hit this on the spot -- proposing a mapping a second time that was already
+    // rejected made `fetch_one` report "no rows returned".
     //
-    // 所以把 id 单独查出来：更新与否是一回事，「这条映射是哪一行」是另一回事。
+    // So query the id separately: whether the update happens is one thing, "which row this mapping is" is another.
     let existing: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM concept_mappings
           WHERE kb_id = $1 AND concept_id = $2 AND source = $3",
@@ -74,20 +74,20 @@ pub async fn propose(
     .execute(pool)
     .await?
     .rows_affected();
-    // 插入或刷新了算写入；撞上已确认 / 已拒绝的那一行，WHERE 挡下更新，写入数为零——
-    // 调用方靠这一位区分「进了待看」与「决定还在」
+    // An insert or refresh counts as a write; hitting a row that is already confirmed or rejected, the WHERE blocks the update and the write count is zero --
+    // the caller uses this bit to tell "went into pending review" from "the decision still stands"
     Ok((id, written > 0))
 }
 
-/// 人从零写一条口径（#562）。**落下来就是确认的**：写的人就是表态的人，
-/// 不需要再过一遍审。
+/// A person writes a definition from scratch (#562). **It is confirmed as it is written**: the person writing it is the one taking the decision,
+/// so it does not need to go through review again.
 ///
-/// 从前这张表只有探索一条来路。一个数据团队手上有自己的指标口径文档，却没有
-/// 地方把它填进去——而口径进了问数的提示词，宽表语料从 1/18 到 17/18（#520）。
+/// Previously this table had exploration as its only way in. A data team has its own metrics definition documents but no
+/// place to enter them -- and definitions feed the question-answering prompt, which took the wide-table corpus from 1/18 to 17/18 (#520).
 ///
-/// 同一个 (概念, 源) 已经有一条时报冲突，而不是悄悄覆盖：那一条可能是探索提的、
-/// 人已经确认过的，覆盖等于抹掉一次表态。要改用 `revise`。
-/// 探索反过来也盖不掉这条：`propose` 只刷新 `proposed` 的行。
+/// If a row for the same (concept, source) already exists, report a conflict rather than silently overwriting: that row may have been proposed by exploration and
+/// already confirmed by a person; overwriting would erase a decision. Use `revise` instead.
+/// Exploration cannot overwrite this in turn either: `propose` only refreshes rows that are `proposed`.
 #[allow(clippy::too_many_arguments)]
 pub async fn create(
     pool: &PgPool,
@@ -131,7 +131,7 @@ pub async fn create(
     Ok(id)
 }
 
-/// 还等着人表态的。Review 页读它。
+/// Still waiting for a person's decision. The Review page reads this.
 pub async fn proposed(
     pool: &PgPool,
     kb_id: Uuid,
@@ -154,8 +154,8 @@ pub async fn proposed(
     .await?)
 }
 
-/// 人确认过的。问数把它们注进 system prompt——**只用确认过的口径**，
-/// 而不是每次从 schema 猜。
+/// Confirmed by a person. Question answering injects these into the system prompt -- **only confirmed definitions are used**,
+/// rather than guessing from the schema every time.
 pub async fn confirmed(pool: &PgPool, kb_id: Uuid, limit: i64) -> AppResult<Vec<ConceptMapping>> {
     Ok(sqlx::query_as(
         "SELECT m.id, m.concept_id, e.canonical_name AS concept_name, m.source,
@@ -172,10 +172,10 @@ pub async fn confirmed(pool: &PgPool, kb_id: Uuid, limit: i64) -> AppResult<Vec<
     .await?)
 }
 
-/// 有人表态了。
+/// A person has decided.
 ///
-/// **改状态不删行**：确认发生过、拒绝也发生过。而拒绝留痕还有当下就用得着的
-/// 作用——`propose` 的 `WHERE status = 'proposed'` 据此不把它刷回待看。
+/// **Changing status does not delete the row**: both the confirmation and the rejection happened. The rejection record also has a
+/// role that matters right now -- `propose`'s `WHERE status = 'proposed'` relies on it so the row is not reset to pending.
 pub async fn decide(
     pool: &PgPool,
     kb_id: Uuid,
@@ -200,11 +200,11 @@ pub async fn decide(
     Ok(())
 }
 
-/// 改一条确认过的口径。**改之前那一版先进 revisions**——问数回溯历史报表时
-/// 要答得出「上季度这个数是怎么算的」。
+/// Edit a confirmed definition. **The previous version is written to revisions first** -- so that when question answering looks back
+/// through historical reports, it can answer "how was this number calculated last quarter".
 ///
-/// 存整版快照而不是差异：读的时候要的就是「当时是什么」，而差异得从头重放
-/// 才能回答这个问题。
+/// Store the whole version as a snapshot rather than a diff: reads need "what it was at that time", and answering that from a diff would
+/// mean replaying from the start.
 #[allow(clippy::too_many_arguments)]
 pub async fn revise(
     pool: &PgPool,
@@ -261,12 +261,12 @@ pub async fn revise(
     Ok(())
 }
 
-/// 数据映射页读的：一页口径，可按状态与关键词筛。
+/// Read by the data mapping page: a page of definitions, filterable by status and keyword.
 ///
-/// **`proposed` 与 `confirmed` 那两条查询都不够用**——前者只捞待表态的，
-/// 后者是给问数拼 prompt 的（无分页、无筛选、限 30 条）。人要看的是全部，
-/// 包括被自己拒绝过的那些：拒绝留了痕，就该看得见，否则「为什么这个概念
-/// 没被映射」永远答不上来。
+/// **Neither the `proposed` nor the `confirmed` query is enough** -- the first only fetches those awaiting a decision,
+/// the second builds the prompt for question answering (no pagination, no filter, capped at 30 rows). People need to see everything,
+/// including the ones they themselves rejected: a rejection leaves a record, and it should be visible, otherwise "why this concept
+/// was not mapped" could never be answered.
 pub async fn page(
     pool: &PgPool,
     kb_id: Uuid,
@@ -275,7 +275,7 @@ pub async fn page(
     limit: i64,
     offset: i64,
 ) -> AppResult<(Vec<ConceptMapping>, i64)> {
-    // 概念名与数据源名都可搜：人记得住的是「GMV」，也可能是「那个接了 orders 的」
+    // Both the concept name and the source name are searchable: what people remember is "GMV", or possibly "the one connected to orders"
     const WHERE: &str = "WHERE m.kb_id = $1
            AND ($2::text IS NULL OR m.status = $2)
            AND ($3::text IS NULL
@@ -310,7 +310,7 @@ pub async fn page(
     Ok((rows, total))
 }
 
-/// 每种状态各多少。页面的筛选条要显示计数，分三次查是三次全表扫。
+/// The count for each status. The page's filter bar shows counts, and three separate queries would mean three full-table scans.
 pub async fn status_counts(pool: &PgPool, kb_id: Uuid) -> AppResult<(i64, i64, i64)> {
     let row: (i64, i64, i64) = sqlx::query_as(
         "SELECT count(*) FILTER (WHERE status = 'proposed'),
@@ -324,8 +324,8 @@ pub async fn status_counts(pool: &PgPool, kb_id: Uuid) -> AppResult<(i64, i64, i
     Ok(row)
 }
 
-/// 一条口径给检索用的两段文字：嵌入的一段（名字 + 说明 + 单位——问题跟这些对得上），
-/// 词面匹配的一段（再加表名与表达式——问题里偶尔直接说列名）。
+/// Two pieces of text for retrieval of one definition: one for embedding (name + description + unit -- questions match against these),
+/// and one for lexical matching (plus the table name and expression -- questions sometimes name a column directly).
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct MappingText {
     pub id: Uuid,
@@ -364,10 +364,10 @@ impl MappingText {
     }
 }
 
-/// 确认口径里还没嵌、或嵌的时候文本 / 模型跟现在不一样的（#574），最多 `limit` 条。
-/// 与 `ontology::types_needing_embedding` 同一条规则：改了文本或换了模型就重嵌。
-/// 有上限是因为补嵌跑在问数的请求路径上：换了嵌入模型之后第一问不该把几百条
-/// 一口气嵌完才开口，剩下的下一问接着补
+/// Confirmed definitions that are not yet embedded, or were embedded with different text or a different model than now (#574), at most `limit` rows.
+/// Same rule as `ontology::types_needing_embedding`: change the text or switch the model and it gets re-embedded.
+/// There is a cap because backfilling runs on the question-answering request path: after switching embedding models, the first question should not
+/// embed hundreds of rows before answering; the rest is backfilled on the next question.
 pub async fn needing_embedding(
     pool: &PgPool,
     kb_id: Uuid,
@@ -388,8 +388,8 @@ pub async fn needing_embedding(
     .bind(limit)
     .fetch_all(pool)
     .await?;
-    // 文本变了的也要重嵌。SQL 里拼这段文字要把 `embed_text` 抄一遍，
-    // 两处迟早不一样，所以拉回来在 Rust 里比
+    // Text that changed also needs re-embedding. Building this text in SQL would mean copying `embed_text` by hand,
+    // and the two copies would eventually diverge, so fetch it back and compare in Rust.
     let stale_text: Vec<(Uuid,)> = sqlx::query_as(
         "SELECT m.id FROM concept_mappings m
           WHERE m.kb_id = $1 AND m.status = 'confirmed'
@@ -430,7 +430,7 @@ pub async fn needing_embedding(
     Ok(out)
 }
 
-/// 写回向量，连同嵌的是哪段文字、哪个模型。
+/// Write the vector back, together with which text and which model it was embedded from.
 pub async fn set_embeddings(
     pool: &PgPool,
     model: &str,
@@ -452,9 +452,9 @@ pub async fn set_embeddings(
     Ok(())
 }
 
-/// 向量一路：离问题最近的确认口径。只比同一个模型嵌出来的行——换过模型、还没重嵌的
-/// 不参与：维度碰巧相同时两个模型的空间也对不上，比出来的近远是假的。维度不同的
-/// 再多挡一道，免得 pgvector 直接报错
+/// Vector path: the confirmed definitions closest to the question. Only rows embedded by the same model are compared -- rows from a model switch that have not been re-embedded
+/// do not take part: even with matching dimensions, two models' spaces do not line up, so the closeness they produce is false. Rows with different dimensions
+/// are blocked by one more check, so pgvector does not raise an error directly
 pub async fn vector_search(
     pool: &PgPool,
     kb_id: Uuid,
@@ -480,8 +480,8 @@ pub async fn vector_search(
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
-/// 全部确认口径的文字，词面一路在 Rust 里打分——一个库几十到几百条，
-/// 拉回来比在 SQL 里做中文分词便宜得多，也不用 pg_trgm
+/// The text of all confirmed definitions; the lexical path scores in Rust -- a library has tens to hundreds of them,
+/// and fetching them back is far cheaper than doing Chinese word segmentation in SQL, and avoids pg_trgm too
 pub async fn confirmed_texts(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<MappingText>> {
     Ok(sqlx::query_as(
         "SELECT m.id, e.canonical_name AS concept_name, m.summary, m.unit, m.table_name, m.expr
@@ -493,7 +493,7 @@ pub async fn confirmed_texts(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Mappin
     .await?)
 }
 
-/// 按 id 取回口径，**保持给定的顺序**——顺序是检索排出来的，提示词里靠前的先被读
+/// Fetch definitions by id, **keeping the given order** -- the order comes from retrieval ranking, and the ones earlier in the prompt are read first
 pub async fn by_ids(pool: &PgPool, kb_id: Uuid, ids: &[Uuid]) -> AppResult<Vec<ConceptMapping>> {
     let rows: Vec<ConceptMapping> = sqlx::query_as(
         "SELECT m.id, m.concept_id, e.canonical_name AS concept_name, m.source,
@@ -510,18 +510,18 @@ pub async fn by_ids(pool: &PgPool, kb_id: Uuid, ids: &[Uuid]) -> AppResult<Vec<C
     Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
 }
 
-/// 一条口径改过几次、每次改之前是什么样。
+/// How many times a definition was revised, and what it looked like before each revision.
 ///
-/// `revise` 从建表起就在写 `concept_mapping_revisions`，而**在此之前没有任何
-/// 地方读它**——留痕留了个寂寞。0006 说留痕是为了「问数回溯历史报表时答得出
-/// 『上季度这个数是怎么算的』」，那就得有人看得见。
+/// `revise` has been writing `concept_mapping_revisions` since the table was created, but **until now nothing**
+/// read it -- the record was kept for nothing. 0006 says the record exists so that when question answering looks back at historical reports it can answer
+/// "how was this number calculated last quarter", so someone has to be able to see it.
 pub async fn revisions(
     pool: &PgPool,
     kb_id: Uuid,
     mapping_id: Uuid,
 ) -> AppResult<Vec<MappingRevision>> {
-    // kb_id 走 JOIN 校验归属：revisions 表自己没有 kb_id，
-    // 不校验就能拿别的库的口径历史
+    // kb_id is checked via a JOIN for ownership: the revisions table has no kb_id of its own,
+    // without this check, another library's definition history could be fetched
     Ok(sqlx::query_as(
         "SELECT r.id, r.before, u.display_name AS changed_by_name, r.changed_at
            FROM concept_mapping_revisions r

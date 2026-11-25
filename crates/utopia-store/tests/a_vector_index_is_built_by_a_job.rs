@@ -1,16 +1,16 @@
-//! 索引由任务建（0035）：写入一侧只负责「排一条」，且排一次就够。
+//! The index is built by a job (0035): the write side only queues "one", and queuing once is enough.
 //!
-//! - 第一次写下某个维度：排上一条 `build_vector_index`
-//! - 再写：不再排（队列里已经有一条）
-//! - 建好之后再写：什么都不排（进程里记住了）
-//! - 超过 HNSW 上限的维度：不排，也建不了——这种失败不该重试
+//! - The first time a dimension is written: queue one `build_vector_index`
+//! - Writes after that: queue nothing (one is already in the queue)
+//! - Writes after it has been built: queue nothing (remembered in the process)
+//! - A dimension beyond the HNSW limit: queue nothing and cannot build it -- this kind of failure should not be retried
 //!
-//! 建索引本身与查询的一致性在 `the_nearest_chunk_is_found_however_it_is_reached` 里。
+//! The consistency of the index build against queries is covered in `the_nearest_chunk_is_found_however_it_is_reached`.
 
 use sqlx::PgPool;
 use utopia_store::vector_index::{self, Target, JOB_KIND, MAX_DIMS};
 
-/// 这个测试独占的维度
+/// The dimension this test owns exclusively
 const DIMS: usize = 9;
 
 async fn queued(pool: &PgPool, dims: usize) -> anyhow::Result<i64> {
@@ -64,7 +64,7 @@ async fn the_first_write_of_a_dimension_queues_one_build() -> anyhow::Result<()>
         return Ok(());
     };
     let pool = PgPool::connect(&url).await?;
-    // 上一次跑留下的都清掉，从「什么都没有」开始
+    // Clear out whatever an earlier run left, starting from "nothing at all"
     vector_index::drop(&pool, Target::Chunks, DIMS).await?;
     sqlx::query("DELETE FROM jobs WHERE kind = $1 AND payload->>'dims' = $2")
         .bind(JOB_KIND)
@@ -79,8 +79,8 @@ async fn the_first_write_of_a_dimension_queues_one_build() -> anyhow::Result<()>
         let second = vector_index::request(&pool, Target::Chunks, DIMS).await?;
         assert_eq!(second, None, "队列里已经有一条，不再排");
         assert_eq!(queued(&pool, DIMS).await?, 1);
-        // worker 认领了它、正在建：再写也不排。排上的每一条都会占一个 worker 名额，
-        // 在建索引的咨询锁上空等到前一条建完（3072 维的库上一建一个多小时）
+        // A worker has claimed it and is building: writes do not queue again. Each queued one takes a worker slot,
+        // and would sit idle on the index build's advisory lock until the earlier one finishes (on a 3072-dimension database, one build takes over an hour)
         sqlx::query("UPDATE jobs SET status = 'running' WHERE kind = $1 AND payload->>'dims' = $2")
             .bind(JOB_KIND)
             .bind(DIMS.to_string())
@@ -96,7 +96,7 @@ async fn the_first_write_of_a_dimension_queues_one_build() -> anyhow::Result<()>
             vector_index::status(&pool, Target::Chunks, DIMS).await?,
             Some(true)
         );
-        // 任务跑完那条会被标 done；这里模拟一下，好让下一问只靠「进程里记住了」
+        // When the job finishes, that one is marked done; simulate it here so the next question relies only on "remembered in the process"
         sqlx::query("UPDATE jobs SET status = 'done' WHERE kind = $1 AND payload->>'dims' = $2")
             .bind(JOB_KIND)
             .bind(DIMS.to_string())
@@ -106,7 +106,7 @@ async fn the_first_write_of_a_dimension_queues_one_build() -> anyhow::Result<()>
         assert_eq!(third, None, "建好了：什么都不排");
         assert_eq!(queued(&pool, DIMS).await?, 0);
 
-        // 超过上限的维度
+        // A dimension beyond the limit
         let too_wide = MAX_DIMS + 1;
         assert_eq!(
             vector_index::request(&pool, Target::Chunks, too_wide).await?,
@@ -134,18 +134,18 @@ async fn the_first_write_of_a_dimension_queues_one_build() -> anyhow::Result<()>
     run
 }
 
-/// 两个维度同时建，旁边还有事务在碰 `chunks`。两条 `CREATE INDEX CONCURRENTLY` 各自要等
-/// 表上其他事务结束，也各自算对方要等的事务，于是 Postgres 报 deadlock detected：本地复现
-/// 一轮约一半概率，错开 10ms 以上就不会（#886 把测试合成一个进程时 3/3 撞上；server 的
-/// worker 并发认领两条 build_vector_index 任务是同一件事，并发默认 64）。
-/// `build` 里的会话级咨询锁让后到的那条等前一条建完。连做八轮，不加锁时几乎必红
+/// Two dimensions built at once, with a transaction also touching `chunks` alongside. Each of two `CREATE INDEX CONCURRENTLY` must wait
+/// for the other transactions on the table to finish, and each also counts as a transaction the other is waiting on, so Postgres reports deadlock detected: reproduced locally
+/// about half the time in one round, and never when the two are staggered by more than 10ms (#886 hit it 3 out of 3 times when the tests were merged into one process; the server's
+/// workers claiming two build_vector_index jobs concurrently is the same thing, with concurrency defaulting to 64).
+/// The session-level advisory lock inside `build` makes the later one wait for the earlier one to finish. Run eight rounds: without the lock it almost always fails.
 #[tokio::test]
 async fn two_dimensions_built_at_once_take_turns() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
         return Ok(());
     };
     let pool = PgPool::connect(&url).await?;
-    // 这个测试独占的两个维度
+    // The two dimensions this test owns exclusively
     const A: usize = 11;
     const B: usize = 13;
     let mut outcome = Ok(());
@@ -153,7 +153,7 @@ async fn two_dimensions_built_at_once_take_turns() -> anyhow::Result<()> {
         for dims in [A, B] {
             vector_index::drop(&pool, Target::Chunks, dims).await?;
         }
-        // 摄取还在往 chunks 写：CIC 要等这些事务，死锁就靠它凑齐
+        // Ingestion is still writing to chunks: CIC has to wait on those transactions, and the deadlock is only assembled with them present
         let writer = async {
             for _ in 0..20 {
                 let mut tx = pool.begin().await?;

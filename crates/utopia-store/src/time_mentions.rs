@@ -1,21 +1,21 @@
-//! 一条陈述提到的时间词（0044 第一刀，#729）和它的读法（0045）。
+//! Time phrases a statement mentions (0044 first slice, #729) and how they are read (0045).
 //!
-//! **一条时间提及是文档的字，永远不是模型算出来的日期。**「去年冬天」「合同签署后 30 日内」
-//! 「Q3」——落库的是这几个字和它们在 `chunks.text` 里的字符偏移，不是某个模型写的
-//! `TIMESTAMPTZ`。字留着，读法可以改；读错了改读法，不用删掉文档重抽。
+//! **A time mention is the document's own words; it is never a date the model computed.** "last winter", "within 30 days of signing the contract"
+//! "Q3": what gets stored is these words and their character offsets in `chunks.text`, not some model's written
+//! `TIMESTAMPTZ`. The words are kept and the reading can change; if a reading was wrong, fix the reading rather than deleting the document and re-extracting.
 //!
-//! 读法分两层（0045 决定 2：模型读，代码算）：
+//! Reading has two layers (0045 decision 2: the model reads, code computes):
 //!
-//! - **解释**（`shape` / `reference` / `granularity`）是模型给的：形状（点、区间、截至、
-//!   时长、没给日期的结束）、参照（照写的绝对值，或锚点 + 偏移，或没有）、字说到梯子的
-//!   哪一级。这里不认这些字段的取值——它们是抽取合同的词汇，库只照存。
-//! - **解算**（`grade` / `resolved_*`）是代码从解释算出来的：两端各自的时刻与精度，梯子与
-//!   `facts` 同一张（0024），结束端多一个 `unknown`。A 是原文写明的绝对日期，B 是按文档
-//!   自己给的锚点算的，C 是没算出来（四列全空——算不出来的等着，决定 4）。`resolved_at`
-//!   是最近一次算的时刻：锚点后来到了要重算。
+//! - **Interpretation** (`shape` / `reference` / `granularity`) is given by the model: shape (point, interval, until,
+//!   duration, end with no date given), reference (an absolute value as written, or an anchor plus offset, or none), and the ladder rung the words name.
+//!   The field values are not checked here: they are the vocabulary of the extraction contract, and the database just stores them.
+//! - **Solved values** (`grade` / `resolved_*`) are computed by code from the interpretation: each end's moment and precision, the ladder and
+//!   `facts` share one table (0024), with the end side having one extra `unknown`. A is an absolute date stated in the text, B is computed from the document's own anchor,
+//!   C could not be computed (all four columns empty: what cannot be computed waits, decision 4). `resolved_at`
+//!   is the most recent computation time: re-compute when the anchor arrives later.
 //!
-//! 一条陈述的 `when` 与 `ended` 各是一条提及（`role`），同一处字可以两次出现。陈述在世界
-//! 轴上的位置（`facts.valid_*`）由 [`crate::graph::set_open_validity`] 按解算写，不由这里写。
+//! A statement's `when` and `ended` are each one mention (`role`); the same words can appear twice. The statement's position on the world
+//! axis (`facts.valid_*`) is written from the solved values by [`crate::graph::set_open_validity`], not written here.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -23,28 +23,28 @@ use std::collections::HashMap;
 use utopia_core::AppResult;
 use uuid::Uuid;
 
-/// 一条时间提及：哪条陈述、哪一块、照抄的字、在块里的字符偏移，以及它的读法（有了的话）
+/// A time mention: which statement, which chunk, the words copied, their character offset in the chunk, and their reading (if any)
 #[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
 pub struct TimeMention {
     pub id: Uuid,
     pub fact_id: Uuid,
     pub chunk_id: Uuid,
-    /// 照抄的字
+    /// The words copied verbatim
     pub text: String,
-    /// 在 `chunks.text` 里的字符偏移（不是字节）
+    /// Character offset in `chunks.text` (not bytes)
     pub char_start: i32,
-    /// 来自陈述的哪个槽：`when` / `ended`
+    /// Which slot of the statement it comes from: `when` / `ended`
     pub role: String,
-    /// 模型的解释：形状、参照、粒度。没读过为空
+    /// The model's interpretation: shape, reference, granularity. Empty if not yet read
     pub shape: Option<String>,
     pub reference: Option<serde_json::Value>,
     pub granularity: Option<String>,
-    /// 代码的解算：A 绝对、B 按锚点算出、C 没算出来。没算过为空
+    /// Code's solved values: A absolute, B computed from an anchor, C not computed. Empty if not yet computed
     pub grade: Option<String>,
     pub resolved_from: Option<DateTime<Utc>>,
     pub resolved_from_precision: Option<String>,
     pub resolved_to: Option<DateTime<Utc>>,
-    /// 结束端多一个 `unknown`：结束了，不知哪天
+    /// The end side has one extra `unknown`: ended, date unknown
     pub resolved_to_precision: Option<String>,
 }
 
@@ -53,9 +53,9 @@ const COLUMNS: &str =
                        grade, resolved_from, resolved_from_precision, resolved_to,
                        resolved_to_precision";
 
-/// 记一条时间提及。`char_start` 是字符偏移，**由服务端在块里搜出来**，不取模型报的数；
-/// `role` 是它来自陈述的哪个槽（`when` / `ended`）。同一条陈述在同一块的同一位置、同一
-/// 个槽只有一行；再记一次回的是那一行的 id
+/// Record a time mention. `char_start` is a character offset, **searched out by the server within the chunk**, not taken from the model's reported value;
+/// `role` is which slot of the statement it comes from (`when` / `ended`). The same statement at the same position in the same chunk,
+/// for the same slot, has only one row; recording again returns that row's id
 pub async fn record(
     pool: &PgPool,
     kb_id: Uuid,
@@ -83,7 +83,7 @@ pub async fn record(
     Ok(id)
 }
 
-/// 一批陈述各自提到的时间词，按事实 id 取回；块内按出现位置排
+/// Time phrases each statement in a batch mentions, fetched by fact id; within a chunk sorted by position of occurrence
 pub async fn for_facts(
     pool: &PgPool,
     fact_ids: &[Uuid],
@@ -106,7 +106,7 @@ pub async fn for_facts(
     Ok(out)
 }
 
-/// 一条等着读的提及：字、位置、槽，和它所在的那句话——解算按文档的语境走一遍时的输入
+/// A pending mention awaiting reading: the words, position, slot, and the sentence it sits in; the input when solving walks through the document in its context
 #[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
 pub struct MentionToResolve {
     pub id: Uuid,
@@ -115,13 +115,13 @@ pub struct MentionToResolve {
     pub text: String,
     pub char_start: i32,
     pub role: String,
-    /// 这条陈述在这一块里的引文（`fact_evidence.quote`）；证据没留引文时退回整块的字
+    /// The quote of this statement in this chunk (`fact_evidence.quote`); when the evidence has no quote, fall back to the whole chunk's words
     pub sentence: String,
 }
 
-/// 一篇文档里所有等着读的提及：每条活着的开放陈述在这篇文档的活分块上的每一条提及，
-/// 按分块顺序、块内位置排——解算沿着文档读下去，锚点才能从前一块带到后一块（0045 决定 3）。
-/// 被新版本替掉的分块不在内：它的字已经不是这篇文档的字
+/// All pending mentions in one document: each live open statement's every mention on this document's live chunks,
+/// in chunk order, then position within the chunk; solving reads the document forward so anchors can carry from one chunk to the next (0045 decision 3).
+/// Chunks replaced by a new version are not included: their words are no longer this document's words
 pub async fn for_document(pool: &PgPool, document_id: Uuid) -> AppResult<Vec<MentionToResolve>> {
     Ok(sqlx::query_as(
         "SELECT m.id, m.fact_id, m.chunk_id, m.text, m.char_start, m.role,
@@ -139,8 +139,8 @@ pub async fn for_document(pool: &PgPool, document_id: Uuid) -> AppResult<Vec<Men
     .await?)
 }
 
-/// 模型对这条提及的解释（0045 决定 2）：形状、参照、粒度，照存。取值是抽取合同的词汇，
-/// 库不认；日期算术不在这里
+/// The model's interpretation of this mention (0045 decision 2): shape, reference, granularity, stored as given. The values are the vocabulary of the extraction contract,
+/// which the database does not check; date arithmetic is not done here
 pub async fn set_interpretation(
     pool: &PgPool,
     id: Uuid,
@@ -160,9 +160,9 @@ pub async fn set_interpretation(
     Ok(())
 }
 
-/// 代码对这条提及的解算：等级和两端各自的时刻与精度，`resolved_at` 记此刻。值先按精度截断
-/// （[`crate::graph::truncate_to`]），存的值与精度说同一句话，数据库的 CHECK 才放行。
-/// grade C 四列全空；结束端 `(None, Some("unknown"))` 是结束了不知哪天
+/// Code's solved value for this mention: grade and each end's moment and precision; `resolved_at` records this moment. Values are first truncated to precision
+/// ([`crate::graph::truncate_to`]), so the stored value and precision say the same thing, and the database's CHECK accepts it.
+/// Grade C has all four columns empty; the end side `(None, Some("unknown"))` means ended, date unknown
 pub async fn set_resolution(
     pool: &PgPool,
     id: Uuid,

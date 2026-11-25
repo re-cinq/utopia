@@ -1,16 +1,16 @@
-//! 批量裁决与按类型筛重复项（#428），打在真库上。
+//! Batch judgment and filtering duplicates by type (#428), run against a real store.
 //!
-//! 要钉住的行为：
+//! Behaviour to pin down:
 //!
-//! - **筛选按类型分三档**：全部 / 两边同一个类型（都有类型且相等）/ 两边类型冲突
-//!   （都有类型且不等）。没类型的一侧哪档都不进——不知道的不能当成一样，也不能
-//!   当成不一样
-//! - **计数与筛选同一套口径**：左栏的两个数就是这两档各多少条
-//! - **批量 = 逐条的人工裁决**：每一条都走 `decide_review`，合并方向、状态、
-//!   decided_by 与单条一模一样；一条失败（不存在、已经裁过）不拖累其余的，
-//!   结果里逐条说明；动作不认识整批拒绝
+//! - **Filtering has three tiers by type**: all / both sides the same type (both have a type and equal) / the two sides' types conflict
+//!   (both have a type and differ). A side with no type falls into none of the tiers — an unknown cannot be treated as the same,
+//!   nor as different
+//! - **Counts and filters use the same basis**: the two numbers in the left column are how many fall in each of these tiers
+//! - **A batch = person judgments one by one**: each one goes through `decide_review`; merge direction, status,
+//!   decided_by are exactly the same as for a single one; one failure (missing, already judged) does not drag down the rest,
+//!   and the result explains each one; an action it does not recognize rejects the whole batch
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. It sets up and tears down its own data, and never touches an existing store.
 
 use sqlx::PgPool;
 use utopia_store::resolution::TypeFilter;
@@ -19,16 +19,16 @@ use uuid::Uuid;
 struct Seed {
     kb: Uuid,
     org: Uuid,
-    /// 同名同类（两个 Person 都叫 Zhang Wei）
+    /// Same name, same class (two Person both named Zhang Wei)
     same_a: Uuid,
-    /// 同名类型冲突（Apple 的 Organization 与 Apple 的 Person）
+    /// Same name, class conflict (Apple's Organization and Apple's Person)
     conflict: Uuid,
-    /// 同名同类（两个 Person 都叫 Li Si）
+    /// Same name, same class (two Person both named Li Si)
     same_b: Uuid,
-    /// 一侧没有类型：哪档都不进
+    /// One side has no type: falls into no tier
     untyped: Uuid,
     pair_a: (Uuid, Uuid),
-    /// 裁决的人：entity_merges.merged_by 与 resolution_reviews.decided_by 都指着 users
+    /// The person deciding: entity_merges.merged_by and resolution_reviews.decided_by both point to users
     user: Uuid,
 }
 
@@ -146,7 +146,7 @@ async fn teardown(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
 }
 
 async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
-    // 三档筛选
+    // Three-tier filter
     let ids = |items: Vec<utopia_core::models::ReviewItem>| {
         let mut v: Vec<Uuid> = items.into_iter().map(|i| i.id).collect();
         v.sort();
@@ -172,13 +172,13 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
         "一侧没类型的哪档都不进"
     );
 
-    // 计数与筛选同一套
+    // Counts and filters on the same basis
     let counts = utopia_store::review::counts(pool, s.kb).await?;
     assert_eq!(counts.duplicates, 4);
     assert_eq!(counts.duplicates_same_type, 2);
     assert_eq!(counts.duplicates_type_conflict, 1);
 
-    // 动作不认识：整批拒绝，什么都没动
+    // Unknown action: whole batch rejected, nothing touched
     assert!(utopia_store::resolution::decide_reviews(
         pool,
         s.kb,
@@ -190,7 +190,7 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
     .await
     .is_err());
 
-    // 批量合并：两条真的、一条不存在的
+    // Batch merge: two real ones and one that does not exist
     let user = s.user;
     let ghost = Uuid::now_v7();
     let outcomes = utopia_store::resolution::decide_reviews(
@@ -226,13 +226,13 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
     .await?;
     assert_eq!(merged, 1, "一对里恰好一个被并进另一个");
 
-    // 已经裁过的再裁一次：报错、不重复合并
+    // Deciding again something already decided: error, no duplicate merge
     let again =
         utopia_store::resolution::decide_reviews(pool, s.kb, &[s.same_a], "keep", user, None)
             .await?;
     assert!(again[0].error.is_some());
 
-    // 批量分开
+    // Batch split
     let kept =
         utopia_store::resolution::decide_reviews(pool, s.kb, &[s.conflict], "keep", user, None)
             .await?;

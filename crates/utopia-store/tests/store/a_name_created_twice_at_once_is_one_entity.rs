@@ -1,7 +1,7 @@
-//! 两份文档并行抽取，同一个名字同时到达消解：只建一个实体。
+//! Two documents extracted in parallel, the same name reaching resolution at once: only one entity is created.
 //!
-//! 实测「澜图数据」在同一秒里建了两个，之后每次提到它都撞上两个候选、再各建一个，
-//! 一篇语料跑完裂成四个。新建按（库，名字）拿咨询锁串行化，锁里再查一次。
+//! Measured: "Lantu Data" was created twice within the same second; every later mention then hit two candidates and created one more each, so one corpus run split into four.
+//! New creation is serialized by an advisory lock on (library, name), and the lock re-checks inside.
 
 use sqlx::PgPool;
 use uuid::Uuid;

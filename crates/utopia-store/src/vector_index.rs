@@ -1,49 +1,49 @@
-//! 向量索引由任务来建，不是一条编号迁移（0035）。
+//! The vector index is built by a task, not by a numbered migration (0035).
 //!
-//! 列是无维的（`embedding vector`，没有 `(N)`）：维度跟着工作区选的嵌入模型走，
-//! 迁移跑的时候还不知道，pgvector 也建不了未知维度的 HNSW。另一头，
-//! `CREATE INDEX CONCURRENTLY` 进不了 sqlx 给迁移套的事务，而不带 CONCURRENTLY
-//! 就要在 `chunks` 上持 ACCESS EXCLUSIVE 锁到建完。所以：第一次写下某个维度的
-//! 向量时排一条任务，任务在事务外建一个**按维度的部分表达式索引**，
-//! `IF NOT EXISTS` 让重排无害。
+//! The column is dimensionless (`embedding vector`, no `(N)`): the dimension follows the embedding model the workspace picked,
+//! which is not known yet when the migration runs, and pgvector cannot build an HNSW index for an unknown dimension. On the other side,
+//! `CREATE INDEX CONCURRENTLY` cannot run inside the transaction sqlx wraps around migrations, and without CONCURRENTLY
+//! it would hold an ACCESS EXCLUSIVE lock on `chunks` until the build finishes. So: the first time a vector of some dimension is written,
+//! queue a task, and the task builds a **per-dimension partial expression index** outside the transaction,
+//! with `IF NOT EXISTS` making re-queuing harmless.
 //!
-//! 读路径上有三条规矩，缺一条索引就悄悄不生效或悄悄少回：
-//! 1. **维度写成字面量。** `vector_dims(col) = $2` 绑参数时自定义计划能用索引，
-//!    generic plan 退回顺扫；sqlx 的预处理语句跑五次就切 generic，第六次起索引
-//!    悄悄失效。用 [`same_dims`] / [`distance`] 把整数写进 SQL。
-//! 2. **`ORDER BY` 一字不差地写索引的表达式。** 用 [`index_order`]：索引建在
-//!    `col::vector(N)`（超过 [`VECTOR_MAX_DIMS`] 时是 `col::halfvec(N)`）上，
-//!    写成别的样子索引就用不上。选出来的距离用 [`distance`]，永远是全精度。
-//! 3. **`hnsw.iterative_scan = relaxed_order`。** HNSW 先取 `ef_search` 个候选再过
-//!    WHERE；一张按 kb 分租的表上，小库的行在候选里占不到几个，`LIMIT 10` 会回
-//!    三行甚至零行（实测 1 万行的库在 6 万行的表上：关着回 3/24，开着回满）。
-//!    iterative_scan 让它继续往下走到凑够为止。它有两个停下来的条件，都在这里放宽：
-//!    `hnsw.scan_mem_multiplier` 从 1 提到 4（默认 work_mem 4 MB 时即 16 MB）——实测
-//!    这一个才是绑住它的：真实库各占索引 1%、旁边一个 5 万行的合成租户、强制走索引，
-//!    倍数 1 时 522 问里 154 问回不满、recall 0.705、每问 32 ms；倍数 4 时全部回满、
-//!    recall 1.0、每问 74 ms，16 与 4 无异。`hnsw.max_scan_tuples` 从 20,000 提到
-//!    100,000，实测里它没绑住，提的理由是把「到顶」留成看得见的慢，而不是悄悄少回。
+//! The read path has three rules; missing any one makes the index quietly stop applying, or quietly return fewer rows:
+//! 1. **Write the dimension as a literal.** With `vector_dims(col) = $2` and a bound parameter, the custom plan can use the index,
+//!    but the generic plan falls back to a sequential scan; sqlx's prepared statements switch to generic after five runs, and from the sixth on the index
+//!    quietly stops working. Use [`same_dims`] / [`distance`] to put the integer into the SQL.
+//! 2. **`ORDER BY` the index's expression verbatim.** Use [`index_order`]: the index is built on
+//!    `col::vector(N)` (above [`VECTOR_MAX_DIMS`] it is `col::halfvec(N)`),
+//!    and if written any other way the index will not be used. The distance selected is [`distance`], always full precision.
+//! 3. **`hnsw.iterative_scan = relaxed_order`.** HNSW first fetches `ef_search` candidates and only then applies
+//!    the WHERE; on a table partitioned per KB, a small KB's rows make up only a few of those candidates, and `LIMIT 10` returns
+//!    3 of 24 (measured: a 10k-row KB on a 60k-row table returned 3 of 24 with it off, and the full set with it on).
+//!    iterative_scan keeps going until enough rows are found. It has two stopping conditions, both relaxed here:
+//!    `hnsw.scan_mem_multiplier` raised from 1 to 4 (16 MB when the default work_mem is 4 MB) — measured:
+//!    this one is what actually binds: a real KB takes 1% of the index, next to a 50k-row synthetic tenant, with the index forced;
+//!    at multiplier 1, 154 of 522 queries did not fill, recall 0.705, 32 ms per query; at multiplier 4, all filled,
+//!    recall 1.0, 74 ms per query, and 16 vs 4 makes no difference. `hnsw.max_scan_tuples` raised from 20,000 to
+//!    100,000; measured, it did not bind, and the reason for raising it is to make "hitting the cap" a visible slowdown rather than quietly fewer rows.
 //!
-//! 走不走索引由规划器定：有 `chunks_kb_idx` 时小库、中库它自己选精确路径，只有
-//! 占表大头的库才走 HNSW（实测 6 万行：20 行和 1 万行的库走精确，5 万的走索引）。
-//! 应用侧不设阈值——阈值是对规划器的猜测，猜错了两边都慢。
+//! Whether to use the index is decided by the planner: with `chunks_kb_idx`, small and mid-size KBs take the exact path on their own, and only
+//! KBs that make up most of the table use HNSW (measured on 60k rows: KBs of 20 and 10k rows take the exact path, and the 50k one uses the index).
+//! The app sets no threshold — a threshold is a guess about the planner, and a wrong guess is slow on both sides.
 
 use sqlx::{Executor, PgConnection, PgPool, Postgres, Transaction};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use utopia_core::{AppError, AppResult};
 
-/// 任务种类，`main.rs` 的分发按这个名字认
+/// The task kind; the dispatch in `main.rs` matches on this name
 pub const JOB_KIND: &str = "build_vector_index";
 
-/// 建索引的会话级咨询锁（见 [`build`]）。key 用字符串哈希，和 temporal 里的时间线锁同一套写法。
-/// 只用 **try** 版本：阻塞的 `pg_advisory_lock` 等锁时那条语句自己就是一个带快照的事务，
-/// 而 CONCURRENTLY 建到最后一步要等所有比它老的快照结束——建的等排队的、排队的等建的，
-/// 换了个地方死锁（本地复现每轮必中）。探一下就返回、不留快照，等待放在客户端
+/// The session-level advisory lock for building an index (see [`build`]). The key is a string hash, using the same approach as the timeline lock in temporal.
+/// Uses only the **try** version: a blocking `pg_advisory_lock` waiting for the lock is itself a statement holding a snapshot transaction,
+/// and CONCURRENTLY, at its last step, waits for every snapshot older than itself to end — the builder waits for the queued, the queued waits for the builder —
+/// deadlocked in another form (reproduced locally every round). It probes and returns at once without holding a snapshot; the waiting is done on the client side
 const BUILD_TRY_LOCK: &str =
     "SELECT pg_try_advisory_lock(hashtextextended('vector_index:build', 0))";
 const BUILD_UNLOCK: &str = "SELECT pg_advisory_unlock(hashtextextended('vector_index:build', 0))";
-/// 没抢到锁时隔多久再探。建一次索引几十秒到几分钟，四分之一秒的粒度够了
+/// How long to wait before probing again after failing to get the lock. Building an index takes tens of seconds to a few minutes, so quarter-second granularity is enough
 const BUILD_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 async fn lock_build(conn: &mut PgConnection) -> AppResult<()> {
@@ -65,17 +65,17 @@ async fn unlock_build(mut conn: sqlx::pool::PoolConnection<Postgres>) {
     }
 }
 
-/// pgvector 的 HNSW 对 `vector` 类型的上限
+/// The upper limit of pgvector's HNSW for the `vector` type
 pub const VECTOR_MAX_DIMS: usize = 2000;
 
-/// 能建索引的上限：`halfvec` 的。超过 [`VECTOR_MAX_DIMS`] 的维度（text-embedding-3-large
-/// 是 3072）索引存半精度，它只负责挑出候选；候选的距离与最终次序仍按 `vector` 全精度
-/// 算（[`distance`] 加外层 [`RESORT`]），所以半精度只可能影响「谁进候选」，不改分数。
-/// 没有索引时这种维度每一问都扫全库（3072 维、二十多万个名字向量，一问几十秒）。
-/// 再宽的不建索引，查询照常走精确路径
+/// The upper limit for building an index: that of `halfvec`. Dimensions above [`VECTOR_MAX_DIMS`] (text-embedding-3-large
+/// is 3072) store the index at half precision, which is only responsible for picking out candidates; the candidates' distances and final ordering are still computed at full `vector` precision
+/// ([`distance`] plus the outer [`RESORT`]), so half precision can only affect who makes it into the candidates, never the score.
+/// Without an index, such a dimension scans the whole database on every query (3072 dimensions, two hundred-odd thousand name vectors, tens of seconds per query).
+/// Anything wider gets no index, and queries take the exact path as usual
 pub const MAX_DIMS: usize = 4000;
 
-/// 索引里存的类型：能用 `vector` 就用，放不下才降到 `halfvec`
+/// The type stored in the index: use `vector` when possible, drop to `halfvec` only when it does not fit
 fn index_type(dims: usize) -> &'static str {
     if dims > VECTOR_MAX_DIMS {
         "halfvec"
@@ -84,14 +84,14 @@ fn index_type(dims: usize) -> &'static str {
     }
 }
 
-/// 哪一列。两张表同一套机制，名字不同而已
+/// Which column. The two tables use the same mechanism; only the names differ
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Target {
-    /// `chunks.embedding`：文档分块，会无界增长的那张
+    /// `chunks.embedding`: document chunks, the table that grows without bound
     Chunks,
-    /// `entities.profile_embedding`：实体画像，类型消解按主语逐个扫它（#514）
+    /// `entities.profile_embedding`: entity profiles, which type resolution scans one by one per subject (#514)
     EntityProfiles,
-    /// `name_vectors.embedding`：名字字符串的向量，召回的第二条通道（0041 第 2 刀）
+    /// `name_vectors.embedding`: vectors of name strings, the second recall channel (0041 part 2)
     NameVectors,
 }
 
@@ -112,7 +112,7 @@ impl Target {
         }
     }
 
-    /// 任务载荷里的名字
+    /// The name in the task payload
     pub fn key(self) -> &'static str {
         self.table()
     }
@@ -127,37 +127,37 @@ impl Target {
     }
 }
 
-/// 索引名：`chunks_embedding_hnsw_1024`
+/// Index name: `chunks_embedding_hnsw_1024`
 pub fn index_name(target: Target, dims: usize) -> String {
     format!("{}_{}_hnsw_{dims}", target.table(), target.column())
 }
 
-/// 部分索引的谓词；查询里要原样出现（规矩 1）
+/// The predicate of the partial index; it must appear verbatim in the query (rule 1)
 pub fn same_dims(column: &str, dims: usize) -> String {
     format!("vector_dims({column}) = {dims}")
 }
 
-/// 全精度的距离：选出来、给外层排的那一列。`param` 是查询向量的参数号
+/// Full-precision distance: the column selected for the outer ordering. `param` is the parameter number of the query vector
 pub fn distance(column: &str, param: usize, dims: usize) -> String {
     format!("{column}::vector({dims}) <=> ${param}::vector({dims})")
 }
 
-/// `ORDER BY` 写的表达式，与索引一字不差（规矩 1、2）。不超过 [`VECTOR_MAX_DIMS`] 时
-/// 就是 [`distance`]；超过时是半精度，只用来让索引挑候选
+/// The expression in `ORDER BY`, identical to the index (rules 1 and 2). When not above [`VECTOR_MAX_DIMS`]
+/// it is [`distance`]; when above, it is half precision, used only to let the index pick candidates
 pub fn index_order(column: &str, param: usize, dims: usize) -> String {
     let ty = index_type(dims);
     format!("{column}::{ty}({dims}) <=> ${param}::{ty}({dims})")
 }
 
-/// 近邻查询的外层次序（#652）。里层照规矩 2 写 `ORDER BY {distance} LIMIT n` 让索引
-/// 接住，套进 `MATERIALIZED` 的 CTE（列名 `distance`、`id`），外层再按这个排：
-/// - `relaxed_order` 下索引回的次序只是大致按距离，外层补一次真排序
-/// - 距离并列时两种计划各排各的（一模一样的两条向量，精确路径和 HNSW 居首不同），id 定下来
-/// - `+ 0` 不能省：没有它规划器认 CTE 的次序为已排（`Presorted Key: distance`），
-///   只在并列的组里排 id，乱序的那部分原样漏出去
+/// The outer ordering of a nearest-neighbour query (#652). The inner layer writes `ORDER BY {distance} LIMIT n` per rule 2 so the index
+/// can take it, wraps it in a `MATERIALIZED` CTE (columns `distance`, `id`), and the outer layer sorts by this:
+/// - Under `relaxed_order` the index returns rows only roughly by distance, so the outer layer does one real sort
+/// - When distances tie, the two plans each sort their own way (two identical vectors: the exact path and HNSW put them in different first positions), so id settles it
+/// - The `+ 0` must not be dropped: without it, the planner takes the CTE's order as already sorted (`Presorted Key: distance`),
+///   so it sorts ids only within the tied groups and the out-of-order part leaks through as-is
 pub const RESORT: &str = "distance + 0, id";
 
-/// 索引现在的状态：`None` 没有；`Some(valid)` 有，`false` 是上次建到一半留下的
+/// Current state of the index: `None` means none; `Some(valid)` means one exists, and `false` is the invalid index left by a build that broke off halfway
 pub async fn status(pool: &PgPool, target: Target, dims: usize) -> AppResult<Option<bool>> {
     status_on(pool, target, dims).await
 }
@@ -178,7 +178,7 @@ async fn status_on<'a>(
     Ok(row.map(|(v,)| v))
 }
 
-/// 进程里记住的「已经在了」的索引：往后每次写入只是一次查找
+/// An index known in-process to already exist: after this, each write is just one lookup
 fn known() -> &'static Mutex<HashSet<String>> {
     static KNOWN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     KNOWN.get_or_init(|| Mutex::new(HashSet::new()))
@@ -196,12 +196,12 @@ fn is_known(name: &str) -> bool {
     known().lock().unwrap().contains(name)
 }
 
-/// 写下某个维度的向量时叫一声：索引不在就排一条建索引任务。
-/// 返回 `Some(job id)` = 这一次排上了。
+/// Called when a vector of some dimension is written: if the index is absent, queue an index-build task.
+/// Returns `Some(job id)` = queued this time.
 ///
-/// 索引在的话记在进程里，往后只是一次 HashSet 查找；不在的时候每次写入一次目录
-/// 查询加一次「没排着、也没在建才排」的插入——建索引的那段时间里写入照常，代价可忽略。
-/// 超过 [`MAX_DIMS`] 的维度什么都不排：建不了，查询走精确路径
+/// When the index exists it is recorded in-process, so later each call is just a HashSet lookup; when it does not exist, every write costs one catalog
+/// query plus one insert of "queue only if not already queued and not being built" — writes during the build proceed as usual, and the cost is negligible.
+/// Dimensions above [`MAX_DIMS`] queue nothing: no index can be built, so queries take the exact path
 pub async fn request(pool: &PgPool, target: Target, dims: usize) -> AppResult<Option<i64>> {
     if dims == 0 || dims > MAX_DIMS {
         return Ok(None);
@@ -223,24 +223,24 @@ pub async fn request(pool: &PgPool, target: Target, dims: usize) -> AppResult<Op
     .await
 }
 
-/// 一次 [`build`] 的结果
+/// The result of one [`build`]
 #[derive(Debug)]
 pub struct Built {
     pub name: String,
-    /// `false` = 本来就在
+    /// `false` = it was already there
     pub created: bool,
     pub seconds: f64,
 }
 
-/// 用表的 owner 建。`owner_url` 是迁移身份的连接串，只在它跟运行身份分开时才有。
+/// Built as the table's owner. `owner_url` is the connection string for the migration identity, present only when it differs from the runtime identity.
 ///
-/// **建索引要的是表的所有权，授权顶替不了。** 部署按 `.env.example` 分开两个身份时，
-/// 应用连库用的是受限角色 `utopia_app`，它在这里拿到的是 `must be owner of table`：
-/// 任务失败三次，索引永远建不出来，每一次近邻查询都退回全表精确扫描。四万一千个名字
-/// 向量的库上，消解给每个 mention 做的那一次查找要一分半到三分钟（#1120）。
+/// **Building an index requires table ownership; a grant cannot substitute for it.** When a deployment splits the two identities as `.env.example` does,
+/// the app's database connection uses the restricted role `utopia_app`, and here it gets `must be owner of table`:
+/// the task fails three times, the index is never built, and every nearest-neighbour query falls back to a full exact table scan. On a database with 41,000
+/// name vectors, the lookup entity resolution does for each mention takes a minute and a half to three minutes (#1120).
 ///
-/// 所以分开了身份就用迁移那个身份开一条连接，建完即关——跟启动时跑迁移是同一个做法，
-/// 高权限连接不在运行期常驻。没分开时 `owner_url` 是 `None`，照旧用应用的池子
+/// So when the identities are split, open one connection with the migration identity and close it once the build finishes — the same approach as running migrations at startup:
+/// the high-privilege connection does not stay resident at runtime. When not split, `owner_url` is `None` and the app's pool is used as before.
 pub async fn build_as_owner(
     app: &PgPool,
     owner_url: Option<&str>,
@@ -259,10 +259,10 @@ pub async fn build_as_owner(
     built
 }
 
-/// 任务本体。**事务外**（CONCURRENTLY 的要求）、**串行**（并行建索引要共享内存，
-/// Docker 默认 64 MB 的 `/dev/shm` 会让它报 could not resize shared memory segment；
-/// 串行 6 万行 1024 维约 90 秒，到处能跑）。上一次建到一半留下的无效索引先删——
-/// `IF NOT EXISTS` 看见它会以为已经建好。
+/// The task body. **Outside a transaction** (CONCURRENTLY requires it), **serial** (parallel index builds need shared memory,
+/// and Docker's default 64 MB `/dev/shm` produces "could not resize shared memory segment";
+/// serially, 60k rows at 1024 dimensions takes about 90 seconds, which runs everywhere). An invalid index left by a half-finished earlier build is dropped first —
+/// `IF NOT EXISTS` would see it and think the index was already built.
 pub async fn build(pool: &PgPool, target: Target, dims: usize) -> AppResult<Built> {
     if dims == 0 || dims > MAX_DIMS {
         return Err(AppError::Validation(format!(
@@ -272,18 +272,18 @@ pub async fn build(pool: &PgPool, target: Target, dims: usize) -> AppResult<Buil
     let name = index_name(target, dims);
     let started = std::time::Instant::now();
     let mut conn = pool.acquire().await?;
-    // 一次只建一条。同一张表上两条 CONCURRENTLY 各自要等表上其他事务结束、也各自算
-    // 对方要等的事务，旁边再有摄取往 chunks 写就凑成死锁（40P01；复现在
-    // a_vector_index_is_built_by_a_job，一轮约一半概率）。worker 并发默认 64，两个维度的
-    // 构建任务被同时认领就是这个局面。锁是会话级的：CONCURRENTLY 不能进事务，事务级
-    // 咨询锁没处放；跟着这条连接走，跨 worker、跨实例都排队。建索引一次几十秒到几分钟，
-    // 排队比死锁后重试便宜
+    // Only one build at a time. Two CONCURRENTLY builds on the same table each wait for other transactions on the table to finish, and each
+    // one also waits on the transaction the other is waiting on; add ingestion writing to chunks alongside and they deadlock (40P01; reproduced in
+    // a_vector_index_is_built_by_a_job, about half the time per round). The default worker concurrency is 64, and two dimensions' build tasks claimed at once produce exactly this. The lock is session-level:
+    // CONCURRENTLY cannot run inside a transaction, so a transaction-level advisory lock has nowhere to live;
+    // tied to this connection, it queues across workers and instances alike. A build takes tens of seconds to a few minutes,
+    // so queueing is cheaper than retrying after a deadlock
     lock_build(&mut conn).await?;
     let outcome = async {
         conn.execute("SET max_parallel_maintenance_workers = 0")
             .await?;
-        // 默认 64 MB 的 maintenance_work_mem 到一万四千行 1024 维就装不下图，之后
-        // 每一行都要落盘再读，5 万行建了 4 分 20 秒；512 MB 只在建的这一会儿占着
+        // The default 64 MB maintenance_work_mem cannot hold the graph at 14,000 rows of 1024 dimensions; after that
+        // every row must go to disk and be read back, and 50k rows took 4 min 20 s to build; 512 MB is held only for the duration of the build
         conn.execute("SET maintenance_work_mem = '512MB'").await?;
         // Reuse the held connection: acquiring another from a busy pool can
         // make builds wait for connections they are themselves holding.
@@ -308,8 +308,8 @@ pub async fn build(pool: &PgPool, target: Target, dims: usize) -> AppResult<Buil
         Ok::<bool, AppError>(!existed)
     }
     .await;
-    // 会话级 SET 跟着连接回池，成败都复位。锁也一样——解不掉就把这条连接关掉而不是
-    // 还回池子：带着锁回池，之后所有构建都会卡在它后面
+    // Session-level SET follows the connection back to the pool and is reset whether the build succeeds or fails. The lock likewise — if it cannot be released, close this connection rather than
+    // returning it to the pool: returning it still holding the lock would leave every later build stuck behind it
     let _ = conn.execute("RESET max_parallel_maintenance_workers").await;
     let _ = conn.execute("RESET maintenance_work_mem").await;
     if outcome.is_ok() {
@@ -324,7 +324,7 @@ pub async fn build(pool: &PgPool, target: Target, dims: usize) -> AppResult<Buil
     })
 }
 
-/// 删掉（测试与手工维护用；写路径不会走到这里）
+/// Drops it (for tests and manual maintenance; the write path never reaches here)
 pub async fn drop(pool: &PgPool, target: Target, dims: usize) -> AppResult<()> {
     let name = index_name(target, dims);
     let mut conn = pool.acquire().await?;
@@ -342,9 +342,9 @@ pub async fn drop(pool: &PgPool, target: Target, dims: usize) -> AppResult<()> {
     Ok(())
 }
 
-/// `hnsw.iterative_scan` 是 pgvector 0.8 才有的参数。旧版本第一次探一下、进程内
-/// 记住：探不到就不设——查询还是对的，只是共享表上的小库可能少回几行，
-/// 那正是 0.8 修的事
+/// `hnsw.iterative_scan` is a parameter that only pgvector 0.8 has. On older versions it is probed once and remembered in-process:
+/// if the probe fails, it is not set — queries are still correct, only small KBs on a shared table may return a few fewer rows,
+/// which is exactly what 0.8 fixed
 async fn iterative_scan_available(pool: &PgPool) -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     if let Some(v) = AVAILABLE.get() {
@@ -359,14 +359,14 @@ async fn iterative_scan_available(pool: &PgPool) -> bool {
     ok
 }
 
-/// 读路径的会话设置（规矩 3）。`SET LOCAL` 只在事务里生效，所以近邻查询都套一个事务
+/// Session settings for the read path (rule 3). `SET LOCAL` takes effect only inside a transaction, so nearest-neighbour queries each wrap one transaction
 pub async fn relaxed_order(pool: &PgPool, tx: &mut Transaction<'_, Postgres>) -> AppResult<()> {
     if iterative_scan_available(pool).await {
         (&mut **tx)
             .execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
             .await?;
-        // 三个参数同一个版本来的（0.8）。两个停止条件见模块注释：内存那个是实测绑住
-        // 扫描的，元组上限那个没绑住，放宽是为了把「到顶」留成看得见的慢
+        // All three parameters came in the same version (0.8). The two stopping conditions are described in the module comment: the memory one is the one measured to bind
+        // the scan; the tuple cap one did not bind, and relaxing it is so that "hitting the cap" stays a visible slowdown
         (&mut **tx)
             .execute("SET LOCAL hnsw.scan_mem_multiplier = 4")
             .await?;

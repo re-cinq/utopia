@@ -1,6 +1,6 @@
-//! 推来的条目抽取完新版本之后，关上新版本不再陈述的事实（RC-006）：证据全停在这份文档被
-//! 取代的分块上的事实按最后一次取代的那一刻闭合；新版本仍在说的、别的文档也在说的、
-//! 名字事实，都不动。
+//! A pushed item, after extraction of its new version, closes the facts the new version no longer states (RC-006): facts whose evidence all sits on chunks
+//! superseded from this document are closed at the moment the last one was superseded; facts the new version still states, or that other documents also state,
+//! and name facts, are left alone.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;

@@ -1,12 +1,12 @@
-//! 执行闸门（0027）：一次自动合并能不能落地，看它撤得回什么。打在真库上。
+//! Execution gate (0027): whether an automatic merge can take effect depends on what it can undo. Run against a real database.
 //!
-//! 三种会离开图的东西，各造一个最小的例子，再各撤一次，证明闸门看的是「现在」：
-//! - **矛盾**：两边各持一条同一个 functional 谓词、指向不同实体的事实——合了就是一条
-//!   `functional` 违规。指向同一个实体的不算；作废了的不算
-//! - **派生**：任一边参与的、还成立的派生事实——合并改前提，派生会被重写
-//! - **回答**：任一边在对话里被认过——它是人在问的东西
+//! Three kinds of thing that leave the graph, each built as a minimal example and each undone once, to prove the gate looks at "now":
+//! - **Contradiction**: both sides carry a fact on the same functional predicate pointing at different entities — merging would make one
+//!   `functional` violation. Facts pointing at the same entity do not count; voided facts do not count
+//! - **Derivation**: a still-holding derived fact in which either side takes part — merging rewrites premises, so the derivation would be rewritten
+//! - **Answer**: either side has been confirmed in a conversation — it is something a person is asking about
 //!
-//! 什么都不牵动的一对，闸门不拦：把握够就照旧自动
+//! A pair that touches none of these is not blocked by the gate: if confident enough, it still merges automatically as before
 
 use sqlx::PgPool;
 use utopia_store::execution_gate::{hold, impact_of, Hold};
@@ -130,21 +130,21 @@ async fn a_merge_that_would_leave_the_graph_is_held() -> anyhow::Result<()> {
     let pool = PgPool::connect(&url).await?;
     let f = seed(&pool).await?;
 
-    // 什么都没有：不拦
+    // Nothing at all: not blocked
     let none = impact_of(&pool, f.kb, f.a, f.b).await?;
     assert_eq!(hold(&none), None, "两边空空的一对，闸门不该拦：{none:?}");
 
-    // 矛盾：a 的 CEO 是 Alice，b 的 CEO 是 Bob。合了就是一个实体两个 CEO
+    // Contradiction: a's CEO is Alice, b's CEO is Bob. Merged, one entity would have two CEOs
     fact(&pool, f.kb, f.a, f.ceo_of, f.c1).await?;
     let clash = fact(&pool, f.kb, f.b, f.ceo_of, f.c2).await?;
     let i = impact_of(&pool, f.kb, f.a, f.b).await?;
     assert_eq!(i.contradictions, vec!["CEO of".to_string()]);
     assert_eq!(hold(&i), Some(Hold::Contradiction("CEO of".into())));
-    // 反过来问也一样
+    // The reverse question too
     let i = impact_of(&pool, f.kb, f.b, f.a).await?;
     assert_eq!(hold(&i), Some(Hold::Contradiction("CEO of".into())));
 
-    // 撤掉 b 的那条：矛盾没了。再给 b 一条指向同一个 Alice 的：同一个值不是矛盾
+    // Undo b's fact: the contradiction is gone. Then give b one pointing at the same Alice: the same value is not a contradiction
     sqlx::query("UPDATE facts SET invalidated_at = now() WHERE id = $1")
         .bind(clash)
         .execute(&pool)
@@ -154,7 +154,7 @@ async fn a_merge_that_would_leave_the_graph_is_held() -> anyhow::Result<()> {
     assert!(i.contradictions.is_empty(), "作废的与同值的都不算：{i:?}");
     assert_eq!(hold(&i), None);
 
-    // 派生：一条靠着 a 推出来的还成立的派生
+    // Derivation: a still-holding derivation that was derived from a
     let rule = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO rules (id, kb_id, predicate_id, kind) VALUES ($1, $2, $3, 'transitive')",
@@ -190,7 +190,7 @@ async fn a_merge_that_would_leave_the_graph_is_held() -> anyhow::Result<()> {
         "推翻了的派生不算"
     );
 
-    // 回答：b 在一轮回答里被认过。人的那一轮与认了别人的那一轮都不算
+    // Answer: b was confirmed in one round of an answer. Neither a human's round nor a round that confirmed someone else counts
     let conv = Uuid::now_v7();
     sqlx::query("INSERT INTO conversations (id, kb_id, user_id) VALUES ($1, $2, $3)")
         .bind(conv)
@@ -231,10 +231,10 @@ async fn a_merge_that_would_leave_the_graph_is_held() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 一个值接替了另一个：两个名字各挂一个、合起来是先后接替的时间线，不是矛盾。
-/// 同一天开始的两个值才排不开（Blackbaud 总部租约：房东先 HPBB1、后 BBHQ1，
-/// 「Lease Agreement」与「Lease Agreement dated May 16, 2016」各挂一个，从前闸门把这一对
-/// 当矛盾留给人，同一份租约就一直是两个实体）
+/// One value succeeds another: two names each hang one, and together they form a successive timeline, not a contradiction.
+/// Only two values starting on the same day cannot be ordered (the Blackbaud headquarters lease: the landlord was first HPBB1, then BBHQ1,
+/// with "Lease Agreement" and "Lease Agreement dated May 16, 2016" each hanging one; before, the gate left that pair to a person as a contradiction,
+/// so the same lease stayed two entities)
 #[tokio::test]
 async fn a_value_that_took_over_from_another_is_not_a_contradiction() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -316,7 +316,7 @@ async fn a_clash_one_side_already_had_is_not_the_merges() -> anyhow::Result<()> 
     };
     let pool = PgPool::connect(&url).await?;
     let f = seed(&pool).await?;
-    // b 自己已经挂着两个没日期的值；a 只挂着其中一个
+    // b itself already hangs two undated values; a hangs only one of them
     fact(&pool, f.kb, f.b, f.ceo_of, f.c1).await?;
     fact(&pool, f.kb, f.b, f.ceo_of, f.c2).await?;
     fact(&pool, f.kb, f.a, f.ceo_of, f.c1).await?;

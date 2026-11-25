@@ -1,14 +1,14 @@
-//! 证据所在的文档删了、删除撤销了，事实的见证照还在的证据重算（0064 决定 3、5；0022 修订
-//! 2026-10-03 留下的口子）。
+//! Recomputing evidence when the document it sits in was deleted (deletion undone, the fact's witness still there): 0064 decisions 3 and 5; the gap left by 0022 revision
+//! 2026-10-03.
 //!
-//! - 每条证据记着它那段原文说话的那一刻；删掉最早那篇，陈述的见证挪到还在的证据里最早的
-//!   那一节的日期上，连同名字——不是那篇文档的日期；
-//! - 还在的证据一条日期都没说，见证就是空：删掉的文档的日期不再给它作证；
-//! - 撤销删除，见证原样回来；
-//! - 没记章节日期的证据（这一列之前写下的）按文档自己的日期读，和从前一样；
-//! - 跟着陈述走的类型化行一起挪，随文档作废的来源陈述不再给它作证。
+//! - Each piece of evidence records the moment its passage of original text spoke; delete the earliest document, and the statement's witness moves to the earliest
+//!   section date among the evidence that remains, together with the name, not the date of that document;
+//! - Remaining evidence that states no dates at all has an empty witness: a deleted document's date no longer vouches for it;
+//! - Undo the deletion and the witness comes back exactly as before;
+//! - Evidence with no recorded section date (written before this column existed) is read by the document's own date, as before;
+//! - Typed rows move with the statement they follow; source statements voided along with a document no longer vouch for them.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` it skips rather than fails. It sets up and tears down its own data and never touches an existing database.
 
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
@@ -22,7 +22,7 @@ fn day(y: i32, m: u32, d: u32) -> DateTime<Utc> {
 }
 
 type Anchor = (Option<DateTime<Utc>>, Option<String>);
-/// 一条证据所在那一节的日期和它的名字；那一节没说日期就是 `None`
+/// The date of the section that one piece of evidence sits in, and its name; `None` when that section states no date
 type Witness<'a> = Option<(DateTime<Utc>, &'a str)>;
 
 async fn anchor(pool: &PgPool, fact: Uuid) -> anyhow::Result<Anchor> {
@@ -34,7 +34,7 @@ async fn anchor(pool: &PgPool, fact: Uuid) -> anyhow::Result<Anchor> {
     )
 }
 
-/// 一篇文档和它的一块正文。`own` 是文档自己的日期（正文说的），没有就是没说
+/// One document and one block of its body. `own` is the document's own date (stated in the body); None if none was stated
 async fn document(
     pool: &PgPool,
     kb: Uuid,
@@ -64,7 +64,7 @@ async fn document(
     Ok((doc, chunk))
 }
 
-/// 一条开放陈述，证据在这几块里；`Some` 的那几条证据记着章节日期，陈述按最早的作证
+/// One open statement, with evidence in these blocks; the entries of evidence that are `Some` record a section date, and the statement is witnessed by the earliest
 async fn statement(
     pool: &PgPool,
     kb: Uuid,
@@ -93,7 +93,7 @@ async fn statement(
     Ok(id)
 }
 
-/// 从这些陈述物化出来的一行类型化事实：记着来源，抄了它们的证据
+/// One typed-fact row materialized from these statements: records the source, copies their evidence
 async fn typed(
     pool: &PgPool,
     kb: Uuid,
@@ -173,15 +173,15 @@ async fn attestation_follows_the_evidence_that_remains() -> anyhow::Result<()> {
         let (chapter_2015, chapter_2020) = (day(2015, 6, 1), day(2020, 6, 1));
         let (by_2015, by_2020) = ("2015 年年报", "2020 年年报");
         let late_own_date = day(2026, 3, 1);
-        // 早的那篇自己的日期是 2026 年 1 月，章节说的是 2015；晚的那篇 2026 年 3 月，章节说 2020；
-        // 第三篇什么日期都没说
+        // The earlier document's own date is January 2026, its section says 2015; the later one is March 2026, its section says 2020;
+        // the third states no date at all
         let (early, early_chunk) = document(&pool, kb, Some(day(2026, 1, 10))).await?;
         let (_late, late_chunk) = document(&pool, kb, Some(late_own_date)).await?;
         let (_bare, bare_chunk) = document(&pool, kb, None).await?;
         let from_2015 = Some((chapter_2015, by_2015));
         let from_2020 = Some((chapter_2020, by_2020));
 
-        // 两篇都说过：最早的章节作证
+        // Both state one: the earliest section vouches
         let both = statement(
             &pool,
             kb,
@@ -191,7 +191,7 @@ async fn attestation_follows_the_evidence_that_remains() -> anyhow::Result<()> {
             &[(early_chunk, from_2015), (late_chunk, from_2020)],
         )
         .await?;
-        // 另一处出处一个日期都没说
+        // The other source states no date at all
         let beside_undated = statement(
             &pool,
             kb,
@@ -201,7 +201,7 @@ async fn attestation_follows_the_evidence_that_remains() -> anyhow::Result<()> {
             &[(early_chunk, from_2015), (bare_chunk, None)],
         )
         .await?;
-        // 只在早的那篇里：随它一起作废
+        // Only in the earlier document: voided along with it
         let only_early = statement(
             &pool,
             kb,
@@ -211,7 +211,7 @@ async fn attestation_follows_the_evidence_that_remains() -> anyhow::Result<()> {
             &[(early_chunk, from_2015)],
         )
         .await?;
-        // 这一列之前写下的证据：没记章节日期，见证是当时按文档日期给的
+        // Evidence written before this column existed: no section date recorded, the witness was given by the document's date at the time
         let legacy = statement(
             &pool,
             kb,
@@ -226,7 +226,7 @@ async fn attestation_follows_the_evidence_that_remains() -> anyhow::Result<()> {
             .bind(day(2026, 1, 10))
             .execute(&pool)
             .await?;
-        // 类型化的行：一行跟着两篇都说过的那条；一行的两个来源里有一个只在早的那篇里
+        // Typed rows: one row follows the one both documents state; a row whose two sources include one that is only in the earlier document
         let follows_both = typed(&pool, kb, watch, market, sold_in, &[both]).await?;
         let late_only = statement(
             &pool,

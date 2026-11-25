@@ -1,8 +1,8 @@
-//! 衰减淘汰的记录（RC-003），打在真库上。
+//! Decay-eviction records (RC-003), run against a real database.
 //!
-//! 要钉住的行为：淘汰记一笔；恢复（不论谁恢复）清掉这一笔；没被淘汰过的文档没有这一笔。
+//! Behavior pinned: eviction records one entry; restoring (by anyone) clears that entry; a document that was never evicted has no entry.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset. Creates and tears down its own database, never touching an existing one.
 
 use sqlx::PgPool;
 use utopia_store::decay::{mark_evicted, was_evicted};

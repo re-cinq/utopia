@@ -1,24 +1,24 @@
-//! 0121：角色词搬到它事实的每一块证据上（0070 决定 1，#1267）。
+//! 0121: the role word moves onto every evidence chunk of its fact (0070 decision 1, #1267).
 //!
-//! 开一个隔离库迁到 0120，种下旧形状的行，再跑 0121：
-//!   - 每块证据（被取代的也算）都拿到陈述的角色词，读出来仍是一个值；
-//!   - 类型化行只在说过这个词、且值与它相同的来源陈述的块上拿到它；
-//!   - 已失效、没有证据的事实（purge 留下的）的角色词被删掉；
-//!   - 活着的事实有角色词却没有证据，迁移整份中止。
+//! Open an isolated database, migrate to 0120, plant rows in the old shape, then run 0121:
+//!     - each evidence chunk (including superseded ones) gets the statement's role word, and it still reads back as one value;
+//!     - a typed row gets the word only on the chunks of a source statement that says that word and has the same value;
+//!     - the role word of an invalidated fact with no evidence (left behind by purge) is deleted;
+//!     - a live fact with a role word but no evidence aborts the whole migration.
 //!
-//! 建库失败（角色没权限的环境）与没有 UTOPIA_DATABASE_URL 一样处理：跳过。
+//! Failing to create the database (an environment where the role lacks permission) is handled the same as having no UTOPIA_DATABASE_URL: skip.
 
 use sqlx::{Acquire, PgPool};
 use uuid::Uuid;
 
-/// 维护库的地址：`…/utopia` → `…/postgres`
+/// The maintenance database address: `…/utopia` → `…/postgres`
 fn admin_url() -> Option<String> {
     let url = utopia_store::test_db::url()?;
     let (head, _) = url.rsplit_once('/')?;
     Some(format!("{head}/postgres"))
 }
 
-/// 按文件顺序跑 `from..=through` 的迁移，各自一个事务（与 sqlx::migrate 同一形状）
+/// Runs the migrations `from..=through` in file order, each in its own transaction (same shape as sqlx::migrate)
 async fn migrate(pool: &PgPool, from: i64, through: i64) -> Result<(), sqlx::Error> {
     let migrator = sqlx::migrate!("../../migrations");
     let mut conn = pool.acquire().await?;
@@ -33,7 +33,7 @@ async fn migrate(pool: &PgPool, from: i64, through: i64) -> Result<(), sqlx::Err
     Ok(())
 }
 
-/// 隔离库：建 → 迁到 0120 → 返回（库名, 连接池）。失败就地跳过
+/// Isolated database: create → migrate to 0120 → return (database name, pool). On failure, skip in place
 async fn scratch(suffix: &str) -> Option<(String, PgPool)> {
     let admin_pool = PgPool::connect(&admin_url()?).await.ok()?;
     let name = format!("sq121_{}_{}", suffix, Uuid::now_v7().simple());
@@ -73,7 +73,7 @@ struct Ledger {
     live_chunk: Uuid,
 }
 
-/// 一个库、一个实体、一份文档的两块：旧的那块已被取代
+/// One library, one entity, and two chunks of one document: the old chunk has been superseded
 async fn seed_ledger(pool: &PgPool) -> anyhow::Result<Ledger> {
     let (org, ws, kb, entity, doc) = (
         Uuid::now_v7(),
@@ -130,7 +130,7 @@ async fn seed_ledger(pool: &PgPool) -> anyhow::Result<Ledger> {
     })
 }
 
-/// 一条事实；`open` 是开放陈述，否则是类型化行
+/// One fact; `open` is an open statement, otherwise it is a typed row
 async fn fact(pool: &PgPool, ledger: &Ledger, open: bool, live: bool) -> anyhow::Result<Uuid> {
     let fact = Uuid::now_v7();
     sqlx::query(
@@ -148,7 +148,7 @@ async fn fact(pool: &PgPool, ledger: &Ledger, open: bool, live: bool) -> anyhow:
     Ok(fact)
 }
 
-/// 按 0120 的形状写一个 `lines` 角色词（没有 chunk_id）
+/// Writes a `lines` role word in the 0120 shape (no chunk_id)
 async fn says_lines(pool: &PgPool, fact: Uuid) -> anyhow::Result<()> {
     says_lines_as(pool, fact, "40-52").await
 }
@@ -234,7 +234,7 @@ async fn a_typed_row_takes_a_role_word_only_on_the_chunk_of_a_statement_that_sai
     says_lines(&pool, said).await?;
     evidence(&pool, said, &[ledger.superseded_chunk]).await?;
     evidence(&pool, silent, &[ledger.live_chunk]).await?;
-    // 说了另一个值的来源：它的块不替类型化行说话，类型化行仍只读出原来的值
+    // A source that says a different value: its chunk does not speak for the typed row, which still reads only the original value
     says_lines_as(&pool, disagreed, "58-70").await?;
     evidence(&pool, disagreed, &[ledger.live_chunk]).await?;
     let typed = fact(&pool, &ledger, false, true).await?;
@@ -248,7 +248,7 @@ async fn a_typed_row_takes_a_role_word_only_on_the_chunk_of_a_statement_that_sai
         .bind(disagreed)
         .execute(&pool)
         .await?;
-    // 来源已经不在的类型化行：角色词照旧抄到它的证据上，读出来不少
+    // A typed row whose source is already gone: the role word is still copied onto its evidence, and reads back in quantity
     let sourceless = fact(&pool, &ledger, false, true).await?;
     says_lines(&pool, sourceless).await?;
     evidence(&pool, sourceless, &[ledger.live_chunk]).await?;

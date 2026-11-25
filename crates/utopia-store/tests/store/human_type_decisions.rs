@@ -1,17 +1,17 @@
-//! 人拍过板的类型，引擎不许改——打在真库上。
+//! Types a person has signed off on must not be changed by the engine: hit against a real database.
 //!
-//! 这一整条防线活在 SQL 的 `WHERE` 子句里：三处读侧各加一句
-//! `type_source <> 'human'`，漏一处就是静默失效。`cargo check` 一个字看不见，
-//! 而 0009 刚在同一片区域踩过 `NULL <> uuid` 的坑——类型系统数得清 Rust，
-//! 数不到 SQL 里去。
+//! This whole line of defence lives in SQL `WHERE` clauses: each of three read sides adds a `type_source <> 'human'`,
+//! and missing one fails silently. `cargo check` cannot see a word of it,
+//! and 0009 just tripped over the `NULL <> uuid` trap in this same area: the type system can count Rust,
+//! but cannot count into the SQL.
 //!
-//! 三条断言对应三条路径：
+//! Three assertions map to three paths:
 //!
-//! - 类型消解取材（`entities_for_type_resolution`）不该捞人拍过板的
-//! - 抽取升格不该给「人说过就是没有类型」的实体安一个类型 ← 0009 × P4 的交叉
-//! - `retype_entities` 用现成的 `actor` 参数区分 human / inferred
+//! - Type-resolution candidate selection (`entities_for_type_resolution`) must not pull in entities a person has signed off on
+//! - Extraction promotion must not give a type to an entity a person said has no type ← the cross-section of 0009 × P4
+//! - `retype_entities` uses the existing `actor` parameter to tell human from inferred
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` it skips rather than fails. It sets up and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -23,8 +23,8 @@ struct Fx {
     sub_type: Uuid,
 }
 
-/// 造一个刚好能触发「第三种取材条件」的本体：`organization` 有子类 `startup`。
-/// 人把实体定成 `organization` 之后，正是这个子类让它够格被重判。
+/// Build an ontology that is just enough to trigger the "third candidate-selection condition": `organization` has a subclass `startup`.
+/// Once a person has set the entity to `organization`, that subclass is exactly what makes it eligible for re-judgment.
 async fn seed(pool: &PgPool) -> anyhow::Result<Fx> {
     let (org, ws, kb) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     let (org_type, sub_type) = (Uuid::now_v7(), Uuid::now_v7());
@@ -95,7 +95,7 @@ async fn source_of(pool: &PgPool, id: Uuid) -> anyhow::Result<String> {
     )
 }
 
-/// 主战场：取材条件里的「现类还有子类就纳入」会把人拍过板的实体一并捞回来。
+/// Main battleground: the "a current class with subclasses is included" condition in candidate selection would pull back entities that a person has signed off on.
 #[tokio::test]
 async fn type_resolution_leaves_human_decisions_alone() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -131,11 +131,11 @@ async fn type_resolution_leaves_human_decisions_alone() -> anyhow::Result<()> {
     run
 }
 
-/// **0009 × P4 的交叉，最容易漏的一条。**
+/// **The cross-section of 0009 × P4, the one most easily missed.**
 ///
-/// 0009 之后「没有类型」可能是人的决定——他看过这个实体，认为本体里没有合适的类。
-/// 而抽取升格的守卫原本只看 `type_key.is_none()`，分不出「还没判」和「人判了，
-/// 就是没有」，于是下一次抽取会给它安一个类型。
+/// After 0009, "no type" may be a person's decision: they looked at this entity and judged that no suitable class exists in the ontology.
+/// But the guard for extraction promotion only checked `type_key.is_none()`, which could not tell "not yet judged" from "a person judged, and it is none",
+/// so the next extraction would give it a type.
 #[tokio::test]
 async fn extraction_does_not_fill_in_a_type_a_human_left_empty() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -145,13 +145,13 @@ async fn extraction_does_not_fill_in_a_type_a_human_left_empty() -> anyhow::Resu
     let f = seed(&pool).await?;
 
     let run = async {
-        // 人看过它，认为本体里没有合适的类 → 没有类型，且这是个决定
+        // A person looked at it and judged that no suitable class exists in the ontology → no type, and this is a decision
         let decided = entity(&pool, &f, "Ambiguous Thing", None, "human").await?;
-        // 还没轮到判的那个
+        // the one not yet judged
         let pending = entity(&pool, &f, "Other Thing", None, "extracted").await?;
 
-        // **升格分支要画像相似度才走得到**：ctx 为空时 best 是 None，整段被跳过。
-        // 第一版就是这么写的，撤掉守卫也没有测试失败——测试没测到它要测的东西
+        // **The promotion branch is reached only with a profile similarity:** with ctx empty, best is None and the whole section is skipped.
+        // The first version was written exactly this way, and removing the guard made no test fail: the test did not check what it was meant to check
         let ctx: Vec<f32> = vec![1.0, 0.0, 0.0];
         for id in [decided, pending] {
             sqlx::query(
@@ -163,7 +163,7 @@ async fn extraction_does_not_fill_in_a_type_a_human_left_empty() -> anyhow::Resu
             .await?;
         }
 
-        // 抽取再次遇到同名 mention，判出 organization。余弦 = 1.0，远高于 SIM_ATTACH
+        // Extraction meets the same name mention again and judges organization. Cosine = 1.0, far above SIM_ATTACH
         for id in [decided, pending] {
             let name: String =
                 sqlx::query_scalar("SELECT canonical_name FROM entities WHERE id = $1")
@@ -183,7 +183,7 @@ async fn extraction_does_not_fill_in_a_type_a_human_left_empty() -> anyhow::Resu
             .await?;
         }
 
-        // 对照：没有人拍过板的那个**应该**被升格，否则这个测试证明不了守卫在起作用
+        // Control: the one without a person's sign-off **should** be promoted, otherwise this test proves nothing about the guard working
         let after_pending: Option<Uuid> =
             sqlx::query_scalar("SELECT type_id FROM entities WHERE id = $1")
                 .bind(pending)
@@ -216,8 +216,8 @@ async fn extraction_does_not_fill_in_a_type_a_human_left_empty() -> anyhow::Resu
     run
 }
 
-/// `retype_entities` 用现成的 `actor` 参数区分来源：人点的批准是背书，受保护；
-/// 引擎自动裁决的不是。不必为此加新参数——#112 加 actor 时它就已经在那儿了。
+/// `retype_entities` uses the existing `actor` parameter to tell the source apart: a person's click to approve is an endorsement, and protected;
+/// an engine's automatic ruling is not. No new parameter is needed for this: it was already there when #112 added actor.
 #[tokio::test]
 async fn who_approved_a_retype_decides_whether_it_is_protected() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -260,15 +260,15 @@ async fn who_approved_a_retype_decides_whether_it_is_protected() -> anyhow::Resu
     run
 }
 
-/// **引擎改过的实体,下一轮还要捞得回来。**
+/// **An entity the engine changed must still be retrievable in the next round.**
 ///
-/// 这一条守的是一个真出过的事故:类型消解落库时把「点运行的那个人」当成了
-/// `retype_entities` 的 actor,而有 actor 就写 `type_source = 'human'`。
-/// 于是**跑过一次消解的实体从此永远不再被消解**——一个没有任何人工 PATCH 记录
-/// 的库,跑完一轮之后预览返回空列表,而且没有任何报错。
+/// This one guards an accident that really happened: when type resolution was stored, it took "the person who clicked run" as
+/// the actor of `retype_entities`, and an actor means writing `type_source = 'human'`.
+/// So **an entity that had been resolved once was never resolved again from then on**: in a database with no manual PATCH record at all,
+/// the preview returned an empty list after one round finished, with no error.
 ///
-/// 「谁点的运行」与「谁判定这个实体是什么」是两件事。前者记在
-/// `ontology.types_resolved` 审计里,后者才该决定 `type_source`。
+/// "Who clicked run" and "who judged what this entity is" are two different things. The former is recorded in the
+/// `ontology.types_resolved` audit; only the latter should decide `type_source`.
 #[tokio::test]
 async fn an_engine_retype_does_not_lock_the_entity_out_of_the_next_round() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -279,13 +279,13 @@ async fn an_engine_retype_does_not_lock_the_entity_out_of_the_next_round() -> an
 
     let run = async {
         let e = entity(&pool, &f, "Initech", Some(f.org_type), "extracted").await?;
-        // 留一个 specific_type:让它在「取材条件」上始终够格,这样落选与否
-        // 只取决于 type_source——否则改成叶子类之后它本来就该落选,测不出东西
+        // Keep one specific_type so that it is always eligible under "candidate selection", so that whether it is passed over
+        // depends only on type_source; otherwise, once changed to a leaf class it would be passed over anyway, and the test would prove nothing
         sqlx::query("UPDATE entities SET specific_type = 'startup company' WHERE id = $1")
             .bind(e)
             .execute(&pool)
             .await?;
-        // 引擎自动裁决:没有人为这一条背书
+        // Automatic ruling by the engine: no person endorsed this one
         utopia_store::resolution::retype_entities(&pool, f.kb, &[(e, f.sub_type)], None).await?;
 
         assert_eq!(

@@ -1,8 +1,8 @@
-//! 比 `vector` 的 HNSW 上限还宽的嵌入（text-embedding-3-large 是 3072 维）也有索引：
-//! 索引存 `halfvec`，只负责挑候选；距离与次序仍按 `vector` 全精度算。
+//! Embeddings wider than the HNSW limit of `vector` (text-embedding-3-large is 3072 dimensions) are still indexed:
+//! the index stores `halfvec` and is only responsible for picking candidates; distance and order are still computed at full `vector` precision.
 //!
-//! 两条分块的距离只差在半精度看不见的地方：半精度下并列（并列由 id 定，id 小的那条
-//! 离得远），全精度下近的那条必须排第一。外层若按半精度的距离排，就会把远的排上来。
+//! The distance of two chunks differs only where half precision cannot see: at half precision they tie (ties are broken by id, and the smaller id is
+//! farther away), while at full precision the nearer one must rank first. If the outer query ranked by the half-precision distance, it would pull the farther one up.
 
 use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
@@ -10,7 +10,7 @@ use sqlx::{Executor, PgPool};
 use utopia_store::vector_index::{self, Target, JOB_KIND, VECTOR_MAX_DIMS};
 use uuid::Uuid;
 
-/// 这个测试独占的维度：刚好放不进 `vector` 的索引
+/// The dimension this test owns exclusively: just too wide to fit the `vector` index
 const DIMS: usize = VECTOR_MAX_DIMS + 1;
 const CROWD: usize = 300;
 
@@ -21,7 +21,7 @@ fn lcg(seed: &mut u64) -> f32 {
     ((*seed >> 33) as f32 / (1u64 << 31) as f32) - 0.5
 }
 
-/// 前两维给定、其余为零的向量
+/// A vector with the first two dimensions given and the rest zero
 fn head(a: f32, b: f32) -> Vec<f32> {
     let mut v = vec![0.0; DIMS];
     v[0] = a;
@@ -33,9 +33,9 @@ struct Fixture {
     org: Uuid,
     big: Uuid,
     small: Uuid,
-    /// 全精度下离查询近的那条
+    /// The one nearer the query at full precision
     nearer: Uuid,
-    /// 半精度下与 `nearer` 一样远，id 更小
+    /// As far as `nearer` at half precision, but with the smaller id
     farther: Uuid,
     only: Uuid,
 }
@@ -48,7 +48,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         Uuid::now_v7(),
     );
     let (doc_big, doc_small) = (Uuid::now_v7(), Uuid::now_v7());
-    // `farther` 先取 id：并列时它排前面
+    // `farther` takes the smaller id first: on a tie, it sorts first
     let (farther, nearer, only) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     let tag = Uuid::now_v7();
 
@@ -88,7 +88,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
             (Uuid::now_v7(), big, doc_big, v)
         })
         .collect();
-    // 1.0004 与 1.0 在半精度里是同一个数（1 附近的间距是 2^-10，1.0004 不到一半，舍成 1），在全精度里不是
+    // 1.0004 and 1.0 are the same number at half precision (the spacing near 1 is 2^-10, and 1.0004 is less than half of that, so it rounds to 1), but at full precision they are not
     rows.push((farther, big, doc_big, head(1.0, 1.0004)));
     rows.push((nearer, big, doc_big, head(1.0, 1.0)));
     rows.push((only, small, doc_small, head(0.2, 1.0)));
@@ -134,7 +134,7 @@ async fn a_wide_embedding_is_indexed_and_ranked_at_full_precision() -> anyhow::R
         return Ok(());
     };
     let pool = PgPool::connect(&url).await?;
-    // 一条连接、不许顺扫也不许排序：规划器只剩索引这条路，统计也都记在这条连接上
+    // One connection: no sequential scan and no sorting allowed; the planner is left only with the index path, and statistics are all recorded on this connection
     let indexed = PgPoolOptions::new()
         .max_connections(1)
         .after_connect(|conn, _| {
@@ -155,7 +155,7 @@ async fn a_wide_embedding_is_indexed_and_ranked_at_full_precision() -> anyhow::R
     };
 
     let run = async {
-        // 上一次跑留下的都清掉，从「什么都没有」开始
+        // Clear away everything left by the previous run, and start from "nothing at all"
         vector_index::drop(&pool, Target::Chunks, DIMS).await?;
         forget_jobs().await?;
         let queued = vector_index::request(&pool, Target::Chunks, DIMS).await?;

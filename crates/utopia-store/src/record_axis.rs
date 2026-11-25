@@ -1,36 +1,36 @@
-//! 记录轴谓词（0019）：`held_at(T)`——**T 时刻我们认为哪些行成立**。
+//! Record-axis predicates (0019): `held_at(T)`: **which rows we believed to hold at moment T**.
 //!
-//! 世界轴（`valid_from` / `valid_to`）答"那时世界是什么样"，记录轴（`recorded_at` /
-//! `invalidated_at`）答"那时我们以为世界是什么样"。写入侧从图谱迁移起就一直记着
-//! 两根轴，读出侧只倒得回第一根——三月被改掉的事实，在任何滑杆位置上都不存在。
+//! The world axis (`valid_from` / `valid_to`) answers "what the world was like then", the record axis (`recorded_at` /
+//! `invalidated_at`) answers "what we believed the world was like then". The write side has recorded both axes since the graph migration,
+//! but the read side could only reach the first one: a fact corrected in March does not exist at any slider position.
 //!
-//! **谓词只在这里拼。** 防御一旦散到每个读点，漏掉一个就悄无声息：SQL 不报错，
-//! `cargo check` 也不会说一个字（0009 栽的正是这一跤，`human_type_decisions`
-//! 那个测试就是那次留下的）。所以读路径引这里的函数，不自己写 `invalidated_at`。
+//! **Predicates are composed only here.** Once the defence spreads to every read point, missing one is silent: SQL raises no error,
+//! and `cargo check` does not say a word either (0009 tripped exactly here; the `human_type_decisions` test is what that episode left behind).
+//! So read paths call the functions here and do not write `invalidated_at` themselves.
 //!
-//! **写路径不用**（0019）：`confirm_fact` / `reject_fact`、采纳的撤销、去重查重
-//! 都是对"当前那一行"的守卫——修正永远发生在现在，没有"以三月的身份改一行"这回事。
+//! **Write paths do not use it** (0019): `confirm_fact` / `reject_fact`, undoing an adoption, dedupe checks
+//! are all guards on "the current row": corrections always happen now; there is no "edit a row as of March" thing.
 //!
-//! 参数是 `Option<usize>`（绑定参数的序号）：`None` 即"现在"，谓词在 **SQL 文本上**
-//! 退化成 `invalidated_at IS NULL`——不只是语义等价，还要让优化器看见它，否则
-//! `IS NULL OR > now()` 的双支会让 `WHERE invalidated_at IS NULL` 的部分索引
-//! 整棵不可用（`held()` 的注释记着那次 61.6s 的教训）。读路径因此只写一处调用，
-//! 而不是为回放和当下各写一条——两条就是下一次漏改的地方。
+//! The arguments are `Option<usize>` (the bound parameter index): `None` means "now", and the predicate is reduced in the **SQL text**
+//! to `invalidated_at IS NULL`: not merely equivalent in meaning, but so the optimizer can see it; otherwise the two-branch
+//! `IS NULL OR > now()` would make the partial index on `WHERE invalidated_at IS NULL`
+//! unusable across the whole tree (the comment on `held()` records the 61.6s lesson from that). So read paths call this in exactly one place,
+//! rather than writing one for replay and one for the present: two copies is where the next missed edit would happen.
 //!
-//! **退化成 `IS NULL` 押在一条写入不变量上**：任何行都不会携带未来的
-//! `invalidated_at` / `deleted_at` / `decided_at` / `resolved_at`——撤销永远盖
-//! `now()` 的戳。有它，`IS NULL` 才与 `IS NULL OR > now()` 同义；没有 CHECK
-//! 守着它，只有这段文字。它若破了（比如预填一个未来的作废时刻），`None` 路径
-//! 会把"尚未生效的作废"当成"从未作废"。退化前有一个调用点碰巧对这种违例稳健，
-//! 退化后四个谓词全都指望它——所以它必须写在这里，让下一个读者撞上。
+//! **Reducing to `IS NULL` rests on a write invariant**: no row carries a future
+//! `invalidated_at` / `deleted_at` / `decided_at` / `resolved_at`: revocation always stamps `now()`. With that, `IS NULL` means the same as `IS NULL OR > now()`; without a CHECK
+//! guarding it, there is only this prose. If it breaks (say a future invalidation time is pre-filled), the `None` path
+//! would treat "invalidation not yet in effect" as "never invalidated". Before the reduction, one call site happened to tolerate
+//! this kind of violation; after it, all four predicates depend on it,
+//! so it must be written here, so that the next reader hits it.
 
-/// 起止两列构成的记录轴区间：`since <= T < invalidated_at`。
+/// The record-axis interval formed by the start and end columns: `since <= T < invalidated_at`.
 ///
-/// **`None` 必须退化成单支谓词**，不能照旧输出 `IS NULL OR > now()` 的双支：
-/// 部分索引（`facts_live_subject_idx` 等，`WHERE invalidated_at IS NULL`）只在
-/// 查询谓词能推出 `invalidated_at IS NULL` 时可用，`OR > now()` 让优化器
-/// 证不出来——读路径退成逐实体全表扫（9311 实体 × 94683 事实的库上
-/// `graph/overview` 节点查询 61.6s，退化后 4.3s）。
+/// **`None` must reduce to a single-branch predicate**, not output the two-branch `IS NULL OR > now()` as before:
+/// partial indexes (`facts_live_subject_idx` etc., `WHERE invalidated_at IS NULL`) are usable only when
+/// the query predicate can imply `invalidated_at IS NULL`; `OR > now()` leaves the optimizer
+/// unable to prove it: read paths fall back to a full per-entity table scan (on a database with 9311 entities x 94683 facts,
+/// the `graph/overview` node query took 61.6s, and 4.3s after the reduction).
 fn held(alias: &str, since: &str, as_of: Option<usize>) -> String {
     match as_of {
         None => format!("{alias}.invalidated_at IS NULL"),
@@ -41,22 +41,22 @@ fn held(alias: &str, since: &str, as_of: Option<usize>) -> String {
     }
 }
 
-/// `facts`：断言在 T 时刻仍被我们持有。
+/// `facts`: the assertion is still held by us at moment T.
 pub fn facts_held_at(alias: &str, as_of: Option<usize>) -> String {
     held(alias, "recorded_at", as_of)
 }
 
-/// `derived_facts`：派生在 T 时刻已推出且未被推翻——回放的图上留着**当时**推出的边，
-/// 而不是今天这套规则的结论。
+/// `derived_facts`: the derivation had been inferred at T and not overturned. The replayed graph keeps the edges inferred **at that time**,
+/// rather than the conclusions of today's rules.
 pub fn derived_held_at(alias: &str, as_of: Option<usize>) -> String {
     held(alias, "derived_at", as_of)
 }
 
-/// `axiom_violations`：违规在 T 时刻还开着。列名与上面两张表不同（`detected_at` /
-/// `decided_at` + `status`），但问的是同一个问题——所以也归这里，别在读点上现拼。
+/// `axiom_violations`: the violation was still open at T. Column names differ from the two tables above (`detected_at` /
+/// `decided_at` + `status`), but it asks the same question, so it lives here too rather than being assembled ad hoc at read points.
 ///
-/// 已裁掉却没留 `decided_at` 的历史行按"当时就不开着"算：宁可少画一条幽灵边，
-/// 也不要凭空给三月的图加一条今天才发现的矛盾。
+/// Pruned historical rows without `decided_at` count as "not open at the time": better to draw one fewer ghost edge
+/// than to conjure a contradiction onto March's graph that was only discovered today.
 pub fn violation_open_at(alias: &str, as_of: Option<usize>) -> String {
     match as_of {
         None => format!("{alias}.status = 'open'"),
@@ -67,7 +67,7 @@ pub fn violation_open_at(alias: &str, as_of: Option<usize>) -> String {
     }
 }
 
-/// `fact_conflicts`：时态冲突在 T 时刻还开着。
+/// `fact_conflicts`: the temporal conflict was still open at T.
 pub fn conflict_open_at(alias: &str, as_of: Option<usize>) -> String {
     match as_of {
         None => format!("{alias}.status = 'open'"),
@@ -78,8 +78,8 @@ pub fn conflict_open_at(alias: &str, as_of: Option<usize>) -> String {
     }
 }
 
-/// `documents`：文档在 T 时刻还在库里。删除留墓碑（#268），所以"删掉的文档"
-/// 在删除之前的任何时刻都该照常出现——它的分块当时确实是可检索的。
+/// `documents`: the document was still in the database at T. Deletion leaves a tombstone (#268), so a "deleted document"
+/// should still appear as normal at any moment before its deletion: its chunks were genuinely retrievable then.
 pub fn document_live_at(alias: &str, as_of: Option<usize>) -> String {
     match as_of {
         None => format!("{alias}.deleted_at IS NULL"),
@@ -90,8 +90,8 @@ pub fn document_live_at(alias: &str, as_of: Option<usize>) -> String {
     }
 }
 
-/// `chunks`：分块在 T 时刻还是现行版本。证据是否"已消失"要按当时的版本判——
-/// 今天被重解析顶掉的段落，在三月的图上仍然是活证据。
+/// `chunks`: the chunk was still the current version at T. Whether evidence "has vanished" must be judged by the version at that time:
+/// a passage superseded by today's re-parse is still live evidence on March's graph.
 pub fn chunk_live_at(alias: &str, as_of: Option<usize>) -> String {
     match as_of {
         None => format!("{alias}.superseded_at IS NULL"),
@@ -102,13 +102,13 @@ pub fn chunk_live_at(alias: &str, as_of: Option<usize>) -> String {
     }
 }
 
-/// 一条事实的证据，选成 `rw_ee`（证据）、`rw_ec`（块）、`rw_ed`（文档），供 [`role_word_fact_ends`] 聚合
+/// A fact's evidence, selected as `rw_ee` (evidence), `rw_ec` (chunk), `rw_ed` (document), for [`role_word_fact_ends`] to aggregate
 pub const ROLE_WORD_EVIDENCE: &str = "fact_evidence rw_ee
          JOIN chunks rw_ec ON rw_ec.id = rw_ee.chunk_id
          JOIN documents rw_ed ON rw_ed.id = rw_ec.document_id";
 
-/// 按事实聚合 [`ROLE_WORD_EVIDENCE`]：T 时刻有没有活块（`any_live`），T 时刻已有的块里
-/// 最晚的终点（`last_end`）。块的终点是 `superseded_at` 与文档 `deleted_at` 里早的那个
+/// Aggregates [`ROLE_WORD_EVIDENCE`] by fact: whether at T there is any live chunk (`any_live`), and among the chunks existing at T
+/// the latest end point (`last_end`). A chunk's end is the earlier of its `superseded_at` and its document's `deleted_at`.
 pub fn role_word_fact_ends(as_of: Option<usize>) -> String {
     format!(
         "bool_or({} AND {}) AS any_live,
@@ -126,12 +126,12 @@ fn chunk_existed_at(alias: &str, as_of: Option<usize>) -> String {
     }
 }
 
-/// 角色词在 T 时刻替它的事实说话吗（0070 决定 2、3），给定它那块 `c`、那块的文档 `d`
-/// 和它事实的 [`role_word_fact_ends`] 一行 `f`。
+/// Whether a role word speaks for its fact at T (0070 decisions 2 and 3), given its chunk `c`, that chunk's document `d`
+/// and its fact's [`role_word_fact_ends`] row `f`.
 ///
-/// 它那块与那块的文档在 T 时刻都还活着，就说话；活着的几块值不同，都说话。
-/// 事实在 T 时刻一块活证据都没有时，最后到头的那几块说话（同一时刻到头的都算），
-/// 只看 T 时刻已有的块。每条事实的证据只聚合一次：重推几百次的陈述不按行重扫
+/// If its chunk and that chunk's document were both still alive at T, it speaks; if several live chunks have different values, all of them speak.
+/// When the fact has no live evidence at all at T, the chunks that ended last speak (those ending at the same moment count too),
+/// looking only at chunks existing at T. Each fact's evidence is aggregated only once: a statement re-derived hundreds of times is not rescanned row by row.
 pub fn role_word_speaks_given(c: &str, d: &str, f: &str, as_of: Option<usize>) -> String {
     format!(
         "(({c_live} AND {d_live})
@@ -143,8 +143,8 @@ pub fn role_word_speaks_given(c: &str, d: &str, f: &str, as_of: Option<usize>) -
     )
 }
 
-/// `statement_qualifiers`：这一行 `q` 此刻说话吗，[`role_word_speaks_given`] 的单行形状。
-/// 只在写入口用，所以不带 T；别名都带 `rw_` 前缀，不和调用方的撞
+/// `statement_qualifiers`: does this row `q` speak right now; the single-row shape of [`role_word_speaks_given`].
+/// Used only at write entry points, so no T is taken; aliases all carry the `rw_` prefix so they do not collide with the caller's.
 pub fn role_word_speaks_now(q: &str) -> String {
     format!(
         "EXISTS (SELECT 1 FROM chunks rw_c JOIN documents rw_d ON rw_d.id = rw_c.document_id
@@ -157,10 +157,10 @@ pub fn role_word_speaks_now(q: &str) -> String {
     )
 }
 
-/// `entity_merges`：这次合并在 T 时刻**生效着**吗（0019 第二刀 / #336）。
+/// `entity_merges`: is this merge **in effect** at T (0019 second slice / #336)?
 ///
-/// 实体身上没有记录轴——`merged_into` 只说合并发生过，不说何时。时刻在这张表上，
-/// 而它和别的表问的是同一个问题，所以列名不同、形状一样。
+/// Entities carry no record axis: `merged_into` only says a merge happened, not when. The moment lives on this table,
+/// and since it asks the same question as the other tables, the column names differ but the shape is the same.
 pub fn merge_in_effect_at(alias: &str, as_of: Option<usize>) -> String {
     match as_of {
         None => format!("{alias}.reverted_at IS NULL"),
@@ -171,11 +171,11 @@ pub fn merge_in_effect_at(alias: &str, as_of: Option<usize>) -> String {
     }
 }
 
-/// 实体在 T 时刻是不是一个独立的节点：那时已经存在，且没有被一次生效中的合并吞掉。
+/// Whether an entity was an independent node at T: it already existed then, and had not been swallowed by a merge in effect.
 ///
-/// **取代读路径上的 `merged_into IS NULL`。** 参数为 `None` 时两者等价（已撤销的合并
-/// 此刻不生效，那个实体本来就该出现），但传了时刻之后，三月被并掉的实体在二月
-/// 会重新长回来——那正是这一刀要的。
+/// **Replaces `merged_into IS NULL` on read paths.** With `None` the two are equivalent (a revoked merge
+/// is not in effect now, so that entity should appear), but once a moment is passed, an entity merged away in March
+/// grows back in February, which is exactly what this slice wants.
 pub fn entity_visible_at(alias: &str, as_of: Option<usize>) -> String {
     let merged = merge_in_effect_at("m", as_of);
     match as_of {
@@ -191,10 +191,10 @@ pub fn entity_visible_at(alias: &str, as_of: Option<usize>) -> String {
     }
 }
 
-/// 一条事实在 T 时刻的主语（`on_object = false`）或宾语。
+/// A fact's subject (`on_object = false`) or object at moment T.
 ///
-/// **现在这条路不进函数**：`fact_owner_at` 包住列之后索引就用不上了，而
-/// 「现在」是每一次画图都要走的路。回放才付这个代价——它本来就少见。
+/// **The present path does not go through the function**: wrapping the columns with `fact_owner_at` would make the index unusable, and
+/// "now" is the path every graph drawing takes. Only replay pays this cost, which is rare anyway.
 pub fn owner_at(fact_alias: &str, column: &str, as_of: Option<usize>, on_object: bool) -> String {
     match as_of {
         None => format!("{fact_alias}.{column}"),
@@ -208,10 +208,10 @@ pub fn owner_at(fact_alias: &str, column: &str, as_of: Option<usize>, on_object:
 mod tests {
     use super::*;
 
-    /// 「现在」那条路必须退化成单支。这不是风格问题：`IS NULL OR > now()` 让
-    /// 优化器证不出 `invalidated_at IS NULL`，`facts_live_subject_idx` 这类
-    /// 部分索引整棵不可用（实测双支走 `facts_live_time_idx` 每次扫 9,877 行，
-    /// 单支走 BitmapOr 扫 4 行）。性能这条性质在别处没有守卫，只有这里。
+    /// The "now" path must reduce to a single branch. This is not a style matter: `IS NULL OR > now()` stops
+    /// the optimizer proving `invalidated_at IS NULL`, so partial indexes such as `facts_live_subject_idx`
+    /// become unusable across the whole tree (measured: the two-branch form scans `facts_live_time_idx` at 9,877 rows each time,
+    /// the single branch uses BitmapOr and scans 4 rows). This performance property has no guard elsewhere; only here.
     #[test]
     fn a_predicate_for_now_has_no_second_branch() {
         for (what, sql) in [
@@ -238,8 +238,8 @@ mod tests {
         }
     }
 
-    /// 回放那条路原样保留：带上时刻参数、两支都在。少了哪一支，三月的图上就会
-    /// 多出今天才作废的行，或者少掉当时还活着的行。
+    /// The replay path is kept as-is: it takes the moment argument and keeps both branches. Drop either branch and March's graph would
+    /// gain rows invalidated only today, or lose rows that were still alive then.
     #[test]
     fn a_predicate_for_a_moment_keeps_both_branches() {
         let sql = facts_held_at("f", Some(3));
@@ -253,9 +253,9 @@ mod tests {
         );
     }
 
-    /// `entity_visible_at(None)` 顶替读路径上的 `merged_into IS NULL`：它换成了
-    /// 对 `entity_merges` 的反连接（多一次 hash anti join），但不再按实体行判。
-    /// 传了时刻才额外要求「那时已经建出来了」。
+    /// `entity_visible_at(None)` replaces `merged_into IS NULL` on read paths: it becomes
+    /// an anti join against `entity_merges` (one extra hash anti join), but no longer judges by the entity row.
+    /// Only when a moment is passed does it additionally require "it had already been created by then".
     #[test]
     fn an_entity_is_visible_now_unless_a_live_merge_swallowed_it() {
         let now = entity_visible_at("e", None);

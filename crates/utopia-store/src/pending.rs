@@ -1,20 +1,20 @@
-//! 等人点头的事实（见 `docs/decisions/0015`，表在 `migrations/0018`）。
+//! Facts awaiting a person's nod (see `docs/decisions/0015`; the table is in `migrations/0018`).
 //!
-//! 一句记忆抽出来的三元组先落这里，**不进 `facts`**：不上图、不参与检索、
-//! 不进推理。人在对话里或 Review 页看见「原句在上、三元组在下」之后点头，
-//! 它才经与抽取相同的那条路（`insert_fact` + 证据 + 时态对账）进账本。
+//! A triple extracted from a memory lands here first, **not in `facts`**: not on the graph, not used in retrieval,
+//! not used in inference. Once a person nods, after seeing "source sentence on top, triple below" in the conversation or on the Review page,
+//! it goes into the ledger via the same path as extraction (`insert_fact` + evidence + temporal reconciliation).
 //!
-//! **为什么另一张表而不是 `facts` 加一列**：五十多处查询按 `invalidated_at IS NULL`
-//! 捞活事实，逐个补过滤漏一处就有一条没人点头的事实混进图里——而这张表存在的
-//! 全部理由就是防这件事。分开之后忘了读它的后果是「看不见待确认队列」，
-//! 方向对了。0013 的 `derived_facts` 是同一个判断。
+//! **Why a separate table rather than a column on `facts`**: over fifty queries filter by `invalidated_at IS NULL`
+//! to pull live facts, and missing the filter in just one place lets an unconfirmed fact slip into the graph, and the whole reason this table exists
+//! is to prevent exactly that. Forgetting to read it has one consequence: "the pending queue is invisible",
+//! and that is the right direction to fail in. 0013's `derived_facts` makes the same call.
 //!
-//! **只拦交互式的单条写入。** 批量摄入仍旧乐观写入 + 事后审阅——那条路不经这里。
+//! **Only blocks interactive single-item writes.** Bulk ingestion still writes optimistically plus after-the-fact review; that path does not go through here.
 //!
-//! **两种形状**（0044 第一刀，迁移 0062）：`phrase` 为空是老的带本体形状（谓词、算出来的
-//! `valid_*`），点头走 `insert_fact` + 时态对账；`phrase` 非空是一条开放陈述——文档自己
-//! 的关系短语、按角色词记的属性、照抄的时间词、引文在块里的位置——点头走
-//! `insert_open_statement`，不问本体、不碰世界轴。
+//! **Two shapes** (0044 first slice, migration 0062): an empty `phrase` is the old ontology-backed shape (predicate, computed
+//! `valid_*`); nodding goes through `insert_fact` + temporal reconciliation; a non-empty `phrase` is an open statement: the document's own
+//! relation phrase, attributes keyed by role word, the time phrases copied verbatim, and the quote's position in the block; nodding goes
+//! through `insert_open_statement`, which does not consult the ontology and does not touch the world axis.
 
 use sqlx::PgPool;
 use utopia_core::models::PendingFactView;
@@ -23,12 +23,12 @@ use uuid::Uuid;
 
 use crate::graph::{FactObject, Validity};
 
-/// 抽取器交过来的一条提议。字段与 `insert_fact` / `insert_value_fact` 对齐，
-/// 多出 `proposed_predicate`（模型原话）、`chunk_id`（那句记忆）、`proposed_by`（谁说的）。
+/// A proposal handed over by the extractor. Fields line up with `insert_fact` / `insert_value_fact`,
+/// with extras `proposed_predicate` (the model's own words), `chunk_id` (the memory sentence), `proposed_by` (who said it).
 pub struct Proposal<'a> {
     pub kb_id: Uuid,
     pub subject_id: Uuid,
-    /// None = 本体里没有对应的关系（0010）。**人要看见的正是这个空**
+    /// None = the ontology has no matching relation (0010). **This empty is exactly what the person needs to see**
     pub predicate_id: Option<Uuid>,
     pub object_id: Option<Uuid>,
     pub object_value: Option<&'a serde_json::Value>,
@@ -37,38 +37,38 @@ pub struct Proposal<'a> {
     pub confidence: f32,
     pub chunk_id: Uuid,
     pub proposed_by: Option<Uuid>,
-    /// 经 MCP 提的话，是哪一枚令牌说的（0026）。网页端对话为空
+    /// Which token said it, for a statement proposed via MCP (0026). Empty for web chat
     pub proposed_token: Option<Uuid>,
-    /// Some = 一条开放陈述（0044）：文档自己的关系短语，照写。点头后落成
-    /// `facts.layer = 'open'`，没有谓词、不写 `valid_*`。None = 老的带本体形状
+    /// Some = an open statement (0044): the document's own relation phrase, as written. Once nodded it becomes
+    /// `facts.layer = 'open'`, with no predicate and no `valid_*` written. None = old ontology-backed shape
     pub phrase: Option<&'a str>,
-    /// 按文档角色词记的属性：`[{"role": "amount", "value": "$2 million"} |
-    /// {"role": "to", "entity_id": "<uuid>"}]`。只在 `phrase` 非空时有意义
+    /// Attributes keyed by document role words: `[{"role": "amount", "value": "$2 million"} |
+    /// {"role": "to", "entity_id": "<uuid>"}]`. Only meaningful when `phrase` is non-empty
     pub qualifiers: Option<&'a serde_json::Value>,
-    /// 陈述提到的时间词，照抄、永远不是日期：`[{"text": "March 4, 2011", "char_start": 143}]`，
-    /// 偏移是 `chunks.text` 里的字符偏移。只在 `phrase` 非空时有意义
+    /// Time phrases the statement mentions, copied verbatim, never a date: `[{"text": "March 4, 2011", "char_start": 143}]`,
+    /// the offset is a character offset in `chunks.text`. Only meaningful when `phrase` is non-empty
     pub time_words: Option<&'a serde_json::Value>,
-    /// 引文在 `chunks.text` 里的字符偏移 `(start, end)`，服务端搜文本算出、从不取模型
-    /// 报的数；没定位到传 None。只在 `phrase` 非空时有意义
+    /// The quote's character offset `(start, end)` in `chunks.text`, computed by the server searching the text, never taken from what the model
+    /// reported; if not located, pass None. Only meaningful when `phrase` is non-empty
     pub quote_span: Option<(i32, i32)>,
 }
 
-/// 提议的去向。三种「没提」都不是错误——重抽一句记忆会再次算出同样的三元组，
-/// 不挡住就等于每抽一次都把人的决定抹掉一次。
+/// Where the proposal goes. None of the three "not proposed" states is an error: re-extracting a memory sentence computes the same triple again,
+/// and without blocking, every extraction would erase the person's decision once more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Proposed(Uuid),
-    /// 图上已经有一条一样的活事实——不必再问
+    /// The graph already has the same live fact: no need to ask again
     AlreadyAsserted,
-    /// 已经在队列里等着
+    /// Already waiting in the queue
     AlreadyPending,
-    /// 人拒绝过这个三元组（`rejected_facts`）
+    /// The person rejected this triple (`rejected_facts`)
     Rejected,
 }
 
 pub async fn propose(pool: &PgPool, p: Proposal<'_>) -> AppResult<Outcome> {
-    // 开放陈述的短语照写但去掉首尾空白——`insert_open_statement` 也这么做，空短语在这里
-    // 就挡下，别让一条点头时才会失败的行进队列
+    // Open-statement phrases are kept as written but stripped of leading and trailing whitespace; `insert_open_statement` does the same, so an empty phrase is blocked here,
+    // so a row that would only fail at nod time never enters the queue
     let phrase = p.phrase.map(str::trim);
     if phrase == Some("") {
         return Err(AppError::invalid(
@@ -76,8 +76,8 @@ pub async fn propose(pool: &PgPool, p: Proposal<'_>) -> AppResult<Outcome> {
             "an open statement keeps the document's relation phrase",
         ));
     }
-    // 「图上已经有」：开放陈述在活着的开放行里按 (主语, 短语, 宾语) 找；带本体的形状
-    // 照旧按 (主语, 谓词, 宾语)
+    // "Already on the graph": an open statement is looked up among live open rows by (subject, phrase, object); the ontology-backed form
+    // still by (subject, predicate, object)
     let asserted: Option<(i32,)> = match phrase {
         Some(phrase) => {
             sqlx::query_as(
@@ -139,10 +139,10 @@ pub async fn propose(pool: &PgPool, p: Proposal<'_>) -> AppResult<Outcome> {
     if pending.is_some() {
         return Ok(Outcome::AlreadyPending);
     }
-    // 拒绝记录只按 (主语, 谓词 / 短语, 宾语实体) 查。**字面值事实不查**：`rejected_facts`
-    // 没有 object_value 列，按 (主语, 谓词) 挡会把「薪水 28000 被拒」扩大成
-    // 「薪水这个属性永远不再提」。宁可多问一次，不替人拒掉一个新值。
-    // 短语进了键：同一对实体之间换一个短语是另一句话，不被上一句的拒绝连累
+    // The rejection record is only looked up by (subject, predicate / phrase, object entity). **Literal-value facts are not looked up**: `rejected_facts`
+    // has no object_value column, so blocking by (subject, predicate) would widen "salary 28000 was rejected" into
+    // "the salary attribute is never mentioned again". Better to ask once more than to reject a new value on someone's behalf.
+    // The phrase is part of the key: a different phrase between the same pair of entities is a different sentence, and must not be hit by the last sentence's rejection
     if let Some(object_id) = p.object_id {
         let rejected: Option<(i32,)> = sqlx::query_as(
             "SELECT 1 FROM rejected_facts
@@ -198,7 +198,7 @@ pub async fn propose(pool: &PgPool, p: Proposal<'_>) -> AppResult<Outcome> {
     Ok(Outcome::Proposed(id))
 }
 
-/// 给人看的一条待确认项：`utopia_core::models::PendingFactView`。
+/// A pending item for a person to see: `utopia_core::models::PendingFactView`.
 const VIEW_SELECT: &str = "\
     SELECT p.id, p.subject_id, s.canonical_name AS subject_name,
            p.predicate_id, r.label AS predicate_label, p.proposed_predicate,
@@ -232,7 +232,7 @@ pub async fn list(
     .await?)
 }
 
-/// 一句记忆抽出的全部待确认项——对话里那张卡片按这个取。
+/// All pending items extracted from one memory sentence: the conversation card fetches by this.
 pub async fn for_chunk(
     pool: &PgPool,
     kb_id: Uuid,
@@ -256,7 +256,7 @@ async fn get(pool: &PgPool, kb_id: Uuid, id: Uuid) -> AppResult<PendingFactView>
         .ok_or(AppError::NotFound)
 }
 
-/// 决策台账要的自包含快照：行删了之后台账上还读得出当时确认或拒绝的是什么。
+/// A self-contained snapshot the decision ledger needs: after the row is deleted, the ledger can still read what was confirmed or rejected at the time.
 fn snapshot(v: &PendingFactView) -> serde_json::Value {
     serde_json::json!({
         "subject": v.subject_name,
@@ -277,28 +277,28 @@ fn snapshot(v: &PendingFactView) -> serde_json::Value {
 
 pub struct Confirmed {
     pub fact_id: Uuid,
-    /// 那句记忆所在的文档：点头之后按它重排时间解析（0045）
+    /// The document that memory sentence lives in: after nodding, time parsing is redone against it (0045)
     pub document_id: Uuid,
-    /// false = 图上已有同一条活事实，这次只补了证据
+    /// false = the same live fact is already on the graph; this time only evidence was added
     pub created: bool,
-    /// 时态对账拿不准、进了 `fact_conflicts` 的条数。开放陈述不对账，恒为 0
+    /// Number of rows where temporal reconciliation was uncertain and went into `fact_conflicts`. Open statements are not reconciled, always 0
     pub conflicts: u32,
     pub snapshot: serde_json::Value,
 }
 
-/// 人点头：按抽取那条路进账本——落事实、挂证据、时态对账——然后从队列里拿掉。
+/// Person nods: enters the ledger via the extraction path (lands the fact, attaches evidence, temporal reconciliation), then is removed from the queue.
 ///
-/// **置信度不动。** 人的态度不用浮点数表达（0011 的教训），它在审计台账里。
+/// **Confidence is not touched.** A person's stance is not expressed as a float (a lesson from 0011); it lives in the audit ledger.
 ///
-/// 不包事务：`insert_fact` 按 (主语, 谓词, 宾语) 对活事实去重，中途断掉再点一次
-/// 只会补证据、不会落第二条，删行在最后——幂等靡有余悸。
+/// No transaction: `insert_fact` dedupes live facts by (subject, predicate, object), so if interrupted and nodded again
+/// it only adds evidence and never lands a second one; the row is deleted last. Idempotent, so no lingering risk.
 pub async fn confirm(pool: &PgPool, kb_id: Uuid, id: Uuid) -> AppResult<Confirmed> {
     let v = get(pool, kb_id, id).await?;
     if let Some(phrase) = v.phrase.clone() {
         return confirm_open(pool, kb_id, &v, &phrase).await;
     }
-    // 锚点是那句记忆所在文档的日期（0022）——与抽取那条路同一个来源。没起点的
-    // 事实从有证据的那一刻起成立，而证据就是这句话
+    // The anchor is the date of the document that memory sentence lives in (0022), the same source as the extraction path. A fact with no start
+    // holds from the moment it has evidence, and the evidence is this sentence
     let attested_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
         "SELECT d.doc_time FROM chunks c JOIN documents d ON d.id = c.document_id
           WHERE c.id = $1",
@@ -313,7 +313,7 @@ pub async fn confirm(pool: &PgPool, kb_id: Uuid, id: Uuid) -> AppResult<Confirme
         to: v.valid_to,
         to_precision: v.valid_to_precision.as_deref(),
         attested_at,
-        // 待定的事实是人或代理提的，日期是直接给的，没经过时间解析
+        // A pending fact was proposed by a person or agent, its date is given directly and did not go through time parsing
         from_grade: None,
         end_after_period: false,
     };
@@ -344,7 +344,7 @@ pub async fn confirm(pool: &PgPool, kb_id: Uuid, id: Uuid) -> AppResult<Confirme
         }
         (None, None) => return Err(no_object()),
     };
-    // 证据指回那句记忆。引句就是整句——一条 episode 本来就只有一句
+    // Evidence points back to the memory sentence. The quoted sentence is the whole sentence: an episode is only ever one sentence
     crate::graph::add_evidence(
         pool,
         fact_id,
@@ -354,9 +354,9 @@ pub async fn confirm(pool: &PgPool, kb_id: Uuid, id: Uuid) -> AppResult<Confirme
     )
     .await?;
 
-    // 与抽取相同的时态对账：带唯一性约束的状态关系，新事实闭合旧事实。
-    // 这正是记忆该有的行为——「Mira 交给 Devin 了」说完，Mira 那条就该闭合。
-    // 并进已有断言的也对：多了一次观察，时间线的形状可能跟着变（#679）
+    // Same temporal reconciliation as extraction: for state relations with a uniqueness constraint, a new fact closes the old one.
+    // This is exactly what memory should do: after "Mira handed it to Devin", Mira's fact should close.
+    // Merging into an existing assertion also works: one more observation, and the timeline's shape may change with it (#679)
     let mut conflicts = 0u32;
     if let Some(pid) = v.predicate_id {
         let meta: Option<(bool, bool, String)> = sqlx::query_as(
@@ -371,7 +371,7 @@ pub async fn confirm(pool: &PgPool, kb_id: Uuid, id: Uuid) -> AppResult<Confirme
                 if functional {
                     directions.push(crate::temporal::Uniqueness::SubjectSide);
                 }
-                // 宾语侧唯一只对实体宾语有意义；字面值没有「谁被指着」
+                // The object-side uniqueness only means something for entity objects; a literal value has no "who is being pointed at"
                 if inverse_functional && v.object_id.is_some() {
                     directions.push(crate::temporal::Uniqueness::ObjectSide);
                 }
@@ -407,25 +407,25 @@ pub async fn confirm(pool: &PgPool, kb_id: Uuid, id: Uuid) -> AppResult<Confirme
     })
 }
 
-/// 人对一条开放陈述点头（0044）：按开放抽取那条路进账本——`insert_open_statement`、
-/// 带偏移的证据、角色词属性、时间词——然后从队列里拿掉。
+/// Person nods to an open statement (0044): enters the ledger via the open extraction path (`insert_open_statement`,
+/// evidence with offsets, role-word attributes, time phrases), then is removed from the queue.
 ///
-/// **不问本体、不做时态对账。** 开放陈述没有谓词，`relation_types` 上没有它的
-/// functional / temporal 可查；它提到的时间是照抄的字，在世界轴上还没有位置，
-/// 没有 `valid_*` 可以拿去闭合谁。把字读成日期、再对账，是 0045 后面几刀的事。
+/// **Does not consult the ontology and does not reconcile over time.** An open statement has no predicate, and `relation_types` has no
+/// functional / temporal entry to look up for it; the time it mentions is copied words, with no position on the world axis yet,
+/// and no `valid_*` to close anyone with. Reading the words as dates and then reconciling is for later slices of 0045.
 ///
-/// 与带本体的那条路一样不包事务：`insert_open_statement` 按 (主语, 短语, 宾语) 在活着的
-/// 开放行里去重，证据、属性、时间词都是 ON CONFLICT 幂等的，中途断掉再点一次不会落第二行。
+/// Like the ontology-backed path, this has no transaction: `insert_open_statement` dedupes by (subject, phrase, object) among the live
+/// open rows; evidence, attributes and time phrases are all ON CONFLICT idempotent, so if interrupted and nodded again it will not land a second row.
 async fn confirm_open(
     pool: &PgPool,
     kb_id: Uuid,
     v: &PendingFactView,
     phrase: &str,
 ) -> AppResult<Confirmed> {
-    // 记录轴的锚点只认文档自己说的日期（#714）：`doc_time_source` 是 content / source
-    // 才取 `doc_time`，上传时间与文件 mtime 不算。记忆文档是 'none'，于是这里为空，
-    // 落成此刻——人此刻点了头的话，人就是证据。抽取那条路没有这个缺省（0064 决定 5）：
-    // 那里没有人在场，文档没说的就是没有
+    // The record-axis anchor only accepts a date the document states itself (#714): `doc_time` is taken only when `doc_time_source` is content / source;
+    // upload time and file mtime do not count. Memory documents are 'none', so it is empty here, and
+    // it lands as now: if a person nods right now, the person is the evidence. The extraction path has no such default (0064 decision 5):
+    // there no person is present, and what the document does not say is absent
     let attested_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
         "SELECT d.doc_time FROM chunks c JOIN documents d ON d.id = c.document_id
           WHERE c.id = $1 AND d.doc_time_source IN ('content', 'source')",
@@ -449,10 +449,10 @@ async fn confirm_open(
         v.confidence,
     )
     .await?;
-    // 证据指回那句记忆，带着引文在块里的位置；`proposed_predicate = phrase`，于是所有
-    // 已经容得下空谓词的读路径不改一字就按短语显示它。
-    // 引文是**那句话**，不是整块：待确认项上的 quote 是块的全文（带时间戳前缀），
-    // 有偏移时按偏移截出这一句，偏移才和引文说同一件事（证据表的 quote 只留 120 字）
+    // Evidence points back to the memory sentence, with the quote's position in the block; `proposed_predicate = phrase`, so all
+    // read paths that already tolerate an empty predicate show it by phrase without changing a character.
+    // The quote is **the sentence**, not the whole block: the quote on the pending item is the whole block (with timestamp prefix),
+    // and with offsets, the sentence is cut out by offsets, so the offsets say the same thing as the quote (the evidence table's quote keeps only 120 chars)
     let span = v.quote_start.zip(v.quote_end);
     let sentence: String = match span {
         Some((start, end)) if start >= 0 && end > start => v
@@ -482,7 +482,7 @@ async fn confirm_open(
                     "a statement qualifier needs the document's role word",
                 )
             })?;
-        // 带 entity_id 的指向一个实体；否则 value 就是文档里的那个值，原样落成 JSON
+        // An entry with entity_id points to an entity; otherwise value is the value in the document, stored as JSON as-is
         let entity_id = q
             .get("entity_id")
             .and_then(serde_json::Value::as_str)
@@ -514,7 +514,7 @@ async fn confirm_open(
                 "a time word is the document's text and its char offset in the chunk",
             ));
         };
-        // 来自陈述的哪个槽；0062 之前记下的项没有这一字段，它们都是 when
+        // Which slot of the statement it came from; items recorded before 0062 lack this field, and they are all `when`
         let role = t
             .get("role")
             .and_then(serde_json::Value::as_str)
@@ -542,7 +542,7 @@ fn no_object() -> AppError {
     )
 }
 
-/// 一列 JSON 对象；不是数组（或没有）就是空
+/// A JSON object column; not an array (or none) is empty
 fn json_items(v: Option<&serde_json::Value>) -> impl Iterator<Item = &serde_json::Value> {
     v.and_then(serde_json::Value::as_array)
         .map(Vec::as_slice)
@@ -550,7 +550,7 @@ fn json_items(v: Option<&serde_json::Value>) -> impl Iterator<Item = &serde_json
         .iter()
 }
 
-/// 一块所在的文档。
+/// The document that a chunk sits in.
 async fn document_of(pool: &PgPool, chunk_id: Uuid) -> AppResult<Uuid> {
     Ok(
         sqlx::query_scalar("SELECT document_id FROM chunks WHERE id = $1")
@@ -560,9 +560,9 @@ async fn document_of(pool: &PgPool, chunk_id: Uuid) -> AppResult<Uuid> {
     )
 }
 
-/// 人拒绝：记进 `rejected_facts`（下一轮重抽先查它），从队列里拿掉。
-/// 那句记忆本身留着——人确实说过那句话，只是没抽出可用的事实。
-/// 开放陈述连短语一起记：拒的是「这句话」，不是这一对实体之间的一切
+/// Person rejects: recorded in `rejected_facts` (the next re-extraction checks it first), then removed from the queue.
+/// The memory sentence itself is kept: the person did say that sentence, it just produced no usable fact.
+/// An open statement records the phrase along with it: what is rejected is "this sentence", not everything between that pair of entities
 pub async fn reject(
     pool: &PgPool,
     kb_id: Uuid,

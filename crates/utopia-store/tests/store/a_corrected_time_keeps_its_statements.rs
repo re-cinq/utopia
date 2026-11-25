@@ -1,20 +1,20 @@
-//! 人改一条物化出来的行的区间（302），改完它仍是那条陈述算出来的行（#899 的第三个改写者）。
+//! A person edits the interval of a row materialized from a statement (302); after editing it is still the row that the statement computes (#899's third rewriter).
 //!
-//! 一条陈述「Zhang San —leads→ Aurora，自 2023-01-10」绑到 leads，物化成一行；另一条说
-//! 李四自 2024-07-05 接手，物化后的对账把张三那一段关在交接日。然后人把张三的起点改成
-//! 2023-02-01（章程日期是批准日，他 2 月 1 日才接手），终点照旧。
+//! One statement "Zhang San —leads→ Aurora, since 2023-01-10" bound to leads, materializes into one row; another says
+//! Li Si took over from 2024-07-05, and reconciliation after materialization closes Zhang San's span at the handover date. Then the person changes Zhang San's start to
+//! 2023-02-01 (the charter date is the approval date; he actually took over on 1 February), with the end unchanged.
 //!
-//! 改写出来的修正行若不带上它由哪些陈述算出（`typed_fact_sources`、`from_statement_id`），
-//! 两处读法同时出错，时态测量台上五道 Aurora 题就是这么错的：
+//! If the corrected row produced by the rewrite does not carry which statements it was computed from (`typed_fact_sources`, `from_statement_id`),
+//! two readings go wrong at the same time: the five Aurora questions on the temporal test bench went wrong exactly this way:
 //!
-//! - 陈述不再被活着的类型化行代表，画布、实体面板和对话工具把它**原样**画回来：
-//!   自 2023-01-10 起、没有终点。于是 1 月 20 日张三在管（人刚改掉的那一段），2024 年
-//!   八月张三和李四同时在管（引擎关上的那一段）
-//! - 下一轮物化看见这条陈述没有活着的行，照陈述再算一行，人改的起点被算回去
+//! - The statement is no longer represented by a live typed row, so the canvas, the entity panel and the conversation tool draw it back **as it was**:
+//!   since 2023-01-10, with no end. So on 20 January Zhang San is in charge (the span the person just edited), and in August 2024
+//!   Zhang San and Li Si are both in charge (the span the engine closed)
+//! - The next materialization round sees the statement has no live row, computes one again from the statement, and the start the person edited is computed back
 //!
-//! 引擎自己的改写（闭合、搬移）从 #911 起就带着这些；人改区间走的是另一个函数。
+//! The engine's own rewrites (closing, moving) have carried these since #911; a person editing an interval goes through a different function.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -63,7 +63,7 @@ async fn a_corrected_time_keeps_its_statements() -> anyhow::Result<()> {
             .execute(&pool)
             .await?;
         }
-        // 一个项目同时只有一个 lead：接任关上前任，与测量台的公理表一致
+        // One project can have only one lead at a time: a successor closes its predecessor, consistent with the axiom table of the bench
         sqlx::query(
             "INSERT INTO relation_types (id, kb_id, key, label, temporal, inverse_functional)
              VALUES ($1, $2, 'leads', 'leads', 'state', TRUE)",
@@ -117,7 +117,7 @@ async fn a_corrected_time_keeps_its_statements() -> anyhow::Result<()> {
         .execute(&pool)
         .await?;
 
-        // 两条陈述两行；物化后的对账把张三那一段关在李四接手那天
+        // Two statements, two rows; after materialization, reconciliation closes Zhang San's span on the day Li Si takes over
         let first = materialize(&pool, kb).await?;
         assert_eq!((first.added, first.corrected), (2, 1), "{first:?}");
         let zhang_rows = |pool: PgPool| async move {
@@ -135,7 +135,7 @@ async fn a_corrected_time_keeps_its_statements() -> anyhow::Result<()> {
         let (closed, _, to) = rows[0];
         assert_eq!(to, Some(t("2024-07-05T00:00:00Z")), "交接日关上前任");
 
-        // 人改起点，终点照旧；与 PATCH /facts/{id} 同一条路：改完按搬移重新对账
+        // A person changes the start, the end unchanged; the same path as PATCH /facts/{id}: after editing, reconcile again through the move
         let corrected = utopia_store::temporal::correct_interval(
             &pool,
             closed,
@@ -151,7 +151,7 @@ async fn a_corrected_time_keeps_its_statements() -> anyhow::Result<()> {
         .expect("the row was live");
         utopia_store::temporal::reconcile_moved_facts(&pool, kb, &[corrected]).await?;
 
-        // 修正行仍是那条陈述算出来的
+        // The corrected row is still the one the statement computes
         let (from_statement,): (Option<Uuid>,) =
             sqlx::query_as("SELECT from_statement_id FROM facts WHERE id = $1")
                 .bind(corrected)
@@ -165,7 +165,7 @@ async fn a_corrected_time_keeps_its_statements() -> anyhow::Result<()> {
         .await?;
         assert_eq!((from_statement, sources), (Some(charter), vec![charter]));
 
-        // 画面上一条陈述只画一条边：改过的那一段。1 月 20 日还没人在管，2024 年八月只有李四
+        // On screen one statement draws only one edge: the span that was edited. On 20 January no one is in charge yet, and in August 2024 only Li Si is
         let leads_of_aurora = |at: &'static str| {
             let pool = pool.clone();
             async move {
@@ -185,7 +185,7 @@ async fn a_corrected_time_keeps_its_statements() -> anyhow::Result<()> {
         assert_eq!(leads_of_aurora("2023-03-01T00:00:00Z").await?, vec!["Zhang San"]);
         assert_eq!(leads_of_aurora("2024-08-01T00:00:00Z").await?, vec!["Li Si"]);
 
-        // 下一轮物化没有要补的：人改的起点不被算回去
+        // The next materialization round has nothing to add: the start a person edited is not computed back
         assert_eq!(materialize(&pool, kb).await?, Outcome::default());
         let rows = zhang_rows(pool.clone()).await?;
         assert_eq!(

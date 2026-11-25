@@ -1,15 +1,15 @@
-//! 环没搜完要说出来，而且没搜到的不算没了（#642），打在真库上。
+//! A cycle search that stops early must say so, and what it did not reach is not thereby gone (#642), tested against a real database.
 //!
-//! 一团稠密的强连通分量里，深度 12 以内的简单环是天文数字，找环撞上
-//! `MAX_CYCLES_PER_PREDICATE` / `MAX_CYCLE_STEPS` 就停。钉三样：
+//! In a dense strongly connected cluster, simple cycles up to depth 12 are astronomically many, so a cycle search that hits
+//! `MAX_CYCLES_PER_PREDICATE` / `MAX_CYCLE_STEPS` stops. Three things are pinned:
 //!
-//! 1. **报告里说出来**：`cycles_capped` 数到这个谓词；落库的环不超过上限；同一份数据
-//!    重跑不插不清——停在哪儿只取决于数据
-//! 2. **没搜完的谓词，上一轮的 open 环不清**：先有一个环，后来同一谓词上长出一团
-//!    稠密的，搜索在够到那个环之前就停了。那一行留着——搜不到不等于不存在
-//! 3. **没截断的谓词照常清**：另一个谓词上的环，撤掉一条边，那一行照样被清掉
+//! 1. **Reported in the output**: `cycles_capped` counts this predicate; the cycles stored do not exceed the cap; and the same data
+//!       rerun neither inserts nor clears -- where it stops depends only on the data
+//! 2. **For a predicate whose search did not finish, the previous round's open cycles are not cleared**: first a cycle exists, then later a dense
+//!       cluster grows on the same predicate, and the search stops before reaching that cycle. That row stays -- not reaching it does not mean it does not exist
+//! 3. **A predicate whose search was not capped is cleared as usual**: a cycle on another predicate, once one edge is removed, is cleared as it always is
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_reason::MAX_CYCLES_PER_PREDICATE;
@@ -20,9 +20,9 @@ struct Fixture {
     org: Uuid,
     kb: Uuid,
     etype: Uuid,
-    /// eternal + transitive：稠密的那一团长在它上面
+    /// eternal + transitive: the dense cluster grows on top of it
     part_of: Uuid,
-    /// eternal + transitive：只有一个小环，从不截断
+    /// eternal + transitive: only one small cycle, never capped
     located_in: Uuid,
 }
 
@@ -101,7 +101,7 @@ async fn fact(pool: &PgPool, f: &Fixture, s: Uuid, p: Uuid, o: Uuid) -> anyhow::
     Ok(id)
 }
 
-/// open 的环行，按谓词分
+/// Open cycle rows, grouped by predicate
 async fn open_cycles(pool: &PgPool, f: &Fixture, predicate: Uuid) -> anyhow::Result<Vec<Uuid>> {
     Ok(sqlx::query_scalar(
         "SELECT v.id FROM axiom_violations v JOIN facts lf ON lf.id = v.left_fact
@@ -124,12 +124,12 @@ async fn a_cycle_search_that_stops_says_so_and_keeps_what_it_did_not_reach() -> 
     let f = seed(&pool).await?;
 
     let result = async {
-        // 稠密那一团的节点先建：id 更小，搜索从它们起步，先撞上上限
+        // The dense cluster's nodes are created first: smaller ids, so the search starts from them and hits the cap first
         let mut clique = Vec::new();
         for i in 0..12 {
             clique.push(entity(&pool, &f, &format!("C{i}")).await?);
         }
-        // ---- 一、先只有一个小环（两个 id 更大的节点）；另一个谓词上也有一个
+        // ---- Part 1: first only one small cycle (two nodes with larger ids); another predicate also has one
         let (x, y) = (entity(&pool, &f, "X").await?, entity(&pool, &f, "Y").await?);
         fact(&pool, &f, x, f.part_of, y).await?;
         fact(&pool, &f, y, f.part_of, x).await?;
@@ -142,7 +142,7 @@ async fn a_cycle_search_that_stops_says_so_and_keeps_what_it_did_not_reach() -> 
         let small = open_cycles(&pool, &f, f.part_of).await?;
         assert_eq!(small.len(), 1);
 
-        // ---- 二、part_of 上长出一团 12 个节点两两互指的
+        // ---- Part 2: on part_of, a cluster of 12 nodes that all point to each other
         for &s in &clique {
             for &o in &clique {
                 if s != o {
@@ -164,7 +164,7 @@ async fn a_cycle_search_that_stops_says_so_and_keeps_what_it_did_not_reach() -> 
         );
         assert_eq!(r.cleared, 0);
 
-        // 同一份数据重跑：停在同一处，不插不清
+        // Rerun on the same data: stops at the same point, no inserts and no clears
         for _ in 0..2 {
             let again = reasoning::run(&pool, f.kb).await?;
             assert_eq!(
@@ -174,7 +174,7 @@ async fn a_cycle_search_that_stops_says_so_and_keeps_what_it_did_not_reach() -> 
             assert_eq!(open_cycles(&pool, &f, f.part_of).await?, open);
         }
 
-        // ---- 三、没截断的谓词照常清
+        // ---- Part 3: a predicate that was not capped is cleared as usual
         sqlx::query("UPDATE facts SET invalidated_at = now() WHERE id = $1")
             .bind(pq)
             .execute(&pool)

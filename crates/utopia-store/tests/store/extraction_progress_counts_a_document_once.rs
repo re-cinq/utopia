@@ -1,11 +1,11 @@
-//! 文库的抽取进度：每篇文档只数一次（#715）。
+//! Extraction progress for the library: each document is counted once (#715).
 //!
-//! 进度条从前拿 `ready`（摄入完成）当分子、`ready + extracting` 当分母。一篇「摄入完了、
-//! 图谱还在抽」的文档在两个维度里各算一次：库里只有一篇正在抽的文档，也显示成 1 / 2。
-//! 现在分子分母都只看 `graph_status`：`done` 与 `extracting`。删掉的文档不算，
-//! 抽取失败的单独数。
+//! The progress bar used to take `ready` (ingestion complete) as the numerator and `ready + extracting` as the denominator. A document that is "ingested, graph still extracting"
+//! was counted in both dimensions: a store with only one document being extracted showed 1 / 2.
+//! Now the numerator and denominator both look only at `graph_status`: `done` and `extracting`. Deleted documents are not counted,
+//! and failed extractions are counted separately.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use sqlx::PgPool;
 use utopia_store::documents;
@@ -61,16 +61,16 @@ async fn a_document_still_extracting_is_not_counted_as_done() -> anyhow::Result<
         document(&pool, kb, "extracting.md", "extracting", false).await?;
         document(&pool, kb, "queued.md", "queued", false).await?;
         document(&pool, kb, "failed.md", "failed", false).await?;
-        // 删掉的文档哪一格都不算，包括它删之前正在抽的
+        // A deleted document counts in no cell, including the extraction it was running before it was deleted
         document(&pool, kb, "deleted.md", "extracting", true).await?;
         let page = documents::page(&pool, kb, None, None, None, false, 50, 0).await?;
-        // 摄入完成的四篇都是 ready——重抽的作用范围不变
+        // The four ingested documents are all ready — the scope of the re-extraction is unchanged
         assert_eq!(page.ready, 4);
         assert_eq!(page.done, 1);
         assert_eq!(page.extracting, 2, "queued 与 extracting 都算在抽");
         assert_eq!(page.failed, 1);
-        // 进度条因此是 done / (done + extracting) = 1 / 3。旧的写法 ready / (ready + extracting)
-        // 会是 4 / 6：两篇还没抽完的、一篇抽失败的都被算成了完成
+        // So the progress bar is done / (done + extracting) = 1 / 3. The old form, ready / (ready + extracting),
+        // would be 4 / 6: the two not yet extracted and the one that failed extraction all counted as complete
         anyhow::Ok(())
     }
     .await;

@@ -1,22 +1,22 @@
-//! 本体声明的公理要真的落到库里——打在真库上。
+//! Axioms declared by the ontology must actually land in the database -- tested against a real database.
 //!
-//! 这条防线的由来是一个既存缺陷:`create_relation_types_bulk` 的文档写着
-//! 「`functional` / `inverse_functional` 必须照词汇表写下去,不能默认 false」,
-//! 而它的 SQL 里是硬编码的 `FALSE, FALSE`——两个数组绑定了却没进 `UNNEST`。
-//! 实测装 FOAF(声明了 17 条 FunctionalProperty)之后,库里 functional 为真的
-//! **一条都没有**。
+//! The origin of this guard is a pre-existing defect: the `create_relation_types_bulk` documentation says
+//! "`functional` / `inverse_functional` must be written as the vocabulary says, not defaulted to false",
+//! but its SQL hard-codes `FALSE, FALSE` -- two arrays were bound but never made it into the `UNNEST`.
+//! Measured after installing FOAF (which declares 17 FunctionalProperty): in the database, **not one**
+//! functional flag is true.
 //!
-//! 那两位是时态引擎自动闭合事实的依据。写错的方向不同,后果也不同:标错成真
-//! 会成批造假冲突(`part_of` 那次 59 条),而这次是反方向——该为真的全成了假,
-//! 于是**该检测出的时态冲突一条都检测不到**,静悄悄地。
+//! Those two flags are what the temporal engine uses to close facts automatically. A wrong write goes in a different direction with different consequences: marking one true wrongly
+//! creates false conflicts in batches (59 of them for `part_of`), whereas this time the direction was reversed -- those that should be true all became false,
+//! so **not a single temporal conflict that should have been detected was detected**, silently.
 //!
-//! `cargo check` 看不见这种错(类型全对),单元测试也看不见(它在 SQL 字符串里)。
-//! 只有把一行真的写进去再读回来才行。
+//! `cargo check` cannot see this kind of error (the types are all correct), and unit tests cannot either (it lives in the SQL string).
+//! Only writing one real row and reading it back can catch it.
 
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// 造一个最小的库:公理落库跟本体大小无关,一条就够。
+/// Build a minimal library: axiom storage does not depend on the ontology's size, so one is enough.
 async fn kb(pool: &PgPool) -> anyhow::Result<(Uuid, Uuid)> {
     let (org, ws, kb) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     sqlx::query("INSERT INTO organizations (id, name) VALUES ($1, 'ax-test')")
@@ -63,7 +63,7 @@ async fn every_axiom_survives_the_bulk_insert() -> anyhow::Result<()> {
                 display_hints: serde_json::json!({}),
             }
         };
-        // 一条全真、一条全假：全假那条守的是"没声明的不该被写成真"
+        // One all-true and one all-false: the all-false one guards that "what is not declared must not be written as true"
         utopia_store::ontology::create_relation_types_bulk(
             &pool,
             kb_id,

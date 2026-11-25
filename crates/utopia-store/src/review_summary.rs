@@ -1,13 +1,13 @@
-//! 审核台的总览（#377）：等着办的、办过的、库的成色。
+//! Review desk overview (#377): what is waiting to be handled, what has been handled, and the health of the library.
 //!
-//! 与 [`crate::review::counts`] 同一个前提——**数数不取数**，每一段都是
-//! 聚合查询，不把行拉下来在 Rust 里数。七档队列的 WHERE 与 `counts` 逐字
-//! 相同（`unconfirmed` 那段抽成了常量共用），否则左栏的数和总览的数迟早
-//! 分叉。
+//! Same premise as [`crate::review::counts`] -- **count, do not fetch**: every section is
+//! an aggregate query, and the rows are not pulled into Rust to be counted. The seven-tier queue's WHERE clauses match `counts` word for word
+//! (the `unconfirmed` part was pulled out into a shared constant), otherwise the numbers in the left column and in the overview would
+//! eventually drift apart.
 //!
-//! 「办过的」读的是审计台账：review./fact./conflict./merge. 四族动作，与
-//! 决策流水（`audit::review_history`）同一个筛子。没有 actor 的那些是后台
-//! 自裁（攒批裁决），单独数出来——「AI 替你办了多少」本身就是一个数。
+//! "Handled" reads the audit ledger: the four action families review., fact., conflict., merge., with the same filter as the decision log (`audit::review_history`).
+//! Those without an actor are the background's own resolutions (batched verdicts), counted separately --
+//! "how much AI handled for you" is itself a number.
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use sqlx::PgPool;
@@ -21,12 +21,12 @@ use uuid::Uuid;
 
 use crate::review::{unconfirmed_fact, LOW_CONFIDENCE_BELOW};
 
-/// 「办过的」按天看多少天
+/// "Handled" by day: how many days to show
 pub const DAILY_DAYS: i64 = 14;
-/// 「谁办的」最多列几个人
+/// "Who handled it": at most how many people to list
 const TOP_ACTORS: i64 = 5;
 
-/// 与 `audit::review_history` 同一个筛子：review 域的四族动作
+/// Same filter as `audit::review_history`: the four review-domain action families
 const DECISION_ACTIONS: &str = "(e.action LIKE 'review.%' OR e.action LIKE 'fact.%'
      OR e.action LIKE 'conflict.%' OR e.action LIKE 'merge.%')";
 
@@ -68,9 +68,9 @@ struct WaitingRow {
 }
 
 async fn waiting(pool: &PgPool, kb_id: Uuid) -> AppResult<ReviewWaiting> {
-    // 每档一对 count/min，一条查询端回来。「最老」按各表自己的时钟：待办事实与
-    // 重复、冲突是 created_at，公理与本体缺陷是 detected_at，两种事实队列是
-    // 事实自己的 recorded_at——都是「从什么时候起就在等」
+    // Each tier gets a count/min pair, returned by one query. "Oldest" uses each table's own clock: pending facts and
+    // duplicates and conflicts use created_at, axioms and ontology defects use detected_at, and the two fact queues use the fact's own recorded_at --
+    // all of them mean "waiting since when"
     let sql = format!(
         "SELECT
            (SELECT count(*) FROM pending_facts WHERE kb_id = $1) AS pending,
@@ -152,7 +152,7 @@ struct DayRow {
 }
 
 async fn decided(pool: &PgPool, kb_id: Uuid) -> AppResult<ReviewDecided> {
-    // 两个窗口一趟查完：按 30 天筛，7 天的用 FILTER 另数一遍
+    // Both windows are fetched in one pass: filter by 30 days, and count the 7-day one again with FILTER
     let by_action: Vec<ActionRow> = sqlx::query_as(&format!(
         "SELECT e.action, (e.actor_id IS NULL) AS automatic,
                 count(*) FILTER (WHERE e.created_at >= now() - interval '7 days') AS last_7d,
@@ -235,7 +235,7 @@ async fn decided(pool: &PgPool, kb_id: Uuid) -> AppResult<ReviewDecided> {
         }
     };
 
-    // 补齐没有决定的那些天——柱子要等距，缺一天图就说谎
+    // Fill in the days with no decisions -- the bars must be evenly spaced, or the chart lies
     let by_day: BTreeMap<NaiveDate, i64> = days.into_iter().map(|d| (d.day, d.count)).collect();
     let today = Utc::now().date_naive();
     let daily = (0..DAILY_DAYS)
@@ -271,8 +271,8 @@ struct AgentRow {
     last_30d: i64,
 }
 
-/// agent 的记录（0025）：开着的建议不分时间；两个窗口里写下的行按**现在的**
-/// 状态数——「自动裁了还站着的」与「被撤回的」是两个数，合起来才是它动过手的
+/// The agent's record (0025): open suggestions are not time-bounded; rows written within the two windows are counted by their **current**
+/// status -- "auto-resolved and still standing" and "withdrawn" are two numbers, and together they show how much it has acted.
 async fn agent(pool: &PgPool, kb_id: Uuid) -> AppResult<ReviewAgent> {
     let open: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM agent_decisions WHERE kb_id = $1 AND status = 'proposed'",
@@ -316,9 +316,9 @@ async fn agent(pool: &PgPool, kb_id: Uuid) -> AppResult<ReviewAgent> {
 }
 
 async fn health(pool: &PgPool, kb_id: Uuid) -> AppResult<ReviewHealth> {
-    // 只数在世的事实（invalidated_at IS NULL）：作废的不算库的成色。
-    // 「有争议」= 挂在一条还开着的冲突的任一端。先合并两端，避免每条事实
-    // 再探测一次冲突表；UNION 去重，同一事实挂在几条冲突上也只计一次。
+    // Count only live facts (invalidated_at IS NULL): invalidated ones do not count toward the library's health.
+    // "Disputed" = attached to either end of an open conflict. Merge both ends first, to avoid probing the conflicts table again
+    // for each fact; UNION removes duplicates, so a fact attached to several conflicts is counted only once.
     let sql = format!(
         "SELECT count(*) AS facts,
                 count(*) FILTER (WHERE f.confidence < $2 AND f.derived_by_rule IS NULL) AS low_confidence,

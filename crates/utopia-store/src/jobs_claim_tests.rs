@@ -1,6 +1,6 @@
-//! 认领顺序（#1300、#1351）：不调对话模型的任务排在模型任务前面，哪怕它来得晚。
+//! Claim order (#1300, #1351): tasks that do not call the chat model go ahead of model tasks, even when they arrive later.
 //!
-//! `claim_one` 认领的是全库的任务，所以这两条放在一百年前，排在库里别的一切前面。
+//! `claim_one` claims tasks across the whole database, so these two are set a hundred years in the past, ahead of everything else in it.
 
 use super::claim_one;
 use sqlx::postgres::PgPoolOptions;
@@ -33,8 +33,8 @@ async fn a_later_intake_job_is_claimed_before_an_earlier_extraction() -> anyhow:
     Ok(())
 }
 
-/// 一条连接的池：临时表只在这条连接上遮住 public.jobs，库里别的任务碰不到它。
-/// 每行是（标签, 种类, 相对现在的 run_at）。
+/// A pool of one connection: the temp table only shadows public.jobs on this connection, so other tasks in the database cannot reach it.
+/// Each row is (label, kind, run_at relative to now).
 async fn isolated_queue(rows: &[(&str, &str, &str)]) -> anyhow::Result<Option<PgPool>> {
     let Some(url) = crate::test_db::url() else {
         return Ok(None);
@@ -60,7 +60,7 @@ async fn isolated_queue(rows: &[(&str, &str, &str)]) -> anyhow::Result<Option<Pg
     Ok(Some(pool))
 }
 
-/// 认领到队列空为止，按认领顺序返回标签。
+/// Claims until the queue is empty, returning labels in claim order.
 async fn claimed_labels(pool: &PgPool, fast_lane: bool) -> anyhow::Result<Vec<String>> {
     let mut labels = Vec::new();
     while let Some(job) = claim_one(pool, fast_lane).await? {
@@ -195,7 +195,7 @@ async fn an_upgrade_reindexes_already_queued_materialization() -> anyhow::Result
     let schema = format!("claim_upgrade_{}", uuid::Uuid::now_v7().simple());
     let result: anyhow::Result<Vec<String>> = async {
         let mut tx = pool.begin().await?;
-        // 旧函数和旧索引只装进这个 schema，不改并发测试正在用的队列。
+        // The old function and old index are loaded only into this schema, so the queue used by the concurrency tests is not changed.
         sqlx::raw_sql(&format!(
             "CREATE SCHEMA {schema};
              SET LOCAL search_path TO {schema};
@@ -216,7 +216,7 @@ async fn an_upgrade_reindexes_already_queued_materialization() -> anyhow::Result
         .bind(crate::phrase_bindings::MATERIALIZE_KIND)
         .execute(&mut *tx)
         .await?;
-        // 旧数据在升级前已经提交；新进程迁移时没有旧函数的内联计划缓存。
+        // Old data was committed before the upgrade; the new process running the migration has no inlined plan cache for the old function.
         tx.commit().await?;
         let mut upgrade = PgConnection::connect(&url).await?;
         sqlx::raw_sql(&format!(
@@ -227,7 +227,7 @@ async fn an_upgrade_reindexes_already_queued_materialization() -> anyhow::Result
         .await?;
         upgrade.close().await?;
 
-        // 认领由升级后的新 worker 连接执行，直接验证已有队列的索引键。
+        // Claims are run by the upgraded new worker connection, directly verifying the index key of the existing queue.
         let mut fresh = PgConnection::connect(&url).await?;
         sqlx::raw_sql(&format!(
             "SET search_path TO {schema};
@@ -288,8 +288,8 @@ async fn a_done_job_older_than_the_retention_is_deleted_and_a_recent_one_kept() 
 
 const RETENTION: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 3600);
 
-/// 按 status 与 age（SQL interval）播 `count` 条该 kind 的任务，清理一次，返回
-/// （prune 的返回值，剩余行数），并把这个 kind 的行删干净。
+/// Seeds `count` tasks of this kind by status and age (SQL interval), prunes once, returns
+/// (prune's return value, remaining row count), and deletes every row of this kind.
 async fn prune_seeded(
     kind_prefix: &str,
     status: &str,
@@ -386,8 +386,8 @@ async fn prune_done_deletes_every_row_when_more_than_one_batch_is_old() -> anyho
     Ok(())
 }
 
-/// 先放一条已有的任务，再 `enqueue_unless_pending` 同 kind 的 `{"kb": "a"}`；
-/// 返回新任务有没有排上。
+/// First insert an existing task, then `enqueue_unless_pending` the same kind with `{"kb": "a"}`;
+/// returns whether the new task got queued.
 async fn enqueues_after_existing(
     existing_status: &str,
     existing_payload: serde_json::Value,
@@ -442,8 +442,8 @@ async fn a_running_job_with_the_same_payload_blocks_an_enqueue() -> anyhow::Resu
     Ok(())
 }
 
-/// 先放一条排着的已有任务，再对同 kind 调 `enqueue_unless_queued`；
-/// 返回（新任务的 id，载荷与新任务相同的排着任务数）。
+/// First insert a queued existing task, then call `enqueue_unless_queued` for the same kind;
+/// returns (new task's id, number of queued tasks with the same payload as the new task).
 async fn enqueue_unless_queued_over(
     kind: &str,
     existing: serde_json::Value,
@@ -494,16 +494,16 @@ const DEFERRED_SINCE: &str = "2026-11-25T10:00:00+00:00";
 
 #[derive(Debug, PartialEq)]
 enum Enqueued {
-    /// 返回了已有那条任务的 id
+    /// returned the id of the existing task
     Absorbed,
-    /// 返回了这个库自己的一条新任务
+    /// returned a new task of this database itself
     New,
-    /// 返回了别人的任务——共享库里别的库排着的 materialize 任务
+    /// returned someone else's task — a materialize task queued by another database in the shared database
     Stranger,
 }
 
-/// 先放一条已有的任务（载荷由库 id 造出），再对 `{"kb_id": base}` 调 `enqueue_queued_once_tx`，
-/// 看它拿到了哪条任务。
+/// First insert an existing task (payload built from the database id), then call `enqueue_queued_once_tx` with `{"kb_id": base}`,
+/// and see which task it got.
 async fn queued_once_over(
     existing_kind: &str,
     existing_status: &str,
@@ -661,7 +661,7 @@ async fn migration_9015_keeps_the_oldest_queued_materialize_job_per_base() -> an
     let kind = crate::phrase_bindings::MATERIALIZE_KIND;
     let result: anyhow::Result<Vec<String>> = async {
         let mut tx = pool.begin().await?;
-        // 迁移只跑在这个 schema 里的 jobs 副本上，不碰共享队列里别人的任务
+        // The migration runs only on the jobs copy in this schema, without touching other tasks in the shared queue.
         sqlx::raw_sql(&format!(
             "CREATE SCHEMA {schema};
              SET LOCAL search_path TO {schema};

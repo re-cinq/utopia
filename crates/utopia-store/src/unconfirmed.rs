@@ -1,26 +1,26 @@
-//! 一个来源关上自己不再陈述的事实（RC-004）。
+//! Closes facts that a source no longer states (RC-004).
 //!
-//! 推陈述的来源每次重推，旧版分块被取代；不再被说出的那条事实只剩停在旧分块上的证据，
-//! 落进审核的「待确认」（[`crate::review::unconfirmed_fact`]）一直不走。这里成批关上它们：
-//! 终点是它最后一条证据被取代的那一刻，走 [`crate::temporal::close_superseded`]——与
-//! 审核里人点「闭合」同一条作废+改写，历史留着，不撤销也不否决。
+//! A source that pushes statements re-pushes them each time, and old chunks get superseded; a fact that is no longer stated survives only as evidence resting on the old chunks,
+//! and the "pending confirmation" that lands in review ([`crate::review::unconfirmed_fact`]) never moves. Here they are closed in batches:
+//! the end is the moment its last evidence was superseded, via [`crate::temporal::close_superseded`] — the same void + rewrite a person's "close" click in review does;
+//! history is kept, nothing is revoked or rejected.
 
 use sqlx::PgPool;
 use utopia_core::AppResult;
 use uuid::Uuid;
 
-/// 一批的结果。`remaining` 是这批之后还能关的条数，全量数（由来源的文档出发，走
-/// `fact_evidence_document_idx`）；`skipped` 是起点晚于那一刻、关不上、留给人的条数
+/// Result of a batch. `remaining` is how many can still be closed after this batch, the full count (starting from the source's documents, via
+/// `fact_evidence_document_idx`); `skipped` is how many start after that moment, cannot be closed, and are left for a person
 pub struct SourceClosing {
     pub closed: u64,
     pub skipped: i64,
     pub remaining: i64,
 }
 
-/// 范围 `$2`（一个来源，或一份文档）的待确认事实，库 `$1`：证据全出自这个来源的文档、全被取代；不含名字事实
-/// （`known_as` 是 Utopia 自己写的）；带陈述来源的类型化行不算——它跟着陈述走，陈述关了
-/// 物化把它按关上的陈述重建。`inverted`：起点（按它的精度截断）晚于终点，
-/// 与 `close_superseded` 拒绝 `interval_inverted` 是同一个比较
+/// Pending facts in the scope `$2` (one source, or one document) of store `$1`: all evidence comes from the source's documents and all of it is superseded; excludes name facts
+/// (`known_as` is written by Utopia itself); typed rows with a statement source are excluded — they follow their statement, and once the statement is closed,
+/// materialization rebuilds them from the closed statement. `inverted`: the start (truncated to its precision) is later than the end,
+/// the same comparison that `close_superseded` uses to refuse `interval_inverted`
 fn candidates(scope: Scope) -> String {
     let key = scope.column();
     format!(
@@ -51,8 +51,8 @@ fn candidates(scope: Scope) -> String {
     )
 }
 
-/// 关上至多 `limit` 条，开放陈述在前。关了陈述就排一次类型化重算（与否决陈述同一个做法，
-/// `graph::reject_fact`）：旧陈述作废，它物化出的行在重算里退下，再按关上的陈述重建
+/// Closes at most `limit`, open statements first. Once a statement is closed, a typed recompute is queued (the same as rejecting a statement,
+/// `graph::reject_fact`): the old statement is voided, the rows it materialized step down in the recompute, and are rebuilt from the closed statement
 pub async fn close_of_source(
     pool: &PgPool,
     kb_id: Uuid,
@@ -62,8 +62,8 @@ pub async fn close_of_source(
     close_in(pool, kb_id, Scope::Source, source_id, limit).await
 }
 
-/// 推来的条目（一份文档）抽取完新版本之后，关上新版本不再陈述的事实（RC-006）：证据全停在
-/// 这份文档被取代的分块上，别处没有证据。一批一批关到没有为止，轮数有界
+/// After a pushed entry (one document) is extracted into a new version, the facts it no longer states are closed (RC-006): all evidence rests on
+/// chunks of this document that were superseded, with no evidence elsewhere. Closes them batch by batch until none remain; the number of rounds is bounded
 pub async fn close_of_document(
     pool: &PgPool,
     kb_id: Uuid,
@@ -125,7 +125,7 @@ async fn close_in(
     let mut closed = 0;
     let mut statements = false;
     for (fact_id, layer, ended) in &due {
-        // None = 期间被别人作废或关了，不算这批的
+        // None = voided or closed by someone else in the meantime, so not counted in this batch
         if crate::temporal::close_superseded(pool, *fact_id, *ended, "second")
             .await?
             .is_some()

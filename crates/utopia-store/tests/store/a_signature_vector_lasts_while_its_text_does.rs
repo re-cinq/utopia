@@ -1,5 +1,5 @@
-//! 签名向量的缓存（#1097，0110）：按 (库, 模型, 哈希) 取回；一轮收尾删掉这一轮不再出现的
-//! 文本和别的模型嵌的行，别的库的不碰。
+//! Cache of signature vectors (#1097, 0110): looked up by (store, model, hash); at the end of a round, delete the rows whose text no longer appears in this round,
+//! and the rows embedded by another model. Other stores' rows are not touched.
 use sqlx::PgPool;
 use utopia_store::signature_vectors;
 use uuid::Uuid;
@@ -39,7 +39,7 @@ async fn a_signature_vector_lasts_while_its_text_does() -> anyhow::Result<()> {
         .await?;
         signature_vectors::put(&pool, kb, "m0", &[(kept.clone(), vec![0.5, 0.5])]).await?;
         signature_vectors::put(&pool, other, "m1", &[(gone.clone(), vec![0.0, 1.0])]).await?;
-        // 撞键不覆盖：同一模型同一段文本，向量是同一个
+        // Key collision is not overwritten: same model and same text, the vector is the same one
         signature_vectors::put(&pool, kb, "m1", &[(kept.clone(), vec![9.0, 9.0])]).await?;
 
         let got = signature_vectors::get(&pool, kb, "m1", &[kept.clone(), gone.clone()]).await?;

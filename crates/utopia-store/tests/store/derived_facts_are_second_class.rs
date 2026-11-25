@@ -1,14 +1,14 @@
-//! R1 打在真库上。纯逻辑那部分（`utopia-reason::derive`）已有 12 个用例，
-//! 这里钉的是它看不见的四样：
+//! R1, run against a real store. The pure-logic part (`utopia-reason::derive`) already has 12 cases;
+//! what is pinned here are the four things it cannot see:
 //!
-//! - **断言优先于派生**。已经断言过的三元组不再派生一份
-//! - **前提撤了，派生跟着失效**——而且是置 `invalidated_at` 不是删行，
-//!   记录轴上要留下「我们曾据此推出，后来前提没了」（0002 第 3 节）
-//! - **证明存得下来**。`fact_derivations` 按 seq 记直接前提，R2 顺着它展开
-//! - **规则身份跨重跑稳定**。否则每跑一次 `rule_id` 指向新 id，历史全断
+//! - **An assertion beats a derivation**. A triple already asserted is not derived a second time
+//! - **When a premise is retracted, the derivation falls with it** — and it sets `invalidated_at` rather than deleting the row,
+//!   so the record axis keeps the trace "we once derived this from it, and later the premise was gone" (0002 section 3)
+//! - **The proof can be stored**. `fact_derivations` records the direct premises by seq, which R2 expands
+//! - **Rule identity is stable across reruns**. Otherwise every run points `rule_id` at a new id, and the history breaks
 //!
-//! 还有一条只有连库才验得出：派生事实要过 `facts` 的两条精度 CHECK。
-//! 交集把某一端算成无界时，那一端的精度必须跟着清掉，否则整条 INSERT 被拒。
+//! There is also one that only a database can check: derived facts must pass the two precision CHECKs on `facts`.
+//! When the intersection makes one end unbounded, that end's precision must be cleared along with it, or the whole INSERT is rejected.
 
 use sqlx::PgPool;
 use utopia_store::reasoning;
@@ -81,12 +81,12 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     })
 }
 
-/// 这里的断言都从同一刻被见证。没给起点的事实从见证那一刻读起（0064），而见证缺省是
-/// 插入的时刻、按秒读：两条前提和后来的断言一旦跨了秒，断言的区间就比派生的晚开始、
-/// 盖不住它，「断言优先」那一步就会偶尔多出一条派生。
+/// All the assertions here are witnessed from the same moment. A fact with no start is read from the moment of its witness (0064), and the witness defaults to
+/// the moment of insertion, read by the second: once the two premises and the later assertion cross a second boundary, the assertion's interval starts later than the derivation and does not cover it,
+/// and the "assertion first" step would occasionally leave one extra derivation behind
 const ATTESTED: &str = "2026-01-01T00:00:00Z";
 
-/// 落一条断言事实，可带区间与精度。
+/// Stores one asserted fact, with an interval and precision optional.
 async fn assert_fact(
     pool: &PgPool,
     f: &Fixture,
@@ -131,7 +131,7 @@ async fn assert_fact(
     Ok(id)
 }
 
-/// 活着的派生事实：(主, 宾)
+/// Live derived facts: (subject, object)
 async fn live_derived(pool: &PgPool, kb: Uuid) -> anyhow::Result<Vec<(Uuid, Uuid)>> {
     Ok(sqlx::query_as(
         "SELECT subject_id, object_id FROM derived_facts
@@ -152,7 +152,7 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
     let f = seed(&pool).await?;
 
     let run = async {
-        // ---- 一、A ⊂ B ⊂ C ⟹ A ⊂ C
+        // ---- 1. A ⊂ B ⊂ C ⟹ A ⊂ C
         let ab = assert_fact(&pool, &f, f.a, f.b, None).await?;
         let bc = assert_fact(&pool, &f, f.b, f.c, None).await?;
         let r = reasoning::materialize(&pool, f.kb).await?;
@@ -161,7 +161,7 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
         assert_eq!(r.inserted, 1);
         assert_eq!(live_derived(&pool, f.kb).await?, vec![(f.a, f.c)]);
 
-        // 证明：两条前提，按顺序
+        // Proof: the two premises, in order
         let derived: Uuid = sqlx::query_scalar("SELECT id FROM derived_facts WHERE kb_id = $1")
             .bind(f.kb)
             .fetch_one(&pool)
@@ -175,7 +175,7 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
         .await?;
         assert_eq!(premises, vec![ab, bc], "证明要按推导顺序记直接前提");
 
-        // ---- 二、重跑幂等，规则 id 不变
+        // ---- 2. Rerun is idempotent, the rule id is unchanged
         let rule_before: Uuid = sqlx::query_scalar("SELECT id FROM rules WHERE kb_id = $1")
             .bind(f.kb)
             .fetch_one(&pool)
@@ -189,13 +189,13 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
             .await?;
         assert_eq!(rule_before, rule_after, "重编译要认得出还是那条规则");
 
-        // ---- 三、断言优先：把 A ⊂ C 也断言出来，派生的那条就该让路
+        // ---- 3. Assertion first: when A ⊂ C is also asserted, the derived one should yield
         assert_fact(&pool, &f, f.a, f.c, None).await?;
         let asserted = reasoning::materialize(&pool, f.kb).await?;
         assert_eq!(asserted.derived, 0, "断言过的三元组不该再派生");
         assert_eq!(asserted.invalidated, 1, "此前派生的那条要作废");
         assert!(live_derived(&pool, f.kb).await?.is_empty());
-        // 作废不是删——记录轴上留着
+        // Voiding is not deleting — it stays on the record axis
         let ghost: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM derived_facts
               WHERE kb_id = $1 AND invalidated_at IS NOT NULL",
@@ -205,7 +205,7 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
         .await?;
         assert_eq!(ghost, 1, "派生失效要留痕，与拒绝一条事实同构");
 
-        // ---- 四、前提撤了，派生跟着走
+        // ---- 4. Premise retracted, derivation follows
         sqlx::query(
             "UPDATE facts SET invalidated_at = now() WHERE subject_id = $1 AND object_id = $2",
         )
@@ -223,8 +223,8 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
         assert_eq!(gone.invalidated, 1, "前提没了，派生必须跟着失效");
         assert!(live_derived(&pool, f.kb).await?.is_empty());
 
-        // ---- 五、精度：交集把结束端算成无界，那一端的精度必须跟着清掉，
-        // 否则撞上 facts_to_precision_matches_date
+        // ---- 5. Precision: the intersection makes the end unbounded, so that end's precision must be cleared as well,
+        // otherwise it hits facts_to_precision_matches_date
         sqlx::query("UPDATE facts SET invalidated_at = NULL WHERE id = $1")
             .bind(bc)
             .execute(&pool)
@@ -261,9 +261,9 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
             Some("2022-06-01"),
             "交集取两个起点里晚的那个"
         );
-        // 精度跟着赢下这一端的那条前提走（0024）：起点是 b ⊂ c 的 6 月 1 日，精度就是它的
-        // day。从前取所有前提里最粗的——year 标在一个 6 月 1 日的值上，值与标签互相矛盾，
-        // 如今数据库的 CHECK 也不会放行
+        // The precision follows the premise that wins that end (0024): the start is b ⊂ c's 1 June, so the precision is
+        // day. Previously the coarsest of all premises was taken — year marked on a 1 June value, the value and its label contradicting each other
+        // which the database CHECK now also refuses
         assert_eq!(
             fp.as_deref(),
             Some("day"),
@@ -271,7 +271,7 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
         );
         assert_eq!(tp, None, "结束端无界，精度必须是空");
 
-        // ---- 六、公理撤了：据它推出的事实作废，而规则行**留着**
+        // ---- 6. Axiom retracted: the facts derived from it are voided, and the rule row is **kept**
         sqlx::query("UPDATE relation_types SET is_transitive = FALSE WHERE id = $1")
             .bind(f.part_of)
             .execute(&pool)
@@ -288,7 +288,7 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
             rules_left, 1,
             "规则行留着——刚作废的那些派生仍指着它，解释「当时靠哪条规则推的」需要它还在"
         );
-        // 公理加回来，派生也要回来（规则 id 还是原来那个）
+        // Axiom added back: the derivation must come back too (the rule id is still the same one)
         sqlx::query("UPDATE relation_types SET is_transitive = TRUE WHERE id = $1")
             .bind(f.part_of)
             .execute(&pool)

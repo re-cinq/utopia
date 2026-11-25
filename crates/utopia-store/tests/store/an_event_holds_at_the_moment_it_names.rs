@@ -1,20 +1,20 @@
-//! 事件在它命名的那一刻成立，恒常每一刻都成立（0031 / #486），打在真库上。
+//! An event holds at the moment it names; a constant holds at every moment (0031 / #486), run against a real store.
 //!
-//! 为什么非要连库：写入侧的归一（`Validity::under`）和读出侧的谓词（`world_axis`）
-//! 各在一处，两处必须说同一句话；而读出侧整个活在 SQL 字符串里——一个写反的 CASE、
-//! 一个拼错的 interval 字面量，`cargo check` 都看不见。
+//! Why this must touch a database: the write-side normalization (`Validity::under`) and the read-side predicate (`world_axis`)
+//! each live in one place, and the two must say the same thing; and the read side lives entirely inside SQL strings — a CASE written backwards,
+//! or a misspelled interval literal, would be invisible to `cargo check`.
 //!
-//! 钉住的事：
-//! - 事件写进库是两端同一个值；在它命名的那个桶里成立（那一天、那个月），桶外不成立
-//! - 给事件一段、只给终点、说它「结束了不知哪天」——落下的仍是一刻或没有日期
-//! - 没日期的事件任何时刻都不成立，但实体上仍列着它；之后来了日期就精化，再来一句
-//!   没日期的并进去
-//! - 恒常抹掉原文里的日期，证据日期也不闸它——1800 年和 2100 年都成立
-//! - 0031 之前写下的事件行（终点空）按起点那个桶读，不必回填
-//! - 人改一个事件的区间，落下的仍是一刻
-//! - 派生经过事件取它的桶（两端带精度），经过恒常两端开放
+//! What is pinned down:
+//! - An event written to the store has the same value at both ends; it holds in the bucket it names (that day, that month), and not outside it
+//! - Giving an event a span, only an end, or saying it "ended, date unknown" — what is stored is still a moment or has no date
+//! - An event with no date holds at no moment, but is still listed on the entity; once a date arrives it is refined, and another sentence
+//!   with no date merges into it
+//! - A constant strips the dates from the source text, and the evidence date does not gate it either — it holds in both 1800 and 2100
+//! - Event rows written before 0031 (with an empty end) are read by their start's bucket, with no backfill needed
+//! - A person changes an event's interval, and what is stored is still a moment
+//! - A derivation takes an event's bucket through it (both ends carry precision); through a constant, both ends are open
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use std::collections::HashSet;
 
@@ -26,7 +26,7 @@ fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
     s.parse().unwrap()
 }
 
-/// 一行事实的两端与精度
+/// The two ends and the precision of one fact row
 type Span = (
     Option<chrono::DateTime<chrono::Utc>>,
     Option<String>,
@@ -42,15 +42,15 @@ struct Fixture {
     vega: Uuid,
     paris: Uuid,
     france: Uuid,
-    /// 状态：领导某组织
+    /// State: leads an organization
     leads: Uuid,
-    /// 事件：收购
+    /// Event: acquisition
     acquired: Uuid,
-    /// 事件，对称：合并
+    /// Event, symmetric: merger
     merged_with: Uuid,
-    /// 恒常：首都
+    /// Constant: capital city
     capital_of: Uuid,
-    /// 恒常，对称：接壤
+    /// Constant, symmetric: borders
     borders: Uuid,
 }
 
@@ -184,7 +184,7 @@ async fn span(pool: &PgPool, id: Uuid) -> anyhow::Result<Span> {
     .await?)
 }
 
-/// T 时刻某实体面板上的事实（按 id）。`None` = 每一刻
+/// The facts on an entity's panel at moment T (by id). `None` = every moment
 async fn facts_at(
     pool: &PgPool,
     f: &Fixture,
@@ -215,7 +215,7 @@ async fn an_event_is_one_moment_and_holds_through_the_bucket_it_names() -> anyho
     let f = seed(&pool).await?;
 
     let run = async {
-        // 2024-04-01 的文档说：Nova 于 2024-03-15 收购 Orion
+        // A document dated 2024-04-01 says: Nova acquired Orion on 2024-03-15
         let (day, _) = fact(
             &pool,
             &f,
@@ -236,7 +236,7 @@ async fn an_event_is_one_moment_and_holds_through_the_bucket_it_names() -> anyho
             ),
             "事件写进库是两端同一个值、同一个精度"
         );
-        // 那一天里的每一刻成立；前一天、后一天都不；证据日期（4 月）更不
+        // Holds at every moment of that day; the day before and the day after do not; the evidence date (April) does not either
         assert!(!holds(&pool, &f, f.nova, day, "2024-03-14T23:59:59Z").await?);
         assert!(holds(&pool, &f, f.nova, day, "2024-03-15T00:00:00Z").await?);
         assert!(holds(&pool, &f, f.nova, day, "2024-03-15T23:59:59Z").await?);
@@ -250,14 +250,14 @@ async fn an_event_is_one_moment_and_holds_through_the_bucket_it_names() -> anyho
             "不限时刻时列出"
         );
 
-        // 读出来的区间跟着桶走：从那一天起，到下一天为止
+        // The interval read back follows the bucket: from that day, up to the next day
         let (_, all) = utopia_store::graph::entity_detail(&pool, f.kb, f.nova, None, None).await?;
         let read = all.iter().find(|x| x.id == day).expect("在面板上");
         assert_eq!(read.holds_from, Some(t("2024-03-15T00:00:00Z")));
         assert_eq!(read.holds_to, Some(t("2024-03-16T00:00:00Z")));
         assert_eq!(read.temporal.as_deref(), Some("event"));
 
-        // 月精度的桶是整个月
+        // A month-precision bucket is the whole month
         let (month, _) = fact(
             &pool,
             &f,
@@ -270,7 +270,7 @@ async fn an_event_is_one_moment_and_holds_through_the_bucket_it_names() -> anyho
         assert!(holds(&pool, &f, f.nova, month, "2024-06-30T12:00:00Z").await?);
         assert!(!holds(&pool, &f, f.nova, month, "2024-07-01T00:00:00Z").await?);
 
-        // 状态照旧：领导从 3 月起、开放——4 月也成立
+        // The state is unchanged: leads from March, open — still holds in April
         let (lead, _) = fact(
             &pool,
             &f,
@@ -298,7 +298,7 @@ async fn a_span_an_ending_or_an_unknown_end_given_to_an_event_collapses() -> any
     let f = seed(&pool).await?;
 
     let run = async {
-        // 模型给了一段：取起点
+        // The model gave a span: take the start
         let (ranged, _) = fact(
             &pool,
             &f,
@@ -325,7 +325,7 @@ async fn a_span_an_ending_or_an_unknown_end_given_to_an_event_collapses() -> any
             )
         );
 
-        // 只给了终点：那就是它发生的时候
+        // Only an end was given: that is when it happened
         let (ended, _) = fact(
             &pool,
             &f,
@@ -353,7 +353,7 @@ async fn a_span_an_ending_or_an_unknown_end_given_to_an_event_collapses() -> any
             )
         );
 
-        // 「结束了不知哪天」对一刻没有意义：落下的是没日期的事件，不是待关的行
+        // "Ended, date unknown" means nothing for a moment: what lands is an event with no date, not a row waiting to be closed
         let (unknown, _) = fact(
             &pool,
             &f,
@@ -390,7 +390,7 @@ async fn an_undated_event_holds_at_no_moment_and_takes_a_date_when_one_arrives(
     let f = seed(&pool).await?;
 
     let run = async {
-        // 2024-04-01 的文档说 Nova 收购了 Orion，没说哪天
+        // A document dated 2024-04-01 says Nova acquired Orion, without saying which day
         let (bare, created) = fact(
             &pool,
             &f,
@@ -416,7 +416,7 @@ async fn an_undated_event_holds_at_no_moment_and_takes_a_date_when_one_arrives(
             );
         }
 
-        // 后来的文档给了日期：精化——裸行作废，新行两端是那一刻
+        // A later document gives the date: refined — the bare row is voided, and the new row's two ends are that moment
         let (dated, created) = fact(
             &pool,
             &f,
@@ -441,7 +441,7 @@ async fn an_undated_event_holds_at_no_moment_and_takes_a_date_when_one_arrives(
         assert!(old_dead);
         assert!(holds(&pool, &f, f.nova, dated, "2024-03-15T12:00:00Z").await?);
 
-        // 再听到一句没日期的「收购了」：并进已有的那一刻，不是第二次收购
+        // Hearing "acquired" again with no date: merges into the existing moment, not a second acquisition
         let (again, created) = fact(
             &pool,
             &f,
@@ -470,7 +470,7 @@ async fn an_eternal_relation_drops_its_dates_and_holds_at_every_moment() -> anyh
     let f = seed(&pool).await?;
 
     let run = async {
-        // 原文：「1990 年起巴黎是法国首都」——日期说的是别的事；文档是 2024 年的
+        // Source: "Paris has been the capital of France since 1990" — the date refers to something else; the document is from 2024
         let (cap, _) = fact(
             &pool,
             &f,
@@ -500,7 +500,7 @@ async fn an_eternal_relation_drops_its_dates_and_holds_at_every_moment() -> anyh
         let read = all.iter().find(|x| x.id == cap).expect("在面板上");
         assert_eq!((read.holds_from, read.holds_to), (None, None), "两端开放");
 
-        // 再说一遍并进同一行
+        // Said again: merged into the same row
         let (again, created) = fact(
             &pool,
             &f,
@@ -529,7 +529,7 @@ async fn a_row_written_before_the_rule_reads_as_its_start_bucket() -> anyhow::Re
     let f = seed(&pool).await?;
 
     let run = async {
-        // 0031 之前的形状：事件谓词、起点有、终点空——当年被读成「从那天起一直如此」
+        // Shape from before 0031: an event predicate with a start and an empty end — it was read back then as "so from that day onward"
         let legacy = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_id,
@@ -572,7 +572,7 @@ async fn a_person_correcting_an_event_leaves_it_one_moment() -> anyhow::Result<(
             Validity::starting(Some(t("2024-03-15T00:00:00Z")), Some("day")),
         )
         .await?;
-        // 人在面板上填了一段 3-20 ~ 6-01：落下的是 3-20 这一刻
+        // A person filled in a span 3-20 ~ 6-01 on the panel: what lands is the moment 3-20
         let corrected = utopia_store::temporal::correct_interval(
             &pool,
             original,
@@ -616,7 +616,7 @@ async fn a_derivation_reads_an_event_as_its_bucket_and_an_eternal_as_open() -> a
     let f = seed(&pool).await?;
 
     let run = async {
-        // merged_with 对称、事件：Nova 与 Orion 于 2024-03 合并
+        // merged_with, symmetric, event: Nova and Orion merged in 2024-03
         fact(
             &pool,
             &f,
@@ -627,7 +627,7 @@ async fn a_derivation_reads_an_event_as_its_bucket_and_an_eternal_as_open() -> a
                 .attested(Some(t("2024-04-01T00:00:00Z"))),
         )
         .await?;
-        // borders 对称、恒常：法国与……巴黎接壤（测试用的荒唐事实，文档是 2024 年的）
+        // borders, symmetric, constant: France and … Paris border each other (an absurd fact used by the test; the document is from 2024)
         fact(
             &pool,
             &f,
@@ -638,7 +638,7 @@ async fn a_derivation_reads_an_event_as_its_bucket_and_an_eternal_as_open() -> a
                 .attested(Some(t("2024-04-01T00:00:00Z"))),
         )
         .await?;
-        // 没日期的事件：Orion 与 Vega 合并，不知何时——推不出反向那条
+        // An event with no date: Orion and Vega merged, at an unknown time — the reverse is not inferred
         fact(
             &pool,
             &f,
@@ -670,7 +670,7 @@ async fn a_derivation_reads_an_event_as_its_bucket_and_an_eternal_as_open() -> a
             }
         };
 
-        // 反向的合并：那一个月，两端带月精度
+        // The reverse merger: that month, both ends carry month precision
         let back = derived(f.orion, f.merged_with, f.nova)
             .await?
             .expect("对称推得出");
@@ -684,12 +684,12 @@ async fn a_derivation_reads_an_event_as_its_bucket_and_an_eternal_as_open() -> a
             ),
             "派生取事件的桶：从 3 月起，到 4 月为止"
         );
-        // 反向的接壤：两端开放，证据日期不进来
+        // The reverse border: both ends open, the evidence date does not come in
         let back = derived(f.paris, f.borders, f.france)
             .await?
             .expect("对称推得出");
         assert_eq!(back, (None, None, None, None));
-        // 不知何时的合并：空区间，不推
+        // A merger at an unknown time: an empty interval, nothing inferred
         assert!(
             derived(f.vega, f.merged_with, f.orion).await?.is_none(),
             "没日期的事件任何时刻都不成立，链经过它推不出东西"

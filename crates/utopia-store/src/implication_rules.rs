@@ -1,10 +1,10 @@
-//! 蕴含规则（0044 决定 3 的第五片）：一种形状的陈述、或带某个类别词的东西，蕴含另一条
-//! 属性的事实。宾语要么就是陈述的宾语，要么由一个读数从宾语的字里读出来。
+//! Implication rules (the fifth slice of 0044 decision 3): a statement of a certain shape, or something carrying a certain category word, implies a fact about another
+//! property. The object is either the statement's own object, or is read out of the object's text by a reading.
 //!
-//! 与绑定同一套生命周期：对齐器提（`propose`，代理），工作台批（`decide_with_delivery`，人），
-//! 人的判定不被代理盖；提案带指纹（0053），输入变了对齐器会再提。执行在 `materialize`
-//! 里，**没有模型调用**：读数由 `read_phrases` 任务先算进 `phrase_readings`，物化只查缓存，
-//! 缓存里没有的这一轮就不算，等缓存填上再来。
+//! Same lifecycle as bindings: the aligner proposes (`propose`, agent), a person approves or rejects (`decide_with_delivery`),
+//! and an agent's proposal does not overwrite a person's decision. Proposals carry a fingerprint (0053), so when the inputs change the aligner proposes again. Execution happens in `materialize`
+//! **with no model call**: readings are first computed by the `read_phrases` job into `phrase_readings`, and materialization only looks up the cache;
+//! a reading missing from the cache is skipped in this round, and is picked up once the cache fills in.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -12,8 +12,8 @@ use sqlx::PgPool;
 use utopia_core::{AppError, AppResult};
 use uuid::Uuid;
 
-/// 读数的种类。字符串进库、进提示词，所以是常量而不是枚举；执行它们的是模型，
-/// 这里只定义「问什么」。加一种就是加一行——和描述一起给模型看
+/// The kinds of reading. The strings go into the database and into prompts, so these are constants rather than an enum; the model executes them,
+/// and this module only defines "what to ask". Adding one is adding a line -- shown to the model together with its description.
 pub const READINGS: &[(&str, &str)] = &[
     (
         "country_of_nationality",
@@ -33,7 +33,7 @@ pub fn reading_is_known(reading: &str) -> bool {
     READINGS.iter().any(|(k, _)| *k == reading)
 }
 
-/// 把一个读数的输入归一：与短语、类别词同一条规矩（空白折一个、小写、去两端）
+/// Normalize a reading's input: same rule as for phrases and category words (collapse whitespace to one, lowercase, trim both ends)
 pub fn normalize(s: &str) -> String {
     crate::phrase_bindings::normalize(s)
 }
@@ -57,7 +57,7 @@ pub struct Rule {
     pub decided_at: DateTime<Utc>,
 }
 
-/// 对齐器提的一条规则。
+/// A rule the aligner proposed.
 pub struct Proposal<'a> {
     /// phrase | kind_word
     pub trigger: &'a str,
@@ -67,7 +67,7 @@ pub struct Proposal<'a> {
     pub object_is_value: bool,
     pub conclude_property_id: Uuid,
     pub reading: Option<&'a str>,
-    /// proposed（要人批）| rejected（模型说这个形状不蕴含什么——记下来免得每轮再问）
+    /// proposed (needs a person's approval) | rejected (the model said this shape implies nothing -- recorded so it is not asked again every round)
     pub status: &'a str,
     pub votes: &'a serde_json::Value,
     pub basis: &'a str,
@@ -75,8 +75,8 @@ pub struct Proposal<'a> {
     pub examples: &'a [String],
 }
 
-/// 记下对齐器的提案；同一条规则已经有人判过的原样留着（返回 None）。代理自己的旧行
-/// 被新提案覆盖——指纹变了对齐器才会再提，覆盖的是过期的看法
+/// Record the aligner's proposal; a rule that a person has already decided is left as is (returns None). The agent's old row
+/// is overwritten by the new proposal -- the fingerprint changes only when the aligner proposes again, so what gets overwritten is a stale view.
 pub async fn propose(pool: &PgPool, kb_id: Uuid, p: &Proposal<'_>) -> AppResult<Option<Uuid>> {
     if !matches!(p.trigger, "phrase" | "kind_word") {
         return Err(AppError::Validation(format!(
@@ -162,9 +162,9 @@ pub async fn get(pool: &PgPool, kb_id: Uuid, id: Uuid) -> AppResult<Option<Rule>
     .await?)
 }
 
-/// 人批或驳一条规则，与它的后续工作**同一事务**提交（0051 的同一条规矩）。
-/// 批准且要读数的：先排 `read_phrases` 把缓存填上（它跑完自己会排物化）；
-/// 不要读数的、或驳回的：直接排物化——驳回也要重算，隐含行得退掉
+/// A person approves or rejects a rule, committed in the **same transaction** as its follow-up work (the same rule as 0051).
+/// On approval, if it needs a reading: queue `read_phrases` first to fill the cache (when it finishes, it queues materialization itself);
+/// if it needs no reading, or was rejected: queue materialization directly -- a rejection also needs a recompute, so implied rows get retracted.
 pub async fn decide_with_delivery(
     pool: &PgPool,
     kb_id: Uuid,
@@ -204,18 +204,18 @@ pub async fn decide_with_delivery(
     Ok(Some(job))
 }
 
-/// 填读数缓存的任务的种类。
+/// The kind of job that fills the reading cache.
 pub const READ_KIND: &str = "read_phrases";
 
-/// 一条待读的字：哪种读数、读什么。
+/// One word waiting to be read: which kind of reading, and what to read.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct PendingReading {
     pub reading: String,
     pub phrase: String,
 }
 
-/// 已批准的规则里，还没有缓存的 (读数, 字)。短语规则读的是陈述的宾语（实体名或字面值），
-/// 类别词规则读的是类别词自己。答过「读不出来」的也算缓存过，不再列
+/// Among approved rules, the (reading, word) pairs that have no cache entry yet. Phrase rules read the statement's object (an entity name or a literal value),
+/// category-word rules read the category word itself. A pair that was answered "cannot be read" also counts as cached and is not listed again.
 pub async fn pending_readings(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<PendingReading>> {
     let sql = format!(
         "SELECT DISTINCT r.reading, {phrase} AS phrase
@@ -239,19 +239,19 @@ pub async fn pending_readings(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Pendi
     Ok(sqlx::query_as(&sql).bind(kb_id).fetch_all(pool).await?)
 }
 
-/// 陈述宾语的字，归一：实体名，或字面值的 value。给读数用
+/// The statement's object word, normalized: an entity name, or the value of a literal. For use by readings.
 pub(crate) fn object_text_sql() -> &'static str {
     "lower(btrim(regexp_replace(coalesce(oe.canonical_name, s.object_value ->> 'value', s.object_value #>> '{}', ''), '\\s+', ' ', 'g')))"
 }
 
-/// 短语规则与陈述的签名匹配（同 materialize 里绑定的 MATCH，把 b 换成 r）
+/// Phrase rules match the statement's signature (the same MATCH as binding in materialize, with b replaced by r)
 pub(crate) const RULE_MATCH: &str =
     "r.phrase = lower(btrim(regexp_replace(s.phrase, '\\s+', ' ', 'g')))
        AND r.subject_type_id IS NOT DISTINCT FROM se.type_id
        AND r.object_is_value = (s.object_id IS NULL)
        AND (s.object_id IS NULL OR r.object_type_id IS NOT DISTINCT FROM oe.type_id)";
 
-/// 记一条读数的答案：库里的一样东西、一个字面值，或两者都空（读不出来，也记，别再问）。
+/// Record one reading's answer: a thing in the library, a literal value, or both empty (could not be read -- also recorded, so it is not asked again).
 pub async fn record_reading(
     pool: &PgPool,
     kb_id: Uuid,
@@ -276,8 +276,8 @@ pub async fn record_reading(
     Ok(())
 }
 
-/// 读数读出了一个名字：库里有这样东西就是它，没有就建一个有名字的。
-/// 名字事实照 0041 记（`names::record`）——这是召回的桥，读数读出的国家下次就能被认出来
+/// If a reading yields a name: if the library has such a thing, that is it; if not, create one with that name.
+/// The name fact is recorded per 0041 (`names::record`) -- this is the bridge for recall, so a country a reading yields can be recognized next time.
 pub async fn resolve_or_create_named(pool: &PgPool, kb_id: Uuid, name: &str) -> AppResult<Uuid> {
     let name = name.trim();
     if name.is_empty() {

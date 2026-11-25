@@ -1,9 +1,9 @@
-//! 提示词里附的「文件开头」是序号最小的现存分块，不是还没抽的第一块。
+//! The "document opening" attached to the prompt is the existing chunk with the smallest ordinal, not the first chunk not yet extracted.
 //!
-//! 抽取只取 `extracted_at IS NULL` 的分块。从前开头取的是那张清单的第一条：改过的文件
-//! 重抽第 3、7 块时，第 7 块把第 3 块当成开头；失败重试时，后面的块把失败的那块当成开头。
+//! Extraction takes only chunks with `extracted_at IS NULL`. The opening used to be the first entry of that list: when a changed file
+//! re-extracts chunks 3 and 7, chunk 7 took chunk 3 as its opening; on a failed retry, later chunks took the failed one as their opening.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset. Creates and tears down its own database, never touching an existing one.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -48,7 +48,7 @@ async fn the_opening_is_the_first_live_chunk_whether_or_not_it_was_extracted() -
         .await?;
         let superseded = Uuid::now_v7();
         let first = Uuid::now_v7();
-        // 第 0 块是上一版留下、已被取代的；第 1 块抽过了；第 3、7 块等着抽
+        // Chunk 0 is left over from the previous version and is superseded; chunk 1 was extracted; chunks 3 and 7 are waiting to be extracted
         for (id, seq, extracted, gone) in [
             (superseded, 0, true, true),
             (first, 1, true, false),

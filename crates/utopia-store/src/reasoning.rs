@@ -1,64 +1,64 @@
-//! 一致性检查的取数与落库。判断本身在 `utopia-reason`——那一层不碰数据库。
+//! Fetching and storing for consistency checks. The judgment itself lives in `utopia-reason`; that layer does not touch the database.
 //!
-//! 三步：把活事实取成边、把 `relation_types` 的公理列取成 `Axioms`、把
-//! `check()` 吐出来的违规写进 `axiom_violations`。
+//! Three steps: fetch live facts as edges, fetch the axiom columns of `relation_types` as `Axioms`, and
+//! write the violations that `check()` emits into `axiom_violations`.
 //!
-//! **重跑是幂等的，而且以「重算」为准。** 每次跑完，这个库里没被重新算出来的
-//! `open` 行会被删掉——它们是派生状态，事实撤了、公理放宽了，那条违规就不该
-//! 还挂在 Review 页上。已经有人表态的（`resolved`）一行不动：那是人的决定，
-//! 不是算出来的东西。
+//! **Re-running is idempotent, and "recomputed" is the source of truth.** After each run, any `open`
+//! row in this database that was not recomputed is deleted: they are derived state; if a fact is retracted or an axiom relaxed, that violation should not
+//! still hang on the Review page. A row someone has already ruled on (`resolved`) is left alone: that is a human decision,
+//! not something computed.
 //!
-//! 这条规矩踩过一次坑的反面（见 `ontology_proposals`）：那边重跑会把被拒绝过的
-//! 提案刷回待看，等于每跑一次就把人的否决抹掉一次。所以这里 `ON CONFLICT`
-//! 什么都不做——已经在库里的那一行，无论 open 还是 resolved，都按原样留着。
+//! The reverse of a rule that was learned the hard way (see `ontology_proposals`): there, re-running would reset rejected
+//! proposals back to pending, wiping out a person's rejection every run. So here `ON CONFLICT`
+//! does nothing: a row already in the database, open or resolved, stays as it is.
 
 use serde_json::json;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use std::collections::{HashMap, HashSet};
 use utopia_core::models::{AxiomViolation, DerivedFactView, OntologyDefect};
-/// 规则种类的字面量。用 &'static str 而不是枚举:它直接进 SQL 也直接做键
+/// Literal rule kinds. &'static str rather than an enum: it goes straight into SQL and is also used directly as a key
 type RuleKind = &'static str;
 use utopia_core::AppResult;
 use utopia_reason::derive::{Contradictions, Derivation, TimedEdge};
 use utopia_reason::{check_all, Axioms, Edge, Kind, Violation};
 use uuid::Uuid;
 
-/// 一次检查的产出，给调用方写审计与告诉用户。
+/// Output of one check, for the caller to write an audit and tell the user.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Report {
-    /// 参与检查的边数
+    /// Number of edges taking part in the check
     pub edges: usize,
-    /// 声明了至少一条公理的谓词数。**为零时结论是「没有判据」而不是「没有矛盾」**
+    /// Number of predicates that declare at least one axiom. **When zero, the conclusion is "no criterion" rather than "no contradiction"**
     pub predicates_with_axioms: usize,
-    /// 这次算出来的违规总数
+    /// Total violations computed this time
     pub found: usize,
-    /// 其中是新的（此前没在库里）
+    /// Of those, the new ones (not previously in the database)
     pub inserted: usize,
-    /// 清掉的陈旧 open 行
+    /// Stale open rows cleared
     pub cleared: usize,
-    /// 派生撞上断言的条数（0017），已含在 `found` 里
+    /// Number of derivations that collide with an assertion (0017), already included in `found`
     pub contradictions: usize,
-    /// 撞上单谓词上限、没进队列的矛盾条数。**不为零时说明根子在规则**：
-    /// 一条谓词上上百条派生都撞了，逐条看是没有意义的
+    /// Number of contradictions that hit the per-predicate cap and did not enter the queue. **Non-zero means the root is in the rules**:
+    /// when hundreds of derivations on one predicate all collide, looking at them one by one is pointless
     pub contradictions_capped: usize,
-    /// 互撞的规则对数——进 `ontology_defects`，不进这张表
+    /// Number of mutually colliding rule pairs: goes to `ontology_defects`, not this table
     pub rules_disagree: usize,
-    /// 重新打开的 resolved 行：人曾说撤了、闭合了、要去改本体，而违规又算出来了——
-    /// 承诺没兑现，队列不替人沉默（#202）
+    /// Resolved rows reopened: a person had said it was retracted or closed, or that the ontology would be changed, yet the violation was computed again:
+    /// the promise was not kept, and the queue does not stay silent on the person's behalf (#202)
     pub reopened: usize,
-    /// 环没搜完的谓词数（#642）。不为零时这些谓词上的环只报了一部分，而且上一轮的
-    /// 环这一轮不清——没搜完不能说没有
+    /// Number of predicates whose cycle search did not finish (#642). When non-zero, cycles on those predicates are only partly reported, and last round's
+    /// cycles are not cleared this round: an unfinished search cannot be taken to mean there are none
     pub cycles_capped: usize,
 }
 
-/// 单个谓词上进队列的矛盾上限（0017 §1）。超出的部分只计数。
+/// Cap on contradictions per predicate that enter the queue (0017 §1). Excess is only counted.
 const MAX_CLASHES_PER_PREDICATE: usize = 50;
 
-/// 取这个库的谓词公理。
+/// Fetch the predicate axioms for this database.
 ///
-/// **只取声明了至少一位的**：一位都没声明的谓词进了表也不会被检查（`says_nothing`
-/// 会跳过），白白占内存。而且这个条数本身有意义——它是「有没有判据」的度量，
-/// 报告里要用。
+/// **Only fetch those that declare at least one flag**: a predicate with no flags declared would be put in the table but never checked (`says_nothing`
+/// skips it), wasting memory. And this count itself is meaningful: it is the measure of "is there any criterion at all",
+/// and the report uses it.
 #[allow(clippy::type_complexity)]
 async fn axioms(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<HashMap<Uuid, Axioms>> {
     let rows: Vec<(
@@ -114,19 +114,19 @@ async fn axioms(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<HashMap<Uuid,
         )
         .collect();
 
-    // **逆是相互的，而库里只存单向。** 声明了 `p⁻¹ = q` 却没回填
-    // `q⁻¹ = p` 的话，`A p B` 推得出 `B q A`，`B q A` 却推不回 `A p B`
-    // ——「问工作和问雇佣答案不同」正是 R1 要消灭的东西，只修一半等于没修。
+    // **Inverses are mutual, but the database stores only one direction.** If `p⁻¹ = q` is declared without filling in
+    // `q⁻¹ = p`, then `A p B` derives `B q A`, but `B q A` cannot derive back to `A p B`:
+    // "asking about work gives a different answer from asking about employment" is exactly what R1 is meant to eliminate, and fixing only half is no fix.
     //
-    // 归一化放在这里而不是数据库触发器：绕过触发器的路不止一条（RDF 导入、
-    // 直接改表），而载入公理只有这一处，谁也绕不过去。
+    // Normalization lives here rather than in a database trigger: there is more than one way around triggers (RDF import,
+    // direct table edits), whereas axiom loading happens in only one place, which nothing can bypass.
     let pairs: Vec<(Uuid, Uuid)> = map
         .iter()
         .filter_map(|(id, ax)| ax.inverse_of.map(|inv| (inv, *id)))
         .collect();
     for (target, source) in pairs {
-        // 已经声明了自己的逆就不动它——**人写的优先于推出来的**，
-        // 两边指得不一样是本体自己的矛盾，交给 R0 报，不在这里悄悄改
+        // If it has already declared its own inverse, leave it alone: **what a person wrote takes precedence over what was derived**,
+        // and if the two sides point at different things, that is the ontology's own contradiction, left for R0 to report rather than silently changed here.
         map.entry(target)
             .or_default()
             .inverse_of
@@ -135,17 +135,17 @@ async fn axioms(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<HashMap<Uuid,
     Ok(map)
 }
 
-/// 主语不在谓词声明的 domain 里、或宾语不在 range 里的活事实（#190 / #196）。
+/// Live facts whose subject is not in the predicate's declared domain, or whose object is not in its range (#190 / #196).
 ///
-/// 签名检查在**账本层**：对齐只给结构对得上的候选（0053），但合并会换掉主语、本体会
-/// 事后改 domain，写入时的把关挡不住写入之后的改动。所以这里对着库量一遍，任何一条路
-/// 写反了都在 Review 里看得见。
+/// The signature check is at the **ledger layer**: alignment only offers structurally matching candidates (0053), but merging swaps the subject, and the ontology
+/// can change domain after the fact, so a gate at write time cannot stop changes made after writing. So this scans the whole database, and any path that
+/// wrote something backwards shows up on Review.
 ///
-/// **没有类型的实体不算**：它没有类型可比，「不知道」不是「不符合」——按 0009，
-/// 未分类是一种诚实的状态，不该因此被报成矛盾。声明了 domain / range 的谓词才查，
-/// 与其它四类同一条纪律：没有公理就没有判据。
+/// **Entities without a type are not counted**: they have no type to compare, and "unknown" is not "does not conform": per 0009,
+/// unclassified is an honest state and should not be reported as a contradiction. Only predicates with declared domain / range are checked,
+/// under the same discipline as the other four classes: no axiom, no criterion.
 ///
-/// `only` 给了就只看这些事实（合并之后对搬动过的那几条立刻查）；None 是全量。
+/// If `only` is given, only those facts are checked (right after a merge, the few that moved); None means all.
 pub async fn signature_breaks(
     conn: &mut PgConnection,
     kb_id: Uuid,
@@ -187,8 +187,8 @@ pub async fn signature_breaks(
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
-/// 把签名违规落进 `axiom_violations`（kind = `signature`，left 与 right 同一条事实）。
-/// 幂等：同一条事实重复报不重复入库。返回新插入的条数。
+/// Writes signature violations into `axiom_violations` (kind = `signature`, left and right are the same fact).
+/// Idempotent: the same fact reported twice is not stored twice. Returns the number of newly inserted rows.
 pub async fn record_signature_breaks(
     pool: &PgPool,
     kb_id: Uuid,
@@ -214,18 +214,18 @@ pub async fn record_signature_breaks(
     Ok(inserted)
 }
 
-/// 一次检测的全部读侧产物：断言边与公理取进来、规则候选解完不动点、五类检查
-/// 算出来、第六类（派生撞上断言）带着人读的细节。**只读不写**——`run` 与本体
-/// 事务里的对账共用同一套取数与过滤（0062）。
+/// All read-side outputs of one detection: assertion edges and axioms fetched in, rule candidates solved to a fixed point, five classes of checks
+/// computed, and the sixth class (derivation colliding with an assertion) carrying details for humans to read. **Read-only, no writes**: `run` and the ontology
+/// reconciliation in one transaction share the same fetching and filtering (0062).
 struct Detection {
-    /// 这一轮算出来的违规全集（还没扣掉人认可过的并存组）
+    /// The full set of violations computed this round (not yet minus the coexistence groups a person has accepted)
     violations: Vec<Violation>,
-    /// `derived_contradiction` 的 detail 按 (left, right) 放——它指着不存在的行，
-    /// 落库时才贴到对应违规上
+    /// The detail of `derived_contradiction` is keyed by (left, right): it points at rows that do not exist,
+    /// and is only attached to the matching violation when stored
     details: HashMap<(Uuid, Uuid), serde_json::Value>,
-    /// 环没搜完的谓词（#642）：它们的 open 环行这一轮不判陈
+    /// Predicates whose cycle search did not finish (#642): their open cycle rows are not judged this round
     cycles_capped: Vec<Uuid>,
-    /// 人认可过并存的互斥组：(种类, 组里的事实集)
+    /// Mutually exclusive groups a person has accepted as coexisting: (kind, the set of facts in the group)
     accepted: Vec<(String, HashSet<Uuid>)>,
     derivation: Derivation,
     clashes: Contradictions,
@@ -236,8 +236,8 @@ struct Detection {
 }
 
 async fn detect(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Detection> {
-    // 与 `materialize` 同一次求解：候选里有规则推出的关系边，被拦下的也在——
-    // 队列报的正是那边拦下的（0017，0047 决定 3）
+    // Same solve as `materialize`: the candidates include relation edges derived by rules, and blocked ones too;
+    // the queue reports exactly what was blocked there (0017, 0047 decision 3).
     let Resolved {
         edges: timed,
         spans,
@@ -252,13 +252,13 @@ async fn detect(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Detection> {
         clashes,
         ..
     } = checked;
-    // 带着区间查：互斥的三类只在同时成立时才算（#634）。从前这里把区间剥掉再查，
-    // 每一次调薪、每一次换负责人都进了 Review
+    // Query with intervals: the three mutually exclusive classes count only when they hold together (#634). Previously the intervals were stripped before checking,
+    // so every raise and every change of owner entered Review.
     let checked = check_all(&timed, &axioms);
     let cycles_capped = checked.cycles_capped;
     let mut violations = checked.violations;
-    // 第五类不在纯逻辑引擎里：它要看实体的类型与谓词的 domain / range，那是库里的
-    // 东西。算出来后与其它四类走同一条落库与清陈规矩
+    // The fifth class is not in the pure logic engine: it needs entity types and predicate domain / range, which are database things.
+    // Once computed it follows the same storage and clear-stale rules as the other four classes.
     for fact in signature_breaks(conn, kb_id, None).await? {
         violations.push(Violation {
             kind: Kind::Signature,
@@ -268,19 +268,19 @@ async fn detect(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Detection> {
         });
     }
 
-    // 第六类（0017）：推出来却落不了地的派生。与 `materialize` 用同一个函数算，
-    // 所以这里报的正是那边拦下的——两边各算一套的话，队列会跟图对不上
+    // The sixth class (0017): a derivation that was inferred but cannot land. It is computed by the same function as `materialize`,
+    // so what is reported here is exactly what was blocked there; if each computed its own, the queue would drift from the graph.
     let names = names_for(conn, &derivation, &clashes).await?;
     let mut details: HashMap<(Uuid, Uuid), serde_json::Value> = HashMap::new();
     let mut per_pred: HashMap<Uuid, usize> = HashMap::new();
     let mut contradictions_capped = 0usize;
     for c in &clashes.with_assertions {
         let d = &derivation.facts[c.derived];
-        // 键与外键都要 `facts` 里的行。链经过规则推出的关系边时，最后一条前提是
-        // 它的临时 id——每轮都不同——退到链上最后一条断言；自环的 `against` 也是它
+        // Keys and foreign keys both need rows in `facts`. When a chain goes through a relation edge derived by a rule, the last premise is
+        // its temporary id (different each round), so it falls back to the last assertion on the chain; a self-loop's `against` is that too
         let Some(&last) = d.premises.iter().rev().find(|p| asserted_ids.contains(p)) else {
-            // 整条前提链都是规则推出的临时 id：没有可落库的键与外键（队列的行
-            // 必须回到 `facts`），这个撞法不落行——`check` 的 blocked 侧仍然拦它
+            // When the entire premise chain is temporary ids derived by rules, there is no storable key or foreign key (queue rows
+            // must trace back to `facts`), so this collision does not store a row: the blocked side of `check` still blocks it.
             continue;
         };
         let against = if asserted_ids.contains(&c.against) {
@@ -304,7 +304,7 @@ async fn detect(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Detection> {
             json!({
                 "axiom": c.axiom.as_str(),
                 "rule": d.rule.as_str(),
-                // 规则推出的关系边：是哪条业务规则（0047）。公理派生没有
+                // The relation edge derived by a rule: which business rule it is (0047). Axiom derivations have none
                 "attribute_rule_id": candidate_rule.get(&c.derived),
                 "via": d.via,
                 "via_label": names.predicate(d.via),
@@ -323,9 +323,9 @@ async fn detect(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Detection> {
             kind: Kind::DerivedContradiction,
             left: against,
             right: last,
-            // 证据链只留断言 id：链经规则推出的关系边时 premises 里混着那一轮的
-            // 临时 id（0047 决定 3）——它不属于任何表，出库后永远解析不出。落库的
-            // path 是给人看、给导出点名的证据链，成员必须回得到 `facts` 的行
+            // The evidence chain keeps only assertion ids: when a chain goes through a relation edge derived by a rule, premises contain that round's
+            // temporary ids (0047 decision 3), which belong to no table and never resolve after storage. The stored
+            // path is the evidence chain shown to people and named in exports, so its members must trace back to rows in `facts`
             path: d
                 .premises
                 .iter()
@@ -350,9 +350,9 @@ async fn detect(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Detection> {
     })
 }
 
-/// 人认可过「这几条可以并存」，这一轮的组又全在那几条里——比如其中一条后来
-/// 撤了，剩下的组首尾变了、键也变了——仍然是那句认可管着，不再端上来。
-/// 组里有一条认可时没见过的，就不拦：那是新情况
+/// A person accepted "these can coexist", and this round's group is entirely within those facts, e.g. one of them was later
+/// retracted, so the group's ends and keys have changed, yet it is still governed by that acceptance and is not surfaced again.
+/// If the group has a fact that was not present when accepted, it is not blocked: that is a new situation
 fn suppressed(v: &Violation, accepted: &[(String, HashSet<Uuid>)]) -> bool {
     is_grouped(v.kind)
         && accepted
@@ -360,9 +360,9 @@ fn suppressed(v: &Violation, accepted: &[(String, HashSet<Uuid>)]) -> bool {
             .any(|(k, facts)| k == v.kind.as_str() && v.path.iter().all(|f| facts.contains(f)))
 }
 
-/// 一轮检测的落库侧：违规按行键 upsert（证据刷成这一轮的），resolved 的破约行
-/// 重开；**没算出来的 open 行不在这一层处置**——`run` 删掉它们，本体事务里的
-/// 对账把它们分档（0062）。返回「这一轮仍成立」的行 id 与 (新插, 重开) 计数。
+/// The storage side of one detection: violations upserted by row key (evidence refreshed to this round's), resolved rows that break their promise
+/// reopen; **open rows not computed are not handled at this layer**: `run` deletes them, and the reconciliation in the ontology transaction
+/// classifies them (0062). Returns the row ids that "still hold this round" and the (newly inserted, reopened) counts.
 async fn settle_violations(
     tx: &mut Transaction<'_, Postgres>,
     kb_id: Uuid,
@@ -386,28 +386,28 @@ async fn settle_violations(
             .get(&(*left, *right))
             .cloned()
             .unwrap_or_else(|| json!({}));
-        // **证据跟着这一轮走**（#619）。从前这里是 `DO NOTHING`，而除此之外没有任何
-        // 地方写 `path` / `detail`——重开那一支也不写。于是一行只要不被删，它带的
-        // 证据就永远是**头一次**记下这个键时算出来的那一份：同一处派生矛盾后来经由另一组
-        // 前提再被算出来，行上写的还是最早那组。重开时更难看，`detected_at`
-        // 换成 now() 而 path 不动，一行上于是一个新时间戳配一份别的轮次的证据。
+        // **Evidence goes with this round** (#619). Previously this was `DO NOTHING`, and no other place
+        // wrote `path` / `detail`, and the reopen branch did not write them either. So a row, as long as it is not deleted, kept the
+        // evidence it carried from the **first** time this key was recorded: the same derived contradiction later recomputed through another group of
+        // premises kept the earliest group on the row. On reopen it was uglier: `detected_at`
+        // became now() while path did not move, so one row ended up with a new timestamp paired with another round's evidence.
         //
-        // **环不走首尾两条的键**（#641）。两个环共用最小的那条和收尾那条、中间不同，
-        // 从前落在同一个键上，后一个覆盖前一个的 path——那不是「同一个环换了证据」，
-        // 是另一个环被吞掉了。环就是它的事实集合，按整条 path 定键（0054）。
+        // **Cycles are not keyed by their first and last edges** (#641). Two cycles sharing the smallest edge and the closing edge, differing in the middle,
+        // used to land on the same key, so the later one overwrote the earlier one's path: that was not "the same cycle with new evidence",
+        // another cycle was swallowed. A cycle is its set of facts, keyed by its whole path (0054).
         //
-        // 插与更新合成一条语句：从前是插一次再 SELECT 一次，两条语句问的是同一行。
-        // `xmax = 0` 只有真正新插的行才成立——`DO UPDATE` 会让 RETURNING 对更新也
-        // 出一行，不这么分就会把「本来就在」数成「新插的」。
+        // Insert and update are merged into one statement: previously it was an insert then a SELECT, two statements asking about the same row.
+        // `xmax = 0` holds only for rows truly newly inserted: `DO UPDATE` would also make RETURNING emit a row for updates, so without this split,
+        // rows that were already there would be counted as newly inserted.
         //
-        // 无论新插的还是本来就在的，都算「这一轮仍然成立」。
-        // 本来就在而且 resolved 的要再看一眼：`fact_retracted` / `fact_closed` /
-        // `axiom_relaxed` / `criterion_changed` 都是「世界会变」的承诺——事实没了、
-        // 区间闭了、判据换了，违规就不该再算出来。又算出来了，承诺就是没兑现，
-        // 那行回到 open，人再看一次。
-        // `accepted` 是有意并存，重算多少次都沉默（#202）——只要还是认可时那几条。
-        // 互斥的组走到这里说明上面没拦住：同一个键下多了一条，那行也回到 open
-        // 两条部分唯一索引各管一类，冲突目标要把索引的 WHERE 原样写出来才推断得到
+        // Whether newly inserted or already there, both count as "still holds this round".
+        // A row that was already there and is resolved must be looked at again: `fact_retracted` / `fact_closed` /
+        // `axiom_relaxed` / `criterion_changed` are all promises that "the world will change": the fact is gone,
+        // the interval closed, the criterion changed, so the violation should no longer be computed. If it is computed again, the promise was not kept,
+        // and that row goes back to open for a person to look at again.
+        // `accepted` is an intentional coexistence: no matter how many times it is recomputed, it stays silent (#202), so long as it is still those same facts as accepted.
+        // A mutually exclusive group reaching here means the checks above did not stop it: one more under the same key, and that row also goes back to open
+        // The two partial unique indexes each govern one class, and the conflict target has to spell out the index's WHERE verbatim for inference to work.
         let upsert = if *kind == Kind::Cycle {
             "INSERT INTO axiom_violations
                  (id, kb_id, kind, left_fact, right_fact, path, detail)
@@ -458,9 +458,9 @@ async fn settle_violations(
         fresh.push(keep);
     }
 
-    // 环没搜完的谓词，上一轮的 open 环这一轮不清（#642）：没搜到不等于不存在。
-    // 撞上上限时报出的是按数据排定的那一批，数据不变就是同一批；数据变了，旧的那几行
-    // 也宁可留着等人看，不能因为这一轮搜不到就当它没了
+    // Predicates whose cycle search did not finish: last round's open cycles are not cleared this round (#642). Not found is not the same as not existing.
+    // When the cap is hit, the batch reported is the one ordered by the data; if the data is unchanged it is the same batch; if the data changed, those old rows
+    // are better kept for a person to look at than dropped because this round's search did not find them.
     if !det.cycles_capped.is_empty() {
         let kept: Vec<Uuid> = sqlx::query_scalar(
             "SELECT v.id FROM axiom_violations v
@@ -477,9 +477,9 @@ async fn settle_violations(
     Ok((fresh, inserted, reopened))
 }
 
-/// 派生之间互撞的按规则对进 `ontology_defects`——根子是那两条声明，不是哪条事实。
-/// 同一对谓词上可能有几种撞法（functional 与 asymmetric 各撞各的），唯一键只到
-/// 谓词对，所以合成一行，几种撞法都写进 detail
+/// Contradictions between derived rules, colliding pairwise, go into `ontology_defects`: the root is those two declarations, not any particular fact.
+/// A pair of predicates can collide in more than one way (functional and asymmetric each collide separately), but the unique key only goes to
+/// the predicate pair, so it is merged into one row, and every collision mode is written into detail.
 async fn settle_defects(
     tx: &mut Transaction<'_, Postgres>,
     kb_id: Uuid,
@@ -524,7 +524,7 @@ async fn settle_defects(
             .iter()
             .map(|r| r["count"].as_u64().unwrap_or(0) as usize)
             .sum();
-        // 已经有人认可过的那一行保持 resolved，只刷 detail：0017 说认可之后不再报
+        // A row someone has already accepted stays resolved, only detail is refreshed: per 0017, once accepted it is no longer reported
         let (id,): (Uuid,) = sqlx::query_as(
             "INSERT INTO ontology_defects (id, kb_id, kind, subject, other, path, detail)
              VALUES ($1, $2, 'rules_disagree', $3, $4, '{}', $5)
@@ -552,10 +552,10 @@ async fn settle_defects(
     Ok(())
 }
 
-/// 跑一遍检查，把结果落库。
+/// Run one check, writing the results to the database.
 pub async fn run(pool: &PgPool, kb_id: Uuid) -> AppResult<Report> {
-    // 检测与落库进同一条事务：读侧看见的是这条事务启动后每条语句前的最新提交，
-    // 与原先池上各取一条连接等价；写侧则没有「插新的」与「清陈旧的」之间的窗口
+    // Detection and storage go into the same transaction: the read side sees the latest commit before each statement since the transaction started,
+    // equivalent to taking one connection per read from the pool as before; the write side then has no window between "insert new" and "clear stale".
     let mut tx = pool.begin().await?;
     let det = detect(&mut tx, kb_id).await?;
     let mut report = Report {
@@ -573,8 +573,8 @@ pub async fn run(pool: &PgPool, kb_id: Uuid) -> AppResult<Report> {
     report.inserted = inserted;
     report.reopened = reopened;
 
-    // 这一轮没算出来的 open 行是陈的：事实被撤了，或者公理放宽了。
-    // resolved 的不动——那是人的决定，不是派生状态
+    // Open rows not computed this round are stale: a fact was retracted, or an axiom was relaxed.
+    // Resolved rows are left alone: that is a human decision, not derived state.
     let cleared = sqlx::query(
         "DELETE FROM axiom_violations
           WHERE kb_id = $1 AND status = 'open' AND NOT (id = ANY($2))",
@@ -590,13 +590,13 @@ pub async fn run(pool: &PgPool, kb_id: Uuid) -> AppResult<Report> {
     Ok(report)
 }
 
-/// 一处违规在库里的身份：与两条唯一索引同形状——环按整条 `path`，其余按
-/// `(kind, left_fact, right_fact)`（0054）。
+/// The identity of a violation in the database: same shape as the two unique indexes: cycles by their whole `path`, the rest by
+/// `(kind, left_fact, right_fact)` (0054).
 ///
-/// **分档归一化**：非环种类的 `path` 存的是这一轮的证据（前提集/组员），
-/// 检出重算时它可以变而行还是那一处违规——拿它分档会把「旧判据下确实检出」
-/// 的行误认成「早就陈了」，从 `criterion_changed` 掉成硬删。所以对账键
-/// 里非环行的 path 一律归成空
+/// **Bucketing normalization**: for non-cycle kinds, `path` stores this round's evidence (premise sets / group members),
+/// which can change on recomputation while the row is still the same violation; bucketing by it would mistake a row that
+/// was truly detected under the old criterion for "long since stale", downgrading it from `criterion_changed` to a hard delete. So in the reconciliation key
+/// the path of non-cycle rows is always normalized to empty.
 pub type ViolationKey = (String, Uuid, Uuid, Vec<Uuid>);
 
 fn partition_key(kind: &str, left: Uuid, right: Uuid, path: &[Uuid]) -> ViolationKey {
@@ -612,10 +612,10 @@ fn partition_key(kind: &str, left: Uuid, right: Uuid, path: &[Uuid]) -> Violatio
     )
 }
 
-/// 当前本体下**会算出来**的违规键集（0062）。不改违规状态——但 `detect` 沿
-/// `resolve` 会顺手把确定性编译出的规则行补齐（`INSERT ... ON CONFLICT DO
-/// NOTHING`），所以它不是字面上的只读。改判据的那条事务在动笔之前调它，
-/// 拿到的就是旧本体下的基线。
+/// The set of violation keys **that would be computed** under the current ontology (0062). Does not change violation state; but `detect` along
+/// `resolve` also fills in rule rows compiled deterministically as a side effect (`INSERT ... ON CONFLICT DO
+/// NOTHING`), so it is not literally read-only. The transaction that changes a criterion calls it before touching anything,
+/// and what it gets is the baseline under the old ontology.
 pub async fn detection_keys(
     conn: &mut PgConnection,
     kb_id: Uuid,
@@ -629,17 +629,17 @@ pub async fn detection_keys(
         .collect())
 }
 
-/// 判据在同一条事务里刚被改过（0062）：按新本体重新检出、落库，
-/// 然后给陈旧的 open 行一个诚实的下场——
+/// The criterion was just changed within the same transaction (0062): re-detect under the new ontology, store,
+/// then give stale open rows an honest outcome:
 ///
-/// - 旧基线里有的：它的判据在这次改动里被端掉了，以 `criterion_changed` 收场。
-///   不是人裁的（`decided_by` 空），是公理/签名变了；下次又被算出来时重开规矩
-///   与 `axiom_relaxed` 同一支
-/// - 旧基线里没有的：它在改动前就已经陈了（事实没了之类），照旧删掉，与
-///   `run` 同一条清陈规矩
+/// - Those present in the old baseline: their criterion was cut off by this change, and they end as `criterion_changed`.
+///   Not a human's ruling (`decided_by` is empty), but the axiom/signature changed; the next time it is computed, reopening follows
+///   the same branch as `axiom_relaxed`
+/// - Those not in the old baseline: they were already stale before the change (fact gone, and so on); delete them as before, under
+///   the same stale-clearing rule as `run`
 ///
-/// 保住的不变式：`status='open'` 的一行必然已对账于**当前**本体。
-/// 返回这一轮检出的违规数（与 `run` 的 `report.found` 同一口径）
+/// Invariant kept: a row with `status='open'` must have been reconciled against the **current** ontology.
+/// Returns the number of violations detected this round (same measure as `report.found` in `run`)
 pub async fn reconcile_ontology(
     tx: &mut Transaction<'_, Postgres>,
     kb_id: Uuid,
@@ -685,7 +685,7 @@ pub async fn reconcile_ontology(
     Ok(det.violations.len())
 }
 
-/// 互斥的三类：一处违规是一组同时成立、彼此冲突的事实（`path` 是整组）。
+/// Mutually exclusive, three classes: a violation is a group of facts that hold together and conflict with each other (`path` is the whole group).
 fn is_grouped(kind: Kind) -> bool {
     matches!(
         kind,
@@ -693,10 +693,10 @@ fn is_grouped(kind: Kind) -> bool {
     )
 }
 
-/// 人认可过并存的互斥组：(种类, 组里的事实)。
+/// Mutually exclusive groups a person accepted as coexisting: (kind, facts in the group).
 ///
-/// 认可说的是「这几条可以同时成立」，所以按事实集合比，不按键比——组里撤掉一条，
-/// 剩下的首尾换了、键也换了，那句认可照样管着它们（#624）。
+/// Acceptance says "these can hold at the same time", so it compares by fact set, not by key: if one fact is retracted from the group,
+/// the remaining first and last have changed and so have the keys, yet that acceptance still governs them (#624).
 async fn accepted_groups(
     conn: &mut PgConnection,
     kb_id: Uuid,
@@ -713,7 +713,7 @@ async fn accepted_groups(
         .into_iter()
         .map(|(kind, left, right, path)| {
             let mut facts: HashSet<Uuid> = path.into_iter().collect();
-            // 首尾本来就在 path 里；0053 之前记下的一对 path 是空的，靠这两列
+            // The first and last are already in `path`; pairs recorded before 0053 have an empty path, and these two columns
             facts.insert(left);
             facts.insert(right);
             (kind, facts)
@@ -721,7 +721,7 @@ async fn accepted_groups(
         .collect())
 }
 
-/// 矛盾要写成人能读的话，而派生没有落库、没有文本可查——名字在这里补。
+/// A contradiction must be written as text a person can read; derivations are not stored and have no text to look up, so names are filled in here.
 struct Names {
     entities: HashMap<Uuid, String>,
     predicates: HashMap<Uuid, String>,
@@ -787,18 +787,18 @@ async fn names_for(
     })
 }
 
-/// Review 页要看的:还没人表态的违规,连同两条事实的三元组文本。
+/// What the Review page wants: unruled violations, together with the triple text of both facts.
 ///
-/// 展开成文本在 SQL 里做而不是回来再查一遍:一页几十条,每条两个三元组,
-/// 分开查就是上百次往返。谓词用 `fact_surface_predicate` 兜底——本体里没有
-/// 对应关系的事实拿原文说法显示(见 `facts.predicate_id`)。
+/// Expanding to text is done in SQL rather than fetched again afterward: a page of dozens of rows, each with two triples,
+/// fetched separately would mean a hundred-plus round trips. Predicates fall back to `fact_surface_predicate`: a fact with no
+/// corresponding relation in the ontology is shown with its original wording (see `facts.predicate_id`).
 pub async fn open_violations(
     pool: &PgPool,
     kb_id: Uuid,
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<AxiomViolation>> {
-    // 让路径按事实 ID 查三元组，避免每条路径都扫描物化后的全库三元组。
+    // Let the path look up triples by fact ID, avoiding a scan of every materialized triple in the database for each path.
     Ok(sqlx::query_as(&format!(
         "WITH triple AS NOT MATERIALIZED (
              SELECT f.id,
@@ -846,7 +846,7 @@ pub async fn open_violations(
           -- 翻页时每一页的先后可以不同——有的行出现两次，有的一次也不出现
           ORDER BY v.detected_at DESC, v.id DESC
           LIMIT $2 OFFSET $3",
-        // 「左边还开着」按读出来的终点判（0022）：结束了不知哪天的不算开着
+        // "The left side is still open" is judged from the end point read back (0022): one whose end date is unknown is not counted as open
         left_holds_to = crate::world_axis::facts_holds_to("lf"),
     ))
     .bind(kb_id)
@@ -897,8 +897,8 @@ struct ViolationRow {
     same_name_peers: bool,
 }
 
-/// 线索按最常见的错法排（0017 §2）：旧断言没写结束日期、两个同名实体、抽取本来就
-/// 没把握。一次只给一条——三条并列等于没给
+/// Hints are ordered by the most common mistake (0017 §2): an old assertion with no end date, two entities with the same name, and extraction simply
+/// unsure. Give only one at a time: three side by side is the same as giving none
 fn hint_for(r: &ViolationRow) -> Option<&'static str> {
     if r.left_open && r.detail.get("valid_from").is_some_and(|v| !v.is_null()) {
         Some("stale")
@@ -911,18 +911,18 @@ fn hint_for(r: &ViolationRow) -> Option<&'static str> {
     }
 }
 
-/// 人裁决一处违规。
+/// A person rules on one violation.
 ///
-/// **四个出路,不是两个。** 时态冲突问「哪条对」,而这里可能是定义错了——
-/// 用户导的本体把某个属性声明成反对称,而他自己的语料里那关系其实双向。
-/// `axiom_relaxed` 记的就是这种:该改的是本体,不是二十条事实。
+/// **Four ways out, not two.** Temporal conflict asks "which one is right", but here the definition may be wrong:
+/// a user-imported ontology declared some attribute antisymmetric, while in his own corpus that relation is actually bidirectional.
+/// `axiom_relaxed` records exactly that: it is the ontology that should change, not twenty facts.
 ///
-/// 改状态不删行,与账本同一个规矩:表过态这件事本身要留痕,而且 `run` 靠
-/// `status = 'open'` 判断哪些是派生的、可以重算掉——人的决定必须活过重跑。
-/// 一处违规里该撤哪条事实。
+/// Changing the status does not delete the row, the same rule as the ledger: the fact that a ruling was made must itself be recorded, and `run` relies on
+/// `status = 'open'` to tell which are derived and can be recomputed away: a person's decision must survive re-runs.
+/// Which fact to retract within one violation.
 ///
-/// 单事实的种类（自环、签名、派生撞断言）只有一条，不用说；双事实与环上的要人指名，
-/// 而且只能指违规自己列出的那几条——撤一条不相干的事实不是裁决，是误操作
+/// Single-fact kinds (self-loop, signature, derivation colliding with an assertion) have only one, no need to say; two-fact and cycle kinds need a person to name it,
+/// and it can only name the facts the violation itself lists: retracting an unrelated fact is not a ruling, it is a mistake.
 pub fn pick_retraction(
     left: Uuid,
     right: Uuid,
@@ -940,11 +940,11 @@ pub fn pick_retraction(
     (r == left || r == right || path.contains(&r)).then_some(r)
 }
 
-/// 「数据错了」：**真的撤掉那条事实**，再把违规标成 resolved（#202）。
+/// "The data is wrong": **really retract that fact**, then mark the violation resolved (#202).
 ///
-/// 此前只改 `axiom_violations`，事实照样活在图里；重跑撞上 resolved 行又什么都不做，
-/// 违规既没消失也不再出现。撤走的是 `reject_fact` 那条路——`invalidated_at`，
-/// 证据不动，账本留痕。回撤掉的那条 id，调用方据此记审计
+/// Before, only `axiom_violations` changed and the fact stayed alive on the graph; a re-run hitting the resolved row then did nothing,
+/// so the violation neither disappeared nor stopped reappearing. What is retracted is the `reject_fact` path: `invalidated_at`,
+/// evidence untouched, the ledger keeps the record. The retracted id is returned so the caller can write the audit.
 pub async fn retract_from_violation(
     pool: &PgPool,
     kb_id: Uuid,
@@ -998,9 +998,9 @@ pub async fn decide(
     Ok(())
 }
 
-// ===================== R0 的另一半：本体自己 =====================
+// ===================== The other half of R0: the ontology itself =====================
 
-/// 本体自洽性检查的产出。
+/// Output of the ontology self-consistency check.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OntologyReport {
     pub classes: usize,
@@ -1009,10 +1009,10 @@ pub struct OntologyReport {
     pub cleared: usize,
 }
 
-/// 量一遍本体自己：谓词的公理组合、subClassOf 的环、不可满足的类。
+/// Measure the ontology itself: predicate axiom combinations, subClassOf cycles, unsatisfiable classes.
 ///
-/// 与 [`run`] 同一套重跑规矩：`open` 是派生状态、可以被重算掉，`resolved`
-/// 是人的决定、一行不动。
+/// Same re-run rules as [`run`]: `open` is derived state and can be recomputed away, `resolved`
+/// is a human ruling and is left alone.
 pub async fn check_ontology(pool: &PgPool, kb_id: Uuid) -> AppResult<OntologyReport> {
     let ax = axioms(&mut *pool.acquire().await?, kb_id).await?;
     let parents: Vec<(Uuid, Uuid)> = sqlx::query_as(
@@ -1090,61 +1090,61 @@ pub async fn check_ontology(pool: &PgPool, kb_id: Uuid) -> AppResult<OntologyRep
     Ok(report)
 }
 
-// ===================== R1：物化推导 =====================
+// ===================== R1: materialized inference =====================
 
-/// 一次推导的产出。
+/// Output of one derivation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeriveReport {
-    /// 编译出来的规则条数。**为零时结论是「没有规则」而不是「推不出东西」**
+    /// Number of compiled rules. **When zero, the conclusion is "no rules" rather than "nothing can be derived"**
     pub rules: usize,
     pub edges: usize,
-    /// 这一轮算出来的派生总数
+    /// Total derivations computed this round
     pub derived: usize,
-    /// 新落库的
+    /// Newly stored
     pub inserted: usize,
-    /// 前提没了、跟着作废的
+    /// Those whose premises are gone and were voided along with them
     pub invalidated: usize,
-    /// 撞上单谓词上限、没推完的谓词个数
+    /// Number of predicates that hit the per-predicate cap and were not fully derived
     pub capped: usize,
-    /// **推出来了却找不到对应规则行的条数。正常应当恒为零。**
+    /// **Number of derivations inferred but with no matching rule row. Normally this is always zero.**
     ///
-    /// 不为零意味着规则编译与推导对不上了。之前这里是一句 `continue`，
-    /// 于是 `ceo_of ⊑ works_at` 推出的那条 `works_at` 事实**推出来了却不落库**，
-    /// 而下游靠它推出的 `employs` 反倒进了库——一条派生的前提凭空消失。
-    /// 数出来，别再让它静默一次
+    /// Non-zero means rule compilation and inference have fallen out of step. Previously this was a single `continue` here,
+    /// so the `works_at` fact that `ceo_of ⊑ works_at` inferred was **inferred but never stored**,
+    /// while the `employs` that downstream inferred from it did get stored: a derived premise vanished into thin air.
+    /// Count it, and do not let it fail silently once more.
     pub unruled: usize,
-    /// 推出来了却撞上断言或别的派生、这一轮拦下没落的（0017）。**拦下的每一条
-    /// 都在 Review 里有对应的一行**——`run` 与这里用同一个函数算
+    /// Inferred but collided with an assertion or another derivation, and blocked this round without landing (0017). **Every blocked one
+    /// has a corresponding row on Review**: `run` and this use the same function to compute it
     pub blocked: usize,
-    /// 参与求值的业务规则条数（0021）
+    /// Number of business rules evaluated (0021)
     pub attribute_rules: usize,
-    /// 业务规则命中数
+    /// Number of business rule hits
     pub rule_hits: usize,
-    /// 前提组合太多、没展开完的 (规则, 实体) 对数。**与「不满足」区分开报**
+    /// Number of (rule, entity) pairs whose premise combinations were too many to fully expand. **Reported separately from "not satisfied"**
     pub rule_capped: usize,
-    /// 业务规则跑了几轮（0030）。一轮的结论进下一轮的输入，直到某一轮不再
-    /// 产出新的结论。链上一环一轮，所以 1 就是「没有链」，2 就是 `A → B`
+    /// How many rounds the business rules ran (0030). One round's conclusions feed the next round's input, until a round produces
+    /// no new conclusions. One link on the chain per round, so 1 means "no chain", 2 means `A → B`
     pub rule_rounds: usize,
-    /// 跑满 `MAX_DEPTH` 轮还在产出：链比上限长，后面的没接上。**与「不满足」
-    /// 区分开报**——没推到与不成立在结果里长得一模一样
+    /// Still producing output after running all `MAX_DEPTH` rounds: the chain is longer than the cap, so the rest did not connect. **Reported separately
+    /// from "not satisfied"**: "not derived" and "does not hold" look exactly the same in the results.
     pub rule_rounds_capped: bool,
-    /// 结论没变、证明变了、于是重写了前提链的行数（0030）。同一句话可以有
-    /// 第二条依据，而对账的键里没有前提——不重写的话那一行会一直挂着上一轮
-    /// 的理由，链上还可能挂着一条刚刚作废的前提
+    /// The conclusion did not change but the proof did, so the premise-chain rows were rewritten (0030). The same statement can have
+    /// a second basis, and the reconciliation key has no premises: without rewriting, that row would keep hanging on last round's
+    /// reason, and the chain might still hold a premise that was just voided
     pub reproved: usize,
-    /// 结论没变、规则定义换了版本、行留着改指新版本的（0060）
+    /// The conclusion did not change but the rule definition moved to a new version, so rows are kept and point at the new version (0060)
     pub redefined: usize,
 }
 
-/// 一条派生从它的前提上得到的精度与置信度（0024）。
+/// The precision and confidence a derivation gets from its premises (0024).
 ///
-/// **抽出来是因为链**（0030）：链中间那一层既要拿它算自己的两端，又要作为
-/// 下一层的前提被同一段代码读一遍。落库那一处与不动点那一处各写一份的话，
-/// 两处对「哪一端是锚点顶上来的」的判断迟早会长得不一样。
+/// **Extracted because of the chain** (0030): the middle layer of a chain needs it both to compute its own two ends and, as
+/// the next layer's premise, to read it again through the same code. If the storage site and the fixed-point site each wrote their own copy,
+/// their judgments about "which end was lifted by the anchor" would eventually diverge.
 ///
-/// 精度跟着**赢下这一端的那条前提**走：派生的起点就是前提里最晚的那个起点，
-/// 它的精度就是那条前提的精度。几条前提并列时取其中最粗的；那一端若是某条
-/// 前提的**锚点**顶上来的（0022），没有精度可言。
+/// Precision follows **the premise that wins this end**: the start of the derivation is the latest start among the premises,
+/// and its precision is that premise's precision. When several premises sit side by side, take the coarsest. If that end was lifted up
+/// by a premise's **anchor** (0022), it has no precision to speak of.
 fn premise_meta(
     premises: &[Uuid],
     from: Option<i64>,
@@ -1161,7 +1161,7 @@ fn premise_meta(
         let Some((pf, pt, pc, fa, ta)) = meta.get(p) else {
             continue;
         };
-        // 置信度取前提里最低的：一条链只和它最弱的一环一样可信
+        // Confidence takes the lowest among premises: a chain is only as trustworthy as its weakest link
         conf = conf.min(*pc);
         let Some((sf, st)) = spans.get(p) else {
             continue;
@@ -1177,8 +1177,8 @@ fn premise_meta(
             if *ta {
                 to_anchored = true;
             } else {
-                // 'unknown' 不是粒度，是「结束了不知哪天」的标记；它顶上来的
-                // 那一端是锚点，走上面那条路
+                // 'unknown' is not a granularity, it is the mark for "ended, date unknown"; the end it lifts
+                // is an anchor, which takes the path above
                 tp = coarsest(
                     tp.as_deref(),
                     pt.as_deref().filter(|p| *p != crate::graph::ENDED_UNKNOWN),
@@ -1189,11 +1189,11 @@ fn premise_meta(
     (fp, tp, conf, from_anchored, to_anchored)
 }
 
-/// 主类靠**派生归类**才够得着的那一份规则：范围从筛子变成一条条件（0030）。
+/// The part of the rules that the main class reaches only through **derived classification**: the scope changes from a sieve into a condition (0030).
 ///
-/// `范围 与 ((A 且 B) 或 C)` 展开就是 `(范围且A且B) 或 (范围且C)`——所以每组
-/// 各加一条，析取仍然只有一层（0029）。写成条件而不是筛子，是为了让归类那条
-/// 派生事实进前提：结论的区间跟着它收窄，它作废时结论也跟着退场。
+/// Expanding `scope AND ((A AND B) OR C)` gives `(scope AND A AND B) OR (scope AND C)`, so each group
+/// adds one more, and disjunction stays one level deep (0029). Writing it as a condition rather than a sieve lets the classification
+/// derived fact enter the premises: the conclusion's interval narrows with it, and when it is voided the conclusion retires too.
 fn scoped_by_conclusion(
     rule: &utopia_reason::rules::BusinessRule,
     is_a: Uuid,
@@ -1219,10 +1219,10 @@ fn scoped_by_conclusion(
     }
 }
 
-/// 一次取数，三样东西：带区间的边、每条事实的区间、精度与置信度。
-/// `run` 与 `materialize` 共用——两边看到的边必须是同一批
-/// 前提的精度、置信度，以及两端各自**是不是锚点**（0022）：来自证据日期而不是原文
-/// 日期的那一端，推出来的派生行在那一端没有精度可言
+/// One fetch, three things: edges with intervals, each fact's interval, and precision and confidence.
+/// Shared by `run` and `materialize`: the edges both see must be the same batch
+/// of premises, with their precision and confidence, and whether each end **is an anchor** (0022): an end that comes from the evidence date rather than the document's
+/// date; a derived row has no precision to speak of at that end
 type PremiseMeta = (Option<String>, Option<String>, f32, bool, bool);
 
 type TimedEdges = (
@@ -1231,9 +1231,9 @@ type TimedEdges = (
     HashMap<Uuid, PremiseMeta>,
 );
 
-/// 一条前提**读出来的**区间（0022）：原文没给起点就从锚点起，说结束了不知哪天就到
-/// 锚点为止。两端都不知道的行读成空区间，求交时自然掉出去——它支撑不了任何派生。
-/// 返回 `(from, to, from_anchored, to_anchored)`。
+/// The interval a premise **reads out** (0022): if the text gives no start, it starts from the anchor; if it says "ended, date unknown", it runs up to
+/// the anchor. A row unknown at both ends reads as an empty interval, which falls out naturally when intersecting: it cannot support any derivation.
+/// Returns `(from, to, from_anchored, to_anchored)`.
 fn read_span(
     temporal: crate::graph::Temporal,
     from: Option<chrono::DateTime<chrono::Utc>>,
@@ -1245,15 +1245,15 @@ fn read_span(
 ) -> (Option<i64>, Option<i64>, bool, bool) {
     use crate::graph::Temporal;
     match temporal {
-        // 恒常每一刻都成立，证据日期不闸它（0031）
+        // Constant at every moment; evidence dates do not gate it (0031)
         Temporal::Eternal => return (None, None, false, false),
-        // 事件在它命名的那个桶里成立；没日期的事件区间为空——`overlap` 对空交集不推，
-        // 所以一条经过「不知何时收购」的链推不出东西，与读出侧一致（0031）。
-        // 0031 之前写下的事件行终点是空的，按起点那个桶读
+        // An event holds within the bucket it names; an event with no date has an empty interval: `overlap` does not infer over an empty intersection,
+        // so a chain through "acquired at an unknown time" infers nothing, consistent with the read side (0031).
+        // Event rows written before 0031 have an empty end, and are read by their start bucket
         Temporal::Event => {
             return match from {
-                // 没日期的事件区间为空。没有见证的（0064 决定 5）也一样：两端都落在
-                // 读不到的远处，和任何区间都不相交
+                // An event with no date has an empty interval. So does one without a witness (0064 decision 5): both ends fall
+                // in an unreachable far distance, disjoint from any interval
                 None => {
                     let a = attested_from.map_or(i64::MAX / 4, |a| a.timestamp());
                     (Some(a), Some(a), true, true)
@@ -1271,14 +1271,14 @@ fn read_span(
     }
     let (f, from_anchored) = match from {
         Some(x) => (Some(x.timestamp()), false),
-        // 没有起点：从见证起；连见证都没有的，下界开放——任何时点都成立（0064 决定 5）
+        // No start: start from the witness; with no witness either, the lower bound is open: it holds at any point in time (0064 decision 5)
         None => match attested_from {
             Some(a) => (Some(a.timestamp()), true),
             None => (None, false),
         },
     };
-    // 结束未知的行按 CHECK 必带 attested_to；万一没有，按开放读——宁可多推一点，
-    // 也不凭空造一个终点
+    // A row whose end is unknown must carry attested_to per the CHECK; if somehow absent, read it as open: better to infer a bit more
+    // than to conjure an end point out of nothing
     let (t, to_anchored) = match (to, to_precision, attested_to) {
         (Some(x), _, _) => (Some(x.timestamp()), false),
         (None, Some(p), Some(a)) if p == crate::graph::ENDED_UNKNOWN => (Some(a.timestamp()), true),
@@ -1288,8 +1288,8 @@ fn read_span(
 }
 
 async fn timed_edges(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<TimedEdges> {
-    // 输入**只有断言**。派生住在另一张表，所以这里连过滤都不必写——那正是
-    // 分表买到的东西：忘了排除的后果是推不出东西，不是把自己的输出喂回自己
+    // The input is **assertions only**. Derivations live in another table, so no filter is even needed here: that is
+    // what splitting into tables buys. Forgetting to exclude has the consequence of inferring nothing, not feeding one's own output back into itself
     let rows: Vec<EdgeRow> = sqlx::query_as(
         "SELECT id, predicate_id, subject_id, object_id,
                 valid_from, valid_to, valid_from_precision, valid_to_precision, confidence,
@@ -1303,7 +1303,7 @@ async fn timed_edges(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<TimedEdg
     .bind(kb_id)
     .fetch_all(&mut *conn)
     .await?;
-    // 谓词的时间语义（0031）：事件按它的桶读，恒常两端开放。一次取全，按谓词查
+    // Temporal semantics of the predicate (0031): events read by their bucket, constants open at both ends. Fetch all at once, look up by predicate
     let temporal_of: HashMap<Uuid, crate::graph::Temporal> = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id, temporal FROM relation_types WHERE kb_id = $1",
     )
@@ -1318,9 +1318,9 @@ async fn timed_edges(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<TimedEdg
     let mut meta: HashMap<Uuid, PremiseMeta> = HashMap::new();
     let mut spans: HashMap<Uuid, (Option<i64>, Option<i64>)> = HashMap::new();
     for (id, pred, subj, obj, from, to, fp, tp, conf, attested_from, attested_to) in rows {
-        // 按读出来的区间推（0022）：没起点的前提从最早的证据起，结束了不知哪天的
-        // 到说出它的那份文档为止。读成开放的话，一条经过 "former CEO" 的链会推出
-        // 一条今天还成立的边
+        // Infer from the read-back intervals (0022): premises with no start start from the earliest evidence, and ones where "ended, date unknown"
+        // run up to the document that says it. Read as open, a chain through "former CEO" would infer
+        // an edge that still holds today
         let temporal = temporal_of.get(&pred).copied().unwrap_or_default();
         let (f, t, fa, ta) = read_span(
             temporal,
@@ -1347,7 +1347,7 @@ async fn timed_edges(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<TimedEdg
     Ok((edges, spans, meta))
 }
 
-/// 人认可过并存的（派生三元组, 断言）对：这些派生下一轮照常落地（0017 §2）。
+/// Pairs of (derived triple, assertion) a person accepted as coexisting: these derivations still land next round as usual (0017 §2).
 async fn accepted_clashes(
     conn: &mut PgConnection,
     kb_id: Uuid,
@@ -1377,16 +1377,16 @@ async fn accepted_clashes(
         .collect())
 }
 
-/// 派生事实的身份：主 + 谓 + 宾 + 区间。
+/// Identity of a derived fact: subject + predicate + object + interval.
 ///
-/// **区间进键**是有意的：区间变了就是另一条断言，老的作废、新的落地，
-/// 因为账本不许原地改。
+/// **Including the interval in the key** is deliberate: when the interval changes it is a different assertion; the old one is voided, the new one lands,
+/// because the ledger does not allow in-place edits.
 ///
-/// 宾语两格,与 `derived_facts` 拓宽后的两条通道一一对应(0021 决策 1):实体宾语
-/// 走 `Option<Uuid>`,字面值结论走那串规范化过的 JSON。两格都参与比较——否则
-/// 同一个类上的两条不同结论会被认成同一条。
-/// 一条前提在 `fact_derivations` 上的两格（0030）：断言一格、派生一格，
-/// 恰好一个有值——数据库那条 CHECK 说的就是这句
+/// The two object slots correspond one-to-one with the two channels `derived_facts` widened to (0021 decision 1): an entity object
+/// goes in `Option<Uuid>`, a literal conclusion goes in that normalized JSON string. Both slots take part in comparison; otherwise
+/// two different conclusions on the same class would be taken as one.
+/// The two slots of a premise on `fact_derivations` (0030): one for assertions, one for derivations,
+/// exactly one of which has a value: the database's CHECK says just that
 type PremiseCols = (Option<Uuid>, Option<Uuid>);
 
 type DerivedKey = (
@@ -1400,9 +1400,9 @@ type DerivedKey = (
 
 type AssertedEdges = HashMap<(Uuid, Uuid, Uuid), Vec<(Option<i64>, Option<i64>)>>;
 
-/// 这一轮要落库的一条派生。公理推出来的与规则推出来的在这里合流——
-/// **合流是必须的**：陈旧行的对账扫的是整张表，两趟各做各的 diff 会把对方的
-/// 行每轮都判成陈旧作废掉。
+/// One derivation to be stored this round. The axiom-derived and rule-derived ones merge here:
+/// **merging is required**: the reconciliation for stale rows scans the whole table, and two separately run diffs would judge
+/// each other's rows stale and void them every round.
 #[derive(Clone)]
 struct Wanted {
     subject: Uuid,
@@ -1412,30 +1412,30 @@ struct Wanted {
     from: Option<i64>,
     to: Option<i64>,
     premises: Vec<Uuid>,
-    /// 公理规则（`rules.id`）或业务规则（`attribute_rules.id`），恰好一个
+    /// An axiom rule (`rules.id`) or a business rule (`attribute_rules.id`), exactly one
     rule_id: Option<Uuid>,
     attribute_rule_id: Option<Uuid>,
-    /// 业务规则推的：凭定义的哪一版（0060）
+    /// For a business rule: which version of its definition (0060)
     attribute_rule_version_id: Option<Uuid>,
 }
 
-/// JSON 值的规范化文本形态，只用来做键。
+/// Normalized text form of a JSON value, used only as a key.
 ///
-/// `serde_json::Value` 自己不是 `Hash`，而键里必须带上字面值宾语；序列化成
-/// 字符串是最省事且稳定的做法——`Map` 在 serde_json 默认是 `BTreeMap`，
-/// 同样的内容序列化出来逐字节相同。
+/// `serde_json::Value` is not itself `Hash`, but the key must carry the literal object; serializing it to a
+/// string is the simplest and most stable approach: `Map` in serde_json defaults to `BTreeMap`,
+/// so the same content serializes byte-for-byte identically.
 fn value_key(v: Option<&serde_json::Value>) -> Option<String> {
     v.map(|v| v.to_string())
 }
 
-/// 精度按「最粗的那个」取。
+/// Precision takes "the coarsest one".
 ///
-/// 派生区间的两端各来自某一条前提，严格说该各随各的精度。取最粗是**故意保守**：
-/// 一条链只和它最不确定的那一环一样可信，而把 year 级的前提推出来的结论标成
-/// day，正是 `facts.valid_from_precision` 那条注释里说的「在无知的地方填一个
-/// 确定的值」。
+/// The two ends of a derived interval each come from one premise; strictly, each should carry its own precision. Taking the coarsest is **deliberately conservative**:
+/// a chain is only as certain as its least certain link, and labelling a conclusion drawn from a year-level premise as day
+/// is exactly what the `facts.valid_from_precision` comment warns against: filling in
+/// a definite value where one is not known.
 fn coarsest(a: Option<&str>, b: Option<&str>) -> Option<String> {
-    // 梯子的顺序（0024）：year 最粗，second 最细；不认识的当最细，免得盖过认识的
+    // Ladder order (0024): year is coarsest, second is finest; unrecognized is treated as finest, so as not to override recognized ones
     let rank = |p: &str| {
         crate::graph::WORLD_PRECISIONS
             .iter()
@@ -1458,9 +1458,9 @@ fn axiom_rule_keys(ax: &HashMap<Uuid, Axioms>) -> Vec<(Uuid, RuleKind)> {
         if a.symmetric {
             want.push((pred, "symmetric"));
         }
-        // 后两种是迁移 0016（a_relation_can_name_its_inverse）补上的规则源。**规则挂在「有声明的那一侧」**——
-        // 归一化过的逆两边都有声明，所以两个方向各得一条规则，与它们各自
-        // 推出的派生对得上
+        // The last two kinds are rule sources added by migration 0016 (a_relation_can_name_its_inverse). **Rules attach to the side that has the declaration**:
+        // both sides of a normalized inverse have declarations, so each direction gets one rule, matching the derivations
+        // each one infers.
         if a.inverse_of.is_some() {
             want.push((pred, "inverse"));
         }
@@ -1472,14 +1472,14 @@ fn axiom_rule_keys(ax: &HashMap<Uuid, Axioms>) -> Vec<(Uuid, RuleKind)> {
     want
 }
 
-/// 按本体公理重编译规则，返回 `(谓词, 种类) → 规则 id`。
+/// Recompile rules from the ontology axioms, returning `(predicate, kind) → rule id`.
 ///
-/// **幂等**：身份取 `(kb, 谓词, 种类)`，重编译认得出「还是那条规则」——否则每跑
-/// 一次 `derived_facts.rule_id` 就指向一个新 id，历史全断。
+/// **Idempotent**: identity is `(kb, predicate, kind)`, so recompilation recognizes "still the same rule"; otherwise every run would make
+/// `derived_facts.rule_id` point at a new id, and the history would break.
 ///
-/// **公理撤了的规则不删。** 已失效的派生行仍指着它，解释「当时是靠哪条规则推的」
-/// 需要它还在；而它不再出现在返回值里，据它推出来的事实由下面的对账作废。
-/// 规则一个库也就几条，留着不占地方。
+/// **Rules whose axioms were retracted are not deleted.** Derivation rows that have since been invalidated still point at them, and explaining
+/// "which rule inferred this at the time" needs it to still exist; it no longer appears in the return value, so facts inferred from it are voided by the reconciliation below.
+/// A database only has a few rules, so keeping them takes no real room.
 async fn compile_rules(
     conn: &mut PgConnection,
     kb_id: Uuid,
@@ -1516,8 +1516,8 @@ pub struct AxiomRule {
     pub target: String,
 }
 
-/// 读编译器采用的声明，包含补齐的逆关系对。
-/// 已存规则还保留撤销的声明，新声明则可能尚未编译；列出它们不能物化或写规则。
+/// Reads the declarations the compiler adopted, including the filled-in inverse pairs.
+/// Stored rules still keep retracted declarations, while new declarations may not be compiled yet; listing them cannot materialize or write rules.
 pub async fn active_axiom_rules(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<AxiomRule>> {
     let mut conn = pool.acquire().await?;
     let ax = axioms(&mut conn, kb_id).await?;
@@ -1549,7 +1549,7 @@ pub async fn active_axiom_rules(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Axi
     Ok(rules)
 }
 
-/// 取边时一并拿回来的随行信息（精度与置信度，落库要用）。
+/// Extra info fetched along with edges (precision and confidence, needed when storing).
 type EdgeRow = (
     Uuid,
     Uuid,
@@ -1574,33 +1574,33 @@ type LiveRow = (
     Option<chrono::DateTime<chrono::Utc>>,
 );
 
-/// 一条业务规则连同它的条件，已经解析成求值器的形状。
+/// One business rule with its conditions, already parsed into the evaluator's shape.
 struct LoadedRule {
     rule: utopia_reason::rules::BusinessRule,
-    /// 规则只看这个类**及其子类**的实体
+    /// The rule only looks at entities of this class **and its subclasses**
     subject_types: Vec<Uuid>,
-    /// 上面那几个类的名字（IRI，没有才 key）。派生归类记的是名字，主类范围记的
-    /// 是 id——链要接上就得两边都有一份（0030）
+    /// The names of the classes above (IRI, falling back to key when none). Derived classification records names, while the main class scope records
+    /// ids: for a chain to connect, both sides need a copy (0030)
     subject_classes: Vec<String>,
-    /// 结论落在哪个谓词上：归类落 `is_a`，属性落它自己那个
+    /// The predicate the conclusion lands on: classification lands on `is_a`, an attribute lands on its own
     conclude_predicate: Uuid,
-    /// 这一轮读的是规则定义的哪一版（0060）：推出来的行记它，证明才说得出
-    /// 「当时规则怎么说」。迁移给每条规则补了第 1 版，所以正常总有
+    /// Which version of the rule definition this round read (0060): an inferred row records it, so the proof can say
+    /// "how the rule read at the time". The migration gave every rule a version 1, so normally there always is one
     version: Option<Uuid>,
 }
 
-/// 编译出来的一批规则，外加接链要用的两样东西（0030）。
+/// A batch of compiled rules, plus two things needed to connect chains (0030).
 struct LoadedRules {
     rules: Vec<LoadedRule>,
-    /// 内建 `is_a`。派生归类落在它上面，链上再读回来也从它上面读
+    /// The built-in `is_a`. Derived classification lands on it, and reading it back down the chain also reads from it
     is_a: Option<Uuid>,
-    /// 类名（IRI，没有才 key）→ 类 id。一条派生归类要变成「这个实体属于哪个类」，
-    /// 必须走这一步
+    /// Class name (IRI, falling back to key when none) → class id. For a derived classification to become "this entity belongs to this class",
+    /// it must go through this step
     class_ids: HashMap<String, Uuid>,
 }
 
-/// 求值要用的一行规则：id、主类、结论种类、结论那三格，外加结论类的 IRI 与 key
-/// （归类结论按 IRI 记，没有才退回 key）
+/// One rule row needed for evaluation: id, main class, conclusion kind, the three slots of the conclusion, plus the conclusion class's IRI and key
+/// (classification conclusions are recorded by IRI, falling back to key when none)
 type RuleDefRow = (
     Uuid,
     Uuid,
@@ -1608,23 +1608,23 @@ type RuleDefRow = (
     Option<Uuid>,
     Option<Uuid>,
     Option<serde_json::Value>,
-    // 算出来的结论那棵树（0032）
+    // The conclusion tree computed (0032)
     Option<serde_json::Value>,
     Option<String>,
     Option<String>,
     Option<Uuid>,
-    // 当前版本的 id（0060）
+    // Current version's id (0060)
     Option<Uuid>,
 );
 
-/// 取业务规则。条件形状不合法的规则**整条跳过而不是报错退出**——一条写坏的
-/// 规则不该让整轮物化停摆，而它不产出这件事在报告的条数里看得见。
+/// Fetch business rules. A rule whose condition shape is invalid is **skipped whole rather than erroring out**: one badly written
+/// rule should not stall the entire materialization, and the fact that it produces nothing is visible in the report's count.
 async fn attribute_rules(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<LoadedRules> {
     use utopia_reason::rules::{BusinessRule, Conclusion, Condition, Op};
 
-    // **按 id 排序**：规则之间撞上同一个结论时留下的是先到的那条证明，而
-    // 「先到」不该由 HashMap 的顺序决定——同一个库两次物化要给出同一份证明
-    // （0029 在组之间讲的是同一件事，0030 让链把它放大了）
+    // **Sort by id**: when rules collide on the same conclusion, the proof left is the one that arrived first, and
+    // "first arrived" should not be decided by HashMap order: two materializations of the same database must give the same proof
+    // (0029 says the same thing between groups; 0030 amplified it through chains)
     let rows: Vec<RuleDefRow> = sqlx::query_as(
         "SELECT r.id, r.subject_type_id, r.conclusion,
                 r.conclude_type_id, r.conclude_predicate_id, r.conclude_value,
@@ -1647,8 +1647,8 @@ async fn attribute_rules(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Load
         });
     }
 
-    // 类名 ↔ 类 id，两个方向各一份：归类结论按名字记（改标签不该让已推出的结论
-    // 变成另一条，0021 决策 2），而主类范围与实体的类都是 id
+    // Class name ↔ class id, one map in each direction: classification conclusions are recorded by name (renaming a label should not turn an
+    // already-inferred conclusion into a different one, 0021 decision 2), whereas the main class scope and entity classes are ids
     let type_rows: Vec<(Uuid, Option<String>, Option<String>)> =
         sqlx::query_as("SELECT id, iri, key FROM entity_types WHERE kb_id = $1")
             .bind(kb_id)
@@ -1662,8 +1662,8 @@ async fn attribute_rules(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Load
         class_name.insert(id, name);
     }
 
-    // 归类结论要落在内建 `is_a` 上。规则存在就意味着它已经被建出来了
-    // （建规则那一步负责），这里取不到就说明库被手改过——跳过而不是造一个
+    // A classification conclusion must land on the built-in `is_a`. If the rule exists, it was already created
+    // (the rule-creation step is responsible); if it cannot be found here, the database was edited by hand: skip rather than create one
     let is_a: Option<(Uuid,)> =
         sqlx::query_as("SELECT id FROM relation_types WHERE kb_id = $1 AND key = 'is_a'")
             .bind(kb_id)
@@ -1671,7 +1671,7 @@ async fn attribute_rules(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Load
             .await?;
 
     let ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
-    // 组序在前：两组推出同一区间时，留下的证明得是稳定的那一条（0029）
+    // Group order first: when two groups infer the same interval, the proof left is the stable one (0029)
     let conds: Vec<(Uuid, i32, Uuid, String, Option<serde_json::Value>, String)> = sqlx::query_as(
         "SELECT rule_id, group_seq, predicate_id, op, operand, subject_side
            FROM attribute_rule_conditions
@@ -1720,7 +1720,7 @@ async fn attribute_rules(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Load
             continue;
         }
         let Some(conditions) = by_rule.remove(&id) else {
-            // 一条没有条件的规则什么都不推（求值器也这么判），不必往下走
+            // A rule with no conditions infers nothing (the evaluator also judges it this way), so there is no need to go further
             continue;
         };
         let (conclusion, predicate) = match conclusion.as_str() {
@@ -1728,12 +1728,12 @@ async fn attribute_rules(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Load
                 let (Some(_), Some((is_a,))) = (conclude_type, is_a) else {
                     continue;
                 };
-                // **按 IRI 记，没有 IRI 才退回 key**：改标签不该让已推出的结论
-                // 变成另一条（0021 决策 2）
+                // **Recorded by IRI; fall back to key only when there is no IRI**: renaming a label should not
+                // turn an already-inferred conclusion into a different one (0021 decision 2)
                 let Some(class) = iri.or(key) else { continue };
                 (Conclusion::Typing { class }, is_a)
             }
-            // 算出来的结论（0032）：谓词照旧，值由算式在求值时按选中的读数算
+            // Computed conclusion (0032): the predicate is unchanged, the value is computed by the formula at evaluation time from the chosen reading
             "computed" => {
                 let (Some(p), Some(e)) = (conclude_pred, conclude_expr) else {
                     continue;
@@ -1790,7 +1790,7 @@ async fn attribute_rules(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Load
     })
 }
 
-/// 操作数按 op 解析。形状不对返回 None，调用方整条规则跳过。
+/// Parse an operand by op. If the shape is wrong, return None and the caller skips the whole rule.
 fn parse_operand(
     op: utopia_reason::rules::Op,
     raw: Option<&serde_json::Value>,
@@ -1803,9 +1803,9 @@ fn parse_operand(
             let (lo, hi) = (arr.first()?.as_f64()?, arr.get(1)?.as_f64()?);
             Some(Operand::Range(lo.min(hi), lo.max(hi)))
         }
-        // **In 与 NotIn 同一支。** 漏掉后者的下场不是「这个条件判错了」，是
-        // `parse_operand` 返回 None、整条规则被当成写坏的跳过——一条用了
-        // 「不属于」的规则从此什么都不推，而界面上它看着好好的（0029 / #476）
+        // **In and NotIn share one branch.** Leaving out the latter does not mean "this condition was judged wrong" but
+        // `parse_operand` returns None, and the whole rule is treated as badly written and skipped: a rule using "not in"
+        // infers nothing from then on, while on screen it looks fine (0029 / #476)
         Op::In | Op::NotIn => {
             let arr = raw?.as_array()?;
             let set: Vec<String> = arr
@@ -1817,9 +1817,9 @@ fn parse_operand(
                 .collect();
             (!set.is_empty()).then_some(Operand::Set(set))
         }
-        // 门槛可以是算出来的（0032）：一个对象是算式，别的照旧是一个数。
-        // 四种操作数形状互不相同——数、两元数组、字符串数组、对象——所以
-        // 认得出来，不必再加一列说「这是哪一种」
+        // The threshold can be computed (0032): an object that is a formula, otherwise still just a number.
+        // The four operand shapes are all different (number, two-element array, string array, object), so
+        // they can be told apart, with no extra column saying "which kind this is"
         _ => {
             let raw = raw?;
             if raw.is_object() {
@@ -1834,7 +1834,7 @@ fn parse_operand(
     }
 }
 
-/// 一个类连同它的全部子类。规则写在 `Well` 上，`HorizontalWell` 的实体也该被看。
+/// A class together with all its subclasses. A rule written on `Well` should also see `HorizontalWell`'s entities.
 async fn descendants_of(conn: &mut PgConnection, kb_id: Uuid, root: Uuid) -> AppResult<Vec<Uuid>> {
     let rows: Vec<(Uuid,)> = sqlx::query_as(
         "WITH RECURSIVE sub AS (
@@ -1851,7 +1851,7 @@ async fn descendants_of(conn: &mut PgConnection, kb_id: Uuid, root: Uuid) -> App
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
-/// 属性事实查询回来的一行：事实、主语、谓词、字面值、区间两端与精度、置信度和证据日期。
+/// One row returned from the attribute-fact query: the fact, subject, predicate, literal value, the interval ends and precision, confidence, and evidence date.
 type AttrFactRow = (
     Uuid,
     Uuid,
@@ -1866,10 +1866,10 @@ type AttrFactRow = (
     Option<chrono::DateTime<chrono::Utc>>,
 );
 
-/// 属性事实：字面值通道上的活事实，连同区间与精度。
+/// Attribute facts: live facts on the literal-value channel, together with interval and precision.
 ///
-/// 与 `timed_edges` 是对偶的一份——那边取 `object_id IS NOT NULL` 的边，
-/// 这边取 `object_value IS NOT NULL` 的字面值。两边都只看断言。
+/// A counterpart to `timed_edges`: that one takes edges with `object_id IS NOT NULL`,
+/// this one takes literal values with `object_value IS NOT NULL`. Both look only at assertions.
 async fn attribute_facts(
     conn: &mut PgConnection,
     kb_id: Uuid,
@@ -1899,8 +1899,8 @@ async fn attribute_facts(
     let mut meta = HashMap::new();
     for (id, subject, predicate, value, from, to, fp, tp, conf, attested_from, attested_to) in rows
     {
-        // 与公理那一路同一种读法（0022）：读数没日期就从它的文档起算。
-        // 属性一律是状态（建属性时固定 state，界面也不给改）
+        // The same reading as the axiom path (0022): if the reading has no date, count from its document.
+        // Attributes are always states (the state is fixed when the attribute is created, and the UI does not allow changing it)
         let (f, t, fa, ta) = read_span(
             crate::graph::Temporal::State,
             from,
@@ -1910,8 +1910,8 @@ async fn attribute_facts(
             attested_from,
             attested_to,
         );
-        // 属性事实的字面值是 `{"value": …, "unit": …}`；比较的是里面那个 value。
-        // 取不到就把整个对象交给求值器——它对认不出的形状一律判不满足
+        // A literal of an attribute fact is `{"value": …, "unit": …}`; the comparison is on the value inside.
+        // If it cannot be read, hand the whole object to the evaluator: it always judges an unrecognized shape as not satisfied
         let inner = value.get("value").cloned().unwrap_or_else(|| value.clone());
         facts.push(utopia_reason::rules::AttrFact {
             id,
@@ -1925,15 +1925,15 @@ async fn attribute_facts(
     Ok((facts, spans, meta))
 }
 
-/// 推一遍，把派生事实落进账本。
+/// Infer once and land the derived facts in the ledger.
 ///
-/// **调用方负责检查 `materialize_inferences` 开关。** 这一层不判——它也被
-/// 「预览一下会推出什么」那条路用，而预览不该受开关约束。
-/// 一条业务规则推出的关系边在不动点里的身份（0047 决定 3）。
+/// **The caller is responsible for checking the `materialize_inferences` switch.** This layer does not judge: it is also used by
+/// the "preview what would be inferred" path, and a preview should not be bound by the switch.
+/// The identity, in the fixed point, of a relation edge inferred by a business rule (0047 decision 3).
 ///
-/// 站得住的：以临时 id 进池子当一条普通带区间的边，并作为候选进矛盾检查。
-/// 被拦下的（`refused`）：退出池子、退出 `wanted`，但**留在候选里**——审核队列
-/// 报的正是它为什么没落地；两边各算一套的话，队列会跟图对不上（0017）
+/// One that stands: enters the pool as a temporary id, as an ordinary edge with an interval, and goes into the contradiction check as a candidate.
+/// One that is blocked (`refused`): leaves the pool and leaves `wanted`, but **stays in the candidates**: the review queue
+/// reports exactly why it did not land; if each computed its own, the queue would drift from the graph (0017)
 struct RelationCandidate {
     edge: utopia_reason::rules::RuleEdge,
     key: DerivedKey,
@@ -1942,24 +1942,24 @@ struct RelationCandidate {
     refused: bool,
 }
 
-/// 一遍检查的产出：池子上的公理派生 + 规则推出的关系候选，和它们撞了什么。
+/// Output of one check: axiom derivations on the pool, plus rule-inferred relation candidates, and what they collided with.
 struct Checked {
-    /// 前 `axiom_count` 条是池子上的公理派生，其后是关系候选（站得住的与被拦下的都在，
-    /// 标签 `Rule::Business`）
+    /// The first `axiom_count` are the axiom derivations on the pool, followed by the relation candidates (both the standing and the blocked are there,
+    /// tagged `Rule::Business`)
     candidates: Derivation,
     axiom_count: usize,
-    /// 候选下标 → 推出它的业务规则。公理派生没有
+    /// Candidate index → the business rule that inferred it. Axiom derivations have none
     candidate_rule: HashMap<usize, Uuid>,
     clashes: Contradictions,
-    /// 不落地的候选下标：撞上断言且没被认可并存的，和撞上别的派生的
+    /// Indexes of candidates that do not land: those colliding with an assertion without an accepted coexistence, and those colliding with other derivations
     blocked: HashSet<usize>,
 }
 
-/// 在「断言边 + 站得住的关系边」的池子上跑一遍公理推导，再拿公理量一遍候选。
+/// Runs the axiom inference over the pool of "assertion edges + standing relation edges", then measures the candidates against the axioms.
 ///
-/// 断言那一侧只给断言：关系边是派生，它与别的派生（含经它推出的公理派生）互撞
-/// 走派生之间那一路，于是 `against` 始终是 `facts` 里的一行——审核队列的外键
-/// 指的就是那张表
+/// The assertion side gives only assertions: relation edges are derived, and their collisions with other derivations (including axiom derivations inferred through them)
+/// go down the derivation-to-derivation path, so `against` is always a row in `facts`: the review queue's foreign key
+/// points at that table
 fn check(
     edges: &[TimedEdge],
     relation: &[RelationCandidate],
@@ -1996,8 +1996,8 @@ fn check(
         });
     }
     let clashes = utopia_reason::derive::contradictions(&candidates, edges, axioms, spans);
-    // asserted > derived 是硬性的（0002）：撞上断言的派生不落地。人认可过并存的
-    // 除外；派生之间互撞的两边都不落，认可与否只影响报不报（0017）
+    // asserted > derived is a hard rule (0002): a derivation that collides with an assertion does not land. Except those a person has accepted as coexisting;
+    // when two derivations collide, neither lands; whether to accept only affects whether it is reported (0017)
     let mut blocked: HashSet<usize> = HashSet::new();
     for c in &clashes.with_assertions {
         let d = &candidates.facts[c.derived];
@@ -2020,9 +2020,9 @@ fn check(
     }
 }
 
-/// 被拦下的关系边退出去之后，站在它上面的结论一起退场：读了它的规则结论、再站在
-/// 那些结论上的结论，直到没有新的为止——一条派生随前提失效（0002），在不动点里
-/// 也成立。前提没了的关系候选不是被拦下的，是推不出来了：整个退出，候选也不留
+/// Once a blocked relation edge is removed, the conclusions standing on it retire together: the rule conclusions that read it, and the ones standing on those
+/// the conclusions on those conclusions, until none are new: a derivation retires when its premise is voided (0002), and holds
+/// in the fixed point too. A relation candidate whose premise is gone is not blocked, it is no longer inferable: it leaves entirely, and no candidate is kept
 fn retire(
     seed: HashSet<Uuid>,
     wanted: &mut HashMap<DerivedKey, Wanted>,
@@ -2051,8 +2051,8 @@ fn retire(
     relation.retain(|r| r.refused || !gone.contains(&r.edge.id));
 }
 
-/// 把这一遍检查拦下的关系候选退出池子。回有没有退出的：退了就得再检查一遍，
-/// 池子变了
+/// Removes from the pool the relation candidates this check blocked. Returns whether any left: if so, check again,
+/// since the pool has changed.
 fn refuse_blocked(
     checked: &Checked,
     relation: &mut Vec<RelationCandidate>,
@@ -2083,28 +2083,28 @@ fn refuse_blocked(
     true
 }
 
-/// `run()`（审核队列）与 `materialize()`（落库）共用的一次求解。
+/// One solve shared by `run()` (review queue) and `materialize()` (storage).
 ///
-/// 输入只有断言（0013）；输出是最后一轮的池子上的公理派生、规则的结论，和被拦下的
-/// 候选——两边从同一份取，队列才跟图对得上（0017）。规则推出的关系边进池子当一条
-/// 普通的边，公理推导每轮重跑一遍（0047 决定 3）；一条被拦下的关系边退出池子而留在
-/// 候选里，站在它上面的结论随它退场
+/// Input is assertions only (0013); output is the axiom derivations on the last round's pool, the rule conclusions, and the blocked
+/// candidates. Both sides take from the same source, so the queue matches the graph (0017). Rule-inferred relation edges enter the pool as ordinary edges;
+/// axiom inference reruns each round (0047 decision 3); a blocked relation edge leaves the pool but stays in the
+/// candidates, and conclusions standing on it retire with it
 struct Resolved {
-    /// 断言的边
+    /// Assertion edges
     edges: Vec<TimedEdge>,
     spans: HashMap<Uuid, (Option<i64>, Option<i64>)>,
     meta: HashMap<Uuid, PremiseMeta>,
     axioms: HashMap<Uuid, Axioms>,
-    /// 公理规则行：(声明所在的谓词, 种类) → 规则 id
+    /// Axiom rule rows: (predicate the declaration is on, kind) → rule id
     rules: HashMap<(Uuid, RuleKind), Uuid>,
-    /// `facts` 里的行：边与属性事实。审核队列的键与外键只认这些
+    /// Rows in `facts`: edges and attribute facts. The review queue's keys and foreign keys only accept these
     asserted_ids: HashSet<Uuid>,
-    /// 最后一遍检查
+    /// The last check run
     checked: Checked,
-    /// 规则的结论：属性的，和站得住的关系
+    /// Rule conclusions: attribute conclusions, and the relations that stand
     wanted: HashMap<DerivedKey, Wanted>,
-    /// 一条规则结论的临时 id → 它最后落在哪一行。链上的前提指的是前者，
-    /// `fact_derivations` 要存的是后者（0030）。键是派生键，值是临时 id
+    /// Temporary id of a rule conclusion → the row it finally lands on. Premises on the chain refer to the former,
+    /// while `fact_derivations` stores the latter (0030). The key is the derivation key, the value is the temporary id
     provisional: HashMap<DerivedKey, Uuid>,
     loaded: LoadedRules,
     capped_by_rule: HashMap<Uuid, usize>,
@@ -2127,12 +2127,12 @@ async fn resolve(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Resolved> {
     let mut rounds = 0usize;
     let mut checked = check(&edges, &relation, &axioms, &spans, &accepted);
 
-    // 第二趟：属性事实上的业务规则（0021）。结论**并进同一个 `wanted`**——
-    // 落库那边的陈旧对账扫的是整张 `derived_facts`，两趟各做各的 diff 会把对方
-    // 落的行每一轮都判成陈旧
+    // Second pass: business rules on attribute facts (0021). Conclusions **merge into the same `wanted`**:
+    // the stale reconciliation on the storage side scans the whole `derived_facts` table, and two separately made diffs would judge
+    // each other's landed rows stale every round
     if !loaded.rules.is_empty() {
         let (asserted, attr_spans, attr_meta) = attribute_facts(&mut *conn, kb_id).await?;
-        // 只读 Y 的连接规则不要求 X 有属性；主类范围必须独立从实体读取。
+        // A join rule that only reads Y does not require X to have an attribute; the main class scope must be read from the entity independently.
         let entity_types: Vec<(Uuid, Uuid)> = sqlx::query_as(
             "SELECT id, type_id FROM entities
               WHERE kb_id = $1 AND merged_into IS NULL AND type_id IS NOT NULL",
@@ -2142,12 +2142,12 @@ async fn resolve(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Resolved> {
         .await?;
         let type_of: HashMap<Uuid, Uuid> = entity_types.into_iter().collect();
         asserted_ids.extend(asserted.iter().map(|f| f.id));
-        // 前提的精度与置信度：落地那一段与不动点这一段共用，所以两份 meta 先合起来；
-        // 区间也要——认出派生的哪一端是被前提的锚点顶上来的，靠的就是它
+        // Precision and confidence of premises: the storage segment and the fixed-point segment share them, so the two metas are merged first;
+        // so are intervals: recognizing which end of a derivation was lifted by a premise's anchor depends on them
         meta.extend(attr_meta);
         spans.extend(attr_spans);
-        // 断言边上公理已经推出的键：规则再推出同一条关系时不另立一行——与属性结论
-        // 「上一轮已经推出过同一条」同一条规矩
+        // A key already inferred by axioms on assertion edges: when a rule infers the same relation again, it does not create another row, the same rule as
+        // "already inferred the same one last round" for attribute conclusions
         let axiom_keys: HashSet<DerivedKey> = checked
             .candidates
             .facts
@@ -2179,24 +2179,24 @@ async fn resolve(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Resolved> {
                 acc
             });
 
-        // ---- 不动点：这一轮的结论进下一轮的输入（0030）
+        // ---- Fixed point: this round's conclusions feed the next round's input (0030)
         //
-        // **全量重跑而不是半朴素**：链通常只有一两环，收敛靠「这一轮没产出新键」
-        // 那一下，真实代价是单趟的两三倍。半朴素要维护每条规则读哪些谓词，
-        // 为一个两三轮的循环换一份索引，不划算。
+        // **Full re-run rather than semi-naive**: chains usually have only one or two links, and convergence relies on
+        // the step "this round produced no new keys"; the real cost is two or three times a single pass. Semi-naive would need to maintain which predicates each rule reads,
+        // and swapping in an index for a loop of two or three rounds is not worth it.
         //
-        // 输入侧一行 `derived_facts` 都不读：反馈全在这个内存池子里，一次物化
-        // 仍然是 (facts, rules, axioms) 的纯函数——0013 那条反对意见守的是这个
+        // The input side reads no `derived_facts` row at all: feedback all lives in this in-memory pool, so one materialization
+        // is still a pure function of (facts, rules, axioms): the objection 0013 raised guards exactly this
         let mut fact_pool = asserted;
-        // 每个实体被**推**出来的类。断言的类在 `type_of` 里，两者进规则的方式
-        // 不一样：断言的类没有区间，是个筛子；推出来的类有区间，得当条件
+        // The classes each entity was **inferred** into. Asserted classes are in `type_of`; the two enter rules differently:
+        // an asserted class has no interval and acts as a sieve, whereas an inferred class has an interval and must count as a condition
         let mut derived_types: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-        // 上一轮加了关系边，池子还没过检查
+        // The previous round added relation edges, and the pool has not been checked yet
         let mut dirty = false;
         for _ in 0..utopia_reason::MAX_DEPTH {
             rounds += 1;
-            // 规则推出的关系边先过公理与矛盾检查（0047 决定 3）：站得住的这一轮起
-            // 当一条普通的边，被拦下的退出池子。退了池子就变了，再查一遍，直到稳住
+            // Relation edges inferred by rules pass the axiom and contradiction checks first (0047 decision 3): the ones that stand become
+            // ordinary edges from this round on; blocked ones leave the pool. A changed pool means check again, until it settles
             let mut refused_now = false;
             while dirty {
                 checked = check(&edges, &relation, &axioms, &spans, &accepted);
@@ -2216,8 +2216,8 @@ async fn resolve(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Resolved> {
                     .filter(|r| !r.refused)
                     .map(|r| r.edge.clone()),
             );
-            // 一轮之内先算完再入池：同一轮里规则读到的是上一轮结束时的池子，
-            // 谁先谁后就不影响结果
+            // Finish computing everything within a round before entering it into the pool: within one round, rules read the pool as it was at the end of the previous round,
+            // so who goes first does not affect the result
             let mut fresh: Vec<(usize, utopia_reason::rules::RuleHit)> = Vec::new();
             capped_by_rule.clear();
             for (ri, lr) in loaded.rules.iter().enumerate() {
@@ -2226,9 +2226,9 @@ async fn resolve(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Resolved> {
                         .get(subject)
                         .is_some_and(|t| lr.subject_types.contains(t))
                 };
-                // 主类是断言的：范围是个筛子，不带区间、不进前提
+                // Main class is asserted: scope is a sieve, carries no interval, and does not enter premises
                 let mut by_assertion: Vec<utopia_reason::rules::AttrFact> = Vec::new();
-                // 只靠派生归类够得着的：范围变成一个条件（下面那段）
+                // Reachable only through derived classification: the scope becomes a condition (the segment below)
                 let mut by_conclusion: Vec<utopia_reason::rules::AttrFact> = Vec::new();
                 for f in &fact_pool {
                     if matches_asserted_scope(&f.subject) {
@@ -2240,7 +2240,7 @@ async fn resolve(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Resolved> {
                         by_conclusion.push(f.clone());
                     }
                 }
-                // X 从连接边枚举，只筛属性挡不住一组全部读取 Y 的条件。
+                // X is enumerated from the connecting edges; filtering attributes alone cannot stop a set of conditions that all read Y.
                 let assertion_edges: Vec<_> = if let Some(join_predicate) = lr.rule.join_predicate {
                     evaluation_edges
                         .iter()
@@ -2262,10 +2262,10 @@ async fn resolve(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Resolved> {
                 let mut capped = rr.capped;
                 fresh.extend(hits.into_iter().map(|h| (ri, h)));
 
-                // 主类是推出来的那一份：**范围写成一条条件**，而不是再当筛子。
-                // 归类那条派生事实因此进了前提，区间跟着它收窄（一个实体
-                // 2019–2022 是 B，就不该拿 2024 的读数满足一条 B 上的规则），
-                // 它作废时这条结论也就跟着退场——这一条不用另写代码
+                // The main class is the inferred version: **the scope is written as a condition**, rather than being applied again as a sieve.
+                // That classification derived fact thus enters the premises, and the interval narrows with it (an entity
+                // that was B during 2019–2022 should not satisfy a rule on B with a 2024 reading),
+                // and when it is voided this conclusion retires with it: no separate code is needed for this one
                 if !by_conclusion.is_empty() {
                     if let (Some(is_a), false) = (loaded.is_a, lr.subject_classes.is_empty()) {
                         let scoped = scoped_by_conclusion(&lr.rule, is_a, &lr.subject_classes);
@@ -2299,15 +2299,15 @@ async fn resolve(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Resolved> {
                         h.from,
                         h.to,
                     );
-                    // 上一轮已经推出过同一条（站得住的、被拦下的都算——被拦下的
-                    // 不再试第二次，不然它每轮进一次退一次，不动点就到不了）
+                    // Already inferred the same one last round (both standing and blocked count; a blocked one
+                    // is not tried a second time, otherwise it would enter and leave the pool every round, and the fixed point would never be reached)
                     if wanted.contains_key(&key)
                         || axiom_keys.contains(&key)
                         || relation.iter().any(|r| r.key == key)
                     {
                         continue;
                     }
-                    // 同一条边已经断言在案、区间还交：asserted > derived，不另立一行
+                    // The same edge is already asserted on record and the intervals overlap: asserted > derived, no separate row
                     let overlaps_assertion = asserted_edges
                         .get(&(h.subject, lr.conclude_predicate, object))
                         .is_some_and(|spans| {
@@ -2380,13 +2380,13 @@ async fn resolve(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Resolved> {
                     h.from,
                     h.to,
                 );
-                // 上一轮已经推出过同一条：不再进池子，也就不会再进 frontier。
-                // 自反馈的环正是在这里停下的——它推出的是同一个键
+                // Already inferred the same one last round: it does not enter the pool again, so it does not enter the frontier again.
+                // Self-feeding loops stop exactly here: they infer the same key
                 if wanted.contains_key(&key) {
                     continue;
                 }
-                // 临时 id：这一条现在就要当事实用，可它落在哪一行要等对账之后
-                // 才知道（不变的结论保留原来那一行）。落库前统一换过来
+                // Temporary id: this one is now used as a fact, but which row it lands on is known only after reconciliation
+                // (an unchanged conclusion keeps its original row). Swapped over before storage
                 let prov = Uuid::now_v7();
                 let pm = premise_meta(&h.premises, h.from, h.to, &spans, &meta);
                 spans.insert(prov, (h.from, h.to));
@@ -2419,12 +2419,12 @@ async fn resolve(conn: &mut PgConnection, kb_id: Uuid) -> AppResult<Resolved> {
                     },
                 );
             }
-            // 这一轮什么新东西都没推出来、也没退出去什么：不动点到了
+            // Nothing new was inferred this round and nothing exited: the fixed point is reached
             if provisional.len() == before && !refused_now {
                 break;
             }
         }
-        // 最后一轮加的关系边还没过检查：查到稳住为止，只是不再跑规则
+        // The relation edges added by the last round have not yet been checked: check until it settles, just no longer running rules
         while dirty {
             checked = check(&edges, &relation, &axioms, &spans, &accepted);
             dirty = refuse_blocked(
@@ -2476,7 +2476,7 @@ pub async fn materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<DeriveReport> 
         ..
     } = checked;
 
-    // 站得住的关系结论已经在 `provisional` 里；候选里在它们之外的是被拦下的那些
+    // Standing relation conclusions are already in `provisional`; the candidates outside them are the blocked ones
     let live_relations = wanted
         .values()
         .filter(|w| w.attribute_rule_id.is_some() && w.object_id.is_some())
@@ -2484,24 +2484,24 @@ pub async fn materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<DeriveReport> 
     let mut report = DeriveReport {
         rules: rules.len(),
         edges: edges.len(),
-        // 引擎推出的派生数：最后一轮池子上的公理派生与关系候选（拦下的也推出来了），
-        // 加上规则的**不同结论**数——不动点里同一条结论每轮都会被重新算出来，
-        // 按次数累加就成了轮数的函数
+        // Number of derivations the engine inferred: the axiom derivations and relation candidates on the last round's pool (blocked ones were also inferred),
+        // plus the number of **distinct** rule conclusions: in the fixed point the same conclusion is recomputed every round,
+        // so accumulating by count would make it a function of the number of rounds
         derived: candidates.facts.len() + provisional.len() - live_relations,
         capped: candidates.capped.len(),
         blocked: blocked.len(),
         attribute_rules: loaded.rules.len(),
         rule_rounds: rounds,
-        // 跑满了轮数还在产出：链比 MAX_DEPTH 长，后面的没接上。**得报出来**——
-        // 「没推到」与「不满足」在结果里长得一模一样（组合封顶那条是同一个道理）
+        // Still producing output after running all the rounds: the chain is longer than MAX_DEPTH, so the rest did not connect. **Must be reported**:
+        // "not reached" and "not satisfied" look exactly the same in the results (the combination cap is the same point)
         rule_rounds_capped,
         rule_hits: provisional.len(),
         ..Default::default()
     };
 
-    // 公理派生并进同一个 `wanted`——**合流是必须的**：陈旧行的对账扫的是整张表，
-    // 两趟各做各的 diff 会把对方的行每轮都判成陈旧作废掉。取的是最后一轮池子上的
-    // 那一份：站在退出的关系边上的派生已经不在里面
+    // Axiom derivations merge into the same `wanted`. **Merging is required**: the reconciliation for stale rows scans the whole table,
+    // and two separately made diffs would judge each other's rows stale and void them every round. Takes the last round's pool's
+    // version: derivations standing on exited relation edges are no longer in it
     for (i, d) in candidates.facts.iter().take(axiom_count).enumerate() {
         if blocked.contains(&i) {
             continue;
@@ -2509,15 +2509,15 @@ pub async fn materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<DeriveReport> 
         let Some((from, to)) = utopia_reason::derive::validity(&d.premises, &spans) else {
             continue;
         };
-        // **按 `via` 查，不是 `predicate`。** 规则行是给「声明了公理的那个
-        // 谓词」编的；跨谓词的两条规则里，派生出来的谓词是另一个
+        // **Look up by `via`, not `predicate`.** Rule rows are made for "the predicate that declared the
+        // axiom"; in a rule across two predicates, the derived predicate is another one
         let Some(&rule_id) = rules.get(&(d.via, d.rule.as_str())) else {
-            // 查不到规则是**编译与推导不一致**，不是正常情况。数出来，
-            // 别再让它静默消失一次
+            // Not finding a rule means **compilation and inference disagree**, not a normal situation. Count it,
+            // do not let it disappear silently once more
             report.unruled += 1;
             continue;
         };
-        // 规则推出的同一条关系先到：那一行带着规则的证明落，公理那份不另立
+        // The same relation inferred by a rule arrived first: that row lands with the rule's proof, and the axiom version does not create another
         wanted
             .entry((d.subject, d.predicate, Some(d.object), None, from, to))
             .or_insert(Wanted {
@@ -2534,8 +2534,8 @@ pub async fn materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<DeriveReport> 
             });
     }
     for lr in &loaded.rules {
-        // 展不完的组合数按规则写回：这个数字在表里常驻，而不只在「跑完那一刻」
-        // 的提示里闪一下。取最后一轮的数——那一轮扫的是最全的池子
+        // Combination counts that cannot be fully expanded are written back to the rule: this number lives in the table permanently, not only flashing
+        // in the hint at the moment the run finished. Take the last round's number: that round scanned the most complete pool
         let capped = capped_by_rule.get(&lr.rule.id).copied().unwrap_or(0);
         sqlx::query("UPDATE attribute_rules SET capped_at_last_run = $2 WHERE id = $1")
             .bind(lr.rule.id)
@@ -2556,11 +2556,11 @@ pub async fn materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<DeriveReport> 
     .await?;
 
     let mut stale: Vec<Uuid> = Vec::new();
-    // 每个还成立的结论最后落在哪一行。**不变的结论保留原来那一行**，所以链上
-    // 指向它的前提要指向这个 id，而不是这一轮新造的（0030）
+    // The row each still-holding conclusion finally lands on. **An unchanged conclusion keeps its original row**, so the premise on the chain
+    // that points to it must point to this id, not one newly created in this round (0030)
     let mut settled: HashMap<DerivedKey, Uuid> = HashMap::new();
-    // 这一轮还成立、行也留着的那些，连同它们**这一轮的**前提。对账的键里没有
-    // 前提，所以「结论没变、理由变了」在这里是看不出来的——下面单独对一遍
+    // Those that still hold this round and whose rows are kept, together with **this round's** premises. The reconciliation key has no
+    // premises, so "conclusion unchanged, reason changed" is invisible here: it is checked separately below
     let mut kept: Vec<(Uuid, Wanted)> = Vec::new();
     for (id, s, p, o, ov, from, to) in &live {
         let key = (
@@ -2579,9 +2579,9 @@ pub async fn materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<DeriveReport> 
         }
     }
 
-    // 前提没了 → 派生跟着失效。**置 invalidated_at 而不是删**：与拒绝一条事实
-    // 完全同构，记录轴上留下「我们曾据此推出，后来前提没了」，实体历史页面
-    // 直接就能展示（0002 第 3 节）
+    // Premise gone, so the derivation is invalidated. **Set invalidated_at rather than delete**: exactly isomorphic to rejecting an assertion,
+    // the record axis keeps "we once inferred this from it, and later the premise went away", which the entity history page
+    // can display directly (0002 section 3)
     if !stale.is_empty() {
         sqlx::query("UPDATE derived_facts SET invalidated_at = now() WHERE id = ANY($1)")
             .bind(&stale)
@@ -2590,8 +2590,8 @@ pub async fn materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<DeriveReport> 
         report.invalidated = stale.len();
     }
 
-    // 剩下的都是新行。**先把 id 全定下来再插**：链上的前提要指向的那一行，
-    // 可能是这一批里还没插的另一条（0030）
+    // The rest are new rows. **Assign all ids first, then insert**: the row a premise on the chain points to
+    // may be another not yet inserted in this batch (0030)
     let fresh: Vec<(Uuid, Wanted)> = wanted
         .into_iter()
         .map(|(key, d)| {
@@ -2600,17 +2600,17 @@ pub async fn materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<DeriveReport> 
             (id, d)
         })
         .collect();
-    // 临时 id → 真正的行 id。链上的前提在不动点里用的是临时 id，落库要换过来；
-    // 断言前提不在这张表里，原样通过
+    // Temporary id → real row id. Premises on the chain use temporary ids in the fixed point, and storage must swap them over;
+    // assertion premises are not in this table and pass through unchanged
     let resolve: HashMap<Uuid, Uuid> = provisional
         .iter()
         .filter_map(|(key, prov)| settled.get(key).map(|id| (*prov, *id)))
         .collect();
 
     for (id, d) in &fresh {
-        // 约束是「有精度必有日期」（0022 放宽了反向）：交集把某一端算成无界时，那一端
-        // 的精度清掉；那一端若来自证据日期而不是原文的日期，也没有精度——在无知的地方
-        // 填一个确定的值，正是 `facts.valid_from_precision` 那条注释说的病
+        // The constraint is "has precision means has a date" (0022 relaxed the reverse): when an intersection makes one end unbounded, that end's
+        // precision is cleared; if that end comes from an evidence date rather than the text's date, it has no precision either: filling
+        // in a definite value where one is unknown is the very disease the `facts.valid_from_precision` comment describes
         let (fp, tp, conf, from_anchored, to_anchored) =
             premise_meta(&d.premises, d.from, d.to, &spans, &meta);
         let fp = if from_anchored { None } else { d.from.and(fp) };
@@ -2642,8 +2642,8 @@ pub async fn materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<DeriveReport> 
         report.inserted += 1;
     }
 
-    // 结论没变、定义变了：这一行现在是凭规则的新版本成立的（0060）。行留着——
-    // 对账的键里没有版本，结论本身没变——版本换过来，证明才说得出它现在凭什么
+    // Conclusion unchanged, definition changed: this row now holds under the rule's new version (0060). The row is kept:
+    // the reconciliation key has no version, and the conclusion itself has not changed; once the version is swapped, the proof can say what it now rests on
     for (id, d) in &kept {
         let Some(version) = d.attribute_rule_version_id else {
             continue;
@@ -2659,10 +2659,10 @@ pub async fn materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<DeriveReport> 
         report.redefined += res.rows_affected() as usize;
     }
 
-    // 结论没变、理由变了：**同一句话可以有第二条依据**（换了一条读数，或者换了
-    // 一组条件）。对账的键是主宾谓加区间，前提不在里面，所以那一行会带着上一轮
-    // 的证明留下来——链让这件事更容易撞上：站在它上面的那条前提可能刚刚作废。
-    // 一次查完再逐条比，只有真不一样的才重写
+    // Conclusion unchanged, reason changed: **the same statement can have a second basis** (a different reading was used, or a different
+    // set of conditions). The reconciliation key is subject-predicate-object plus interval, and the premises are not in it, so that row would keep
+    // last round's proof. Chains make this more likely: a premise on it may have just been voided.
+    // Look them all up in one go, then compare one by one; only those that really differ are rewritten
     let kept_ids: Vec<Uuid> = kept.iter().map(|(id, _)| *id).collect();
     let mut stored: HashMap<Uuid, Vec<PremiseCols>> = HashMap::new();
     if !kept_ids.is_empty() {
@@ -2716,13 +2716,13 @@ pub async fn materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<DeriveReport> 
     }
     report.reproved = reproved.len();
 
-    // 证明**等派生全插完再写**：链上一条前提指的可能是这一批里的另一行，
-    // 而这一批没有顺序可言（`wanted` 是个 HashMap）。一趟写完的话，先轮到
-    // 的那一行会指着还不存在的行，外键当场拦下
+    // Proofs are **written after all derivations are inserted**: a premise on the chain may point at another row in this batch,
+    // and this batch has no order (`wanted` is a HashMap). If written in one pass, the row that gets its turn first
+    // would point at a row that does not exist yet, and the foreign key would reject it on the spot
     for (id, d) in &fresh {
         for (seq, premise) in d.premises.iter().enumerate() {
-            // 前提是断言还是另一条派生：两列二选一，`seq` 是跨两种的一个序，
-            // 证明读起来才是一条顺下来的路（0030）
+            // A premise is either an assertion or another derivation: the two columns are one-of-two, `seq` is a sequence across both kinds,
+            // so the proof reads as one path downward (0030)
             let derived_premise = resolve.get(premise).copied();
             sqlx::query(
                 "INSERT INTO fact_derivations (derived_fact_id, premise_fact_id,
@@ -2745,11 +2745,11 @@ fn stamp(secs: i64) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default()
 }
 
-/// Review 页要看的本体缺陷，连同标签。
+/// Ontology defects the Review page shows, together with their labels.
 ///
-/// 标签在 SQL 里取而不是回来再查：`subject` 那一列同一列指两张表（谓词或类），
-/// 分开查就要先按 kind 分组、再发两批查询，而一次 LEFT JOIN 两张表就够——
-/// 一个 id 只可能命中其中一张。
+/// Labels are fetched in SQL rather than afterward: the `subject` column means one of two tables (a predicate or a class),
+/// separate queries would first group by kind and then send two batches, whereas one LEFT JOIN across the two tables is enough:
+/// an id can only hit one of them.
 pub async fn open_defects(
     pool: &PgPool,
     kb_id: Uuid,
@@ -2783,10 +2783,10 @@ pub async fn open_defects(
     .await?)
 }
 
-/// 人对一处本体缺陷表态。
+/// A person rules on one ontology defect.
 ///
-/// 两个出路而不是三个：本体缺陷没有「数据错了」这一条——它压根没看数据。
-/// `fixed` 是「我去改了本体」，`accepted` 是「看过，不必改」。
+/// Two ways out, not three: an ontology defect has no "the data is wrong" option, since it never looked at data.
+/// `fixed` means "I changed the ontology", `accepted` means "looked at it, no need to change".
 pub async fn decide_defect(
     pool: &PgPool,
     kb_id: Uuid,
@@ -2811,10 +2811,10 @@ pub async fn decide_defect(
     Ok(())
 }
 
-/// 到点该重推的库。
+/// Libraries due for re-inference now.
 ///
-/// 与来源同步同一个形状：一个间隔 + 一个上次时间。**从没推过的算到期**——
-/// 刚打开开关的库不该等一个周期才第一次推。
+/// Same shape as source sync: an interval plus a last-time. **Never-inferred counts as due**:
+/// a library that just had the toggle turned on should not wait a full period for its first inference.
 pub async fn due_for_inference(pool: &PgPool) -> AppResult<Vec<Uuid>> {
     Ok(sqlx::query_scalar(
         "SELECT id FROM knowledge_bases
@@ -2827,11 +2827,11 @@ pub async fn due_for_inference(pool: &PgPool) -> AppResult<Vec<Uuid>> {
     .await?)
 }
 
-/// 定时扫描的一拍：到期的库各排一份推理任务，已经排着一份的不再排。
+/// One tick of the periodic scan: each due library queues one inference task; if one is already queued, it is not queued again.
 ///
-/// 只跳过排着的就够（#1304）：处理器先 `mark_inference_ran` 再推，任务一开始跑这个库就
-/// 不再到期；还到期的只有任务排着、`last_inference_at` 还没动的那段，而那段正是这里挡住的。
-/// 一个库排不进去不拦着别的库
+/// Skipping only the queued ones is enough (#1304): the handler calls `mark_inference_ran` before inferring, so once the task starts running for this library it
+/// is no longer due; the only still-due window is when the task is queued and `last_inference_at` has not moved yet, and that window is exactly what this blocks.
+/// A library that cannot be queued does not block other libraries
 pub async fn queue_due_inferences(pool: &PgPool) -> AppResult<()> {
     for kb_id in due_for_inference(pool).await? {
         if let Err(e) = crate::jobs::enqueue_unless_queued(
@@ -2847,10 +2847,10 @@ pub async fn queue_due_inferences(pool: &PgPool) -> AppResult<()> {
     Ok(())
 }
 
-/// 记下这一轮推完的时间。
+/// Record the time this round of inference finished.
 ///
-/// **推完就记，哪怕什么都没变**：这一列答的是「上次看过没有」，不是「上次改过
-/// 没有」。不记的话没变化的库会每分钟被扫起来重算一遍。
+/// **Record it even if nothing changed**: this column answers "was it checked last time", not "did it change last time".
+/// Without recording, unchanged libraries would be scanned and recomputed every minute.
 pub async fn mark_inference_ran(pool: &PgPool, kb_id: Uuid) -> AppResult<()> {
     sqlx::query("UPDATE knowledge_bases SET last_inference_at = now() WHERE id = $1")
         .bind(kb_id)
@@ -2859,14 +2859,14 @@ pub async fn mark_inference_ran(pool: &PgPool, kb_id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
-/// 一条派生事实的证明，展开到原句（0002 R2）。
+/// The proof of one derived fact, expanded down to the original sentences (0002 R2).
 ///
-/// `fact_derivations` 只记直接前提，顺着它一层层问下去就是完整的证明。一条
-/// 前提要么是断言——那一步的叶子是它的原句——要么是**另一条派生**（0030），
-/// 那一步要再问一次它凭什么。**撤了的前提照样列出并打上标记**：派生随前提
-/// 失效，但「当时靠的是什么」要读得出来，那正是记录轴存在的理由。
+/// `fact_derivations` records only the direct premises; asking down layer by layer gives the full proof. A
+/// premise is either an assertion (that step's leaf is its original sentence) or **another derivation** (0030),
+/// in which case that step asks again what it rests on. **Retracted premises are still listed and marked**: a derivation
+/// is invalidated along with its premises, but "what it relied on at the time" must still be readable, which is exactly why the record axis exists.
 ///
-/// 派生已失效或不存在时回 None——不是错误，界面据此收起。
+/// Returns None when the derivation is invalidated or does not exist: not an error, the UI collapses on that basis.
 pub async fn proof(
     pool: &PgPool,
     kb_id: Uuid,
@@ -2879,10 +2879,10 @@ pub async fn proof(
     Ok(Some(utopia_core::models::Proof { derived, steps }))
 }
 
-/// 一条派生的直接前提，派生的那几步再往下展开一层（0030）。
+/// One step of a derivation's direct premises; the derivation steps further expand one more layer (0030).
 ///
-/// 深度上限与推理是同一条 `MAX_DEPTH`：链最长这么长，证明也就最深这么深。
-/// 到底了就停在那一步上——它自己的三元组还是列出来的，只是不再往下问。
+/// The depth cap is the same `MAX_DEPTH` as inference: the chain is at most this long, so the proof is at most this deep.
+/// When it reaches the bottom, it stops at that step: its own triple is still listed, it just does not ask further.
 fn premise_steps<'a>(
     pool: &'a PgPool,
     kb_id: Uuid,
@@ -2903,7 +2903,7 @@ fn premise_steps<'a>(
         .bind(derived_id)
         .fetch_all(pool)
         .await?;
-        // 断言那几步一次取完（每一步还要各取一次证据），派生那几步逐条问
+        // Assertion steps are all fetched at once (each step also needs its own evidence fetch); derivation steps are asked one by one
         let asserted: Vec<Uuid> = rows.iter().filter_map(|(_, f, _)| *f).collect();
         let mut by_fact: HashMap<Uuid, utopia_core::models::ProofStep> =
             steps_for(pool, kb_id, &asserted)
@@ -2935,9 +2935,9 @@ fn premise_steps<'a>(
     })
 }
 
-/// 一条派生前提读成证明的一步。三元组与区间跟断言那一步同一副样子——读的人
-/// 关心的是「这一句成不成立」，而不是它从哪张表来；`derived` 那一格答的是
-/// 后者，也是「还能不能再往下点一层」的依据。
+/// One step of a proof: a derived premise read out. Its triple and interval look like an assertion step, since the reader
+/// cares about "is this sentence true", not which table it came from; the `derived` cell answers the latter,
+/// and is also the basis for "can I click one level further".
 async fn derived_step(
     pool: &PgPool,
     id: Uuid,
@@ -3001,17 +3001,17 @@ async fn derived_step(
             valid_to,
             confidence,
             retracted,
-            // 派生没有原句：它的「证据」就是下面那一层前提
+            // A derivation has no original sentence: its "evidence" is the premise layer below it
             evidence: Vec::new(),
             premises: Vec::new(),
         },
     ))
 }
 
-/// 一串前提展开成证明的步：三元组、区间、撤没撤、证据。
+/// A chain of premises expanded into proof steps: triple, interval, retracted or not, evidence.
 ///
-/// 落了地的派生（`fact_derivations`）与没落地的（`axiom_violations.path`）都从这里
-/// 走——前提是同一种东西，证明链没有理由长两个样
+/// Both derivations that landed (`fact_derivations`) and those that did not (`axiom_violations.path`) go through here:
+/// premises are the same kind of thing, so there is no reason for the proof chain to have two shapes
 async fn steps_for(
     pool: &PgPool,
     kb_id: Uuid,
@@ -3062,7 +3062,7 @@ async fn steps_for(
         retracted,
     ) in rows
     {
-        // 一条链最多 MAX_DEPTH 步，逐条取证据是可数的几次往返
+        // A chain has at most MAX_DEPTH steps, so fetching evidence one by one is a countable number of round trips
         let evidence = crate::graph::fact_evidence(pool, kb_id, fact_id).await?;
         steps.push(utopia_core::models::ProofStep {
             seq: seq as i32,
@@ -3085,15 +3085,15 @@ async fn steps_for(
     Ok(steps)
 }
 
-/// 没落地的派生里，与这个实体有关、**当时**还开着的那些（0017 §3）——面板
-/// 「推出来的」一档的「没落地的」小节。
+/// Among derivations that did not land, those relevant to this entity and **still open at the time** (0017 §3): the panel's
+/// "not landed" subsection under the "inferred" tier.
 ///
-/// 面板上的 `blocked` 那一档跟其它键走同一个 `as_of`（`#549` 把 `derived`
-/// 那一档接通、`#307` 把剩下的接上）：一个三月被推翻的违规在回放中的面板
-/// 上不该留着幽灵边。`v.status = 'open'` 不区分「现在开着」与「三月还开
-/// 着、四月才被人关了」——`violation_open_at` 是答案。
+/// The `blocked` tier on the panel uses the same `as_of` as the other keys (`#549` wired the `derived`
+/// tier, `#307` connected the rest): a violation overturned in March should not leave a ghost edge on the panel when replaying. `v.status = 'open'`
+/// does not tell apart "open now" from "open in March but closed by a person in April".
+/// `violation_open_at` is the answer.
 ///
-/// 写路径不走这里（`decide_violation` 等）。
+/// The write path does not go through here (`decide_violation` etc.).
 pub async fn blocked_for_entity(
     pool: &PgPool,
     kb_id: Uuid,
@@ -3133,7 +3133,7 @@ pub async fn blocked_for_entity(
     .await?)
 }
 
-/// 没落地的派生的证明链：它的前提就在违规的 `path` 里。找不到那条违规时 `None`
+/// The proof chain of a derivation that did not land: its premises are right in the violation's `path`. `None` if that violation is not found
 pub async fn blocked_proof(
     pool: &PgPool,
     kb_id: Uuid,
@@ -3153,8 +3153,8 @@ pub async fn blocked_proof(
     }
 }
 
-/// 按 id 取一条派生（失效的也取：证明要能回看）。
-/// 公理名字取声明它的谓词，不取结论谓词；撤销的公理也仍要能解释历史事实。
+/// Fetch one derivation by id (invalidated ones too: the proof must be viewable historically).
+/// The axiom name takes the predicate that declares it, not the conclusion predicate; a retracted axiom must still be able to explain historical facts.
 async fn derived_one(
     pool: &PgPool,
     kb_id: Uuid,
@@ -3208,10 +3208,10 @@ async fn derived_one(
     .await?)
 }
 
-/// 一条派生事实，配好展示与证明所需的文本（实体面板的「推出来的」那一档）。
+/// A derived fact, with the text needed for display and proof (the "inferred" tier of the entity panel).
 ///
-/// **证明一起取回来**：这一档存在的理由就是「这条边不是谁说的，是这么推出来的」，
-/// 而不给出前提的话它跟一条普通的边看不出区别——那正是用户担心的污染。
+/// **The proof is fetched along with it**: the reason this tier exists is "this edge was not said by anyone, it was inferred this way",
+/// and without showing the premises it would look no different from an ordinary edge, exactly the contamination users worry about.
 pub async fn derived_for_entity(
     pool: &PgPool,
     kb_id: Uuid,
@@ -3219,15 +3219,15 @@ pub async fn derived_for_entity(
     at: Option<chrono::DateTime<chrono::Utc>>,
     as_of: Option<chrono::DateTime<chrono::Utc>>,
 ) -> AppResult<Vec<DerivedFactView>> {
-    // 记录轴（0019 / #549）：断言那一半早就走 `held_at`，这一半曾写死
-    // `invalidated_at IS NULL`——回放到三月的面板上挂着四月才推出的结论，
-    // 前提一条都不在，结论却在。谓词只在 record_axis 里拼，这里不自己写。
+    // Record axis (0019 / #549): the assertion half always went through `held_at`; this half had been hardcoded to
+    // `invalidated_at IS NULL`, so a panel replayed to March held conclusions inferred only in April:
+    // none of the premises exist, yet the conclusion does. The predicate is composed only in record_axis; it is not written here.
     //
-    // **宾语与规则两侧都是 LEFT JOIN。** 表拓宽之后（0021）一条派生的宾语可能
-    // 是字面值而不是实体，规则可能是业务规则而不是公理——内连接会把这两种
-    // 结论**静默地**从面板上抹掉，而它们恰恰是最需要解释的那种。
+    // **Both the object and the rule sides are LEFT JOIN.** After the table was widened (0021), a derivation's object may
+    // be a literal value rather than an entity, and the rule may be a business rule rather than an axiom: an inner join would
+    // **silently** erase both kinds of conclusion from the panel, and they are exactly the kind most in need of explanation.
     //
-    // 宾语的显示文本因此有三个来源：实体名、归类结论里的类标签、属性结论的值。
+    // The object's display text thus has three sources: the entity name, the class label in a classification conclusion, and the value of an attribute conclusion.
     Ok(sqlx::query_as(&format!(
         "SELECT d.id, d.predicate_id, d.object_value, d.rule_id, d.attribute_rule_id,
                 d.invalidated_at, d.valid_from_precision, d.valid_to_precision,

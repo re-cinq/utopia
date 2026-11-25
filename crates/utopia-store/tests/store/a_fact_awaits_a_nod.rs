@@ -1,14 +1,14 @@
-//! 记忆抽出的事实先等人点头（`docs/decisions/0015`，表在迁移 0018）——打在真库上。
+//! Facts extracted from memory wait for a person's nod first (`docs/decisions/0015`, table in migration 0018) — run against a real DB.
 //!
-//! 守的是那次实测的反面：对话里说「Acme 把总部搬到了深圳」，图上**不能**立刻多出
-//! 一条活边。提议只进 `pending_facts`；人点头之后它才按抽取那条路进账本（事实 +
-//! 证据指回那句话 + 时态对账）；摇头之后同一个三元组不再被提。
+//! It guards against the reverse of what was observed: the conversation says "Acme moved its headquarters to Shenzhen", and the graph must **not** immediately gain
+//! a live edge. A proposal goes only into `pending_facts`; only after a person nods does it enter the ledger through the extraction path (fact +
+//! evidence pointing back at that sentence + temporal reconciliation); after a shake of the head, the same triple is no longer proposed.
 
 use sqlx::PgPool;
 use uuid::Uuid;
 
 struct Fixture {
-    /// 夹具建的 org，收尾时从它删起（级联）
+    /// The org built by the fixture, deleted from first at teardown (cascading)
     org: Uuid,
     kb: Uuid,
     acme: Uuid,
@@ -34,7 +34,7 @@ async fn fixture(pool: &PgPool) -> anyhow::Result<Fixture> {
         .bind(ws)
         .execute(pool)
         .await?;
-    // 总部只有一个：functional 让时态对账有事可做
+    // There is only one headquarters: functional makes temporal reconciliation have something to do
     let hq = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO relation_types (id, kb_id, key, label, functional)
@@ -57,7 +57,7 @@ async fn fixture(pool: &PgPool) -> anyhow::Result<Fixture> {
             .execute(pool)
             .await?;
     }
-    // 那句记忆，走产品自己的路落成 chunk
+    // That memory sentence becomes a chunk through the product's own path
     let (_doc, chunk) = utopia_store::memory::append_episode(
         pool,
         kb,
@@ -134,7 +134,7 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
             )
         };
 
-        // 1. 提议不上图
+        // 1. The proposal does not go onto the graph
         let first = propose(f.shenzhen, "2026-03-15").await?;
         assert!(matches!(first, Outcome::Proposed(_)), "第一次该进队列");
         assert_eq!(live_facts(&pool, f.kb).await?, 0, "提议阶段图上不能有活边");
@@ -143,10 +143,10 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
         assert_eq!(queued[0].subject_name, "Acme");
         assert!(queued[0].quote.contains("Acme moved its headquarters"), "原句要跟着提议一起给人看");
 
-        // 2. 同一句重抽不重复提
+        // 2. Re-extracting the same sentence does not propose it again
         assert_eq!(propose(f.shenzhen, "2026-03-15").await?, Outcome::AlreadyPending);
 
-        // 3. 点头：进账本，证据指回那句话，队列清空
+        // 3. Nod: it enters the ledger, evidence points back at the sentence, and the queue is emptied
         let Outcome::Proposed(id) = first else { unreachable!() };
         let done = pending::confirm(&pool, f.kb, id).await?;
         assert!(done.created, "确认该落一条新事实");
@@ -161,10 +161,10 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
         assert_eq!(ev_proposed.as_deref(), Some("moved headquarters to"));
         assert!(pending::for_chunk(&pool, f.kb, f.chunk).await?.is_empty());
 
-        // 4. 图上已有的不再问
+        // 4. Something already on the graph is not asked about again
         assert_eq!(propose(f.shenzhen, "2026-03-15").await?, Outcome::AlreadyAsserted);
 
-        // 5. 摇头有记忆：拒过的三元组下一轮不再被提
+        // 5. A shake of the head is remembered: a triple that was refused is not proposed in the next round
         let Outcome::Proposed(bad) = propose(f.shanghai, "2020-01-01").await? else {
             panic!("换一个宾语该是新提议");
         };
@@ -172,9 +172,9 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
         assert_eq!(propose(f.shanghai, "2020-01-01").await?, Outcome::Rejected);
         assert_eq!(live_facts(&pool, f.kb).await?, 1, "拒绝不碰图");
 
-        // 6. 点头走的是抽取那条路：functional 关系的新值闭合旧值。
-        //    拒绝记录按 (主语, 谓词, 宾语) 查，同一个宾语换日期照样被挡——
-        //    所以换一个宾语实体来演接任
+        // 6. A nod goes through the extraction path: for a functional relation, the new value closes the old one.
+        //    Refusal records are looked up by (subject, predicate, object), so the same object with a changed date is still blocked —
+        //    so the demo of a successor uses a different object entity
         let beijing = Uuid::now_v7();
         sqlx::query("INSERT INTO entities (id, kb_id, canonical_name) VALUES ($1, $2, 'Beijing')")
             .bind(beijing)
@@ -200,9 +200,9 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
     }
     .await;
 
-    // 删掉夹具自己建的 org，级联带走工作区、知识库与其余一切。
-    // 从前只删知识库，每跑一次就在库里多留一对空的 org / workspace——
-    // 「生产代码里没有删 org 这个动作」是对的，但夹具不是生产代码，自己建的自己收
+    // Delete the org the fixture itself created; the cascade takes the workspace, the KB and everything else with it.
+    // Previously only the KB was deleted, so every run left behind an empty org / workspace pair in the DB —
+    // "no production code deletes an org" is right, but a fixture is not production code, so it cleans up what it creates itself
     sqlx::query("DELETE FROM organizations WHERE id = $1")
         .bind(f.org)
         .execute(&pool)

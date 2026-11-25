@@ -1,8 +1,8 @@
-//! 一条陈述只在绑定对得上的时候成类型化行（0067）：绑定得是 bound、是这个库的、
-//! 陈述得是活着的开放陈述，主宾类与宾语是不是字面值都得和签名一致，方向要说得通；
-//! 措辞只差大小写和空白的算同一句。每个用例从一条完全对得上的陈述出发，只改一处。
+//! A statement becomes a typed row only when its binding fits (0067): the binding must be bound and belong to this database,
+//! the statement must be a live open statement, and its subject/object classes and whether the object is a literal must match the signature, with the direction making sense;
+//! wording that differs only in case and whitespace counts as the same sentence. Each case starts from a fully matching statement and changes one thing.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` it skips rather than fails. It sets up and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_store::materialize::{count, materialize};
@@ -38,7 +38,7 @@ struct Case {
 }
 
 impl Case {
-    /// 「Harbor Bakery（organization）is based in Port Ellen（place）」，绑定一模一样
+    /// "Harbor Bakery (organization) is based in Port Ellen (place)", binding exactly the same
     fn fitting() -> Self {
         Case {
             binding_status: "bound",
@@ -103,7 +103,7 @@ async fn typed_rows_after_materializing(pool: &PgPool, case: Case) -> anyhow::Re
             .execute(pool)
             .await?;
         }
-        // 绑定的类与属性必须和绑定同库（外键），所以别的库的绑定带它自己的属性、不带类
+        // The bound classes and attributes must belong to the same database (foreign keys), so a binding from another database carries its own attributes, not its classes
         for (id, base, key) in [
             (hq, kb, "headquartered_in"),
             (founded_in, kb, "founded_in"),
@@ -148,7 +148,7 @@ async fn typed_rows_after_materializing(pool: &PgPool, case: Case) -> anyhow::Re
             Object::Entity(_) => (Some(port), None),
             Object::Value => (None, Some("\"Port Ellen\"")),
         };
-        // 开放陈述不带 predicate_id；类型化层的陈述带一个，不是绑定的那条，免得并进自己
+        // An open statement carries no predicate_id; a typed-layer statement carries one that is not the bound one, so it does not merge into itself
         let predicate = (case.statement_layer == "typed").then_some(founded_in);
         sqlx::query(
             "INSERT INTO facts (id, kb_id, subject_id, object_id, object_value, layer, phrase,
@@ -211,7 +211,7 @@ async fn typed_rows_after_materializing(pool: &PgPool, case: Case) -> anyhow::Re
     run
 }
 
-/// 每个用例：名字、期望的类型化行数、相对「完全对得上」改掉的那一处
+/// Each case: name, the expected number of typed rows, and the one place changed relative to "fully matching"
 macro_rules! typed_rows_test {
     ($name:ident, $expected:expr, $($field:ident: $value:expr),+) => {
         #[tokio::test]

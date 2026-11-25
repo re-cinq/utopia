@@ -1,4 +1,4 @@
-//! 推送来的陈述记住它写下的事实：块内位置 + 陈述的规范键 → 事实（9012）。
+//! For pushed statements, remember the facts they wrote: position within the chunk + the statement's canonical key → fact (9012).
 
 use std::collections::{HashMap, VecDeque};
 
@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use utopia_core::AppResult;
 
-/// 记下块内第 `ord` 条陈述（规范键 `key`）写出的事实。
+/// Records the facts written by the `ord`-th statement in the chunk (canonical key `key`).
 pub async fn remember(
     pool: &PgPool,
     chunk_id: Uuid,
@@ -28,7 +28,7 @@ pub async fn remember(
     Ok(())
 }
 
-/// 记下规范键 `key` 的具名实体对应的 entity_id。
+/// Records the entity_id corresponding to the named entity with canonical key `key`.
 pub async fn remember_entity(
     pool: &PgPool,
     chunk_id: Uuid,
@@ -47,7 +47,7 @@ pub async fn remember_entity(
     Ok(())
 }
 
-/// 同一文档里最近一块被取代、抽过、记过陈述的块：沿用的上一版
+/// The most recent chunk in the same document that was superseded, extracted, and had statements recorded: the previous version carried over
 async fn previous_chunk(
     pool: &PgPool,
     document_id: Uuid,
@@ -66,7 +66,7 @@ async fn previous_chunk(
     .await?)
 }
 
-/// 上一版记下的具名实体：规范键 → 仍然活着（没被并走）的 entity_id；没有上一版就是空表
+/// Named entities recorded in the previous version: canonical key → entity_id still alive (not merged away); with no previous version this is an empty table
 pub async fn carried_entities(
     pool: &PgPool,
     document_id: Uuid,
@@ -86,9 +86,9 @@ pub async fn carried_entities(
     Ok(remembered.into_iter().collect())
 }
 
-/// 沿用上一版的事实：同一文档里最近一块被取代、抽过、记过陈述的块，按规范键配对（相同的键按
-/// 原有顺序一一配），配上且事实还活着的陈述把事实、证据和角色词搬到新块上，并给新块记下
-/// 同一条事实。返回被沿用的陈述在块里的原始位置和它们的事实；没有上一版就是空表
+/// Carries over facts from the previous version: the most recent superseded chunk in the same document that was extracted and had statements recorded is paired by canonical key (identical keys are paired
+/// one by one in their original order), and statements that are paired and whose facts are still alive move their facts, evidence and role words onto the new chunk, and record for the new chunk
+/// the same fact. Returns the original positions of the carried-over statements in the chunk and their facts; with no previous version this is an empty table
 pub async fn carry_over(
     pool: &PgPool,
     document_id: Uuid,

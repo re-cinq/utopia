@@ -1,11 +1,11 @@
-//! Agent/对话记忆：episodes 快速路径。
+//! Agent/conversation memory: the episodes fast path.
 //!
-//! 设计（零新轮子）：记忆空间 = 知识库本身；每条 episode = 隐式 "Memory" 来源下
-//! "Memory log" 文档上追加的一个 chunk（文本内嵌事发时间戳行）。于是全链路复用：
-//! chunk 进全文/向量索引（记忆可检索）、fact_evidence 指 chunk（记忆事实可溯源到
-//! 原话）、extracted_at 增量抽取只处理新 episode、事实 valid_from 取事发时间、
-//! 与既有 functional 事实矛盾时时态引擎自动闭合——"上月喜欢 A 本月改 B"自然
-//! 变成两段区间。账本纪律：episodes 只追加，永不改写。
+//! Design (no new wheels): memory space = the knowledge base itself; each episode = a chunk appended, under the implicit "Memory" source, to the
+//! "Memory log" document (the event time is embedded as a line in the text). That way the whole pipeline is reused:
+//! chunks go into the full-text/vector indexes (memories are searchable), fact_evidence points at the chunk (memory facts trace back to
+//! the original words), extracted_at lets incremental extraction process only new episodes, a fact's valid_from takes the event time,
+//! and when it contradicts an existing functional fact the temporal engine closes it automatically: "liked A last month, changed to B this month" naturally
+//! becomes two intervals. Ledger discipline: episodes are append-only, never rewritten.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -15,7 +15,7 @@ use uuid::Uuid;
 pub const MEMORY_SOURCE_KIND: &str = "memory";
 const MEMORY_DOC_KEY: &str = "memory:log";
 
-/// 每 KB 的隐式 Memory 来源（不可删；Library 里可见——记忆透明是特性）。
+/// The implicit Memory source per KB (cannot be deleted; visible in Library: memory transparency is a feature).
 pub async fn get_or_create_memory_source(pool: &PgPool, kb_id: Uuid) -> AppResult<Uuid> {
     if let Some((id,)) = sqlx::query_as::<_, (Uuid,)>(
         "SELECT id FROM sources WHERE kb_id = $1 AND kind = $2 LIMIT 1",
@@ -39,8 +39,8 @@ pub async fn get_or_create_memory_source(pool: &PgPool, kb_id: Uuid) -> AppResul
     Ok(id)
 }
 
-/// Memory log 文档（每 KB 一份）。绕开 documents::create 的同内容去重——
-/// 它不是内容寻址的文件，sha256 填哨兵值。
+/// The Memory log document (one per KB). Bypasses documents::create's same-content dedup:
+/// it is not a content-addressed file, so sha256 gets a sentinel value.
 pub async fn get_or_create_memory_doc(pool: &PgPool, kb_id: Uuid) -> AppResult<Uuid> {
     if let Some((id,)) = sqlx::query_as::<_, (Uuid,)>(
         "SELECT id FROM documents
@@ -71,13 +71,13 @@ pub async fn get_or_create_memory_doc(pool: &PgPool, kb_id: Uuid) -> AppResult<U
     Ok(id)
 }
 
-/// 追加一条 episode：新 chunk（extracted_at 空 → 增量抽取会拾起；embedding 空 →
-/// memory_ingest 会补）。事发时间内嵌进文本首行，抽取模型据此定 valid_from。
+/// Append one episode: a new chunk (extracted_at empty, so incremental extraction will pick it up; embedding empty,
+/// so memory_ingest will fill it in). The event time is embedded in the text's first line, which the extraction model uses to set valid_from.
 ///
-/// **NUL 字节在入库前剥掉**（#665）：chat / MCP 来的 `remember` 工具里 JSON
-/// 解码出来的 `\0` 走到这一行——Postgres `TEXT` 不收 0x00，与文档路径同一
-/// 个错误，整段就丢了。共用 `utopia_core::without_nul`，与
-/// `pipeline::process_document` 走同一个 helper。
+/// **NUL bytes are stripped before storage** (#665): the `\0` that JSON decoding yields from the `remember` tool in chat / MCP
+/// reaches this line. Postgres `TEXT` does not accept 0x00, and the document path hits
+/// the same error, so the whole passage is dropped. Shares `utopia_core::without_nul`, the same helper as
+/// `pipeline::process_document`.
 pub async fn append_episode(
     pool: &PgPool,
     kb_id: Uuid,
@@ -85,7 +85,7 @@ pub async fn append_episode(
     occurred_at: DateTime<Utc>,
 ) -> AppResult<(Uuid, Uuid)> {
     let doc_id = get_or_create_memory_doc(pool, kb_id).await?;
-    // 先剥 NUL 再拼前缀：下面入库的 text 与 char_end 都从 `stamped` 来，算的是同一份
+    // Strip NUL first, then prepend the prefix: the text and char_end stored below both come from `stamped`, and they measure the same content
     let stripped = utopia_core::without_nul(text);
     let stamped = format!(
         "[{}] {}",
@@ -120,11 +120,11 @@ pub async fn append_episode(
     Ok((doc_id, chunk_id))
 }
 
-/// 这篇文档是不是记忆日志。
+/// Whether this document is a memory log.
 ///
-/// **抽取据此决定事实要不要人点头**（0015）：记忆是人在对话里特意说的一句话，
-/// 一次一条、人就在现场，确认成本最低；而摄进来的文档一次上万条，逐条确认
-/// 是不可能的，那条路仍旧乐观写入 + 事后审阅。
+/// **Extraction uses this to decide whether facts need a human's nod** (0015): a memory is a sentence a person said on purpose in conversation,
+/// one at a time, with the person right there, so confirming is cheapest; an ingested document, by contrast, has tens of thousands of statements, and confirming them one by one
+/// is impossible, so that path still does optimistic writes plus after-the-fact review.
 pub async fn is_memory_document(pool: &PgPool, document_id: Uuid) -> AppResult<bool> {
     let found: Option<(i32,)> = sqlx::query_as(
         "SELECT 1 FROM documents d JOIN sources s ON s.id = d.source_id

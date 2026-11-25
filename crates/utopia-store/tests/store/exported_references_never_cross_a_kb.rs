@@ -1,14 +1,14 @@
-//! 写入侧：导出会触碰的每条边都被 0070 的外键/触发器挡住；导出侧体检
-//! 覆盖 0070 保护的**全部**结构引用边——别库/悬空的行宁可整份拒导，也不许
-//! 伪造 IRI 或静默丢语义。落到别库的下场分两种：
-//!   - 铸成本库 IRI 的引用（实体、事实、派生、文档、段落、规则）→ 伪造身份；
-//!   - 进本库词汇表按 id 查的引用（谓词、属性类型、实体类型、父类）→ 静默消失。
+//! Write side: every edge the export would touch is blocked by 0070's foreign keys and triggers; the export-side health check
+//! covers **all** structural reference edges that 0070 protects. A row pointing into another KB, or a dangling one, must reject the whole export rather than
+//! forge an IRI or silently drop a meaning. A row that lands in another KB ends up in one of two ways:
+//!   - references minted as this KB's IRIs (entities, facts, derivations, documents, chunks, rules) → a forged identity;
+//!   - references looked up by id in this KB's vocabulary (predicates, attribute types, entity types, parent classes) → silently disappear.
 //!
-//! 两种都是坏行，触发器与导出侧一律拒。
+//! Both kinds are bad rows; the trigger and the export side both reject them.
 //!
-//! 坏行靠 `SET LOCAL session_replication_role='replica'` 造——只关本事务的
-//! 触发器（含 FK 强制），提交即恢复；这同时允许造出「指着的行已不在」的
-//! 悬空引用，正是从 0070 之前的备份恢复进来的形态。
+//! Bad rows are built with `SET LOCAL session_replication_role='replica'`, which turns off only this transaction's triggers
+//! (including FK enforcement) and is restored on commit. This also allows building dangling references whose target row no longer exists,
+//! which is exactly the shape of a restore from a backup taken before 0070.
 
 use sqlx::{Acquire, PgPool};
 use uuid::Uuid;
@@ -44,7 +44,7 @@ struct Fixture {
     eact_a: Uuid,
 }
 
-/// 两库，每库一套能被引用的零件：文档/段落/实体/事实/谓词/类/公理规则/业务规则/派生
+/// Two KBs, each with one set of parts that can be referenced: documents / chunks / entities / facts / predicates / classes / axiom rules / business rules / derivations
 async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     let (org, ws, a, b) = (
         Uuid::now_v7(),
@@ -192,8 +192,8 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         .execute(pool)
         .await?;
     }
-    // 0073 之后进库的同库家族成员:蕴含规则、读数缓存、勘误账、定义史——
-    // 每库一套,供越库断言取用
+    // Same-KB family members added after 0073: entailment rules, reading cache, errata ledger, definition history —
+    // one set per KB, for the cross-KB assertions to draw on
     for (id, kb, pred) in [(irule_a, a, rel_a), (irule_b, b, rel_b)] {
         sqlx::query(
             "INSERT INTO implication_rules (id, kb_id, trigger, phrase,
@@ -237,7 +237,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         .execute(pool)
         .await?;
     }
-    // 读数缓存没有 id 列——键是 (kb_id, reading, phrase)
+    // The reading cache has no id column — its key is (kb_id, reading, phrase)
     for (kb, ent) in [(a, ent_a), (b, ent_b)] {
         sqlx::query(
             "INSERT INTO phrase_readings (kb_id, reading, phrase, entity_id)
@@ -294,7 +294,7 @@ async fn cleanup(pool: &PgPool, f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 新的跨库写：每条边都被它自己的触发器当场挡下
+/// A new cross-KB write: every edge is blocked on the spot by its own trigger
 #[tokio::test]
 async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -304,7 +304,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     utopia_store::db::migrate(&pool).await?;
     let f = seed(&pool).await?;
 
-    // —— 派生的前提：两种前提，两种越库形态
+    // — Derivation premises: two kinds of premise, two shapes of cross-KB reference
     for (premise_fact, premise_derived, what) in [
         (Some(f.fact_b), None, "foreign fact premise"),
         (None, Some(f.der_b), "foreign derived premise"),
@@ -321,7 +321,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         assert!(err.is_err(), "derivation premise: {what} 必须被拒");
     }
 
-    // —— 边上的属性：别库类型会被词汇表静默跳过，别库实体会被铸进本库 IRI
+    // — Attributes on edges: a type from another KB is silently skipped by the vocabulary, and an entity from another KB would be minted with this KB's IRI
     let err = sqlx::query(
         "INSERT INTO fact_qualifiers (fact_id, qualifier_type_id, value)
          VALUES ($1, $2, '\"lit\"'::jsonb)",
@@ -342,8 +342,8 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .await;
     assert!(err.is_err(), "qualifier.entity→foreign 必须被拒");
 
-    // —— 事实本体的五个引用列（from_statement_id 是同表自指：immediate 端在
-    //    BEFORE 触发器上，目标早已在场时当场拒）
+    // — The five reference columns of the fact ontology (from_statement_id is a self-reference within the same table: the immediate end is
+    //    on a BEFORE trigger, and is rejected on the spot once the target is already present)
     for (col, foreign_id, what) in [
         ("subject_id", f.ent_b, "fact.subject"),
         ("object_id", f.ent_b, "fact.object"),
@@ -367,8 +367,8 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         assert!(err.is_err(), "{what}→foreign 必须被拒");
     }
 
-    // —— 陈述来源（typed_fact_sources，0068）：行自己没有 kb 列，归属按所属
-    //    fact 的库判——A 的事实吃 B 的陈述，序列化会铸出指着别库陈述的边
+    // — Statement sources (typed_fact_sources, 0068): the row has no kb column of its own, so ownership is judged by the KB of its
+    //    fact — A's fact consuming B's statement would serialise an edge that points at another KB's statement
     let err = sqlx::query("INSERT INTO typed_fact_sources (fact_id, statement_id) VALUES ($1, $2)")
         .bind(f.fact_a)
         .bind(f.fact_b)
@@ -376,8 +376,8 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         .await;
     assert!(err.is_err(), "factsource.statement→foreign 必须被拒");
 
-    // —— 开放陈述的属性（statement_qualifiers，0061）：行没有 kb 列，归属按
-    //    所属 fact 的库判；别库的实体值会被铸进本库 IRI
+    // — Attributes of open statements (statement_qualifiers, 0061): the row has no kb column, so ownership is judged by the KB
+    //    of its fact; an entity value from another KB would be minted with this KB's IRI
     let err = sqlx::query(
         "INSERT INTO statement_qualifiers (fact_id, role, entity_id, chunk_id)
          VALUES ($1, 'as', $2, $3)",
@@ -388,7 +388,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .execute(&pool)
     .await;
     assert!(err.is_err(), "squalifier.entity→foreign 必须被拒");
-    // 角色词记在别库的块上（0070 决定 1）
+    // A role word recorded on a chunk in another KB (0070 decision 1)
     let err = sqlx::query(
         "INSERT INTO statement_qualifiers (fact_id, role, value, chunk_id)
          VALUES ($1, 'lines', '\"1\"'::jsonb, $2)",
@@ -399,14 +399,14 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .await;
     assert!(err.is_err(), "squalifier.chunk→foreign 必须被拒");
 
-    // —— 时间提及（0061/0064）：提及自己的 kb 必须与它指的事实、段落同属一库
+    // — Time mentions (0061/0064): the mention's own kb must be in the same KB as the fact and chunk it refers to
     let err = sqlx::query(
         "INSERT INTO time_mentions (id, kb_id, fact_id, chunk_id, text, char_start)
          VALUES ($1, $2, $3, $4, '去年', 0)",
     )
     .bind(Uuid::now_v7())
     .bind(f.a)
-    .bind(f.fact_b) // 事实在别库
+    .bind(f.fact_b) // fact in another KB
     .bind(f.chunk_a)
     .execute(&pool)
     .await;
@@ -418,12 +418,12 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(Uuid::now_v7())
     .bind(f.a)
     .bind(f.fact_a)
-    .bind(f.chunk_b) // 段落在别库
+    .bind(f.chunk_b) // chunk in another KB
     .execute(&pool)
     .await;
     assert!(err.is_err(), "timemention.chunk→foreign 必须被拒");
 
-    // —— 类型与短语绑定（0065/0066）：绑定的类/属性以绑定行自己的库为准
+    // — Type and phrase bindings (0065/0066): the bound class or attribute follows the bound row's own KB
     let err = sqlx::query(
         "INSERT INTO type_bindings (id, kb_id, kind_word, status, type_id)
          VALUES ($1, $2, 'corp', 'bound', $3)",
@@ -456,7 +456,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .await;
     assert!(err.is_err(), "pbinding.relation→foreign 必须被拒");
 
-    // —— 派生事实本体的五个引用列
+    // — The five reference columns of the derived fact ontology
     for (col, foreign_id, what) in [
         ("subject_id", f.ent_b, "derived.subject"),
         ("object_id", f.ent_b, "derived.object"),
@@ -464,7 +464,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         ("rule_id", f.rule_b, "derived.rule"),
         ("attribute_rule_id", f.arule_b, "derived.attribute_rule"),
     ] {
-        // attribute_rule 与 rule 互斥：测 attribute_rule 那行不带 rule_id
+        // attribute_rule and rule are mutually exclusive: the test for the attribute_rule row carries no rule_id
         let err = if col == "attribute_rule_id" {
             sqlx::query(
                 "INSERT INTO derived_facts (id, kb_id, subject_id, predicate_id, attribute_rule_id)
@@ -502,7 +502,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         assert!(err.is_err(), "{what}→foreign 必须被拒");
     }
 
-    // —— 实体的类、类层级、互斥、domain/range
+    // — The entity's class, class hierarchy, disjointness, and domain/range
     let err = sqlx::query(
         "INSERT INTO entities (id, kb_id, canonical_name, type_id) VALUES ($1, $2, 'e', $3)",
     )
@@ -543,8 +543,8 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         assert!(err.is_err(), "{what}→foreign 必须被拒");
     }
 
-    // —— 关系的同表自指与边属性声明：owl:inverseOf /
-    //    rdfs:subPropertyOf 与 qualifier 列表都是语义，别库的不许进来
+    // — Self-reference of relations within the same table, and the declaration of edge attributes: owl:inverseOf /
+    //    rdfs:subPropertyOf and the qualifier list are all semantics, so another KB's must not come in
     let err = sqlx::query(
         "INSERT INTO relation_types (id, kb_id, key, label, inverse_of) VALUES ($1, $2, 'inv', 'inv', $3)",
     )
@@ -572,8 +572,8 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .await;
     assert!(err.is_err(), "relation.qualifier→foreign 必须被拒");
 
-    // —— 规则本体：公理编在哪个谓词上、业务规则看什么类得什么结论，
-    //    现在都在导出里——它们的引用同样不许跨库
+    // — Rule ontology: which predicate an axiom is written on, and which class a business rule looks at to reach which conclusion,
+    //    all appear in the export now — their references must not cross KBs either
     let err = sqlx::query(
         "INSERT INTO rules (id, kb_id, predicate_id, kind) VALUES ($1, $2, $3, 'transitive')",
     )
@@ -583,8 +583,8 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .execute(&pool)
     .await;
     assert!(err.is_err(), "rule.predicate→foreign 必须被拒");
-    // 每条结论形状自己的必填列（CHECK 钉死了 typing/attribute/computed 的列组），
-    // 一个引用列一种合法形状
+    // Each conclusion shape's own required columns (the CHECK pins the column groups of typing / attribute / computed),
+    // one legal shape per reference column
     let err = sqlx::query(
         "INSERT INTO attribute_rules (id, kb_id, name, subject_type_id, conclusion,
                                       conclude_predicate_id, conclude_value)
@@ -592,7 +592,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     )
     .bind(Uuid::now_v7())
     .bind(f.a)
-    .bind(f.cls_b) // subject_type 别库
+    .bind(f.cls_b) // subject_type in another KB
     .bind(f.rel_a)
     .execute(&pool)
     .await;
@@ -605,7 +605,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(Uuid::now_v7())
     .bind(f.a)
     .bind(f.cls_a)
-    .bind(f.cls_b) // conclude_type 别库
+    .bind(f.cls_b) // conclude_type in another KB
     .execute(&pool)
     .await;
     assert!(err.is_err(), "arule.conclude_type→foreign 必须被拒");
@@ -617,13 +617,13 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(Uuid::now_v7())
     .bind(f.a)
     .bind(f.cls_a)
-    .bind(f.rel_b) // conclude_predicate 别库
+    .bind(f.rel_b) // conclude_predicate in another KB
     .execute(&pool)
     .await;
     assert!(err.is_err(), "arule.conclude_predicate→foreign 必须被拒");
 
-    // —— #901:0070 之后进库的表也归同一条不变量 ——
-    // 蕴含规则本体的三个引用列（复合外键）
+    // — #901: tables added after 0070 also fall under the same invariant —
+    // The three reference columns of the entailment rule ontology (composite foreign keys)
     for (col, foreign_id, what) in [
         ("subject_type_id", f.cls_b, "irule.subject_type"),
         ("object_type_id", f.cls_b, "irule.object_type"),
@@ -653,7 +653,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .await;
     assert!(err.is_err(), "irule.conclude_property→foreign 必须被拒");
 
-    // 读数缓存答出的实体（复合外键）；UPDATE 路径同样拦
+    // The entity answered by the reading cache (composite foreign key); the UPDATE path is blocked likewise
     let err = sqlx::query(
         "INSERT INTO phrase_readings (kb_id, reading, phrase, entity_id)
          VALUES ($1, 'nationality', 'x', $2)",
@@ -671,8 +671,8 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
             .await;
     assert!(err.is_err(), "reading.entity 改成别库也必须被拒");
 
-    // 隐含事实的出处（owner-derived 触发器）：规则、触发的陈述、触发的实体
-    // 都按所属 fact 的库判；CHECK 要求 statement/entity 恰好一个非空
+    // Provenance of implied facts (owner-derived trigger): the rule, the triggering statement, and the triggering entity
+    // are all judged by the KB of their owning fact; the CHECK requires exactly one of statement / entity to be non-empty
     let err = sqlx::query(
         "INSERT INTO implied_fact_sources (fact_id, rule_id, statement_id)
          VALUES ($1, $2, $3)",
@@ -703,7 +703,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .execute(&pool)
     .await;
     assert!(err.is_err(), "implied.entity→foreign 必须被拒");
-    // UPDATE 路径：先落合法行，再把 rule 改成别库的——UPDATE OF 盯得住
+    // UPDATE path: first land a legal row, then change its rule to one from another KB — UPDATE OF watches it
     sqlx::query(
         "INSERT INTO implied_fact_sources (fact_id, rule_id, entity_id)
          VALUES ($1, $2, $3)",
@@ -720,7 +720,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         .await;
     assert!(err.is_err(), "implied.rule 改成别库也必须被拒");
 
-    // 勘误账：run 盯的文档、action 上的六个引用列全是复合外键
+    // Errata ledger: the document watched by run and the six reference columns on action are all composite foreign keys
     let err = sqlx::query("INSERT INTO errata_runs (id, kb_id, document_id) VALUES ($1, $2, $3)")
         .bind(Uuid::now_v7())
         .bind(f.a)
@@ -747,8 +747,8 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         .await;
         assert!(err.is_err(), "{what}→foreign 必须被拒");
     }
-    // run/document 两列走 UPDATE 路径验:把已有 action 挪到别库的
-    // run 或文档上,复合外键照样当场拒
+    // The run and document columns are checked through the UPDATE path: moving an existing action onto a run or document
+    // in another KB, the composite foreign key still rejects it on the spot
     for (col, foreign_id, what) in [
         ("run_id", f.erun_b, "errata.run"),
         ("document_id", f.doc_b, "errata.document"),
@@ -763,9 +763,9 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         assert!(err.is_err(), "{what} 改成别库也必须被拒");
     }
 
-    // 规则定义史与凭它推出的派生（#913 的表也在面内）
-    // superseded 的版本不占「每规则一条 current」的唯一索引——让行只剩
-    // 跨库这一个毛病,拒它的才是那条复合外键
+    // Rule definition history and the derivations inferred from it (the #913 table is also in scope)
+    // superseded versions do not occupy the "one current per rule" unique index, so the row has only
+    // the cross-KB fault left, and it is the composite foreign key that rejects it
     let err = sqlx::query(
         "INSERT INTO attribute_rule_versions (id, kb_id, rule_id, seq, definition,
                                               superseded_at)
@@ -777,8 +777,8 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .execute(&pool)
     .await;
     assert!(err.is_err(), "arversion.rule→foreign 必须被拒");
-    // 派生的「凭哪一版定义推出」不许指别库(identity 键不含规则列,
-    // object_value 换个值躲开与已落派生的身份撞车)
+    // A derivation's "inferred from which version of the definition" must not point at another KB (the identity key does not include the rule column,
+    // so changing object_value to a different value avoids colliding with an already-landed derivation)
     let err = sqlx::query(
         "INSERT INTO derived_facts (id, kb_id, subject_id, predicate_id, object_value,
                                     attribute_rule_id, attribute_rule_version_id)
@@ -797,7 +797,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         "derived.attribute_rule_version→foreign 必须被拒"
     );
 
-    // 0071/0080 出生就带复合键、却一直不在体检里的两条边
+    // Two edges that were born with composite keys in 0071/0080 but had never been registered in the health check
     let err = sqlx::query(
         "INSERT INTO attribute_rules (id, kb_id, name, subject_type_id, conclusion,
                                       conclude_predicate_id, join_predicate_id)
@@ -822,7 +822,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .await;
     assert!(err.is_err(), "namevector.fact→foreign 必须被拒");
 
-    // —— kb 过户：把已被引用的行挪到别的库，等于把指着它的行一次全变坏行
+    // — KB transfer: moving an already-referenced row to another KB amounts to turning every row pointing at it into a bad row at once
     for (table, id, what) in [
         ("entities", f.ent_a, "entities.kb_id"),
         ("entity_types", f.cls_a, "entity_types.kb_id"),
@@ -846,7 +846,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
             .await;
         assert!(err.is_err(), "{what} 过户必须被拒");
     }
-    // 读数缓存的键不是 id——按 (kb_id, reading, phrase) 挪库同样不许
+    // The reading cache's key is not an id — moving it between KBs by (kb_id, reading, phrase) is likewise not allowed
     let err =
         sqlx::query("UPDATE phrase_readings SET kb_id = $1 WHERE kb_id = $2 AND phrase = 'r'")
             .bind(f.b)
@@ -855,7 +855,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
             .await;
     assert!(err.is_err(), "phrase_readings.kb_id 过户必须被拒");
 
-    // —— 防误伤：同库的合法写入照常
+    // — Guard against false positives: legal writes within the same KB still go through as usual
     sqlx::query(
         "INSERT INTO fact_derivations (derived_fact_id, premise_fact_id, seq)
          VALUES ($1, $2, 0)",
@@ -873,7 +873,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.ent_a)
     .execute(&pool)
     .await?;
-    // 新家族同库写入也要照常：出处、读数、勘误、定义史、名字向量
+    // Writes within the same KB for the new families must also go through as usual: provenance, readings, errata, definition history, name vectors
     sqlx::query(
         "INSERT INTO implied_fact_sources (fact_id, rule_id, statement_id)
          VALUES ($1, $2, $3)",
@@ -933,7 +933,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     cleanup(&pool, &f).await
 }
 
-/// 存量坏行：体检报出正确的边，对应的页读取同样拒
+/// Legacy bad rows: the health check reports the right edge, and the corresponding page read rejects it likewise
 #[tokio::test]
 async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -949,7 +949,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
         .execute(&mut *tx)
         .await?;
 
-    // 每条边造一行坏行——全部落在库 A 身上
+    // Each edge builds one bad row — all of them land on KB A
     sqlx::query(
         "INSERT INTO fact_derivations (derived_fact_id, premise_fact_id, seq)
          VALUES ($1, $2, 0)",
@@ -983,13 +983,13 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.ent_b)
     .execute(&mut *tx)
     .await?;
-    // 事实的 supersedes 指向别库事实
+    // A fact's supersedes points at a fact in another KB
     sqlx::query("UPDATE facts SET supersedes = $2 WHERE id = $1")
         .bind(f.fact_a)
         .bind(f.fact_b)
         .execute(&mut *tx)
         .await?;
-    // 陈述来源指着别库陈述（typed_fact_sources 与 from_statement_id 两条路）
+    // A statement source points at a statement in another KB (both paths: typed_fact_sources and from_statement_id)
     sqlx::query("INSERT INTO typed_fact_sources (fact_id, statement_id) VALUES ($1, $2)")
         .bind(f.fact_a)
         .bind(f.fact_b)
@@ -1000,7 +1000,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
         .bind(f.fact_b)
         .execute(&mut *tx)
         .await?;
-    // 开放陈述的属性值指着别库实体；另一个角色词记在别库的块上
+    // An attribute value of an open statement points at an entity in another KB; another role word is recorded on a chunk in another KB
     sqlx::query(
         "INSERT INTO statement_qualifiers (fact_id, role, entity_id, chunk_id)
          VALUES ($1, 'as', $2, $3)",
@@ -1018,8 +1018,8 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.chunk_b)
     .execute(&mut *tx)
     .await?;
-    // 时间提及两种坏法：归属在 A 却指着 B 的段落（体检扫得见——行按自己的
-    // kb 计数）；归属在 B 却挂在 A 的事实上（按事实取回时，页校验拦它）
+    // Two bad ways for a time mention: owned by A but pointing at B's chunk (the health check can see this, since rows are counted by their own
+    // kb); owned by B but hung off A's fact (when fetched by fact, the page validation catches it)
     sqlx::query(
         "INSERT INTO time_mentions (id, kb_id, fact_id, chunk_id, text, char_start)
          VALUES ($1, $2, $3, $4, '去年', 0)",
@@ -1040,7 +1040,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.chunk_a)
     .execute(&mut *tx)
     .await?;
-    // 类型绑定指着别库的类
+    // A type binding points at a class in another KB
     sqlx::query(
         "INSERT INTO type_bindings (id, kb_id, kind_word, status, type_id)
          VALUES ($1, $2, 'corp', 'bound', $3)",
@@ -1050,7 +1050,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.cls_b)
     .execute(&mut *tx)
     .await?;
-    // 短语绑定指着别库的属性
+    // A phrase binding points at an attribute in another KB
     sqlx::query(
         "INSERT INTO phrase_bindings (id, kb_id, phrase, relation_type_id,
                                      direction, status)
@@ -1061,19 +1061,19 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.rel_b)
     .execute(&mut *tx)
     .await?;
-    // 派生的公理规则换库
+    // A derivation's axiom rule changes KB
     sqlx::query("UPDATE derived_facts SET rule_id = $2 WHERE id = $1")
         .bind(f.der_a)
         .bind(f.rule_b)
         .execute(&mut *tx)
         .await?;
-    // 实体的类换库
+    // An entity's class changes KB
     sqlx::query("UPDATE entities SET type_id = $2 WHERE id = $1")
         .bind(f.ent_a)
         .bind(f.cls_b)
         .execute(&mut *tx)
         .await?;
-    // 类层级与 domain/range
+    // Class hierarchy and domain/range
     sqlx::query("INSERT INTO entity_type_parents (child_id, parent_id) VALUES ($1, $2)")
         .bind(f.cls_a)
         .bind(f.cls_b)
@@ -1087,8 +1087,8 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .execute(&mut *tx)
     .await?;
 
-    // —— 体检现在覆盖 0070 保护的全部结构边:剩下每条边也各造一行坏行 ——
-    // 证据的段落指针与冗余文档指针
+    // — The health check now covers all structural edges that 0070 protects: each remaining edge also builds one bad row —
+    // the evidence's chunk pointer and the redundant document pointer
     sqlx::query("INSERT INTO fact_evidence (fact_id, chunk_id) VALUES ($1, $2)")
         .bind(f.fact_a)
         .bind(f.chunk_b)
@@ -1100,7 +1100,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
         .bind(f.doc_b)
         .execute(&mut *tx)
         .await?;
-    // 段落挂在别库文档下
+    // A chunk hangs under a document in another KB
     sqlx::query(
         "INSERT INTO chunks (id, kb_id, document_id, seq, text) VALUES ($1, $2, $3, 9, 'x')",
     )
@@ -1109,7 +1109,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.doc_b)
     .execute(&mut *tx)
     .await?;
-    // 事实本体的主语/宾语/谓词
+    // The subject / object / predicate of the fact ontology
     sqlx::query(
         "UPDATE facts SET subject_id = $2, object_id = $2, predicate_id = $3 WHERE id = $1",
     )
@@ -1118,7 +1118,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.rel_b)
     .execute(&mut *tx)
     .await?;
-    // 派生本体的主语/宾语/谓词;另一条派生走业务规则——attribute_rule 别库
+    // The subject / object / predicate of the derivation ontology; another derivation goes through a business rule — attribute_rule in another KB
     sqlx::query(
         "UPDATE derived_facts SET subject_id = $2, object_id = $2, predicate_id = $3 WHERE id = $1",
     )
@@ -1139,8 +1139,8 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.arule_b)
     .execute(&mut *tx)
     .await?;
-    // 类互斥的两个引用列是两条结构边、共用一个报错 label——
-    // a_id 别库一行、b_id 别库一行(CHECK 不许 a_id = b_id)
+    // The two reference columns of class disjointness are two structural edges sharing one error label —
+    // a_id in one row of another KB, b_id in one row of another KB (the CHECK forbids a_id = b_id)
     sqlx::query("INSERT INTO entity_type_disjoint (kb_id, a_id, b_id) VALUES ($1, $2, $3)")
         .bind(f.a)
         .bind(f.cls_b)
@@ -1153,7 +1153,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
         .bind(f.cls_b)
         .execute(&mut *tx)
         .await?;
-    // range 与关系声明的边属性
+    // The edge attribute on range and on the relation declaration
     sqlx::query(
         "INSERT INTO relation_type_ranges (relation_type_id, entity_type_id) VALUES ($1, $2)",
     )
@@ -1168,19 +1168,19 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.rel_b)
     .execute(&mut *tx)
     .await?;
-    // 关系的同表自指
+    // Self-reference of the relation
     sqlx::query("UPDATE relation_types SET inverse_of = $2, sub_property_of = $2 WHERE id = $1")
         .bind(f.rel_a)
         .bind(f.rel_b)
         .execute(&mut *tx)
         .await?;
-    // 公理的谓词
+    // The predicate of the axiom
     sqlx::query("UPDATE rules SET predicate_id = $2 WHERE id = $1")
         .bind(f.rule_a)
         .bind(f.rel_b)
         .execute(&mut *tx)
         .await?;
-    // 业务规则的两个引用列、typing 结论的类、条件的谓词
+    // The two reference columns of the business rule, the class of the typing conclusion, and the predicate of the condition
     sqlx::query(
         "UPDATE attribute_rules SET subject_type_id = $2, conclude_predicate_id = $3 WHERE id = $1",
     )
@@ -1208,7 +1208,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.rel_b)
     .execute(&mut *tx)
     .await?;
-    // 时间提及指着别库事实(段落同库)——timemention.fact 这一条单独验
+    // A time mention points at a fact in another KB (the chunk in the same KB) — timemention.fact is verified separately on its own
     sqlx::query(
         "INSERT INTO time_mentions (id, kb_id, fact_id, chunk_id, text, char_start)
          VALUES ($1, $2, $3, $4, '明年', 4)",
@@ -1219,7 +1219,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.chunk_a)
     .execute(&mut *tx)
     .await?;
-    // 短语绑定的两个类型引用列
+    // The two type reference columns of a phrase binding
     sqlx::query(
         "INSERT INTO phrase_bindings (id, kb_id, phrase, subject_type_id, status)
          VALUES ($1, $2, 'runs-sub', $3, 'none')",
@@ -1239,9 +1239,9 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .execute(&mut *tx)
     .await?;
 
-    // —— #901 新家族的坏行:0091 保护的 15 条新边 + 两条早就带复合键、
-    //    却一直没人登记体检的边(join_predicate、name_vectors) ——
-    // 蕴含规则本体的三个引用列
+    // — Bad rows for the #901 families: the 15 new edges protected by 0091, plus two that carried composite keys from the start but
+    //    had never been registered in the health check (join_predicate, name_vectors) —
+    // The three reference columns of the entailment rule ontology
     sqlx::query(
         "INSERT INTO implication_rules (id, kb_id, trigger, phrase, conclude_property_id,
                                         status, subject_type_id)
@@ -1274,7 +1274,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.rel_b)
     .execute(&mut *tx)
     .await?;
-    // 读数缓存答了别库的实体
+    // The reading cache answered an entity from another KB
     sqlx::query(
         "INSERT INTO phrase_readings (kb_id, reading, phrase, entity_id)
          VALUES ($1, 'nationality', 'bad', $2)",
@@ -1283,8 +1283,8 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.ent_b)
     .execute(&mut *tx)
     .await?;
-    // 隐含事实的出处三种坏法(CHECK:statement/entity 恰好一个;
-    // 主键是 (fact_id, rule_id),再落一条同库事实把三行错开)
+    // Three bad ways for implied-fact provenance (CHECK: exactly one of statement / entity;
+    // the primary key is (fact_id, rule_id), and landing another same-KB fact offsets the three rows)
     sqlx::query(
         "INSERT INTO facts (id, kb_id, subject_id, object_id, confidence)
          VALUES ($1, $2, $3, $3, 0.9)",
@@ -1301,7 +1301,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.fact_a)
     .fetch_one(&mut *tx)
     .await?;
-    // 再落一条本库规则:三行各占一个 (fact_id, rule_id) 主键
+    // Land another rule in this KB: the three rows each take a (fact_id, rule_id) primary key
     let irule_a2 = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO implication_rules (id, kb_id, trigger, phrase,
@@ -1340,8 +1340,8 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.ent_b)
     .execute(&mut *tx)
     .await?;
-    // 定义史挂到别库规则;派生记下别库的版本(版本行标 superseded,
-    // 不与种子里那条 current 撞「每规则一条」的唯一索引)
+    // Definition history hangs off a rule in another KB; the derivation records a version from another KB (the version row is marked superseded,
+    // so it does not collide with the seeded current row under the "one per rule" unique index)
     sqlx::query(
         "INSERT INTO attribute_rule_versions (id, kb_id, rule_id, seq, definition,
                                               superseded_at)
@@ -1365,8 +1365,8 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.arv_b)
     .execute(&mut *tx)
     .await?;
-    // 勘误账:run 盯别库文档一行;action 上的 run/document 各坏一行,
-    // 其余四列塞进同一行
+    // Errata ledger: run watches a document in another KB, one bad row each for run and document on action,
+    // and the other four columns are stuffed into the same row
     sqlx::query("INSERT INTO errata_runs (id, kb_id, document_id) VALUES ($1, $2, $3)")
         .bind(Uuid::now_v7())
         .bind(f.a)
@@ -1409,7 +1409,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     .bind(f.fact_b)
     .execute(&mut *tx)
     .await?;
-    // relation 形状的 join 谓词指别库;名字向量两头各坏一行
+    // The join predicate of relation shape points at another KB; name vectors each get one bad row at both ends
     sqlx::query(
         "INSERT INTO attribute_rules (id, kb_id, name, subject_type_id, conclusion,
                                       conclude_predicate_id, join_predicate_id)
@@ -1446,10 +1446,10 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     let err = utopia_store::export::provenance_integrity(&mut pool.begin().await?, f.a).await;
     let msg = format!("{err:?}");
     assert!(err.is_err(), "库 A 的体检必须拒导");
-    // 体检覆盖 0070/0091 保护的全部结构边——埋下去的每一类坏行都要被点名,
-    // 导出还没序列化的边(规则、绑定、时间提及、条件)也一样:受保护的
-    // 同库引用断在账本上,这份导出就不可信。57 个报错 label 对应 58 条
-    // 结构边(class.disjoint 的 a_id/b_id 共用一个 label)
+    // The health check covers all structural edges protected by 0070 / 0091 — every kind of bad row buried must be named,
+    // and so must the edges the export has not yet serialised (rules, bindings, time mentions, conditions): if a protected
+    // same-KB reference is broken on the ledger, this export cannot be trusted. 57 error labels correspond to 58 structural edges
+    // (class.disjoint's a_id and b_id share one label)
     for edge in [
         "evidence.chunk",
         "evidence.document",
@@ -1513,7 +1513,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
         assert!(msg.contains(edge), "体检该报 {edge}: {msg}");
     }
 
-    // 逐页校验：坏行落在哪页，哪页就拒——不能漏出伪造 IRI
+    // Page-by-page validation: wherever the bad row falls, that page is rejected — no forged IRI may leak out
     assert!(
         utopia_store::export::facts_page(&mut pool.begin().await?, f.a, None)
             .await
@@ -1541,8 +1541,8 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
     cleanup(&pool, &f).await
 }
 
-/// 留下的行才参与校验：被引的行在两次读之间消失，判违规的是
-/// **随页原子选出的归属**，不是事后另一个时刻的 JOIN——悬空引用照样拒
+/// Only rows left behind between the two reads take part in validation: a referenced row that disappears between reads makes the violation
+/// **the ownership selected atomically with the page**, not a JOIN at a later moment — a dangling reference is still rejected
 #[tokio::test]
 async fn retained_row_validation_survives_dangling_and_late_state() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -1552,7 +1552,7 @@ async fn retained_row_validation_survives_dangling_and_late_state() -> anyhow::R
     utopia_store::db::migrate(&pool).await?;
     let f = seed(&pool).await?;
 
-    // 合法证据先行
+    // Legal evidence first
     sqlx::query("INSERT INTO fact_evidence (fact_id, chunk_id, document_id) VALUES ($1, $2, $3)")
         .bind(f.fact_a)
         .bind(f.chunk_a)
@@ -1561,7 +1561,7 @@ async fn retained_row_validation_survives_dangling_and_late_state() -> anyhow::R
         .await?;
     utopia_store::export::facts_page(&mut pool.begin().await?, f.a, None).await?;
 
-    // 绕过触发器把文档删掉：evidence 行还指着它——悬空不是「不存在所以跳过」
+    // Delete the document by bypassing the trigger: the evidence row still points at it — dangling is not "does not exist, so skip"
     let mut conn = pool.acquire().await?;
     let mut tx = conn.begin().await?;
     sqlx::query("SET LOCAL session_replication_role = 'replica'")
@@ -1582,7 +1582,7 @@ async fn retained_row_validation_survives_dangling_and_late_state() -> anyhow::R
         "该报 evidence.document: {msg}"
     );
 
-    // 同理：前提行被删，derived 的前提数组仍留着死指针——逐页校验要拦
+    // Likewise: the premise row is deleted, and the derived's premise array still holds a dead pointer — page-by-page validation must catch it
     sqlx::query(
         "INSERT INTO fact_derivations (derived_fact_id, premise_fact_id, seq)
          VALUES ($1, $2, 0)",

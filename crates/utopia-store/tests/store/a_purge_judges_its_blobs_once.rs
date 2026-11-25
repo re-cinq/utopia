@@ -1,17 +1,17 @@
-//! #516：purge 一句话判完所有指纹，答案与逐个问一模一样。
+//! #516: purge decides all fingerprints in one statement, with the same answer as asking one by one.
 //!
-//! 原文按内容寻址、跨库共用，一份指纹只有在**没有任何地方**再引用时才交给调用方去删文件。
-//! 判错的两个方向不对称：多留是漏磁盘，多交是把别人还在用的原文删掉。从前每个指纹
-//! 单独问一次库，问多少次锁就多握多久；现在一句 unnest 问完，这里守的是答案一个不移：
+//! Original content is addressed by content and shared across stores; a fingerprint is handed to the caller to delete the file only when **nothing anywhere** still references it.
+//! The two directions of a wrong judgment are asymmetric: keeping too much leaks disk, handing out too much deletes original content someone else still uses. Before, each fingerprint
+//! was asked of the store separately, and the more questions, the longer the lock was held; now one unnest asks them all, and what is guarded here is that the answer does not move:
 //!
-//! 1. 另一篇文档还拿着的指纹不交。
-//! 2. 另一个库的文档拿着也不交——那一问故意不带 kb_id。
-//! 3. 只有旧版本拿过、如今谁都不拿的指纹交出去：判断发生在版本行删掉之后。
-//! 4. 已 purge 的文档不算引用：它的行还在，指纹已经不归它了。
-//! 5. 同一个指纹在多个版本里出现，名单上只有一次。
-//! 6. 一句话的答案与逐个问的答案相等，这是整个改法的正确性论证。
+//! 1. A fingerprint another document still holds is not handed out.
+//! 2. One held by a document in another store is not handed out either — that question deliberately omits kb_id.
+//! 3. A fingerprint only an old version ever held, and that no one holds now, is handed out: the judgment happens after the version rows are deleted.
+//! 4. A purged document does not count as a reference: its row remains, but the fingerprint no longer belongs to it.
+//! 5. The same fingerprint appearing in several versions appears on the list only once.
+//! 6. The answer of one statement equals the answer of asking one by one; this is the correctness argument for the whole change.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use sqlx::PgPool;
 use utopia_store::documents;
@@ -41,7 +41,7 @@ async fn seed() -> anyhow::Result<Option<Fx>> {
         .execute(&pool)
         .await?;
     let kb = base(&pool, ws).await?;
-    // 指纹带本次运行的随机后缀，别和库里残留的撞上
+    // Fingerprint carries this run's random suffix, so it does not collide with leftovers in the store
     let tag = Uuid::now_v7().simple().to_string();
     Ok(Some(Fx {
         pool,
@@ -102,7 +102,7 @@ impl Fx {
         Ok(documents::purge(&self.pool, kb, doc).await?.blobs)
     }
 
-    /// 从前的判法，逐个指纹问一次；第 6 条拿它当真值
+    /// The old method: ask the store once per fingerprint; item 6 takes it as the ground truth
     async fn judged_one_by_one(&self, shas: &[String]) -> anyhow::Result<Vec<String>> {
         let mut out = Vec::new();
         for s in shas {
@@ -134,8 +134,8 @@ async fn a_blob_another_document_still_holds_is_never_collected() -> anyhow::Res
     let Some(f) = seed().await? else {
         return Ok(());
     };
-    // 同一个库里两篇活文档不能同 sha（documents_kb_sha_idx），所以同库的另一个
-    // 持有者只能是别人的历史版本
+    // Two live documents in the same store cannot share a sha (documents_kb_sha_idx), so the other
+    // holder in the same store can only be someone else's historical version
     let shared = f.sha("shared");
     let a = f.document(f.kb, "a.md", &shared).await?;
     let b = f.document(f.kb, "b.md", &f.sha("b-now")).await?;
@@ -187,7 +187,7 @@ async fn a_purged_document_no_longer_holds_its_blob() -> anyhow::Result<()> {
     let Some(f) = seed().await? else {
         return Ok(());
     };
-    // 两篇活文档同 sha 只能在两个库里（documents_kb_sha_idx）
+    // Two live documents with the same sha can only be in two stores (documents_kb_sha_idx)
     let shared = f.sha("shared");
     let other_kb = base(&f.pool, f.ws).await?;
     let x = f.document(f.kb, "x.md", &shared).await?;
@@ -224,7 +224,7 @@ async fn the_batched_answer_equals_the_one_by_one_answer() -> anyhow::Result<()>
         return Ok(());
     };
     let other_kb = base(&f.pool, f.ws).await?;
-    // 甲拿着五个指纹：现行一个、历史四个；其中两个别处还有人拿，一个已被 purge 的文档拿过
+    // A holds five fingerprints: one current, four historical; two of them are held elsewhere, and one a purged document once held
     let (own, shared_doc, shared_far, held_by_purged, old_only) = (
         f.sha("own"),
         f.sha("shared-doc"),
@@ -253,7 +253,7 @@ async fn the_batched_answer_equals_the_one_by_one_answer() -> anyhow::Result<()>
     .fetch_all(&f.pool)
     .await?;
     let mut batched = f.purge(f.kb, a).await?;
-    // 提交之后的库状态与事务内判断时相同：版本行已删、文档已标 purged
+    // The store state after commit is the same as when judged inside the transaction: version rows deleted, document marked purged
     let mut one_by_one = f.judged_one_by_one(&shas).await?;
     batched.sort();
     one_by_one.sort();

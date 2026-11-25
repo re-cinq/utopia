@@ -1,14 +1,14 @@
-//! 改来源时设置、保留、关掉衰减（RC-003），打在真库上。
+//! Setting, keeping and clearing decay when a source is updated (RC-003), run against a real store.
 //!
-//! 要钉住的行为：
+//! Behaviour to pin down:
 //!
-//! - **不写就不动**：更新别的字段，衰减原样
-//! - **写对象就打开**：存下完整的四个字段，之后默认值再变也不会动它
-//! - **写 null 就关掉**
-//! - **越界的值被拒绝**，库里的原值不变
-//! - **列表看得到**
+//! - **Not written, not changed**: updating other fields leaves decay as it was
+//! - **Writing an object turns it on**: the full four fields are stored, and later changes to the defaults do not affect it
+//! - **Writing null turns it off**
+//! - **Out-of-range values are rejected**, and the original value in the store stays
+//! - **Visible in the list**
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use sqlx::PgPool;
 use utopia_store::decay::DecaySettings;

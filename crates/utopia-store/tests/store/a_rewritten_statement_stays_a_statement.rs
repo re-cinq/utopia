@@ -1,10 +1,10 @@
-//! 改写一条开放陈述，改出来的还是陈述（RC-004 的后记）：`layer` 和 `phrase` 随修正行走。
+//! Rewriting an open statement yields a statement (a postscript to RC-004): `layer` and `phrase` follow the corrected row.
 //!
-//! 人改区间（`correct_interval`，PATCH /facts/{id}）和撤回合并搬主宾（`rehome_tx`）从前
-//! 只复制类型化那几列，开放陈述改完成了没有谓词的类型化行：物化再也读不到它，它的类型化行
-//! 随旧陈述作废后就不再回来。这里两条路各改一次，再物化一轮，类型化行按改过的陈述重建。
+//! Human interval correction (`correct_interval`, PATCH /facts/{id}) and rehoming subject and object when retracting a merge (`rehome_tx`) used to
+//! copy only the typed columns. So an open statement corrected into a typed row with no predicate could no longer be read by materialization, and its typed row
+//! is voided along with the old statement and never comes back. Here each path is changed once, then a materialization round runs, and the typed rows are rebuilt from the changed statement.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset. Creates and tears down its own database, never touching an existing one.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -12,8 +12,8 @@ use utopia_store::graph::Validity;
 use utopia_store::materialize::materialize;
 use uuid::Uuid;
 
-/// 一个库：Ada 和 Bea 两个人、一处 Port Ellen，一条绑到 based_in 的开放陈述
-/// 「Ada is based in Port Ellen，自 2020-01-01」，已经物化出它的类型化行
+/// One knowledge base: Ada and Bea as two people, one Port Ellen, and one open statement bound to based_in
+/// "Ada is based in Port Ellen, since 2020-01-01", whose typed row has already been materialized from it
 struct Statement {
     pool: PgPool,
     org: Uuid,
@@ -63,7 +63,7 @@ impl Statement {
         })
     }
 
-    /// 一行是哪一层、说的是哪句话、有没有谓词
+    /// Which layer a row is in, which sentence it says, and whether it has a predicate
     async fn layer_of(&self, fact: Uuid) -> sqlx::Result<(String, Option<String>, Option<Uuid>)> {
         sqlx::query_as("SELECT layer, phrase, predicate_id FROM facts WHERE id = $1")
             .bind(fact)
@@ -71,7 +71,7 @@ impl Statement {
             .await
     }
 
-    /// 物化一轮之后活着的 based_in 类型化行：主语和起点
+    /// Live based_in typed rows after a materialization round: subject and start
     async fn typed_after_materialize(&self) -> anyhow::Result<Vec<(Uuid, Option<DateTime<Utc>>)>> {
         materialize(&self.pool, self.kb).await?;
         Ok(sqlx::query_as(

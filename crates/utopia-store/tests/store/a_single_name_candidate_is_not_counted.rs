@@ -1,5 +1,5 @@
-//! 同名候选只有一个时没有可比的，不必数它的事实（#1296）。
-//! 一条连接的池子：sqlx 把它跑过的语句都缓存在 `pg_prepared_statements` 里，没跑过的就不在。
+//! With only one same-name candidate there is nothing to compare, so its facts need not be counted (#1296).
+//! A pooled connection: sqlx caches the statements it has run in `pg_prepared_statements`; statements that were never run are not there.
 
 use sqlx::postgres::PgPoolOptions;
 use utopia_store::names;

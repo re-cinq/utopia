@@ -1,4 +1,4 @@
-//! 授予、收回系统管理员——打在真库上。
+//! Granting and revoking system admin -- tested against a real database.
 
 use sqlx::PgPool;
 use uuid::Uuid;

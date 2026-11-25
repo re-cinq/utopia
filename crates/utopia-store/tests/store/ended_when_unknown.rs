@@ -1,20 +1,20 @@
-//! 「结束了，但不知道哪天」这个状态，打在真库上。
+//! The state "ended, but the day is not known", run against a real DB.
 //!
-//! 两端各记精度之前，`valid_to IS NULL` 同时表示「还在持续」和「结束了但不知何时」。
-//! 那两件事**真值相反**——一个说关系现在成立，一个说不成立——而账本只有一种写法，
-//! 于是 "former CEO of Weta Digital" 只能写成前者，图会断言一件原文说已经结束的事。
+//! Before the two ends each carried their own precision, `valid_to IS NULL` meant both "still ongoing" and "ended, but when is unknown".
+//! Those two things have **opposite truth values** — one says the relation holds now, the other says it does not — and the ledger had only one way of writing it,
+//! so "former CEO of Weta Digital" could only be written as the former, and the graph would assert something the source says has already ended.
 //!
-//! 这里钉三样，每一样都活在 SQL 或 SQL 约束里，`cargo check` 一个字看不见：
+//! Three things are pinned here, each of which lives in SQL or an SQL constraint, and `cargo check` sees none of it:
 //!
-//! - 三种结束状态都存得进去，四种自相矛盾的组合存不进去
-//! - 「结束了但不知哪天」的新观察**不会**被当成"什么都没说"并进开放行
-//! - 时态引擎**不把它当开放行**去闭合——它自己都不知道自己何时结束
+//! - All three ended states can be stored; four self-contradictory combinations cannot be stored
+//! - A new observation of "ended on an unknown day" is **not** folded into an open row as if "nothing was said"
+//! - The temporal engine does **not** treat it as an open row to close — it does not even know when it ended itself
 //!
-//! 那四个否定用例里有一个曾经漏网：`valid_to` 有日期而精度为 NULL 时，
-//! `NULL IN ('year',…)` 求值是 NULL，`TRUE AND NULL` 是 NULL，CHECK 遇 NULL 判通过。
-//! 三值逻辑在这里是静默的，只有真跑一遍才看得见。
+//! One of the four negative cases once slipped through: when `valid_to` has a date and the precision is NULL,
+//! `NULL IN ('year',…)` evaluates to NULL, `TRUE AND NULL` is NULL, and the CHECK treats NULL as a pass.
+//! Three-valued logic is silent here, and only actually running it makes it visible.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is not set. It builds and tears down its own data and never touches an existing DB.
 
 use sqlx::PgPool;
 use utopia_store::graph::{Validity, ENDED_UNKNOWN};
@@ -58,7 +58,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     .bind(kb)
     .execute(pool)
     .await?;
-    // functional：主语侧唯一，时态引擎才会对它做闭合对账
+    // functional: unique on the subject side, so the temporal engine does close reconciliation on it
     sqlx::query(
         "INSERT INTO relation_types (id, kb_id, key, label, temporal, functional)
          VALUES ($1, $2, 'leads', 'leads', 'state', TRUE)",
@@ -113,7 +113,7 @@ async fn a_relation_the_text_says_is_over_is_not_stored_as_ongoing() -> anyhow::
     let f = seed(&pool).await?;
 
     let run = async {
-        // "Akkaraju, former CEO of Weta" —— 结束是原文说的，日期是原文没给的
+        // "Akkaraju, former CEO of Weta" — the ending is stated in the text; the date is not given in the text
         let (ended, _) = utopia_store::graph::insert_fact(
             &pool,
             f.kb,
@@ -132,9 +132,9 @@ async fn a_relation_the_text_says_is_over_is_not_stored_as_ongoing() -> anyhow::
             "但精度那一位要说出「它结束了」——少了它就跟「仍在持续」分不开"
         );
 
-        // **同一断言再来一次「结束了但不知哪天」的观察，不该被并成"什么都没说"。**
-        // 从前的判据是 valid_from.is_none() && valid_to.is_none()，
-        // 而这条观察两者都满足——它会被并进开放行，唯一带来的信息（它结束了）就丢了
+        // **Another "ended on an unknown day" observation of the same assertion must not be merged into "nothing was said".**
+        // Previously the criterion was valid_from.is_none() && valid_to.is_none(),
+        // and this observation satisfies both — it would be folded into the open row, and the one piece of information it brings (that it ended) is lost
         let (second, created) = utopia_store::graph::insert_fact(
             &pool,
             f.kb,
@@ -161,8 +161,8 @@ async fn a_relation_the_text_says_is_over_is_not_stored_as_ongoing() -> anyhow::
     run
 }
 
-/// 时态引擎**不该把「已结束-不知何时」当成开放行**去闭合：
-/// 一条自己都不知道何时结束的断言，没有资格给别人定结束时刻。
+/// The temporal engine **should not treat "ended, unknown when" as an open row** to close:
+/// an assertion that does not even know when it ended has no standing to set someone else's end moment.
 #[tokio::test]
 async fn an_already_ended_fact_is_not_treated_as_an_open_claim() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -172,7 +172,7 @@ async fn an_already_ended_fact_is_not_treated_as_an_open_claim() -> anyhow::Resu
     let f = seed(&pool).await?;
 
     let run = async {
-        // 旧行：结束了，不知哪天
+        // Old row: ended, day unknown
         let (old, _) = utopia_store::graph::insert_fact(
             &pool,
             f.kb,
@@ -183,7 +183,7 @@ async fn an_already_ended_fact_is_not_treated_as_an_open_claim() -> anyhow::Resu
             0.9,
         )
         .await?;
-        // 新行：另一个宾语，2024 年开始。functional 关系，引擎会去找"开放行"
+        // New row: a different object, starting in 2024. A functional relation, so the engine will look for an "open row"
         let (new, _) = utopia_store::graph::insert_fact(
             &pool,
             f.kb,
@@ -209,7 +209,7 @@ async fn an_already_ended_fact_is_not_treated_as_an_open_claim() -> anyhow::Resu
         .await?;
         assert_eq!(report.corrected.len(), 0, "旧行已经结束，不该再被闭合一次");
         assert_eq!(report.conflicts, 0, "它也不构成矛盾——两段本来就不重叠");
-        // 旧行原样未动
+        // Old row left untouched
         let still: Option<chrono::DateTime<chrono::Utc>> =
             sqlx::query_scalar("SELECT valid_to FROM facts WHERE id = $1")
                 .bind(old)

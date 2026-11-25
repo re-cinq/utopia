@@ -1,18 +1,18 @@
-//! 治理先读台账（0025），打在真库上。
+//! Governance reads the ledger first (0025), run against a real DB.
 //!
-//! 要钉住的行为：
+//! The behaviour to pin down:
 //!
-//! - **先例只认人的**：同一对被人分开过两次算两条，机器自己合过的那条不算；
-//!   这一对合过、这个名字对别的名字、这种类型对的习惯、涉及这个名字的撤回，
-//!   四族各归各
-//! - **闸门**：人分开过的对模型说合只建议；合过的对模型说合就动手；有撤回只建议；
-//!   类型冲突不合；没有任何先例不合，但能分
-//! - **队列先进先出**，队头带着同名或同实体的簇；写了建议的对不再进队列；
-//!   人裁了一对，同簇的建议作废、那些对回到队列
-//! - **回答**：一条建议只能答一次；开关关了的库不在定时扫描里
+//! - **Precedents only trust people's**: a pair that a person separated twice counts as two; one the machine merged itself does not count;
+//!   this pair merged, this name against other names, the habit of this type pair, and withdrawals involving this name —
+//!   four families, each kept apart
+//! - **Gates**: a pair a person separated is only suggested to the model as a merge; a pair that was merged sends the model straight to acting; a withdrawal only suggests;
+//!   a type conflict is not merged; with no precedent at all it is not merged, but it can be separated
+//! - **The queue is first-in, first-out**, and the head carries the cluster of same-name or same-entity pairs; a pair that already has a written suggestion does not re-enter the queue;
+//!   when a person decides one pair, the suggestions in the same cluster are invalidated and those pairs return to the queue
+//! - **Answering**: a suggestion can be answered only once; a KB whose switch is off is not in the scheduled scan
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
-//! 台账只增不删，种下的几行留在库里（kb 已删，kb_id 悬空，本就允许）。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is not set. It builds and tears down its own data and never touches an existing DB.
+//! The ledger only grows and never deletes; the few rows seeded stay in the DB (the KB was deleted, so kb_id dangles, which is already allowed).
 
 use chrono::{Duration, Utc};
 use sqlx::PgPool;
@@ -23,15 +23,15 @@ struct Seed {
     kb: Uuid,
     org: Uuid,
     user: Uuid,
-    /// 张伟 1 对 张伟 2：人分开过两次
+    /// Zhang Wei 1 vs Zhang Wei 2: separated by a person twice
     zw12: Uuid,
-    /// Apple 对 Apple Inc.：人合过
+    /// Apple vs Apple Inc.: merged by a person
     apple: Uuid,
-    /// Orion 对 Orion Labs：合过又撤回
+    /// Orion vs Orion Labs: merged, then withdrawn
     orion: Uuid,
-    /// Mercury（公司）对 Mercury（人）：类型冲突
+    /// Mercury (company) vs Mercury (person): type conflict
     mercury: Uuid,
-    /// 张伟 2 对 张伟 3：与第一对同名同实体，进簇
+    /// Zhang Wei 2 vs Zhang Wei 3: same name and same entity as the first pair, joins the cluster
     zw23: Uuid,
 }
 
@@ -104,7 +104,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Seed> {
     let mercury1 = entity(company, "Mercury").await?;
     let mercury2 = entity(person, "Mercury").await?;
 
-    // 等人的对，created_at 隔开一分钟：先进先出要看得出顺序
+    // Pairs awaiting a person: created_at spaced one minute apart, so the first-in-first-out order is visible
     let t0 = Utc::now() - Duration::hours(1);
     let mut n = 0;
     let mut review = |l: Uuid, r: Uuid| {
@@ -134,7 +134,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Seed> {
     let mercury = review(mercury1, mercury2).await?;
     let zw23 = review(zw2, zw3).await?;
 
-    // 台账：人的决定。actor 为空的那条是机器裁的，不算先例
+    // Ledger: people's decisions. The entry with an empty actor was decided by the machine and does not count as a precedent
     let ledger = |actor: Option<Uuid>, action: &str, detail: serde_json::Value| {
         let action = action.to_string();
         let pool = pool.clone();
@@ -166,7 +166,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Seed> {
     )
     .await?;
 
-    // 这种类型对的习惯：人裁过的 Person×Person 对，一合三分
+    // Habit of this type pair: Person×Person pairs decided by a person, one merged and three separated
     for status in ["merged", "kept", "kept", "kept"] {
         let (a, b) = (
             entity(person, "Someone").await?,
@@ -212,20 +212,20 @@ async fn teardown(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
 }
 
 async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
-    // 先进先出
+    // First in, first out
     let q = governance::queue(pool, s.kb, 10).await?;
     let ids: Vec<Uuid> = q.iter().map(|i| i.id).collect();
     assert_eq!(ids, vec![s.zw12, s.apple, s.orion, s.mercury, s.zw23]);
     let by_id = |id: Uuid| q.iter().find(|i| i.id == id).cloned().unwrap();
 
-    // 队头的簇：同名同实体的张伟 2 对 3
+    // The head of the queue: the cluster of Zhang Wei 2 vs 3, same name and same entity
     let cluster = governance::cluster_of(pool, s.kb, &by_id(s.zw12), 11).await?;
     assert_eq!(
         cluster.iter().map(|i| i.id).collect::<Vec<_>>(),
         vec![s.zw23]
     );
 
-    // 四族先例
+    // Precedents from the four families
     let p = governance::precedents_for(pool, s.kb, &by_id(s.zw12)).await?;
     assert_eq!(p.same_pair.len(), 2, "人分开过两次；机器合过的那条不算");
     assert!(p.same_pair.iter().all(|x| !x.merged()));
@@ -312,7 +312,7 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
         Gate::Apply
     );
 
-    // 写了建议的对不再进队列
+    // A pair with a written suggestion does not re-enter the queue
     let run_id = Uuid::now_v7();
     let d_apple = governance::record(
         pool,
@@ -386,9 +386,9 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
         "一个目标同时只有一条开着的建议"
     );
 
-    // 人裁了张伟 1 对 2：同簇的张伟 2 对 3 的建议作废、回到队列；Apple 的不受影响
+    // A person decided Zhang Wei 1 vs 2: the suggestion for Zhang Wei 2 vs 3 in the same cluster is invalidated and returns to the queue; Apple's is unaffected
     utopia_store::resolution::decide_review(pool, s.kb, s.zw12, "keep", s.user, None).await?;
-    // 同一对实体人裁过：不分左右；别的对没有
+    // A pair of entities decided by a person: no left or right; other pairs have none
     let zw = by_id(s.zw12);
     assert_eq!(
         governance::decided_before(pool, s.kb, zw.left.id, zw.right.id).await?,
@@ -418,11 +418,11 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
         .map(|i| i.id)
         .collect();
     assert_eq!(ids, vec![s.orion, s.mercury, s.zw23]);
-    // 张伟 2 对 3 的同对先例还是种下的两条：decide_review 本身不写台账，台账由路由层记
+    // The same-pair precedents for Zhang Wei 2 vs 3 are the two seeded entries: decide_review itself does not write the ledger, the route layer records it
     let p = governance::precedents_for(pool, s.kb, &by_id(s.zw23)).await?;
     assert_eq!(p.same_pair.len(), 2);
 
-    // 回答一条建议：答过就不能再答
+    // Answer a suggestion: once answered it cannot be answered again
     governance::settle(pool, s.kb, d_apple, "accepted", s.user).await?;
     let d = governance::get(pool, s.kb, d_apple).await?;
     assert_eq!(d.status, "accepted");
@@ -433,7 +433,7 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
             .is_err()
     );
 
-    // 第二刀的工具：翻台账、找同名、数今天花的调用
+    // Tools for the second slice: scan the ledger, find same names, count the calls spent today
     let hits = governance::ledger_search(pool, s.kb, "apple", 10).await?;
     assert_eq!(
         hits.len(),
@@ -482,8 +482,8 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
     assert_eq!(d.trace[0]["tool"], "facts");
     assert_eq!(governance::loop_calls_today(pool, s.kb).await?, 3);
 
-    // 保险丝（第四刀）：撤回的次数从某一刻数起；跳闸只在开着时发生、只发生一次；
-    // 合并历史里撤回 agent 的合并，那一行也记成 reverted
+    // Circuit breaker (fourth slice): the count of withdrawals is counted from a given moment; tripping happens only when it is on, and only once;
+    // a merge withdrawn by the agent in the merge history is also recorded as reverted on that row
     let (a, b) = (alike_id(pool, s.kb).await?, {
         let id: Uuid = sqlx::query_scalar(
             "SELECT id FROM entities WHERE kb_id = $1 AND canonical_name = 'Someone' LIMIT 1",
@@ -541,8 +541,8 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
-    // agent 正在裁的一簇锁住（0025 第五刀）：任务在跑 + 标着 adjudicating + 开关开着，
-    // 三样齐了人才裁不了；任务一停，标记只是标记
+    // Lock the cluster the agent is adjudicating (0025 fifth slice): the task is running, is marked adjudicating, and the switch is on;
+    // when all three hold, a person cannot adjudicate; once the task stops, the flag is only a flag
     sqlx::query("INSERT INTO jobs (kind, payload, status) VALUES ('govern', $1, 'running')")
         .bind(serde_json::json!({ "kb_id": s.kb }))
         .execute(pool)
@@ -570,7 +570,7 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
         "orion、mercury、zw23 等 agent 看"
     );
 
-    // 定时扫描：开关开着且有没看过的对 → 在；关了 → 不在
+    // Scheduled scan: switch on and an unseen pair → included; switched off → not included
     assert!(governance::due(pool).await?.contains(&s.kb));
     sqlx::query("UPDATE knowledge_bases SET governance = FALSE WHERE id = $1")
         .bind(s.kb)
@@ -580,7 +580,7 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 随便一个张伟的 id：原文工具要一个实体
+/// Any one Zhang Wei's id: the source-text tool needs an entity
 async fn alike_id(pool: &PgPool, kb: Uuid) -> anyhow::Result<Uuid> {
     let id: Uuid = sqlx::query_scalar(
         "SELECT id FROM entities WHERE kb_id = $1 AND canonical_name = 'Zhang Wei' LIMIT 1",

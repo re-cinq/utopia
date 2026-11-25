@@ -1,13 +1,13 @@
-//! 按名字找实体：名字完全相同的排在最前，再按度数。
+//! Find entities by name: exact-name matches come first, then by degree.
 //!
-//! 从前只按度数排、截在 `limit` 上。问「Apple」而库里有九个事实更多的「Apple Store …」，
-//! 叫 Apple 的那个排到第十——对话与 MCP 的工具只读前八条，于是它找不到，按名字读事实时
-//! 读成了另一个。别名同理：「IBM」是 International Business Machines 的一个名字（0041），
-//! 问 IBM 的人要的就是它。
+//! Previously it ordered by degree only and cut off at `limit`. Asking for "Apple" while the KB holds an "Apple Store …" with nine more facts pushed the entity
+//! called Apple to tenth place — the chat and MCP tools only read the first eight, so it was not found, and reading facts by name
+//! read another entity's facts instead. Aliases likewise: "IBM" is a name of International Business Machines (0041), and
+//! anyone asking for IBM wants that one.
 //!
-//! 回放那一支多绑一个时刻参数，顺序跟着挪了一位，所以也要走一遍。
+//! The replay branch binds one more moment parameter and shifts the order by one place, so it is walked through as well.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is not set. It builds and tears down its own data and never touches an existing DB.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -26,7 +26,7 @@ async fn entity(pool: &PgPool, kb: Uuid, ty: Uuid, name: &str) -> anyhow::Result
     Ok(id)
 }
 
-/// 一条事实，让 `subject` 的度数加一
+/// One fact, adding one to the degree of `subject`
 async fn busy(
     pool: &PgPool,
     kb: Uuid,
@@ -98,7 +98,7 @@ async fn a_search_puts_the_exact_name_first() -> anyhow::Result<()> {
         .await?;
         let city = entity(&pool, kb, ty, "Cupertino").await?;
 
-        // 叫 Apple 的没有事实；九个名字里带 Apple 的各有一条，度数都比它高
+        // The one called Apple has no facts; each of the nine with Apple in their name has one, so their degrees are all higher
         let apple = entity(&pool, kb, ty, "Apple").await?;
         for i in 1..=9 {
             let store = entity(&pool, kb, ty, &format!("Apple Store {i}")).await?;
@@ -110,7 +110,7 @@ async fn a_search_puts_the_exact_name_first() -> anyhow::Result<()> {
         assert_eq!(rows.len(), 8);
         assert_eq!(rows[0].id, apple, "the entity named exactly Apple comes first");
 
-        // 回放那一支：时刻参数挪了一位，同名仍在最前
+        // The replay branch: the moment parameter has shifted by one place, and the same name is still first
         let (rows, _) = utopia_store::graph::search_entities(
             &pool,
             kb,
@@ -123,7 +123,7 @@ async fn a_search_puts_the_exact_name_first() -> anyhow::Result<()> {
         .await?;
         assert_eq!(rows[0].id, apple, "the same holds when replaying a moment");
 
-        // 别名：IBM 是 International Business Machines 的一个名字，大小写不论
+        // Alias: IBM is a name of International Business Machines, case-insensitive
         let ibm = entity(&pool, kb, ty, "International Business Machines").await?;
         utopia_store::names::record(&pool, kb, ibm, "IBM", None, None).await?;
         for i in 1..=9 {

@@ -1,13 +1,13 @@
-//! 衰减的淘汰计划（RC-003），打在真库上。
+//! Decay's eviction plan (RC-003), tested against a real database.
 //!
-//! 要钉住的行为：
+//! Behavior to pin:
 //!
-//! - **超出 max_items 的源才被排上**，没开衰减的、没超出的不排
-//! - **只在比 min_age_days 老的文档里挑**，新的碰不得
-//! - **挑分最低的，多出几个拿几个**；最近被检索的、名字带 decision 的分高，留下（久没人读的算陈旧，各扣一分）
-//! - **分相同的，旧的先走**
+//! - **Only sources over max_items get queued**; sources without decay on, or not over the limit, are not queued
+//! - **Only chooses among documents older than min_age_days**; new ones must not be touched
+//! - **Picks the lowest scores, and gives up exactly as many as are over**; those recently retrieved, or whose name contains "decision", score higher and are kept (one that nobody has read for a long time counts as stale, losing a point each)
+//! - **Among equal scores, the older one goes first**
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 
 use chrono::{Duration, Utc};
 use sqlx::PgPool;

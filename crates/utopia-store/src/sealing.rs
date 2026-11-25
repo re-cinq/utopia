@@ -1,16 +1,16 @@
-//! 凭据补封：升级前落库的明文凭据，在钥匙装好之后的第一次启动补成密文。
+//! Seal backfill: plaintext credentials stored before the upgrade become ciphertext on the first start after the key is installed.
 //!
-//! 幂等，每次启动都跑：判据是「值没有 `enc:v1:` 前缀」，已封的不动。四处凭据
-//! （`llm_settings` 四把 key、`data_sources.conn_string`、`sources.config` 的凭据键、
-//! `sources.ingest_token`）在这里各扫一遍——加了新的存放处要同时加到这里，否则那一处
-//! 会一直是明文而没有任何地方报警。
+//! Idempotent, runs on every start: the test is whether the value lacks the `enc:v1:` prefix, and sealed values are left alone. Four places hold credentials
+//! (the four `llm_settings` keys, `data_sources.conn_string`, the credential keys of `sources.config`,
+//! `sources.ingest_token`) are each scanned here — adding a new storage place means adding it here too, otherwise that one
+//! stays plaintext with no alarm anywhere.
 
 use sqlx::PgPool;
 use utopia_core::models::SOURCE_SECRET_KEYS;
 use utopia_core::{secrets, AppResult};
 use uuid::Uuid;
 
-/// 返回补封的行数。没装钥匙时什么都不做
+/// Returns the number of rows sealed. When no key is installed, does nothing
 pub async fn backfill(pool: &PgPool) -> AppResult<usize> {
     if !secrets::is_ready() {
         return Ok(0);
@@ -20,7 +20,7 @@ pub async fn backfill(pool: &PgPool) -> AppResult<usize> {
         + seal_sources(pool, None).await?)
 }
 
-/// `only` = 只补这一个工作区（测试用；启动时传 None 扫全部）
+/// `only` = backfill only this one workspace (for tests; at startup pass None to scan all)
 pub async fn seal_llm_settings(pool: &PgPool, only: Option<Uuid>) -> AppResult<usize> {
     type Keys = (
         Uuid,
@@ -78,7 +78,7 @@ pub async fn seal_data_sources(pool: &PgPool, only: Option<Uuid>) -> AppResult<u
     Ok(n)
 }
 
-/// 来源表小，整张读回来在 Rust 里判：凭据键藏在 JSON 里，SQL 判起来反而绕
+/// The sources table is small, so read the whole table back and judge in Rust: credential keys hide inside JSON, which makes SQL awkward here
 pub async fn seal_sources(pool: &PgPool, only: Option<Uuid>) -> AppResult<usize> {
     let rows: Vec<(Uuid, serde_json::Value, Option<String>)> = sqlx::query_as(
         "SELECT id, config, ingest_token FROM sources WHERE ($1::uuid IS NULL OR id = $1)",

@@ -1,13 +1,13 @@
-//! 源的衰减开关与文档的检索记录（RC-003），打在真库上。
+//! A source's decay switch and a document's retrieval record (RC-003), hit against a real database.
 //!
-//! 要钉住的行为：
+//! Behaviour to pin:
 //!
-//! - **关着是默认**：新建的源 `decay` 为 NULL，没人要求就什么都不多写
-//! - **开关是个对象**：`decay` 只收 JSON 对象，别的形状数据库拒绝
-//! - **半衰期有范围**：`document_salience.half_life_days` 在 1 到 365 之外数据库拒绝
-//! - **跟着文档走**：文档删掉，它的检索记录一起没
+//! - **Off is the default**: a newly created source has `decay` NULL, and nothing extra is written unless someone asks
+//! - **The switch is an object**: `decay` accepts only a JSON object; the database rejects other shapes
+//! - **The half-life has a range**: the database rejects `document_salience.half_life_days` outside 1 to 365
+//! - **Follows the document**: delete the document and its retrieval record goes with it
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` it skips rather than fails. It sets up and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use uuid::Uuid;

@@ -1,13 +1,13 @@
-//! 一段状态先被观察到起点，后来的文档说它某天结束了：账本关上那一段，不另立一行。
+//! A span whose start was observed first, then a later document says it ended on some day: the ledger closes that span rather than creating a new row.
 //!
-//! 「2024-11-05 列入失信名单」之后读到「2025-03-12 移出名单」——移出那条没有起点、
-//! 只有终点，它说的是同一段的结束。旧行作废、修正行链回、边上的属性随行（0037）。
+//! After "2024-11-05 put on the blacklist" comes "2025-03-12 removed from the list": the removal has no start,
+//! only an end; it states the end of the same span. The old row is voided, the correction row chains back, and attributes on the edge travel with the row (0037).
 
 use sqlx::PgPool;
 use uuid::Uuid;
 
 type Stamp = chrono::DateTime<chrono::Utc>;
-/// 活着的一行：id、起、止、链回哪一行
+/// A live row: id, start, end, and which row it chains back to
 type LiveRow = (Uuid, Option<Stamp>, Option<Stamp>, Option<Uuid>);
 
 fn day(s: &str) -> Stamp {
@@ -135,7 +135,7 @@ async fn an_end_date_closes_the_open_span() -> anyhow::Result<()> {
         .await?;
     }
 
-    // 第一份文档：从 2020-01-10 起任董事
+    // First document: serving as director from 2020-01-10
     let (first, created) = utopia_store::graph::insert_fact(
         &pool,
         kb,
@@ -158,7 +158,7 @@ async fn an_end_date_closes_the_open_span() -> anyhow::Result<()> {
     let value = serde_json::json!({ "value": "董事" });
     utopia_store::graph::upsert_fact_qualifier(&pool, first, title, &value).await?;
 
-    // 第二份文档：2024-04-30 辞去董事职务——没起点、只有终点
+    // Second document: resigned as director on 2024-04-30: no start, only an end
     let (closed, created) = utopia_store::graph::insert_fact(
         &pool,
         kb,
@@ -196,7 +196,7 @@ async fn an_end_date_closes_the_open_span() -> anyhow::Result<()> {
     assert_eq!(quals[&closed].len(), 1, "职务随修正行");
     assert_eq!(quals[&closed][0].value, Some(value));
 
-    // 第三份文档又说了一遍同一天离任：同一件事，复用那一行
+    // A third document states the same departure day: the same event, so reuse that row
     let (again, created) = utopia_store::graph::insert_fact(
         &pool,
         kb,
@@ -210,7 +210,7 @@ async fn an_end_date_closes_the_open_span() -> anyhow::Result<()> {
     assert_eq!(again, closed);
     assert!(!created);
 
-    // 处罚决定书里提到「董事李文博」，没写日期，文档日期在任期之内：说的是这一段
+    // The penalty decision mentions "director Li Wenbo" with no date; the document date falls within the tenure: this speaks of this span
     let (mentioned, created) = utopia_store::graph::insert_fact(
         &pool,
         kb,
@@ -223,7 +223,7 @@ async fn an_end_date_closes_the_open_span() -> anyhow::Result<()> {
     .await?;
     assert_eq!(mentioned, closed, "任期内的无日期提及并进关上的那一段");
     assert!(!created);
-    // 任期之后的无日期提及：可能是再次任职，另立一条，等人裁
+    // A mention with no date after the tenure: could be a re-appointment, so a separate row, left for a person to rule
     let (later, created) = utopia_store::graph::insert_fact(
         &pool,
         kb,
@@ -248,8 +248,8 @@ async fn an_end_date_closes_the_open_span() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 同一段的三种来法，都只剩一条活着的行：
-/// 起点先到、后来的文档把整段说全；终点先到（并行抽取时说结束的那份先落库）、起点后到。
+/// Three ways the same span arrives, and only one live row remains:
+/// the start comes first and a later document states the whole span; or the end comes first (the document that says it ended is stored first during parallel extraction) and the start arrives later.
 #[tokio::test]
 async fn a_span_told_in_two_halves_is_one_row() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -314,7 +314,7 @@ async fn a_span_told_in_two_halves_is_one_row() -> anyhow::Result<()> {
     }
     let (court, a, b) = (ids[0], ids[1], ids[2]);
 
-    // 起点先到，后来的文档把整段说全（同起点 + 终点）→ 关上，不另立
+    // Start first, a later document states the whole span (same start + end) → closed, no new row
     let (first, _) = utopia_store::graph::insert_fact(
         &pool,
         kb,
@@ -342,7 +342,7 @@ async fn a_span_told_in_two_halves_is_one_row() -> anyhow::Result<()> {
     assert_eq!(rows[0].2, Some(day("2025-03-12")));
     assert_eq!(rows[0].3, Some(first));
 
-    // 终点先到（说结束的那份文档先落库），起点后到 → 一行，两头都有
+    // End first (the document that says it ended is stored first), start arrives later → one row, with both ends present
     let (end_only, _) = utopia_store::graph::insert_fact(
         &pool,
         kb,

@@ -1,13 +1,13 @@
-//! 导出取数面：单事务快照与游标边界。
+//! Export read surfaces: a single-transaction snapshot and cursor boundaries.
 //!
-//! 判定在导出取数层：`provenance_integrity` 与各 page 函数吃调用方的事务——
-//! 同一条连接里种行、读页、断言。除「中途提交」那条探针外（它要两条连接），
-//! 所有种子与坏行都在一个**回滚的事务**里造：快照库上跑这组测试不会留下
-//! 任何一行。
+//! The judgment lives in the export read layer: `provenance_integrity` and each page function take the caller's transaction:
+//! seeding rows, reading pages and asserting all happen on one connection. Apart from the "commit mid-way" probe (which needs two connections),
+//! all seeds and bad rows are built inside one **rolled-back transaction**, so running this set of tests on a snapshot database leaves
+//! no row behind.
 //!
-//! 坏行靠 `SET LOCAL session_replication_role='replica'` 造：只关本事务的
-//! 触发器（0070 装上的那些也一并关），回滚即恢复——要模拟的正是绕过触发器
-//! 进来的存量坏行。
+//! Bad rows are built with `SET LOCAL session_replication_role='replica'`: it disables only this transaction's
+//! triggers (including those that 0070 installed), and rollback restores them. What is being simulated is exactly
+//! stored bad rows that slipped in by bypassing the triggers.
 
 use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use utopia_store::export;
@@ -20,8 +20,8 @@ struct Fixture {
     attr_a: Uuid,
 }
 
-/// 两个库；A 库一份文档一段一实体一事实一条证据一属性，B 库空着备查。
-/// 全部在调用方的事务里落——回滚即清场，一个 DELETE 都不用
+/// Two libraries; library A has one document, one passage, one entity, one fact, one piece of evidence and one attribute; library B is left empty for reference.
+/// Everything is written inside the caller's transaction: rollback clears the scene, no DELETE needed
 async fn seed_tx(tx: &mut Transaction<'_, Postgres>) -> anyhow::Result<Fixture> {
     let (org, ws, a, b) = (
         Uuid::now_v7(),
@@ -120,8 +120,8 @@ async fn seed_tx(tx: &mut Transaction<'_, Postgres>) -> anyhow::Result<Fixture> 
     })
 }
 
-/// 文档过户的极端形态（replica）：文档挪到 B 之后，A 的证据行还指着它——
-/// A 的导出宁拒也不能把别库文档铸进本库 IRI；B 没指着它，照常放行
+/// The extreme form of document transfer (replica): after the document moves to B, A's evidence row still points at it:
+/// A's export would rather refuse than mint another library's document into this library's IRI; B does not point at it, so it passes as usual
 #[tokio::test]
 async fn a_reassigned_document_breaks_the_edges_that_point_at_it() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -141,7 +141,7 @@ async fn a_reassigned_document_breaks_the_edges_that_point_at_it() -> anyhow::Re
         .execute(&mut *tx)
         .await?;
 
-    // A 的导出整体拒：evidence.document 还指着那份已经不属于本库的文档
+    // A's export is refused as a whole: evidence.document still points at a document that no longer belongs to this library
     let err = export::provenance_integrity(&mut tx, f.a).await;
     let msg = format!("{err:?}");
     assert!(err.is_err(), "文档过户后 A 的出处链必须拒导");
@@ -151,16 +151,16 @@ async fn a_reassigned_document_breaks_the_edges_that_point_at_it() -> anyhow::Re
     );
     assert!(export::facts_page(&mut tx, f.a, None).await.is_err());
 
-    // B 收下了文档，但它没有任何指着 A 的行：它的体检照样过
+    // B has received the document, but no row points at A from it: its health check still passes
     export::provenance_integrity(&mut tx, f.b).await?;
     tx.rollback().await?;
     Ok(())
 }
 
-/// 导出中途落下的写进不了这一份。tx 起 REPEATABLE READ 快照后，
-/// 另一条连接提交一条新谓词+引用它的派生——本事务的词汇表页与派生页
-/// 都看不见它：没有半个进来的引用，也没有悬空的 wasGeneratedBy。
-/// 这条要两条连接，种子必须提交——清场照常走
+/// A write that lands mid-export does not get into this copy. After the tx starts a REPEATABLE READ snapshot,
+/// another connection commits a new predicate plus a derivation that references it: this transaction's vocabulary page and derivation page
+/// both cannot see it: no half-arrived reference, and no dangling wasGeneratedBy.
+/// This case needs two connections, so the seed must commit: clean-up still runs as usual
 #[tokio::test]
 async fn a_mid_stream_commit_stays_outside_the_snapshot() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -193,7 +193,7 @@ async fn a_mid_stream_commit_stays_outside_the_snapshot() -> anyhow::Result<()> 
         .execute(&pool)
         .await?;
 
-    // 先埋一条谓词和一条引用它的派生，作为「快照内」基线
+    // First bury one predicate and one derivation that references it, as the in-snapshot baseline
     let (rule0, pred0) = (Uuid::now_v7(), Uuid::now_v7());
     sqlx::query(
         "INSERT INTO relation_types (id, kb_id, key, label, kind)
@@ -224,7 +224,7 @@ async fn a_mid_stream_commit_stays_outside_the_snapshot() -> anyhow::Result<()> 
     .execute(&pool)
     .await?;
 
-    // 导出事务：只读 REPEATABLE READ，快照从第一条语句起钉死
+    // Export transaction: read-only REPEATABLE READ, the snapshot is pinned from the first statement
     let mut conn = pool.acquire().await?;
     let mut tx = conn.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -233,7 +233,7 @@ async fn a_mid_stream_commit_stays_outside_the_snapshot() -> anyhow::Result<()> 
     export::provenance_integrity(&mut tx, a).await?;
     let _ = export::entities_page(&mut tx, a, None).await?;
 
-    // 中途：另一条连接提交一条新谓词+引用它的派生事实
+    // Midway: another connection commits a new predicate plus a derived fact that references it
     let (rule_late, pred_late, derived_late) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     sqlx::query(
         "INSERT INTO relation_types (id, kb_id, key, label, kind)
@@ -264,7 +264,7 @@ async fn a_mid_stream_commit_stays_outside_the_snapshot() -> anyhow::Result<()> 
     .execute(&pool)
     .await?;
 
-    // 快照里：词汇表页、派生页都不该有中途进来的行——一致性是整份的
+    // In the snapshot: neither the vocabulary page nor the derivation page should have rows that arrived midway: consistency is for the whole
     let relations = export::relations(&mut tx, a).await?;
     assert!(
         !relations.iter().any(|r| r.id == pred_late),
@@ -279,7 +279,7 @@ async fn a_mid_stream_commit_stays_outside_the_snapshot() -> anyhow::Result<()> 
     tx.rollback().await?;
     drop(conn);
 
-    // 新事务是新的快照：两条都该在
+    // A new transaction is a new snapshot: both should be present
     let mut tx2 = pool.begin().await?;
     let relations = export::relations(&mut tx2, a).await?;
     assert!(relations.iter().any(|r| r.id == pred_late));
@@ -298,10 +298,10 @@ async fn a_mid_stream_commit_stays_outside_the_snapshot() -> anyhow::Result<()> 
     Ok(())
 }
 
-/// NIL 是合法 uuid——schema 不拦它当主键。按序它排在最前；首页谓词若是
-/// `id > 哨兵`，这一行就永远进不了任何一页。而指向它的引用照样解析过去：
-/// 节点缺席、边在场，导出里就悬一条没有本体的引用。所有按 id 翻页的
-/// 取数口——实体、事实、派生、文档——第一页都得把它翻出来
+/// NIL is a legal uuid: the schema does not block it as a primary key. Sorted, it comes first; if the first-page predicate is
+/// `id > sentinel`, this row never makes it onto any page. And references pointing at it still resolve:
+/// the node is absent while the edge is present, so the export has a dangling reference with no entity behind it. Every read
+/// that pages by id (entities, facts, derivations, documents) must page it out on its first page
 #[tokio::test]
 async fn a_nil_id_row_still_reaches_the_first_page() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -314,8 +314,8 @@ async fn a_nil_id_row_still_reaches_the_first_page() -> anyhow::Result<()> {
     let f = seed_tx(&mut tx).await?;
     let nil = Uuid::nil();
 
-    // 每张走 id 游标的表各埋一行 NIL 主键；引用一律指回这些 NIL 行自己，
-    // 外键不因 NIL 失效——它们跟其他行一样合法
+    // Each table that uses an id cursor gets one NIL primary-key row; references all point back at these NIL rows themselves,
+    // and the foreign keys are not broken by NIL: they are as legal as any other row
     sqlx::query("INSERT INTO entities (id, kb_id, canonical_name) VALUES ($1, $2, 'nil-e')")
         .bind(nil)
         .bind(f.a)

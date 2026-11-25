@@ -18,7 +18,7 @@ pub async fn list(pool: &PgPool, workspace_id: Uuid) -> AppResult<Vec<MemberView
     Ok(rows)
 }
 
-/// 部署内全部用户（添加成员的选人器）。
+/// All users in the deployment (the picker for adding members).
 pub async fn org_users(pool: &PgPool, org_id: Uuid) -> AppResult<Vec<OrgUser>> {
     let rows = sqlx::query_as(
         "SELECT id, email, display_name, is_admin FROM users
@@ -48,16 +48,16 @@ pub async fn current_role(
     crate::workspaces::role_of(pool, user_id, workspace_id).await
 }
 
-/// 设置/添加成员角色（upsert）。防呆逻辑在 API 层。
+/// Set/add a member role (upsert). Guard logic lives in the API layer.
 pub async fn set_role(
     pool: &PgPool,
     workspace_id: Uuid,
     user_id: Uuid,
     role: Role,
 ) -> AppResult<()> {
-    // 目标用户必须存在于本组织,**而且在职**——否则能把一个已停用的账号
-    // 加进工作区,它在成员列表里又看不见（那条查询过滤了停用的）,
-    // 于是成了一条谁也发现不了的授权
+    // The target user must exist in this org, **and be active**: otherwise one could add a deactivated account
+    // to the workspace, which then cannot be seen in the member list (that query filters out deactivated ones),
+    // and so becomes an authorization nobody can discover
     let exists: Option<(Uuid,)> =
         sqlx::query_as("SELECT id FROM users WHERE id = $1 AND deactivated_at IS NULL")
             .bind(user_id)
@@ -90,12 +90,12 @@ pub async fn remove(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> AppResu
     Ok(())
 }
 
-/// 已停用的账号。**没有这一条，恢复就够不着**——停用的人从所有列表里消失，
-/// 管理员拿不到他的 id，而恢复接口要的正是那个 id。
+/// Deactivated accounts. **Without this one, restore is out of reach**: deactivated people vanish from every list,
+/// so admins cannot get their id, and the restore endpoint takes exactly that id.
 ///
-/// 与 [`org_users`] 分成两个查询而不是加一个「含停用」的开关：读的人不一样
-/// （那个喂选人器，这个喂管理页的一小块），而一个布尔参数会让两处的调用点
-/// 都得先想一下自己要哪一种。
+/// Kept as two queries rather than one [`org_users`] with an "include deactivated" switch: the readers differ
+/// (one feeds the picker, the other a small block of the admin page), and a boolean parameter would make the call sites
+/// in both places each stop and think about which one they want.
 pub async fn deactivated_users(pool: &PgPool, org_id: Uuid) -> AppResult<Vec<OrgUser>> {
     Ok(sqlx::query_as(
         "SELECT id, email, display_name, is_admin FROM users

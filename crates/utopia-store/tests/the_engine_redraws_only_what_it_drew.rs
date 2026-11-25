@@ -1,12 +1,12 @@
-//! 引擎只重画自己画的终点（#679 第三轮评审的复现，留作回归）。
+//! The engine redraws only the endpoints it drew itself (a reproduction of the #679 third-round review, kept as a regression).
 //!
-//! 第二版把「引擎画的终点」记在行上、每次一次重算。评审又找出它碰坏的地方：两侧都唯一的
-//! 关系一侧关上、另一侧又打开；原文说已经结束的旧值被当成后任，关掉了当下的值；撤回合并
-//! 让记录轴回放合并窗口时答案变了；删除文档读名单早于上锁；改写把没裁的冲突撤下、把人裁过
-//! 的冲突又问一遍；原文说出的终点并进引擎关上的行之后仍被重算；删掉的文档还在给行排序；
-//! 证据写到刚被改写掉的旧行上；说不出时间的值谁先到结果不同；迁移之前关上的行永远不重算。
+//! The second version recorded "endpoints the engine drew" on the row and recomputed them each time. The review found where else it broke: a relation unique on both sides
+//! closed on one side and opened on the other; an old value the source says had already ended was taken as the successor and closed the current value; undoing a merge
+//! made the record-axis replay of the merge window return a different answer; deleting a document read the roster before taking the lock; a rewrite withdrew a conflict nobody had ruled on and re-asked
+//! one a person had ruled on; an end stated by the source was still recomputed after being merged into a row the engine had closed; a deleted document still ordered rows;
+//! evidence was written onto an old row that had just been rewritten; for a value with no time, whichever arrived first gave a different result; rows closed before the migration were never recomputed.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` it skips rather than fails. It sets up and tears down its own data and never touches an existing database.
 
 use serde_json::json;
 use sqlx::PgPool;
@@ -87,7 +87,7 @@ fn t(day: &str) -> chrono::DateTime<chrono::Utc> {
     format!("{day}T00:00:00Z").parse().unwrap()
 }
 
-/// 一次观察：值、起止、出自哪天的文档、置信度
+/// One observation: value, start and end, the document's date it came from, and confidence
 #[derive(Clone, Copy)]
 struct Seen<'a> {
     subject: Uuid,
@@ -97,7 +97,7 @@ struct Seen<'a> {
     ended_unknown: bool,
     doc: Option<&'a str>,
     confidence: f32,
-    /// 这次观察出自一块看图描述出来的文字（0040 决定 4）：它不许单独关掉一段正确的旧值
+    /// This observation came from text describing a picture (0040 decision 4): it may not alone close a correct older span
     described: bool,
 }
 
@@ -114,7 +114,7 @@ fn seen<'a>(f: &Fixture, value: &'a str, from: &'a str) -> Seen<'a> {
     }
 }
 
-/// 一份自带日期的文档，一个分块
+/// One document that carries its own date, one chunk
 async fn document(pool: &PgPool, kb: Uuid, day: &str, text: &str) -> anyhow::Result<(Uuid, Uuid)> {
     let (d, c) = (Uuid::now_v7(), Uuid::now_v7());
     sqlx::query(
@@ -139,7 +139,7 @@ async fn document(pool: &PgPool, kb: Uuid, day: &str, text: &str) -> anyhow::Res
     Ok((d, c))
 }
 
-/// 抽取的写法：落库（或并进已有断言）、写证据、对账
+/// The extraction pattern: stored (or merged into an existing assertion), evidence written, reconciled
 async fn observe(pool: &PgPool, f: &Fixture, x: Seen<'_>) -> anyhow::Result<Uuid> {
     let mut validity = Validity {
         from: x.from.map(t),
@@ -172,7 +172,7 @@ async fn observe(pool: &PgPool, f: &Fixture, x: Seen<'_>) -> anyhow::Result<Uuid
     )
     .await?;
     if x.from.is_none() && x.doc.is_none() {
-        // 模拟文档没有时间（0064），不使用人工写入口的此刻见证。
+        // The simulated document has no time (0064), so it does not use the moment-of-entry witness of the manual entry point.
         sqlx::query("UPDATE facts SET attested_from = NULL WHERE id = $1")
             .bind(id)
             .execute(pool)
@@ -180,7 +180,7 @@ async fn observe(pool: &PgPool, f: &Fixture, x: Seen<'_>) -> anyhow::Result<Uuid
     }
     if let Some(c) = chunk {
         if x.described {
-            // 描述出来的块必须带锚（0058 的 CHECK）：图在文件里的哪一块
+            // A described chunk must carry an anchor (0058's CHECK): which chunk in the file the diagram is in
             sqlx::query(
                 "UPDATE chunks SET origin = 'described', origin_model = 'test-vision',
                         anchor = jsonb_build_object('page', 1, 'image', 0) WHERE id = $1",
@@ -207,7 +207,7 @@ async fn observe(pool: &PgPool, f: &Fixture, x: Seen<'_>) -> anyhow::Result<Uuid
     Ok(id)
 }
 
-/// (值, 起点, 终点, 终点精度, 终点锚点)
+/// (value, start, end, end precision, end anchor)
 type Seg = (
     String,
     Option<String>,
@@ -295,8 +295,8 @@ async fn pool() -> anyhow::Result<Option<PgPool>> {
     ))
 }
 
-/// 「一个人同时只领导一个项目，一个项目同时只有一个领导」：一行在两条时间线上。
-/// Pat 先领导 A、后领导 B，A 关在 B 开始时；再读到一遍「Pat 领导 A」，什么都不变
+/// "One person leads only one project at a time, and one project has only one leader": a row sits on two timelines.
+/// Pat leads A first, then B; A closes when B starts; reading "Pat leads A" again changes nothing
 #[tokio::test]
 async fn a_relation_unique_on_both_sides_does_not_flip_between_them() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -391,8 +391,8 @@ async fn a_relation_unique_on_both_sides_does_not_flip_between_them() -> anyhow:
     Ok(())
 }
 
-/// 原文说一个旧值已经结束（「HPBB1 不再是房东」出自 2021 年的文件）：那份文件的日期只说明
-/// 那天之前它结束了，不能把它排在 2021 年、去关上当下的值
+/// The source says an older value had already ended ("HPBB1 is no longer the landlord", from a 2021 filing): that file's date only shows
+/// that it had ended before that day; it must not be placed in 2021 and used to close the current value
 #[tokio::test]
 async fn a_value_the_text_says_has_ended_does_not_close_the_current_one() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -431,7 +431,7 @@ async fn a_value_the_text_says_has_ended_does_not_close_the_current_one() -> any
     let recital = open_rows(&pool, &f, f.lease).await?;
     cleanup(&pool, &f).await?;
 
-    // 结束在一个写明的日子，没有起点，出自一份更晚的文件
+    // Ends on a stated day, no start, from a later filing
     let f = seed(&pool).await?;
     observe(&pool, &f, seen(&f, "NEW", "2020-01-01")).await?;
     observe(
@@ -451,8 +451,8 @@ async fn a_value_the_text_says_has_ended_does_not_close_the_current_one() -> any
     Ok(())
 }
 
-/// 合并；合并之后到了一个值，关上了搬来的那一行；撤回。回放合并窗口里的某一刻，
-/// 撤回之前问与之后问答案一样
+/// A merge; after the merge a value arrived, closing the moved-in row; then undo. Asking about a moment in the replayed merge window,
+/// the answer is the same before and after the undo
 #[tokio::test]
 async fn a_revert_does_not_rewrite_what_the_merge_window_held() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -509,7 +509,7 @@ async fn a_revert_does_not_rewrite_what_the_merge_window_held() -> anyhow::Resul
     Ok(())
 }
 
-/// 删除文档等锁的时候，那一行被时间线重算改写成了新的一行：锁上之后重读名单，新行一并作废
+/// While deleting the document waited for the lock, that row was rewritten by a timeline recompute into a new row: after locking, reread the roster, and the new row is voided too
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_deletion_that_waited_for_the_lock_still_takes_the_rewritten_row() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -529,7 +529,7 @@ async fn a_deletion_that_waited_for_the_lock_still_takes_the_rewritten_row() -> 
         .bind(a)
         .fetch_one(&pool)
         .await?;
-    // 像一次时间线重算那样持着锁，把 A 改写成新的一行
+    // Holds the lock the way a timeline recompute does, rewriting A into a new row
     let key = format!("timeline:{}:{}:{}:SubjectSide", f.kb, f.lease, f.deadline);
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -577,7 +577,7 @@ async fn a_deletion_that_waited_for_the_lock_still_takes_the_rewritten_row() -> 
     Ok(())
 }
 
-/// 并行落库：证据不会写到刚被改写掉的旧行上，每一条现存的行都有证据
+/// Parallel storage: evidence is not written onto an old row that has just been rewritten; every existing row has evidence
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn evidence_follows_a_row_rewritten_while_it_was_written() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -614,7 +614,7 @@ async fn evidence_follows_a_row_rewritten_while_it_was_written() -> anyhow::Resu
     Ok(())
 }
 
-/// 人裁过「两个都留着」的一对，两行后来被改写，不再问第二遍
+/// A pair that a person ruled "keep both" on was later rewritten in both rows, and is not asked a second time
 #[tokio::test]
 async fn a_pair_a_person_kept_is_not_asked_again_after_a_rewrite() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -649,7 +649,7 @@ async fn a_pair_a_person_kept_is_not_asked_again_after_a_rewrite() -> anyhow::Re
     Ok(())
 }
 
-/// 同一天开始的两个值记了一对冲突；后来的值把两行都改写了，那对冲突还开着
+/// Two values starting on the same day recorded a conflict pair; a later value rewrote both rows, and the conflict pair is still open
 #[tokio::test]
 async fn an_unresolved_conflict_stays_open_when_its_rows_are_rewritten() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -667,7 +667,7 @@ async fn an_unresolved_conflict_stays_open_when_its_rows_are_rewritten() -> anyh
     Ok(())
 }
 
-/// 引擎把 A 关在 B 开始时；一份文件写明 A 到那天为止。后来 B 被驳回，A 仍然到那天为止
+/// The engine closed A at B's start; a filing states A ran until that day. Later B was rejected, and A still runs until that day
 #[tokio::test]
 async fn an_end_the_text_states_on_a_row_the_engine_closed_is_kept() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -694,7 +694,7 @@ async fn an_end_the_text_states_on_a_row_the_engine_closed_is_kept() -> anyhow::
     Ok(())
 }
 
-/// 删掉一个没起点的值最早那份文档：它不再在那天排进时间线，前任的锚点跟着往后挪
+/// Delete the earliest document for a value with no start: it no longer sorts into the timeline on that day, and the predecessor's anchor moves later with it
 #[tokio::test]
 async fn a_deleted_document_no_longer_dates_a_row() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -735,8 +735,8 @@ async fn a_deleted_document_no_longer_dates_a_row() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 一个说不出时间的值（没起点，也没有自带日期的证据）与一个有日期的值：谁先到都是同一对
-/// 冲突交给人，两边都开着
+/// A value whose time cannot be stated (no start, and no evidence carrying its own date) and a dated value: whichever arrives first, they form the same pair
+/// handed to a person for judgment, both sides still open
 #[tokio::test]
 async fn a_value_with_no_time_meets_a_dated_one_the_same_way_in_either_order() -> anyhow::Result<()>
 {
@@ -776,8 +776,8 @@ async fn a_value_with_no_time_meets_a_dated_one_the_same_way_in_either_order() -
     Ok(())
 }
 
-/// 迁移之前引擎关上的行由 0057 回填成引擎画的：已有的库再来两份晚到的补充协议，
-/// 时间线照样排得开。人关上的、原文说出终点的不回填
+/// Rows the engine closed before the migration are backfilled by 0057 as engine-drawn: an existing database gets two more late supplementary agreements, and
+/// the timeline still lays out fine. Rows closed by a person with the end stated in the source are not backfilled
 #[tokio::test]
 async fn the_migration_marks_the_ends_the_old_engine_drew() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -790,7 +790,7 @@ async fn the_migration_marks_the_ends_the_old_engine_drew() -> anyhow::Result<()
     let f = seed(&pool).await?;
     observe(&pool, &f, seen(&f, "v1", "2020-02-18")).await?;
     observe(&pool, &f, seen(&f, "v5", "2020-06-08")).await?;
-    // 人手动关上的一段，与引擎关的形状一样
+    // A span a person closed by hand has the same shape as one the engine closed
     let other = entity(&pool, f.kb, f.etype, "Other Lease", Uuid::now_v7()).await?;
     let by_hand = observe(
         &pool,
@@ -822,7 +822,7 @@ async fn the_migration_marks_the_ends_the_old_engine_drew() -> anyhow::Result<()
     .bind(by_hand)
     .execute(&pool)
     .await?;
-    // 迁移之前的库：这一列全是假
+    // A database from before the migration: this column is all false
     sqlx::query("UPDATE facts SET end_derived = FALSE WHERE kb_id = $1")
         .bind(f.kb)
         .execute(&pool)
@@ -844,8 +844,8 @@ async fn the_migration_marks_the_ends_the_old_engine_drew() -> anyhow::Result<()
     Ok(())
 }
 
-/// 连环合并里撤回头一环（#679 第四轮评审）：S 并进 T、T 再并进 C，撤回 S→T。
-/// S 的事实此刻挂在 C 身上，也要跟着 S 回去，C 的时间线上不留它
+/// Withdrawing the first link of a chained merge (#679 fourth-round review): S is merged into T, T into C; withdraw S→T.
+/// S's facts now hang off C and must go back with S, leaving none on C's timeline
 #[tokio::test]
 async fn undoing_the_first_merge_of_a_chain_brings_its_facts_home() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -877,7 +877,7 @@ async fn undoing_the_first_merge_of_a_chain_brings_its_facts_home() -> anyhow::R
     Ok(())
 }
 
-/// 撤回合并把合并之后改写出来的行送回源实体时，它们身上开着的冲突跟着走（#679 第四轮评审）
+/// When withdrawing a merge sends rows rewritten after the merge back to the source entity, the conflicts open on them go along (#679 fourth-round review)
 #[tokio::test]
 async fn a_revert_keeps_the_conflict_its_rows_carried() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -913,8 +913,8 @@ async fn a_revert_keeps_the_conflict_its_rows_carried() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 删一篇给几百个实体各记了一个属性的文档：改拿谓词一级的锁，删得掉，也都作废了。
-/// 逐条锁的时候几千条就要几千把锁，两万条时锁表装不下（#679 第四轮评审）
+/// Deleting a document that recorded one attribute each for hundreds of entities: it now takes a predicate-level lock, which is deletable, and all of them are voided.
+/// Locking row by row would take thousands of locks for thousands of rows, and at twenty thousand the lock table cannot hold them (#679 fourth-round review)
 #[tokio::test]
 async fn deleting_a_document_that_dates_many_timelines_still_works() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -922,7 +922,7 @@ async fn deleting_a_document_that_dates_many_timelines_still_works() -> anyhow::
     };
     let f = seed(&pool).await?;
     let (doc, chunk) = document(&pool, f.kb, "2020-01-01", "a table").await?;
-    // 默认 300 条走谓词锁那条路； 可以复现评审时锁表装不下的规模
+    // By default 300 rows take the predicate-lock path; it can reproduce the scale at which the lock table overflowed during the review
     let n: usize = std::env::var("REDRAW_BULK_N")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -961,8 +961,8 @@ async fn deleting_a_document_that_dates_many_timelines_still_works() -> anyhow::
     Ok(())
 }
 
-/// 删掉没起点那一行最早的证据文档：引擎的锚点挪到第二份文档，读出来的起点也跟着挪，
-/// 两段不叠；撤销删除又都回去（#679 第四轮评审）
+/// Delete the earliest evidence document for a row with no start: the engine's anchor moves to the second document, and the start read out moves with it,
+/// so the two spans do not overlap; undoing the deletion brings both back (#679 fourth-round review)
 #[tokio::test]
 async fn deleting_the_first_document_moves_the_read_start_with_the_anchor() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {

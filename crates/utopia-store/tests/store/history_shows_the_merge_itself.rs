@@ -1,15 +1,15 @@
-//! 合并本身也进这条认识轴（#337 的时钟接进 `entity_history`），打在真库上。
+//! The merge itself also enters this knowledge axis (the #337 clock is wired into `entity_history`), run against a real database.
 //!
-//! 从前 History 只看得见合并**顺手作废的那些事实**（`merged`），看不见合并这件事
-//! 本身：打开一个被并过的实体，界面在说结果，不说发生了什么。而合并是这条轴上
-//! 最大的一次认识改变——从此它和另一个实体算同一个东西。
+//! Previously History could only see the **facts the merge voided in passing** (`merged`), not the merge itself:
+//! open a merged entity and the interface states the outcome, not what happened. On this axis a merge is
+//! the largest single change of knowledge — from then on it and another entity count as one thing.
 //!
-//! 三件事各自会以不同的方式坏掉，所以分开断言：
-//! - **方向**：吸收了谁（`merged_in`）与被谁吸收（`merged_away`）在图上是两件事，
-//!   回滚也是按方向做的；同一句话说两头，读的人分不出谁并进了谁
-//! - **撤销的归因**：撤的人常常不是当初合的人，自动合并那一行的 `merged_by` 还是
-//!   NULL——所以撤销那一条要从审计里取人，不能借合并行的
-//! - **总数**：分页的总数漏掉这一支，翻到最后一页会少几条
+//! Three things each break in their own way, so they are asserted separately:
+//! - **Direction**: whom it absorbed (`merged_in`) and who absorbed it (`merged_away`) are two different things on the graph,
+//!   and rollback is also done by direction; saying both ends in one sentence leaves the reader unable to tell who merged into whom
+//! - **Attribution of a revert**: the person who reverts is often not the person who merged; an automatic merge's row keeps `merged_by`
+//!   NULL — so the revert entry must take the person from the audit log, not borrow it from the merge row
+//! - **Total count**: the paginated total misses this branch, so paging to the last page comes up a few short
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -21,13 +21,13 @@ fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
 struct Fixture {
     org: Uuid,
     kb: Uuid,
-    /// 留下的那个
+    /// The one that remains
     keeper: Uuid,
-    /// 四月被并进 keeper，至今仍并着
+    /// Merged into keeper in April, still merged
     absorbed: Uuid,
-    /// 五月被并进 keeper，六月撤销
+    /// Merged into keeper in May, reverted in June
     returned: Uuid,
-    /// 撤销那一下的人
+    /// The person who did the revert
     reverter: Uuid,
 }
 
@@ -87,11 +87,11 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         .await?;
     }
 
-    // 四月：absorbed 并进 keeper，自动裁决（merged_by 为空）
+    // April: absorbed merged into keeper, decided automatically (merged_by empty)
     utopia_store::resolution::merge_entities(pool, kb, absorbed, keeper, None, "test").await?;
     backdate(pool, absorbed, "2026-04-01T00:00:00Z", None).await?;
 
-    // 五月：returned 并进 keeper；六月由人撤销
+    // May: returned merged into keeper; reverted by a person in June
     let merge_id =
         utopia_store::resolution::merge_entities(pool, kb, returned, keeper, None, "test").await?;
     utopia_store::resolution::revert_merge(pool, kb, merge_id).await?;
@@ -102,7 +102,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         Some("2026-06-01T00:00:00Z"),
     )
     .await?;
-    // 撤销的人记在审计里（`merge.revert`），history 从那儿取归因
+    // The revert's person is recorded in the audit log (`merge.revert`); history takes attribution from there
     utopia_store::audit::record(
         pool,
         Some(kb),
@@ -124,7 +124,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     })
 }
 
-/// 合并的时刻由 `now()` 落库，测试要的是确定的日期。
+/// The merge moment is recorded by `now()`; the test wants a fixed date.
 async fn backdate(
     pool: &PgPool,
     source: Uuid,
@@ -148,7 +148,7 @@ async fn history_carries_the_merge_and_its_direction() -> anyhow::Result<()> {
     let pool = PgPool::connect(&url).await?;
     let f = seed(&pool).await?;
 
-    // 收编的那一头：两次并入 + 一次撤销
+    // The side that absorbed them: two merges plus one revert
     let (events, total) = utopia_store::graph::entity_history(&pool, f.kb, f.keeper, 50, 0).await?;
     let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
     assert_eq!(
@@ -167,7 +167,7 @@ async fn history_carries_the_merge_and_its_direction() -> anyhow::Result<()> {
     );
     assert_eq!(total, events.len() as i64, "总数漏了合并这一支");
 
-    // 对方的名字要在，否则界面上只剩一句「有实体并了进来」
+    // The other party's name must be present, otherwise the interface would only say "an entity was merged in"
     assert!(
         events
             .iter()
@@ -176,7 +176,7 @@ async fn history_carries_the_merge_and_its_direction() -> anyhow::Result<()> {
         "并入事件要带对方实体的名字"
     );
 
-    // 归因：合并是引擎自动裁的（merged_by 为空），撤销是人做的
+    // Attribution: the merge was decided automatically by the engine (merged_by empty), the revert was done by a person
     let merged_in = events.iter().find(|e| e.kind == "merged_in").unwrap();
     assert!(
         merged_in.actor_name.is_none(),
@@ -189,7 +189,7 @@ async fn history_carries_the_merge_and_its_direction() -> anyhow::Result<()> {
         "撤销的人从审计里取，而不是借合并行的 merged_by"
     );
 
-    // 被并走的那一头：方向相反，而且看得见自己是四月没的
+    // The side that was merged away: the opposite direction, and it is visible that it disappeared in April
     let (events, _) = utopia_store::graph::entity_history(&pool, f.kb, f.absorbed, 50, 0).await?;
     let away: Vec<_> = events.iter().filter(|e| e.kind == "merged_away").collect();
     assert_eq!(away.len(), 1, "它并进了别人，只有这一次");
@@ -199,7 +199,7 @@ async fn history_carries_the_merge_and_its_direction() -> anyhow::Result<()> {
         "它没吸收过谁"
     );
 
-    // 撤销过的那一头：并出去、又回来，两条都在
+    // The side that was reverted: merged away and back again, both entries are there
     let (events, _) = utopia_store::graph::entity_history(&pool, f.kb, f.returned, 50, 0).await?;
     let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
     assert!(

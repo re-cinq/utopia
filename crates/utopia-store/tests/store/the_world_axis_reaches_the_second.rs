@@ -1,12 +1,12 @@
-//! 世界轴到秒为止（0024），打在真库上。
+//! The world axis runs to the second (0024), run against a real DB.
 //!
-//! 钉三样，每一样都活在 SQL 或 SQL 约束里：
-//! - 分精度的事实存得进去，存的值截到整分——写入路径截一遍，数据库的 CHECK 再守一遍
-//! - 值与精度不一致的行（day 精度却带着 14 点）被 CHECK 挡在门外：三值逻辑不会放行
-//! - 派生行的精度跟着**赢下这一端的那条前提**走，不再取所有前提里最粗的——year 标在
-//!   一个 6 月 15 日的值上，正是这条不变量要消灭的矛盾
+//! Three things are pinned, each of which lives in SQL or an SQL constraint:
+//! - Facts with a precision can be stored, and the stored value is truncated to the whole minute — the write path truncates, and the DB CHECK guards it again
+//! - Rows whose value and precision disagree (day precision but carrying 14:00) are blocked at the door by the CHECK: three-valued logic does not let them through
+//! - A derived row's precision follows **the premise that wins this end**, rather than taking the coarsest of all premises — year tagged on
+//!   a value of 15 June is exactly the contradiction this invariant is meant to eliminate
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is not set. It builds and tears down its own data and never touches an existing DB.
 
 use sqlx::PgPool;
 use utopia_store::graph::Validity;
@@ -104,7 +104,7 @@ async fn a_stored_value_is_truncated_to_its_precision() -> anyhow::Result<()> {
     let f = seed(&pool).await?;
 
     let run = async {
-        // 记忆日志那一行：14:32 打的戳，精度到分。带着毫秒进来，存的是整分
+        // That memory-log row: stamped at 14:32, precision to the minute. It comes in with milliseconds, and the stored value is the whole minute
         let (id, _) = utopia_store::graph::insert_fact(
             &pool,
             f.kb,
@@ -120,7 +120,7 @@ async fn a_stored_value_is_truncated_to_its_precision() -> anyhow::Result<()> {
         assert_eq!(from, Some(t("2026-06-01T14:32:00Z")), "截到整分");
         assert_eq!(fp.as_deref(), Some("minute"));
 
-        // 人把它闭合在某个小时：闭合点截到整点
+        // A person closes it at some hour: the closing point is truncated to the whole hour
         let closed =
             utopia_store::temporal::close_superseded(&pool, id, t("2026-06-01T18:45:00Z"), "hour")
                 .await?
@@ -129,8 +129,8 @@ async fn a_stored_value_is_truncated_to_its_precision() -> anyhow::Result<()> {
         assert_eq!(to, Some(t("2026-06-01T18:00:00Z")), "小时精度就是整点");
         assert_eq!(tp.as_deref(), Some("hour"));
 
-        // 绕过写入路径直接塞一行值与精度不一致的：CHECK 挡住。**这条要真跑**——
-        // 三值逻辑里 NULL 会让 CHECK 静默放行，只有插一次才知道它没放
+        // A row whose value and precision disagree is inserted directly, bypassing the write path: the CHECK blocks it. **This one must actually run** —
+        // in three-valued logic a NULL lets a CHECK pass silently; only inserting once tells you it did not
         let bad = sqlx::query(
             "INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_id,
                                 valid_from, valid_from_precision)
@@ -147,7 +147,7 @@ async fn a_stored_value_is_truncated_to_its_precision() -> anyhow::Result<()> {
             .expect_err("day 精度带着 14 点，不该存得进去")
             .to_string();
         assert!(err.contains("facts_from_precision_matches_date"), "{err}");
-        // 精度不在梯子上的也挡
+        // Precision not on the ladder is also blocked
         let bad = sqlx::query(
             "INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_id,
                                 valid_from, valid_from_precision)
@@ -176,7 +176,7 @@ async fn a_stored_value_is_truncated_to_its_precision() -> anyhow::Result<()> {
     run
 }
 
-/// 派生的起点是前提里最晚的那个起点；精度就是那条前提的精度，不是所有前提里最粗的
+/// A derived start is the latest of the premises' starts; the precision is that premise's precision, not the coarsest of all premises
 #[tokio::test]
 async fn a_derived_bound_carries_the_precision_of_the_premise_that_set_it() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -186,7 +186,7 @@ async fn a_derived_bound_carries_the_precision_of_the_premise_that_set_it() -> a
     let f = seed(&pool).await?;
 
     let run = async {
-        // a ⊂ b 从 2020 年起（year）；b ⊂ c 从 2023-06-15 起（day）
+        // a ⊂ b from 2020 (year); b ⊂ c from 2023-06-15 (day)
         utopia_store::graph::insert_fact(
             &pool,
             f.kb,

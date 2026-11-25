@@ -1,8 +1,8 @@
-//! RC-009：一篇文档排着一份抽取时，再变一次不再多排一份。
+//! RC-009: while one extraction for a document is queued, a second change does not queue another.
 //!
-//! `extract_document` 只带文档 id，跑的时候读文档当下的块，所以同一篇排着的第二份读到的和
-//! 第一份一模一样。两处入队的载荷不同（一处多带提议人），按 `document_id` 比，不按整份载荷。
-//! 在跑的那份不算：它可能在新版本到之前就读完了，新版本得有自己的一次。
+//! `extract_document` carries only the document id and reads the document's current chunks when it runs, so a second queued copy reads the same
+//! as the first. The two enqueue sites carry different payloads (one also carries the proposer), so match by `document_id`, not by the whole payload.
+//! A running one does not count: it may have finished reading before the new version arrived, so the new version needs its own run.
 
 use sqlx::PgPool;
 use utopia_store::jobs;

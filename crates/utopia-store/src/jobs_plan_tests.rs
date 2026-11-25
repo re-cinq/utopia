@@ -1,7 +1,7 @@
-//! 排队前的「已有同样的在排或在跑」查找，不该去读那些早已结束的任务：生产的 jobs 表
-//! 260 万行、924 MB，几乎全是 done/failed，而每次入队都顺序扫一遍整张表。
+//! The "already pending or running" lookup before enqueueing should not read tasks that finished long ago: in production the jobs table
+//! has 2.6 million rows and 924 MB, nearly all done or failed, and every enqueue scans the whole table in order.
 //!
-//! 计划针对 jobs 的临时副本（统计信息只来自播种），共享库里并发的写入翻不了计划。
+//! The plan targets a temp copy of jobs (statistics come only from seeding), so concurrent writes in the shared database cannot flip the plan.
 use super::ENQUEUE_UNLESS_PENDING_SQL;
 use sqlx::postgres::PgPoolOptions;
 

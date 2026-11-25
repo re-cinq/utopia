@@ -1,14 +1,14 @@
-//! 类型化图谱是视图（0044 决定 3，0067、0068）：绑上的签名下的开放陈述算成类型化行，
-//! 几条陈述说同一件事就是一行，绑定变了行跟着变，跑多少遍结果一样。
+//! The typed graph is a view (0044 decision 3, 0067, 0068): an open statement under a bound signature becomes a typed row;
+//! several statements saying the same thing are one row; when the binding changes the row follows; the result is the same however many times it runs.
 //!
-//! 一条陈述「Harbor Bakery —is based in→ Port Ellen」，签名 (is based in, organization,
-//! place) 绑到 headquartered_in：算出一条类型化行，谓词是它，证据与限定抄过来，
-//! `from_statement_id` 指回陈述；再跑一遍什么都不动；带 mood 的陈述不算；另一份文档
-//! 的同一句并进同一行（两条来源、两条证据），它说的另一个 since 不跟进来，行只读建行那条的，它说的 until 行还没有、跟进来；作废其中一条陈述，行还在、来源少一条；
-//! 绑定翻成 reverse，旧行作废、新行主宾对调；绑定改成 none，行作废、不再补；
-//! 带 mood 的陈述重推、新块不再说 mood，就成一行。
+//! One statement "Harbor Bakery —is based in→ Port Ellen", with signature (is based in, organization,
+//! place) bound to headquartered_in: a typed row is computed, its predicate is that, evidence and qualifiers are copied over,
+//! `from_statement_id` points back to the statement; running again changes nothing; statements with a mood do not count; the same sentence from another document
+//! merges into the same row (two sources, two pieces of evidence); the other `since` it states does not follow in, the row keeps the one from the creating statement, and the `until` it states, which the row did not yet have, does follow; voiding one of the statements leaves the row, with one fewer source;
+//! the binding flipped to reverse: the old row is voided, and the new row has subject and object swapped; the binding changed to none: the row is voided and not filled in again;
+//! a statement with a mood re-pushed, where the new chunk no longer states the mood, becomes a row.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use sqlx::PgPool;
 use utopia_store::materialize::{materialize, Outcome};
@@ -43,7 +43,7 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
     .await?;
 
     let run = async {
-        // 两个类、一条属性
+        // Two classes, one attribute
         let (organization, place, hq) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
         for (id, key) in [(organization, "organization"), (place, "place")] {
             sqlx::query(
@@ -65,7 +65,7 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
         .execute(&pool)
         .await?;
 
-        // 两样东西；三条陈述：一条平常的，一条带 mood 的，一条另一份文档说的同一件事
+        // Two things; three statements: an ordinary one, one with a mood, and one from another document saying the same thing
         let (bakery, port) = (Uuid::now_v7(), Uuid::now_v7());
         for (id, type_id, name) in [(bakery, organization, "Harbor Bakery"), (port, place, "Port Ellen")] {
             sqlx::query(
@@ -78,8 +78,8 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
             .execute(&pool)
             .await?;
         }
-        // 先来一条没时间的裸陈述，再来两条带时间的：裸行会被带时间的行取代（supersedes），
-        // 来源要跟着搬到新行上
+        // First a bare statement with no time arrives, then two with times: the bare row is superseded by the timed row (supersedes),
+        // and the sources must move along to the new row
         let bare = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO facts (id, kb_id, subject_id, object_id, layer, phrase, confidence)
@@ -140,7 +140,7 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
         let stated_chunk = evidence_of(stated, "bakery.txt").await?;
         let again_chunk = evidence_of(again, "bakery-2.txt").await?;
         let planned_chunk = evidence_of(planned, "bakery-plan.txt").await?;
-        // 并进来的那条还说了 until：行没有这个角色，要跟进来
+        // The statement merged in also states an until: the row does not have this role, so it must follow in
         for (statement, chunk, role, value) in [
             (stated, stated_chunk, "since", "2019"),
             (again, again_chunk, "since", "2021"),
@@ -166,7 +166,7 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
         .execute(&pool)
         .await?;
 
-        // 两条签名都绑到 headquartered_in
+        // Both signatures bound to headquartered_in
         let binding = |phrase: &'static str| {
             let pool = pool.clone();
             async move {
@@ -190,9 +190,9 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
         binding("will move to").await?;
         binding("operates from").await?;
 
-        // 三条平常的陈述说的是同一件事：裸的那条先成一行，带时间的取代它（added 2，旧行作废、
-        // 来源搬过来），第三条并进去（merged 1）——最后一行，三条来源，两条证据；带 mood 的
-        // 那条不算
+        // Three ordinary statements saying the same thing: the bare one becomes a row first, the timed one supersedes it (added 2, old row voided,
+        // sources moved over), the third merges in (merged 1) — final: one row, three sources, two pieces of evidence; the one with a mood
+        // does not count
         let first = materialize(&pool, kb).await?;
         assert_eq!(first, Outcome { retired: 0, added: 2, merged: 1, implied: 0, corrected: 0, conflicts: 0 });
         let live = |pool: PgPool| async move {
@@ -210,7 +210,7 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
         let (typed_id, subject, object, predicate, from, vf, grade) = rows[0].clone();
         assert_eq!((subject, object, predicate, from), (bakery, port, hq, stated));
         assert!(vf.is_some(), "世界轴时间抄过来");
-        // 起点是怎么来的也抄过来：时态引擎在类型化的行上判，读不到等级就只能回去猜（0045 第 3 刀）
+        // How the start came about is copied over as well: the temporal engine judges on typed rows, and without a level it would have to guess again (0045 slice 3)
         assert_eq!(grade.as_deref(), Some("B"), "起点的来历随日期一起抄过来");
         let sources: i64 =
             sqlx::query_scalar("SELECT count(*) FROM typed_fact_sources WHERE fact_id = $1")
@@ -222,8 +222,8 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
                 .bind(typed_id)
                 .fetch_one(&pool)
                 .await?;
-        // 并进来的那条说 since 2021：行已有 since，不抄，只读建行那条的 2019；
-        // 它说的 until 行还没有，跟进来
+        // The statement merged in says since 2021: the row already has a since, so it is not copied; only the 2019 of the creating statement is read;
+        // the until it states, which the row does not yet have, follows in
         let qualifiers: Vec<(String, String, Uuid)> = sqlx::query_as(
             "SELECT role, value #>> '{}', chunk_id FROM statement_qualifiers
               WHERE fact_id = $1 ORDER BY role",
@@ -243,10 +243,10 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
             )
         );
 
-        // 再跑一遍：什么都不动
+        // Run again: nothing changes
         assert_eq!(materialize(&pool, kb).await?, Outcome::default());
 
-        // 一份文档撤了它那句：行还在，来源少一条
+        // One document retracts its sentence: the row stays, with one fewer source
         sqlx::query("UPDATE facts SET invalidated_at = now() WHERE id = $1")
             .bind(again)
             .execute(&pool)
@@ -260,12 +260,12 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
         assert_eq!(sources, 2);
         assert_eq!(live(pool.clone()).await?.len(), 1, "还有来源，行留着");
 
-        // 绑定翻成 reverse：旧行作废，新行主宾对调
+        // Binding flipped to reverse: old row voided, new row has subject and object swapped
         sqlx::query("UPDATE phrase_bindings SET direction = 'reverse' WHERE kb_id = $1 AND phrase IN ('is based in', 'operates from')")
             .bind(kb)
             .execute(&pool)
             .await?;
-        // 旧行的来源全不成立了：作废 1；反向重算时裸的那条先成行、带时间的再取代它：新建 2
+        // All sources of the old row no longer hold: 1 voided; on the reverse recompute the bare one becomes a row first, and the timed one then supersedes it: 2 created
         assert_eq!(materialize(&pool, kb).await?, Outcome { retired: 1, added: 2, merged: 0, implied: 0, corrected: 0, conflicts: 0 });
         let rows = live(pool.clone()).await?;
         assert_eq!(rows.len(), 1);
@@ -278,7 +278,7 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
         .await?;
         assert_eq!(retired, 1, "旧行留着，只是作废了");
 
-        // 绑定改成 none：行作废，不再补
+        // Binding changed to none: row voided, not filled in again
         sqlx::query(
             "UPDATE phrase_bindings SET status = 'none', relation_type_id = NULL, direction = NULL
               WHERE kb_id = $1 AND phrase IN ('is based in', 'operates from')",
@@ -289,7 +289,7 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
         assert_eq!(materialize(&pool, kb).await?, Outcome { retired: 1, added: 0, merged: 0, implied: 0, corrected: 0, conflicts: 0 });
         assert_eq!(utopia_store::materialize::count(&pool, kb).await?, 0);
 
-        // 带 mood 的那条重推、新块不再说 mood：旧块上的 mood 不再拦着，它成一行（0070 决定 2）
+        // The statement with a mood is re-pushed, and the new chunk no longer states the mood: the mood on the old chunk no longer blocks it, and it becomes a row (0070 decision 2)
         sqlx::query("UPDATE chunks SET superseded_at = now() WHERE id = $1")
             .bind(planned_chunk)
             .execute(&pool)

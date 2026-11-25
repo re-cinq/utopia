@@ -1,22 +1,22 @@
-//! 绑上的签名下的开放陈述算成类型化事实（0044 决定 3 的第三、四片，见 0067、0068）。
+//! Open statements under a bound signature become typed facts (pieces 3 and 4 of decision 3 of 0044; see 0067, 0068).
 //!
-//! 类型化图谱是视图：一条类型化行 = 一个三元组，来自一条或几条开放陈述与它们签名的绑定。
-//! 谓词是绑定给的属性，主宾按绑定的方向（reverse 就是陈述的宾语当主语），字面值、世界轴
-//! 时间、来源时间、置信度从陈述来；证据与限定各复制一份；来源记在 `typed_fact_sources`，
-//! `from_statement_id` 是第一条。带 mood 限定的陈述不算。
+//! The typed graph is a view: one typed row = one triple, drawn from one or more open statements and their signature bindings.
+//! The predicate is the attribute the binding gives; subject and object follow the binding's direction (reverse means the statement's object becomes the subject); literal values,
+//! temporal axis, source time, and confidence come from the statement; evidence and qualifiers are each copied once; sources are recorded in `typed_fact_sources`,
+//! with `from_statement_id` being the first. Statements carrying a mood qualifier do not count.
 //!
-//! 写行走类型化图谱本来的门（[`crate::graph::insert_fact`] / [`crate::graph::insert_value_fact`]）：同断言
-//! 同起点复用那一行，裸行被带时间的观察取代并链上，「结束了」关上开着的行——两份文档说
-//! 同一件事，时间线上是一条边。
+//! Writing rows goes through the typed graph's own gate ([`crate::graph::insert_fact`] / [`crate::graph::insert_value_fact`]): the same assertion
+//! with the same start reuses that row; a bare row is replaced by a timed observation and chained, and an "ended" marker closes the open row — two documents saying
+//! the same thing make one edge on the timeline.
 //!
-//! 重算是集合运算，跑多少遍结果一样：先删「不再成立」的来源（陈述作废了、签名不再绑着、
-//! 绑到了别的属性或反了方向、行本身作废了），再作废来源全空的类型化行，最后给「该有而
-//! 没有」的（陈述, 绑定）对补上——有同断言的行就并进去，没有才新建。没有模型调用。
+//! Recomputation is a set operation, and the result is the same however many times it runs: first delete sources that no longer hold (statement voided, signature no longer bound,
+//! bound to another attribute or reversed, the row itself voided), then void typed rows whose sources are all gone, and finally fill in the (statement, binding) pairs that should exist but do not
+//! — a row with the same assertion absorbs the pair, and only when there is none is a new row created. No model call.
 //!
-//! 写下的行随后**对账**（#899）：写路径上抽取和点头写完一条 state 事实都会沿它的唯一性
-//! 方向重算时间线（`temporal::reconcile_new_fact`），物化出来的行是同一种观察，不该
-//! 少这一步——否则一个函数型属性的两个值各开着一段，后一次观察关不上前一次。重算
-//! 提交之后再对账：对账按时间线各自开事务、拿自己的锁，不在物化的事务里做
+//! The written rows are then **reconciled** (#899): on the write path, extraction and a confirmed state fact each recompute the timeline along the attribute's uniqueness
+//! direction (`temporal::reconcile_new_fact`); a materialized row is the same kind of observation, so this step must not be skipped
+//! — otherwise two values of a functional attribute would each stay open, and a later observation could not close the earlier one. Reconciliation runs
+//! after the recomputation commits: each reconciliation opens its own transaction and takes its own locks, so it is not done inside the materialization transaction.
 
 use sqlx::PgPool;
 use utopia_core::AppResult;
@@ -25,41 +25,41 @@ use uuid::Uuid;
 use crate::graph::{insert_fact_on, FactObject, Validity};
 use serde_json::Value;
 
-/// 陈述与绑定对得上的条件：短语归一后相等，两端的类相同（空也相同），宾语是不是字面值相同。
-/// `s` 是开放陈述（facts），`se`/`oe` 是它两端的实体，`b` 是 phrase_bindings
+/// The condition for a statement and a binding to match: after phrase normalization they are equal, the classes at both ends are the same (empty matches empty), and whether the object is a literal matches.
+/// `s` is the open statement (facts), `se`/`oe` are its two entities, `b` is the phrase_bindings
 const MATCH: &str = "b.kb_id = s.kb_id
        AND b.phrase = lower(btrim(regexp_replace(s.phrase, '\\s+', ' ', 'g')))
        AND b.subject_type_id IS NOT DISTINCT FROM se.type_id
        AND b.object_is_value = (s.object_id IS NULL)
        AND (s.object_id IS NULL OR b.object_type_id IS NOT DISTINCT FROM oe.type_id)";
 
-/// 一条只说了一刻的陈述（起止同值）绑在一条状态属性上怎么读，见 [`span_of`]：绑定说
-/// `start` 从那一刻起，说 `end` 到那一刻为止，说 `none` 或没说按那个日期命名的时段读
-/// （0053 修订 2026-10-22）。从前 `none` 和没说的不算类型化行（`MOMENT_UNREAD`），四篇公司
-/// 简介上每一条年度数字都这么丢了；照抄起止会写成一段任何时刻都不成立的状态，所以终点
-/// 挪到桶的尽头、标上 `end_after_period`，读的人印得出原文写的 2023
-/// 属性的 datatype 与单位，值按它们读（[`attribute_value`]）；`rt` 是绑到或蕴含的那条属性，
-/// 是关系时 datatype 为 NULL，值原样写
+/// How a statement that states just one moment (start equals end) bound to a state attribute is read, see [`span_of`]: the binding says
+/// `start` runs from that moment on, `end` runs up to that moment, and a binding that says `none` or says nothing reads the span named by that date
+/// (0053 revision 2026-10-22). Previously `none` and unstated did not make typed rows (`MOMENT_UNREAD`), and every annual figure in four company
+/// profiles was lost that way; copying the start and end would write a state that holds at no moment, so the end
+/// moves to the end of the bucket, marked with `end_after_period`, so the reader can print the 2023 the original wrote
+/// The attribute's datatype and unit; values are read by them ([`attribute_value`]). `rt` is the attribute bound to or implied by the rule,
+/// when it is a relation the datatype is NULL and the value is written as-is
 const SHAPE: &str = "CASE WHEN rt.kind = 'attribute' THEN rt.datatype END AS datatype, rt.unit";
 
-/// 一轮重算写了什么。
+/// What one round of recomputation wrote.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Outcome {
-    /// 作废的类型化行（来源全空了）
+    /// Voided typed rows (their sources were all gone)
     pub retired: u64,
-    /// 新建的类型化行
+    /// Newly created typed rows
     pub added: u64,
-    /// 并进已有行的陈述数
+    /// Statements merged into existing rows
     pub merged: u64,
-    /// 规则算出来的隐含行（0044 决定 3 第五片），新建的
+    /// Implied rows derived by a rule (piece 5 of decision 3 of 0044), newly created
     pub implied: u64,
-    /// 对账自动闭合而改写出来的修正行数（#899）
+    /// The number of correction rows rewritten by reconciliation's automatic closing (#899)
     pub corrected: u64,
-    /// 对账裁不了、交给人的冲突数
+    /// The number of conflicts reconciliation could not decide and handed to a human
     pub conflicts: u32,
 }
 
-/// 一条该物化的（陈述, 绑定）对，连陈述上要抄的东西。
+/// A (statement, binding) pair to materialize, plus what to copy from the statement.
 #[derive(sqlx::FromRow)]
 struct Due {
     statement: Uuid,
@@ -67,7 +67,7 @@ struct Due {
     direction: String,
     subject_id: Uuid,
     object_id: Option<Uuid>,
-    /// 宾语是实体时它的名字：绑到文本属性上，名字就是值（0044 修订 2026-10-22）
+    /// When the object is an entity, its name: bound to a text attribute, the name is the value (0044 revision 2026-10-22)
     object_name: Option<String>,
     object_value: Option<serde_json::Value>,
     valid_from: Option<chrono::DateTime<chrono::Utc>>,
@@ -77,21 +77,21 @@ struct Due {
     valid_to_precision: Option<String>,
     attested_from: Option<chrono::DateTime<chrono::Utc>>,
     confidence: f32,
-    /// 绑定说一刻标的是哪一端（start / end / none，NULL 未知）
+    /// Which end the binding marks a moment on (start / end / none, NULL unknown)
     marks: Option<String>,
-    /// 绑到的属性的时间语义
+    /// The temporal semantics of the attribute bound to
     temporal: Option<String>,
-    /// 绑到的是关系还是属性
+    /// Whether what is bound is a relation or an attribute
     kind: String,
-    /// 绑到的是属性时它的 datatype 与单位，值按它们读（[`attribute_value`]）
+    /// When the bound thing is an attribute, its datatype and unit; values are read by them ([`attribute_value`])
     datatype: Option<String>,
     unit: Option<String>,
 }
 
-/// 对一个库重算一遍。
+/// Recomputes one KB.
 ///
-/// Worker 走这一条：等多久都行，因为它没人在屏幕前面等。人的判定不走这条：
-/// 见 `materialize_human`，那是另一条带预算的入口
+/// The worker takes this path: it can wait as long as needed, because nobody is waiting in front of a screen. Human judgments do not take this path:
+/// see `materialize_human`, which is another entry point with a time budget
 pub async fn materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<Outcome> {
     // A worker and a human review can recompute the same base concurrently.
     // Serialize before reading due statements, and use this connection for the
@@ -106,8 +106,8 @@ pub async fn materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<Outcome> {
     reconcile_written(pool, kb_id, outcome, &written).await
 }
 
-/// 这一轮写下（新建或并入）的类型化行沿各自的唯一性时间线对账（#899）。只有 state 且
-/// 声明了唯一性的谓词有时间线，`timelines_of` 自己筛；其余的行这里是空转
+/// The typed rows written by this round (newly created or merged) are reconciled along their own uniqueness timelines (#899). Only state rows and
+/// predicates that declare uniqueness have timelines; `timelines_of` filters by itself, and the others spin idle here
 async fn reconcile_written(
     pool: &PgPool,
     kb_id: Uuid,
@@ -122,14 +122,14 @@ async fn reconcile_written(
     Ok(outcome)
 }
 
-/// 任务里的入口（0051）：**试锁，不等**。拿到 `typed_materialize` 就在这条连接上
-/// 跑完整的重算并提交；拿不到就回滚、返回 `None`，由调用方挂成 `Deferred` 稍后再来。
+/// The entry point inside a task (0051): **try the lock, do not wait.** If it gets `typed_materialize`, it runs the full recomputation
+/// on this connection and commits; if it cannot get the lock, it rolls back and returns `None`, and the caller marks it `Deferred` to come back later.
 ///
-/// 为什么不像 `materialize` 那样等锁：等锁的是一条池里的连接，几个决定连着点下来，
-/// 每个 job 都抱着一条连接排队，池就空了（0051 §Alternatives）。也为什么不像旧的
-/// 人工入口那样给等待设 2 秒预算：job 没人在屏幕前面等，超时只是把同一次重算推到
-/// 下一次重试，不如一开始就不等。人的那一次点击只提交决定和这个 job（同一事务，
-/// `phrase_bindings::decide_with_delivery`），屏幕上等的是事件，不是锁。
+/// Why not wait for the lock as `materialize` does: waiting for the lock holds a connection from the pool, so several decisions clicked in a row each
+/// queue a job holding a connection, and the pool empties (0051 §Alternatives). Nor is it like the old
+/// human entry point with its 2-second wait budget: a job has nobody in front of a screen, so a timeout merely pushes the same recomputation
+/// to the next retry; it is better not to wait at all. A human's single click commits only the decision and this job (same transaction,
+/// `phrase_bindings::decide_with_delivery`); what the screen waits on is an event, not a lock.
 pub async fn try_materialize(pool: &PgPool, kb_id: Uuid) -> AppResult<Option<Outcome>> {
     let mut tx = pool.begin().await?;
     let acquired: bool = sqlx::query_scalar(
@@ -158,16 +158,16 @@ async fn materialize_in_tx(
     // runs, and a generic plan cannot see how many rows `kb_id = $1` selects. The source cleanup's
     // generic plan ran for hours on a production base where the plan for its own id takes two
     // seconds (#1298). The per-row statements in the loops stay cached.
-    // 这一轮写下的行（新建的和并入的），提交后对账
+    // The rows written this round (newly created and merged) are reconciled after commit
     let mut written: Vec<Uuid> = Vec::new();
-    // 0. 起止同值的物化状态行（#966 之前照抄一刻写下的）任何时刻都不成立：作废，它的陈述
-    //    在第 3 步按绑定说的读法重算——「那天加入」与「自那天起」重新落成一段从那天起的状态。
-    //    只认照抄来的：它有一条来源陈述两端正是这一刻（类型化行看 typed_fact_sources，隐含行
-    //    看 implied_fact_sources）。人改成起止相等的行也带着 from_statement_id、implied 和
-    //    来源链接（#967、#911），看上去和算出来的一样，但它的来源陈述不是这一刻，不碰：
-    //    不变量从此挡住新的，旧的由人自己改。排在第 1 步之前：那一刻的陈述在绑定说出读法
-    //    之前不算来源，第 1 步会先删掉这条链接。只碰算出来的行（from_statement_id 或
-    //    implied，与第 2 步同一条守卫）：人手写的行并进一条陈述之后也有来源链接，它不是算的
+    // 0. A materialized state row whose start equals its end (copied as-is before #966 wrote a moment) holds at no moment: void it; its statement
+    //    is recomputed in step 3 with the reading the binding gives — "joined that day" and "since that day" settle again into a span starting that day.
+    //    Only copies are recognized: it has a source statement whose two ends are exactly this moment (typed rows check typed_fact_sources; implied rows
+    //    check implied_fact_sources). A row a human edited to have equal start and end also carries from_statement_id, implied, and
+    //    source links (#967, #911) and looks like a computed one, but its source statement is not this moment, so it is left alone:
+    //    the invariant blocks new ones from now on, and humans fix the old ones by hand. It runs before step 1: until the binding gives the reading, a statement at that moment does not count as a source, and step 1 would delete this link first.
+    //    Only computed rows are touched (from_statement_id or
+    //    implied, the same guard as step 2): a row a human wrote that absorbed a statement also has source links, but it is not computed
     let emptied = sqlx::query(
         "UPDATE facts t
             SET invalidated_at = now()
@@ -189,15 +189,15 @@ async fn materialize_in_tx(
     .await?
     .rows_affected();
 
-    // 1. 删不再成立的来源：陈述死了、行死了、签名没绑着、属性或方向变了、陈述带了 mood
+    // 1. Delete sources that no longer hold: the statement is dead, the row is dead, the signature no longer binds, the attribute or direction changed, or the statement now carries a mood
     sqlx::query(&source_cleanup_sql())
         .persistent(false)
         .bind(kb_id)
         .execute(&mut **tx)
         .await?;
 
-    // 1b. 隐含行的来源：规则不再批准、触发它的陈述死了或换了签名、实体没了或换了类别词，
-    //     来源就删；与 1 同一条规矩，只是来源表是另一张（implied_fact_sources）
+    // 1b. Sources of implied rows: the rule no longer approves them, the statement that triggered them died or changed its signature, or the entity is gone or changed its category word:
+    //     delete the source; same rule as 1, only the source table is different (implied_fact_sources)
     sqlx::query(&format!(
         "DELETE FROM implied_fact_sources i
           USING implication_rules r
@@ -221,7 +221,7 @@ async fn materialize_in_tx(
     .execute(&mut **tx)
     .await?;
 
-    // 2. 作废来源全空的类型化行：只动算出来的行（带 from_statement_id 的、或规则算的），人写的不碰
+    // 2. Void typed rows whose sources are all gone: only computed rows are touched (those with from_statement_id, or rule-derived); human-written rows are left alone
     let retired = sqlx::query(
         "UPDATE facts t
             SET invalidated_at = now()
@@ -237,8 +237,8 @@ async fn materialize_in_tx(
     .rows_affected();
     let retired = retired + emptied;
 
-    // 3. 该有而没有的（陈述, 绑定）对：陈述活着、签名绑着、没 mood、还没有活着的行以它为来源
-    //    且谓词相同。reverse 只对两样东西之间的关系有意义（字面值当不了主语）
+    // 3. (statement, binding) pairs that should exist but do not: the statement is alive, the signature is bound, no mood, and no live row yet has it as a source
+    //    with the same predicate. reverse only makes sense for a relation between two things (a literal cannot be a subject)
     let due: Vec<Due> = sqlx::query_as(&due_sql())
         .persistent(false)
         .bind(kb_id)
@@ -246,13 +246,13 @@ async fn materialize_in_tx(
         .await?;
 
     let (mut added, mut merged) = (0u64, 0u64);
-    // 绑上了却按 datatype 读不出的值：(陈述, 属性, 原文的字)，收尾时记成丢弃行
+    // Bound values that cannot be read under their datatype: (statement, attribute, the original word), recorded as discarded rows at the end
     let mut unreadable: Vec<(Uuid, Uuid, String)> = Vec::new();
     for d in &due {
         let reverse = d.direction == "reverse";
-        // 一刻的陈述在状态属性下按绑定说的读（#966、0053 修订 2026-10-22）：开始写成从那一刻
-        // 起，结束写成到那一刻为止（走 `insert_fact_on`「某天结束了」那条路，关上开放的那段），
-        // 都不是或没说：属性按那个日期命名的时段读，关系不写（见 `span_of`）
+        // A moment statement under a state attribute is read as the binding says (#966, 0053 revision 2026-10-22): a start is written as from that moment
+        // on, an end as up to that moment (through the `insert_fact_on` "ended on some day" path, closing the open span),
+        // and if neither or nothing is said, the attribute is read as the span named by that date, and a relation writes nothing (see `span_of`)
         let Some(validity) = span_of(
             d.kind == "attribute",
             d.temporal.as_deref() == Some("state"),
@@ -266,7 +266,7 @@ async fn materialize_in_tx(
         ) else {
             continue;
         };
-        // 文本属性绑上了一条宾语是实体的陈述：宾语的名字就是值（0044 修订 2026-10-22）
+        // A text attribute bound to a statement whose object is an entity: the object's name is the value (0044 revision 2026-10-22)
         let named_value = (d.kind == "attribute")
             .then(|| {
                 d.object_name
@@ -306,8 +306,8 @@ async fn materialize_in_tx(
                 .await?
             }
             (false, None, Some(value)) => {
-                // 读不成属性的 datatype：陈述留在开放图谱里，这一对不写——但要记一行
-                // （`attr_datatype`），从前这里什么都不说，图里少了一个数没人说得出为什么
+                // A value that cannot be read as the attribute's datatype: the statement stays in the open graph and this pair is not written — but a row must be recorded
+                // (`attr_datatype`); before, nothing was said, and a number missing from the graph went unexplained
                 let Some(value) = attribute_value(value, d.datatype.as_deref(), d.unit.as_deref())
                 else {
                     unreadable.push((d.statement, d.property, raw_text(value)));
@@ -334,8 +334,8 @@ async fn materialize_in_tx(
                 .bind(d.statement)
                 .execute(&mut **tx)
                 .await?;
-            // 新行取代了一条裸行（时间精化，supersedes 链上）：被取代那行的来源跟着搬过来，
-            // 这一轮就收敛，不等下一轮把旧来源当「不成立」删掉再补
+            // A new row replaces a bare row (time refinement, on the supersedes chain): the replaced row's sources move along with it,
+            // so this round converges, instead of waiting for the next round to delete the old sources as "no longer holding" and re-add them
             sqlx::query(
                 "INSERT INTO typed_fact_sources (fact_id, statement_id)
                  SELECT $1, src.statement_id
@@ -365,7 +365,7 @@ async fn materialize_in_tx(
         .bind(d.statement)
         .execute(&mut **tx)
         .await?;
-        // 证据每次都抄：证据是同一段原文的同一处引文
+        // Evidence is copied every time: evidence is the same quotation from the same passage
         sqlx::query(
             "INSERT INTO fact_evidence (fact_id, chunk_id, quote, document_id, doc_version,
                                         proposed_predicate, quote_start, quote_end)
@@ -378,8 +378,8 @@ async fn materialize_in_tx(
         .bind(d.statement)
         .execute(&mut **tx)
         .await?;
-        // 角色词只抄行还没有的角色（0070 决定 1 的修订）：并进已有行的陈述若对同一角色
-        // 说了别的值，抄过来这一行就同时读到两个值；别的值由决定 4 带过来
+        // Role words copy only the roles the row does not have yet (a revision of decision 1 of 0070): when a statement merged into an existing row says a different value for the same role,
+        // copying it would make this row read two values at once; the other value is carried over by decision 4
         sqlx::query(
             "INSERT INTO statement_qualifiers (fact_id, role, value, entity_id, chunk_id)
              SELECT $1, q.role, q.value, q.entity_id, q.chunk_id
@@ -394,14 +394,14 @@ async fn materialize_in_tx(
         .execute(&mut **tx)
         .await?;
     }
-    // 3a. 已批准的规则算隐含行（0044 决定 3 第五片）。读数只查缓存：缓存里没有的这一轮
-    //     不算，`read_phrases` 填上之后再来。短语规则按陈述触发，类别词规则按实体触发
+    // 3a. Computed implied rows from approved rules (piece 5 of decision 3 of 0044). Readings only check the cache: this round does not compute those missing from the cache;
+    //     they are computed after `read_phrases` fills it in. Phrase rules trigger on statements, category-word rules trigger on entities
     let implied = imply_in_tx(tx, kb_id, &mut written, &mut unreadable).await?;
     record_unreadable(tx, kb_id, &unreadable).await?;
-    // 3b. 见证跟着来源陈述走（0064 决定 3、5）：类型化的行自己没有出处。物化与算隐含行
-    //     用的写入口在陈述没有见证时填的是此刻（那是给人写的事实用的缺省），这里改回陈述的。
-    //     排在 3a 之后：规则算出的行也是这样写下的
-    //     见证动了的已有行和新写下的行一起，提交后对账：见证是时间线排序用的时刻
+    // 3b. Witnesses follow the source statement (0064 decisions 3, 5): typed rows have no provenance of their own. The write entry used by materialization and implied-row
+    //     computation fills in the current moment when a statement has no witness (the default for facts written by humans); here it is switched back to the statement's.
+    //     Runs after 3a: rule-derived rows are written this way too.
+    //     Existing rows whose witness moved, together with newly written rows, are reconciled after commit: the witness is the moment the timeline uses for ordering.
     written.extend(sync_typed_attestation(&mut **tx, kb_id, None).await?);
     Ok((
         Outcome {
@@ -443,21 +443,21 @@ const TYPED_ATTESTATION_SQL: &str = "UPDATE facts t
                  OR t.attested_by IS DISTINCT FROM src.by)
           RETURNING t.id";
 
-/// 类型化行的见证 = 它的来源陈述里最早的那个见证，连同那条日期的名字；来源陈述一条见证
-/// 都没有的，它也没有（任何时点都成立，0064 决定 5）。来源陈述有两处：物化进这一行的
-/// （`typed_fact_sources`），和规则读出这一行的（`implied_fact_sources`）；类别词规则的
-/// 来源是实体，不带见证。
+/// The witness of a typed row = the earliest witness among its source statements, together with that date's name; if no source statement has a witness,
+/// neither does it (it holds at any moment, 0064 decision 5). Source statements come in two places: those materialized into this row
+/// (`typed_fact_sources`), and those a rule read this row from (`implied_fact_sources`); for category-word rules
+/// the source is the entity, which carries no witness.
 ///
-/// 动的行：有陈述物化进来的，和规则算出来的（`implied`）。人写的行只被规则的结论并进来时
-/// 不动——它的见证是人写下它的那一刻，并进来时 `attest_earlier` 已经往早挪过
+/// Rows moved by this: those materialized from statements, and those computed by rules (`implied`). A human-written row is left alone when rule conclusions merge into it:
+/// its witness is the moment a human wrote it, and `attest_earlier` has already moved it earlier when merging
 ///
-/// 回见证动了的那些行。见证是唯一性时间线给没起点的行排序用的时刻（`temporal::DATED_AT`），
-/// 所以调用方提交之后要拿这些行去对账（`temporal::reconcile_moved_facts`）——只对这些行
-/// 所在的时间线，不是整个库
+/// Returns the rows whose witness moved. The witness is the moment the unique timeline uses to order rows with no start (`temporal::DATED_AT`),
+/// so after commit the caller must reconcile these rows (`temporal::reconcile_moved_facts`) — only the timelines these rows are in,
+/// not the whole KB
 ///
-/// 作废了的来源陈述不作证：物化自己会先把它们从来源里清掉，删文档那条路
-/// （`documents::reattest_tx`）却是在物化之前跑的，陈述刚随文档作废、来源表还没动。
-/// `only`：只动这些行（删文档时只动引用了那篇文档的，它们的时间线已经锁上）；`None` 是整个库
+/// A voided source statement bears no witness: materialization itself first removes them from the sources, but the document-deletion path
+/// (`documents::reattest_tx`) runs before materialization, when the statement was just voided along with the document and the source table is not yet updated.
+/// `only`: touch only these rows (on document deletion, only those citing that document, whose timelines are already locked); `None` is the whole KB
 pub async fn sync_typed_attestation<'e>(
     ex: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
     kb_id: Uuid,
@@ -488,9 +488,9 @@ struct Implied {
     valid_to_precision: Option<String>,
     attested_from: Option<chrono::DateTime<chrono::Utc>>,
     confidence: f32,
-    /// 结论属性的时间语义：一刻的陈述落到状态属性上按时段读（规则没有 marks）
+    /// Temporal semantics of the conclusion attribute: a moment statement landing on a state attribute is read as a span (the rule has no marks)
     temporal: String,
-    /// 结论是属性还是关系：一刻的陈述只在属性上读成时段
+    /// Whether the conclusion is an attribute or a relation: a moment statement is read as a span only on an attribute
     kind: String,
     datatype: Option<String>,
     unit: Option<String>,
@@ -502,8 +502,8 @@ async fn imply_in_tx(
     written: &mut Vec<Uuid>,
     unreadable: &mut Vec<(Uuid, Uuid, String)>,
 ) -> AppResult<u64> {
-    // 短语规则：签名下活着的、没 mood 的陈述；宾语是读数的答案（缓存里的实体或值），
-    // 没有读数时就是陈述的宾语。已经有活着的隐含行以这条陈述为来源的不再算
+    // Phrase rules: live statements without mood under the signature; the object is the reading's answer (the entity or value from the cache),
+    // with no reading, it is the statement's object. Those that already have a live implied row with this statement as the source are not computed again
     let by_statement: Vec<Implied> = sqlx::query_as(&format!(
         "SELECT r.id AS rule, s.id AS statement, NULL::uuid AS entity,
                 s.subject_id, r.conclude_property_id AS property,
@@ -536,7 +536,7 @@ async fn imply_in_tx(
     .bind(kb_id)
     .fetch_all(&mut **tx)
     .await?;
-    // 类别词规则：带这个类别词的活着的实体；宾语必须来自读数（类别词自己没有宾语）
+    // Category-word rules: live entities carrying this category word; the object must come from a reading (the category word itself has no object)
     let by_entity: Vec<Implied> = sqlx::query_as(&format!(
         "SELECT r.id AS rule, NULL::uuid AS statement, e.id AS entity,
                 e.id AS subject_id, r.conclude_property_id AS property,
@@ -562,8 +562,8 @@ async fn imply_in_tx(
 
     let mut implied = 0u64;
     for d in by_statement.iter().chain(by_entity.iter()) {
-        // 规则没有 marks（#966）：一刻的陈述蕴含一条状态属性时，结论是属性的按那个日期命名
-        // 的时段读，是关系的不算隐含行（0053 修订 2026-10-22，同物化）
+        // Rules have no marks (#966): when a moment statement implies a state attribute, the conclusion for an attribute is read as a span named by that date,
+        // and a relation's is not an implied row (0053 revision 2026-10-22, same as materialization)
         let Some(validity) = span_of(
             d.kind == "attribute",
             d.temporal == "state",
@@ -583,7 +583,7 @@ async fn imply_in_tx(
             (None, Some(v)) => {
                 let Some(read) = attribute_value(v, d.datatype.as_deref(), d.unit.as_deref())
                 else {
-                    // 类别词规则的来源是实体，没有文档可记；短语规则的记在触发它的陈述上
+                    // The source of a category-word rule is an entity, so there is no document to record; a phrase rule records it on the statement that triggered it
                     if let Some(statement) = d.statement {
                         unreadable.push((statement, d.property, raw_text(v)));
                     }
@@ -594,8 +594,8 @@ async fn imply_in_tx(
             }
             _ => continue,
         };
-        // 一个东西不蕴含自己：读数把「Virginia」读成「United States」是对的，把「France」
-        // 读成「France」就是一条自环
+        // An entity does not imply itself: reading "Virginia" as "United States" is right, while reading "France" as "France"
+        // is a self-loop
         if matches!(object, FactObject::Entity(o) if o == d.subject_id) {
             continue;
         }
@@ -627,7 +627,7 @@ async fn imply_in_tx(
         .bind(d.entity)
         .execute(&mut **tx)
         .await?;
-        // 证据：短语规则抄触发它的那条陈述的引文——读的人从这句得出的结论，证据就是这句
+        // Evidence: a phrase rule copies the quotation of the statement that triggered it — the conclusion a reader draws from this sentence has this sentence as its evidence
         if let Some(statement) = d.statement {
             sqlx::query(
                 "INSERT INTO fact_evidence (fact_id, chunk_id, quote, document_id, doc_version,
@@ -646,13 +646,13 @@ async fn imply_in_tx(
     Ok(implied)
 }
 
-/// 一条陈述落成类型化行时的区间。起止不同的照抄；起止同值的一刻落到状态属性上按绑定说的读
-/// （#966）：`start` 从那一刻起，`end` 到那一刻为止（走「某天结束了」那条路）。`none` 或没说：
-/// 落到**属性**上按那个日期命名的时段读（0053 修订 2026-10-22）——「2023年营业收入58亿元」是
-/// 2023 这一年的一个量，起点是它，终点是桶的尽头，标上 `end_after_period`，读的人印得出原文
-/// 写的 2023；落到关系上照旧不算行——「joined on 2023-06-01」读成一天的任职会把同一天起的
-/// 开放行关在次日（写入口「同起点、这次带了终点、那行还开着就关上」），那是一条错的结束。
-/// 没有精度的一刻不是桶，读不出时段，也返回 None
+/// The span of a statement when it lands as a typed row. Different start and end are copied as-is; a moment with equal start and end lands on a state attribute, read as the binding says
+/// (#966): `start` runs from that moment, `end` runs up to it (through the "ended on some day" path). `none`, or nothing said:
+/// it lands on the **attribute** and is read as the span named by that date (0053 revision 2026-10-22) — "2023 revenue of 5.8 billion" is
+/// a quantity for the year 2023: the start is that year, the end is the end of the bucket, marked with `end_after_period`, so the reader can print the 2023
+/// the original wrote; landing on a relation still makes no row — "joined on 2023-06-01" read as a one-day tenure would shut the
+/// open row that starts that same day on the next day (the write entry's rule: same start, an end now given, and the row still open means close it), which is a wrong end.
+/// A moment without precision is not a bucket, so no span can be read from it, and it returns None too
 #[allow(clippy::too_many_arguments)]
 fn span_of<'a>(
     attribute: bool,
@@ -716,7 +716,7 @@ fn span_of<'a>(
     })
 }
 
-/// 值那一格原文的字，给丢弃行当样例：`{"value": "超过2000人"}` → `超过2000人`
+/// The original words of the value cell, given to discarded rows as a sample: `{"value": "over 2000 staff"}` → `over 2000 staff`
 fn raw_text(raw: &Value) -> String {
     match raw.get("value").unwrap_or(raw) {
         Value::String(s) => s.clone(),
@@ -724,9 +724,9 @@ fn raw_text(raw: &Value) -> String {
     }
 }
 
-/// 读不出的值记成 `attr_datatype` 丢弃行（0001：丢弃是一行，不是沉默）。按库整个重写：
-/// 物化每轮重算，上一轮读不出、这一轮属性改成文本读出来了的，行跟着退掉。文档从陈述的
-/// 证据取；没有证据的陈述（人写的）没有文档可挂，不记
+/// Values that cannot be read are recorded as `attr_datatype` discarded rows (0001: a discard is a row, not silence). Rewritten for the whole KB:
+/// materialization recomputes each round, so rows left by a previous round that could not be read but can now be read because the attribute became text are retired. The document is taken from the statement's
+/// evidence; statements with no evidence (human-written) have no document to attach to, so nothing is recorded
 async fn record_unreadable(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     kb_id: Uuid,
@@ -773,13 +773,13 @@ async fn record_unreadable(
     .await
 }
 
-/// 开放陈述的值（`{"value": "2.3亿元"}`）落到属性上的样子：`value` 那一格按 datatype 与单位读成
-/// 数、日期、真假（[`utopia_extract::attribute_value`]），其余键照抄；绑到关系上的值原样留着。
+/// The shape of an open statement's value (`{"value": "about 230m"}`) when it lands on an attribute: the `value` cell is read by datatype and unit into
+/// a number, a date, or a boolean ([`utopia_extract::attribute_value`]); other keys are copied as-is; a value bound to a relation is kept as-is.
 ///
-/// **读不出来就不写**（None）。从前照抄原文的字：声明了 number、单位万元的「注册资本」上躺着
-/// `"2.3亿元"`，导出成 `"2.3亿元"^^xsd:decimal`，比较、对账、规则全都对不上。读不出来的陈述
-/// 还在开放图谱里，原文的字一个没丢。只在这里读、不在 `insert_fact_on` 的门上读：人和勘误
-/// 会在日期属性上写相对的日期（`relative`），那是另一种值
+/// **If it cannot be read, nothing is written** (None). Previously the original characters were copied: a "registered capital" declared as a number in units of ten-thousand yuan held
+/// `"about 230m"`, exported as `"about 230m"^^xsd:decimal`, which matched nothing for comparison, reconciliation, or rules.
+/// The statement still sits in the open graph, and none of the original characters are lost. It is read only here, not at the `insert_fact_on` gate: humans and corrections
+/// write relative dates on date attributes (`relative`), which is a different kind of value
 fn attribute_value(raw: &Value, datatype: Option<&str>, unit: Option<&str>) -> Option<Value> {
     let Some(datatype) = datatype else {
         return Some(raw.clone());
@@ -794,7 +794,7 @@ fn attribute_value(raw: &Value, datatype: Option<&str>, unit: Option<&str>) -> O
     Some(out)
 }
 
-/// 陈述 `s` 没有一个说着话的 `mood`（0070 决定 2）：重推丢掉了 mood，旧块上的 mood 就不再拦着
+/// Statement `s` has no speaking `mood` (0070 decision 2): a re-push dropped the mood, so a mood on an old chunk no longer blocks
 fn no_mood_spoken() -> String {
     format!(
         "NOT EXISTS (SELECT 1 FROM statement_qualifiers q WHERE q.fact_id = s.id AND q.role = 'mood' AND {})",
@@ -802,12 +802,12 @@ fn no_mood_spoken() -> String {
     )
 }
 
-/// 类别词的归一（同 type_bindings）：这里要在 SQL 里对上实体的 specific_type
+/// Normalization of category words (same as type_bindings): here it must match the entity's specific_type in SQL
 fn kind_word_sql(col: &str) -> String {
     format!("lower(btrim(regexp_replace({col}, '\\s+', ' ', 'g')))")
 }
 
-/// 库里活着的、从陈述算出来的类型化行数。
+/// The number of live typed rows derived from statements in the KB.
 pub async fn count(pool: &PgPool, kb_id: Uuid) -> AppResult<i64> {
     Ok(sqlx::query_scalar(
         "SELECT count(*) FROM facts
@@ -819,10 +819,10 @@ pub async fn count(pool: &PgPool, kb_id: Uuid) -> AppResult<i64> {
     .await?)
 }
 
-/// 步骤 3 的语句：该有而没有的（陈述, 绑定）对。
-/// 从已绑定的绑定出发，先只取措辞对得上的开放陈述（两个 CTE 各算一遍），再连实体。
-/// 规整后的措辞连接规划器估不出行数，会对每条绑定把所有实体重读一遍：
-/// 测试里 30 万实体读了 900 万行，生产上 85–93 秒。条件和结果行都没变。
+/// The statement for step 3: (statement, binding) pairs that should exist but do not.
+/// Starts from the bound bindings, first takes only open statements whose wording matches (both CTEs compute it separately), then joins the entities.
+/// Normalized wording joins that the planner cannot estimate the row count for, so for each binding it rereads all entities:
+/// in a test, 300k entities read 9 million rows; in production 85–93 seconds. The condition and the result rows are unchanged.
 fn due_sql() -> String {
     format!(
         "WITH bound AS MATERIALIZED (
@@ -861,9 +861,9 @@ fn due_sql() -> String {
     )
 }
 
-/// 步骤 1 的语句：仍然成立的来源只算一遍（CTE），再用反连接删掉其余的。
-/// 写成相关的 NOT EXISTS 时，规划器把绑定匹配估成一行，对每个来源重扫一遍：
-/// 69 万个来源的库上跑了十二小时，这样写两分钟。条件和删掉的行都没变。
+/// The statement for step 1: sources that still hold are computed once (a CTE), then the rest are deleted by an anti-join.
+/// When written as a correlated NOT EXISTS, the planner estimated the binding match as one row and rescanned for each source:
+/// on a KB with 690k sources it ran for twelve hours; written this way it takes two minutes. The condition and the deleted rows are unchanged.
 fn source_cleanup_sql() -> String {
     format!(
         "WITH holding AS MATERIALIZED (

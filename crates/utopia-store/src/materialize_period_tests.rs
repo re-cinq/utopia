@@ -1,6 +1,6 @@
-//! 一刻的陈述落到状态属性上按绑定说的读（0053 修订 2026-10-22）：`none` 或没说按那个日期
-//! 命名的时段写成一段（起点是它，终点是桶的尽头，标 `end_after_period`），`start` 照旧开着。
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过。
+//! A moment's statement landing on a status attribute is read as the binding says (0053 revision 2026-10-22): with `none` or nothing said, go by that date
+//! and the period it names is written as one span (start at it, end at the end of the bucket, marked `end_after_period`), and `start` stays open as before.
+//! Skipped when `UTOPIA_DATABASE_URL` is not set.
 
 use super::materialize_in_tx;
 use crate::phrase_bindings;
@@ -51,7 +51,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fx> {
     .bind(kb)
     .execute(pool)
     .await?;
-    // 「2023年营业收入58亿元」：时间解析把一年写成起止同值、精度 year 的一刻
+    // "2023 revenue 5.8 billion yuan": time parsing writes the year as a moment with the same start and end, precision year
     let year: DateTime<Utc> = "2023-01-01T00:00:00Z".parse()?;
     sqlx::query(
         "INSERT INTO facts(id,kb_id,subject_id,object_value,layer,phrase,valid_from,valid_from_precision,valid_to,valid_to_precision)
@@ -128,7 +128,7 @@ async fn a_single_date_that_marks_neither_end_names_its_period() -> anyhow::Resu
     let run = async {
         let start: DateTime<Utc> = "2023-01-01T00:00:00Z".parse()?;
         let end: DateTime<Utc> = "2024-01-01T00:00:00Z".parse()?;
-        // 绑定没说一刻标哪一端：按 2023 这一年读
+        // The binding does not say which end the moment marks: read it as the year 2023
         bind(&pool, &f, None).await?;
         let rows = typed(&pool, f.kb).await?;
         assert_eq!(rows.len(), 1, "{rows:?}");
@@ -140,7 +140,7 @@ async fn a_single_date_that_marks_neither_end_names_its_period() -> anyhow::Resu
             after,
             "the end is the moment after the period the document wrote"
         );
-        // 「都不是」是同一种读法；重算是集合运算，还是那一行
+        // "Neither" is the same reading; recomputation is a set operation, still that one row
         bind(&pool, &f, Some("none")).await?;
         let again = typed(&pool, f.kb).await?;
         assert_eq!(again.len(), 1);

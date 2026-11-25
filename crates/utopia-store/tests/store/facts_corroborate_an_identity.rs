@@ -1,16 +1,16 @@
-//! 画像分不开同名的人时，事实能分开（#331，续 #270/#329）。
+//! When the profile cannot tell two same-named people apart, facts can (#331, continuing #270/#329).
 //!
-//! 一个库里有两个「张伟」：一个在平台工程部，一个在财务部。画像向量分不出谁是谁
-//! ——#329 之后这种并列会新建实体、入两条人工审核对，而人在审核卡上看的正是那两条
-//! `works_for` 事实。**代码本可以自己看。** 这个文件钉的就是那一步。
+//! One database holds two "Zhang Wei"s: one in platform engineering, one in finance. The profile vector cannot tell which is which
+//! — since #329 such a pairing creates entities and enters two manual review pairs, and the person on the review card looks at exactly those two
+//! `works_for` facts. **The code could have looked for itself.** This file pins that step.
 //!
-//! 证据只往一个方向走：一致是「同一人」的弱证据，不一致**什么都不是**。在 Acme
-//! 上班又在 Zenith 兼职的人有两个 `works_for`，他仍是一个人；两个不同的人也可能
-//! 同属一家公司。所以这里既钉「命中就定案」，也钉「命中不了就一切照旧」——
-//! 后者才是不把弱证据当强证据的那道闸。
+//! Evidence only flows one way: agreement is weak evidence of "the same person", while disagreement is **nothing at all**. A person who works at Acme
+//! and part-time at Zenith has two `works_for` facts, yet is still one person; two different people may also
+//! belong to the same company. So this pins both "a hit settles it" and "no hit changes nothing":
+//! the latter is the gate that stops weak evidence being treated as strong.
 //!
-//! 连库才测得到：命中与否取决于一条带窗口函数、带 NOT EXISTS 的 SQL 挑出了哪些
-//! 宾语，`cargo check` 一个字看不见。没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。
+//! Only testable against a database: whether there is a hit depends on which objects a SQL query with window functions and NOT EXISTS picks out,
+//! which `cargo check` cannot see at all. Without `UTOPIA_DATABASE_URL` it skips rather than fails.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -22,8 +22,8 @@ struct Fx {
     zhang_b: Uuid,
 }
 
-/// 两个同名的张伟。`shared` 为真时再给他们一个**共同**的雇主——
-/// 那条事实对分辨他们毫无帮助，却最容易在文档里撞上。
+/// Two same-named Zhang Weis. When `shared` is true, they also get a **shared** employer —
+/// that fact is no help in telling them apart, yet it is the easiest one to collide with in documents.
 async fn seed(pool: &PgPool, shared: bool) -> anyhow::Result<Fx> {
     let (org, ws, kb) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     let (person, organization) = (Uuid::now_v7(), Uuid::now_v7());
@@ -85,8 +85,8 @@ async fn seed(pool: &PgPool, shared: bool) -> anyhow::Result<Fx> {
         .execute(pool)
         .await?;
     }
-    // 两人的画像**完全相同**：同一个 chunk 播的种（#221 之后是常态）。
-    // 向量在这个场景里注定分不开他们
+    // Both people's profiles are **identical**: seeded from the same chunk (the norm since #221).
+    // The vectors are doomed to fail to tell them apart in this scenario
     for (id, v) in [(zhang_a, "[1,0,0]"), (zhang_b, "[1,0,0]")] {
         sqlx::query(
             "UPDATE entities SET profile_embedding = $2::vector, profile_n = 1 WHERE id = $1",
@@ -130,7 +130,7 @@ async fn drop_kb(pool: &PgPool, kb: Uuid) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 并列 + 原文点了其中一个人的部门 → 定案，不再掷硬币也不再劳烦人。
+/// Tied + the source text pointed at one person's department → settled, no more coin flip and no bothering the person.
 #[tokio::test]
 async fn a_fact_in_the_text_settles_a_namesake_tie() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -166,7 +166,7 @@ async fn a_fact_in_the_text_settles_a_namesake_tie() -> anyhow::Result<()> {
     run
 }
 
-/// 原文把两个部门都提了 → 这条线索在他们之间也分不开，维持 #329 的行为。
+/// The source text mentions both departments → this clue cannot tell them apart either, so keep the #329 behaviour.
 #[tokio::test]
 async fn a_clue_that_points_at_both_settles_nothing() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -198,8 +198,8 @@ async fn a_clue_that_points_at_both_settles_nothing() -> anyhow::Result<()> {
     run
 }
 
-/// **共同的雇主不是线索。** 两个张伟都在星云控股，文档提到星云控股什么也没说明——
-/// 这条事实在 SQL 里就该被排除，否则它是最容易撞上的那种误判。
+/// **A shared employer is not a clue.** Both Zhang Weis are at Xingyun Holdings, and mentioning Xingyun Holdings says nothing:
+/// this fact should be excluded in SQL, otherwise it is the easiest kind of false judgment to hit.
 #[tokio::test]
 async fn an_employer_they_share_is_not_a_clue() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -234,8 +234,8 @@ async fn an_employer_they_share_is_not_a_clue() -> anyhow::Result<()> {
     run
 }
 
-/// 谁都没提到 → 一切照旧。**这一条是那道闸**：不一致（或没提）绝不能被当成
-/// 「不是同一人」的证据，否则兼职的人会被拆成两个。
+/// Neither is mentioned → everything as before. **This one is the gate**: a disagreement (or no mention) must never be treated as
+/// evidence of "not the same person", or part-time people would be split into two.
 #[tokio::test]
 async fn text_that_names_neither_changes_nothing() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -253,7 +253,7 @@ async fn text_that_names_neither_changes_nothing() -> anyhow::Result<()> {
             "Zhang Wei",
             Some(&ctx),
             None,
-            // 提到的是第三家公司：一致的证据没有，"不一致"也不算证据
+            // The one mentioned is a third company: agreeing evidence is absent, and "disagreement" does not count as evidence either
             Some("Zhang Wei moonlights at Zenith Robotics on weekends."),
             &[],
         )
@@ -270,8 +270,8 @@ async fn text_that_names_neither_changes_nothing() -> anyhow::Result<()> {
     run
 }
 
-/// 灰区（分数在 `SIM_NEW..SIM_ATTACH`）同样受旁证左右：向量说「不够像」，
-/// 而原文点了名。阈值一个都没动，动的是在阈值之外多问了一句。
+/// The grey zone (scores in `SIM_NEW..SIM_ATTACH`) is likewise swayed by side evidence: the vector says "not similar enough",
+/// yet the source text named them. No threshold was moved; what changed is that one more question is asked beyond the threshold.
 #[tokio::test]
 async fn the_grey_zone_listens_to_the_facts_too() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -281,8 +281,8 @@ async fn the_grey_zone_listens_to_the_facts_too() -> anyhow::Result<()> {
     let f = seed(&pool, false).await?;
 
     let run = async {
-        // 让两个候选分开且都落在灰区：与 A 约 0.45，与 B 约 0.40，
-        // 差 0.05 > SIM_TIE_MARGIN，所以走的是灰区那条路而不是并列那条
+        // Let the two candidates be apart and both land in the grey zone: against A about 0.45, against B about 0.40,
+        // a gap of 0.05 > SIM_TIE_MARGIN, so it takes the grey-zone path rather than the tie path
         sqlx::query("UPDATE entities SET profile_embedding = '[0,1,0]'::vector WHERE id = $1")
             .bind(f.zhang_b)
             .execute(&pool)

@@ -1,11 +1,11 @@
-//! 一个类的实例列表能只列缺某条关系的成员（#1269）。
+//! A class's instance list can list only the members that lack a given relation (#1269).
 //!
-//! 「哪些人没写雇主」：连着的方式不止类型化的一行——开放陈述照文档的字写（大小写、
-//! 空白不同也是同一个短语）、逆关系从另一头写（`Acme employs Cy`）、绑到这个属性的
-//! 短语（`is employed by`）、规则推出来的一行也算。五种连上的成员都不列，只剩真的什么
-//! 都没有的那个。
+//! "Which people have no employer written": a connection can be made in more ways than one typed row. An open statement in the document's own words (case
+//! and whitespace differences are the same phrase), an inverse relation written from the other end (`Acme employs Cy`), a phrase bound to this attribute
+//! (`is employed by`), and a row inferred by a rule all count. The five kinds of connected member are not listed, leaving only the one that truly has nothing
+//! at all.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` it skips rather than fails. It sets up and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_store::ontology::{entity_instances, link_predicate, Lacking, LinkEnd};
@@ -96,7 +96,7 @@ async fn a_member_linked_any_way_is_not_listed_as_lacking() -> anyhow::Result<()
     assert_eq!(predicate.relation_type_id, Some(works_for));
     assert_eq!(predicate.phrases(), ["is employed by", "works_for"]);
 
-    // 开放短语、看宾语那端：只有 Ann 被人 mentors 过
+    // Open phrase, looking at the object end: only Ann has ever been mentored by someone
     let never_mentored = names_lacking(&pool, kb, person, "Mentors", LinkEnd::In).await?;
     assert_eq!(
         never_mentored,

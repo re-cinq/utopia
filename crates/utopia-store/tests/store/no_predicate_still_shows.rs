@@ -1,17 +1,17 @@
-//! 没有谓词的事实**不能从读路径上消失**（见 `facts.predicate_id`）。
+//! A fact with no predicate **must not vanish from the read paths** (see `facts.predicate_id`).
 //!
-//! 为什么非要连库：`facts.predicate_id` 改成可空之后，二十条读查询里的
-//! `JOIN relation_types` 全都变成了静默的过滤器——内连接丢掉 NULL 行不报错、
-//! 不告警，`cargo check` 和 clippy 一个字都看不见。这与 0009 的
-//! `NULL <> uuid` 是同一个陷阱的两副面孔：三值逻辑下"没有值"被当成"不匹配"。
+//! Why a real database is required: after `facts.predicate_id` was made nullable, the twenty-odd read queries'
+//! `JOIN relation_types` all became silent filters — an inner join drops NULL rows without an error and
+//! without a warning, and `cargo check` and clippy cannot see a single character of it. This is the same trap as
+//! `NULL <> uuid` from 0009, in two guises: under three-valued logic, "no value" gets treated as "no match".
 //!
-//! 这个测试守的就是那条线：**造一条没有谓词的事实，然后要求每条读路径都还能看见它**。
-//! 把任何一条 `LEFT JOIN relation_types` 改回 `JOIN`，这里必须红。
+//! This test guards that line: **create a fact with no predicate, then require every read path to still see it**.
+//! If any `LEFT JOIN relation_types` is changed back to `JOIN`, this must go red.
 //!
-//! 顺带守住显示口径：`fact_surface_predicate` 取出现最多的那个说法，
-//! 于是同一条事实在图上、实体面板、变更历史里叫同一个名字。
+//! Incidentally it also guards the display rule: `fact_surface_predicate` takes the most frequent phrasing,
+//! so the same fact has the same name on the graph, the entity panel, and the change history.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset. Creates and tears down its own; never touches an existing database.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -20,9 +20,9 @@ struct Fixture {
     kb: Uuid,
     subject: Uuid,
     doc: Uuid,
-    /// 没有谓词、但证据里留了原文说法的事实
+    /// A fact with no predicate, but with the original phrasing kept in its evidence
     surfaced: Uuid,
-    /// 没有谓词、连原文说法也没有的事实（更早的历史遗留长这样）
+    /// A fact with no predicate and no original phrasing either (older history left over looks like this)
     mute: Uuid,
 }
 
@@ -101,7 +101,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         .await?;
     }
 
-    // 两条事实都没有谓词——本体里没有对应的关系，这正是可空谓词要表达的状态
+    // Neither fact has a predicate — the ontology has no matching relation, which is exactly the state a nullable predicate exists to express
     for (id, from) in [
         (surfaced, "2020-01-01T00:00:00Z"),
         (mute, "2021-01-01T00:00:00Z"),
@@ -120,9 +120,9 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         .await?;
     }
 
-    // surfaced 有三条证据：acquired 两次、bought 一次。众数是 acquired——
-    // 同时验了 fact_surface_predicate 的"取出现最多的那个"。
-    // mute 只有一条不带原文说法的证据，模拟 add_evidence 无条件记录之前的老数据
+    // surfaced has three pieces of evidence: acquired twice, bought once. The majority is acquired —
+    // this also checks fact_surface_predicate's "take the most frequent one".
+    // mute has only one piece of evidence with no original phrasing, simulating old data from before add_evidence recorded unconditionally
     for (fact, chunk, pred) in [
         (surfaced, chunk_a, Some("acquired")),
         (surfaced, chunk_b, Some("acquired")),
@@ -157,15 +157,15 @@ async fn a_fact_without_a_predicate_is_still_visible_everywhere() -> anyhow::Res
         return Ok(());
     };
     let pool = PgPool::connect(&url).await?;
-    // **开跑前先扫地。** 断言 panic 会跳过下面的 teardown（它只接住 Err 那条路），
-    // 于是一次失败的跑会给下一次留下垃圾。清干净比把每条断言改成返回 Err 便宜
+    // **Sweep up before starting.** An assertion panic skips the teardown below (it only catches the Err path),
+    // so a failed run would leave garbage for the next one. Cleaning up is cheaper than changing every assertion to return Err
     sqlx::query("DELETE FROM organizations WHERE name = 'no-predicate-test'")
         .execute(&pool)
         .await?;
     let f = seed(&pool).await?;
 
     let run = async {
-        // 1. 显示口径：众数胜出，且不是随机的那一个
+        // 1. Display rule: the majority wins, and it is not a random one
         let word: Option<String> = sqlx::query_scalar("SELECT fact_surface_predicate($1)")
             .bind(f.surfaced)
             .fetch_one(&pool)
@@ -178,7 +178,7 @@ async fn a_fact_without_a_predicate_is_still_visible_everywhere() -> anyhow::Res
             .await?;
         assert!(none.is_none(), "连原文说法都没有时该是空，而不是编一个词");
 
-        // 2. 图的边：两条都要在，且都标成 inferred
+        // 2. The graph edges: both must be present, and both marked inferred
         let (_, edges) =
             utopia_store::graph::neighborhood(&pool, f.kb, f.subject, 1, None, None).await?;
         let ours: Vec<_> = edges
@@ -192,7 +192,7 @@ async fn a_fact_without_a_predicate_is_still_visible_everywhere() -> anyhow::Res
         let m = ours.iter().find(|e| e.id == f.mute).unwrap();
         assert!(m.label.is_none(), "说不出就是说不出，不该回落成「有关联」");
 
-        // 3. 实体面板
+        // 3. Entity panel
         let (_, facts) =
             utopia_store::graph::entity_detail(&pool, f.kb, f.subject, None, None).await?;
         let panel: Vec<_> = facts
@@ -205,7 +205,7 @@ async fn a_fact_without_a_predicate_is_still_visible_everywhere() -> anyhow::Res
         assert!(s.inferred);
         assert!(s.temporal.is_none(), "没有谓词就谈不上时态类别");
 
-        // 4. 文档产出（DocViewer 逐块回看）
+        // 4. Document output (DocViewer reviewing block by block)
         let chunk_facts = utopia_store::graph::document_extractions(&pool, f.doc).await?;
         assert!(
             chunk_facts.iter().any(|c| c.fact_id == f.surfaced),
@@ -219,8 +219,8 @@ async fn a_fact_without_a_predicate_is_still_visible_everywhere() -> anyhow::Res
         assert!(chunk_facts.iter().all(|c| !c.is_open_statement),
             "历史投影即便有原文说法，也不能用投影 ID 添加陈述案例");
 
-        // 宾语是字面值的那条：阅读页右栏只认 canonical_name 的时候，它在界面上是
-        // 主语加短语、后面空着一片（「Hugging Face, Inc. known as」）
+        // The one whose object is a literal: when the reading page's right column only recognized canonical_name, it showed up on screen as
+        // subject plus phrase with the rest blank ("Hugging Face, Inc. known as")
         let valued = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO facts (id, kb_id, subject_id, layer, phrase, object_value, confidence)
@@ -246,13 +246,13 @@ async fn a_fact_without_a_predicate_is_still_visible_everywhere() -> anyhow::Res
         assert!(v.is_open_statement, "有短语的原始陈述可添加案例");
         assert_eq!(v.predicate.as_deref(), Some("known as"), "确认案例要显示原文短语");
 
-        // 5. 实体历史（外层 FROM 是 CTE，别名写错会直接报 missing FROM-clause）
+        // 5. Entity history (the outer FROM is a CTE; a wrong alias fails directly with missing FROM-clause)
         let (hist, _) = utopia_store::graph::entity_history(&pool, f.kb, f.subject, 50, 0).await?;
         let h = hist.iter().find(|e| e.fact_id == Some(f.surfaced));
         assert!(h.is_some(), "实体历史漏掉了没有谓词的事实");
         assert_eq!(h.unwrap().predicate_label.as_deref(), Some("acquired"));
 
-        // 6. 账本变更流
+        // 6. Ledger change feed
         let changes = utopia_store::graph::graph_changes(
             &pool,
             f.kb,
@@ -268,17 +268,17 @@ async fn a_fact_without_a_predicate_is_still_visible_everywhere() -> anyhow::Res
         assert!(c.is_some(), "变更流漏掉了没有谓词的事实");
         assert_eq!(c.unwrap().predicate_label.as_deref(), Some("acquired"));
 
-        // 7. **不再有任何机制能把它长回来。**
+        // 7. **No mechanism can bring it back any more.**
         //
-        // 这一条的历史值得留着：第一版是空断言（只 `SELECT … WHERE builtin`，
-        // 而夹具是裸 SQL 建的库、从没播种过，于是断言在一片空地上成立）；
-        // 第二版补了对照组——先调 `ensure_default_ontology` 把种子种下去，
-        // 再确认 `related_to` 不在其中。因为删完七分钟，代码就把行种回来过一次。
+        // The history of this one is worth keeping: the first version was an empty assertion (it only ran `SELECT … WHERE builtin`,
+        // and the fixture built the database with bare SQL, never seeded, so the assertion held on bare ground);
+        // the second version added a control group — first call `ensure_default_ontology` to plant the seed,
+        // then confirm `related_to` is not in it. Because seven minutes after deletion, the code had planted the row back once.
         //
-        // 现在**连播种函数都没有了**：0009 删内置实体类、0010 与 `#125` 删种子关系、
-        // 0011 把 `mapped_to` 搬去 `concept_mappings`，`ensure_default_ontology`
-        // 随之退场。所以这里改守更强的那条性质：**建库路径上不存在任何
-        // 代码硬塞的关系**，`builtin` 那一列在新库里恒为空。
+        // Now **even the seeding function is gone**: 0009 removed the built-in entity classes, 0010 and `#125` removed the seed relations,
+        // 0011 moved `mapped_to` into `concept_mappings`, and `ensure_default_ontology`
+        // retired along with them. So here we guard the stronger property: **no code on the database-creation path forces any relation in**,
+        // and the `builtin` column is always empty in a new database.
         let seeded: Vec<String> =
             sqlx::query_scalar("SELECT key FROM relation_types WHERE kb_id = $1 AND builtin")
                 .bind(f.kb)
@@ -289,15 +289,15 @@ async fn a_fact_without_a_predicate_is_still_visible_everywhere() -> anyhow::Res
             "本体里不该有代码硬塞进去的关系，实得 {seeded:?}"
         );
 
-        // 只按 kb 查，不查全库：全库计数会被并行跑的其它测试和上一轮的残留污染，
-        // 那是条会无故变红的断言。这一条已经守住了要守的东西——
-        // 种子表种下之后，本体里没有一个"什么都没说"的关系可供模型挑选
+        // Scoped to the KB only, not the whole database: a whole-database count would be polluted by other tests running in parallel and by leftovers from the previous run,
+        // which would be an assertion that turns red for no reason. This one already guards what it should —
+        // once the seed table is planted, the ontology contains no "says nothing" relation for the model to pick
 
         Ok::<(), anyhow::Error>(())
     }
     .await;
 
-    // 无论断言是否炸，都把临时数据拆干净（下层全是 ON DELETE CASCADE）
+    // Clean up the temporary data whether or not the assertion blew up (everything below is ON DELETE CASCADE)
     sqlx::query("DELETE FROM organizations WHERE name = 'no-predicate-test'")
         .execute(&pool)
         .await?;

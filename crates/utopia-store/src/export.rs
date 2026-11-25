@@ -1,53 +1,53 @@
-//! 导出用的读取面（0020）。
+//! Read surface used for export (0020).
 //!
-//! 与界面那几个视图分开写，因为问的东西不一样：界面要「现在是什么样」，
-//! 导出要**全部**——闭合的区间、撤回的行、修正链，一条都不能少，否则导出的
-//! 是一张干净自信的图，而那正是审计要看的东西被抹掉的样子。
+//! Written separately from the views in the UI, because the questions differ: the UI asks "what does it look like now",
+//! while export must have **everything** — closed intervals, retracted rows, correction chains; not one may be missing, or the export becomes
+//! a clean, confident graph, which is exactly how the things an audit needs to see get erased.
 //!
-//! 除本体外一律**按 id 分页**：一个库的事实可以有几十万条，全读进内存再序列化
-//! 会在最需要它的那种部署上炸掉。id 是 uuid v7，按它排序即按写入顺序排序。
-//! 第一页没有下界（`$2 IS NULL OR id > $2`）：uuid 没有更小的哨兵可垫——
-//! `id > NIL` 会把主键恰为 NIL 的合法行永远挡在导出外，而指向它的
-//! (document_id, version) 定位器照样解析，留下一条没有本体的边。
+//! Everything except the ontology is **paginated by id**: a KB can have hundreds of thousands of facts, and reading them all into memory before serializing
+//! would blow up on exactly the deployments that need it most. The id is a uuid v7, so sorting by it sorts by write order.
+//! The first page has no lower bound (`$2 IS NULL OR id > $2`): a uuid has no smaller sentinel to pad with —
+//! `id > NIL` would forever keep out a legitimate row whose primary key is exactly NIL, while the
+//! (document_id, version) locator pointing at it would still resolve, leaving an edge with no object.
 //!
-//! **同一份快照**：所有取数口吃调用方的事务（`&mut Transaction`），路由侧把它
-//! 定成只读 REPEATABLE READ——体检、词汇表与每一页读的是同一个时刻的库。
-//! 若每页各自向连接池要一条连接，词汇表发完之后才提交的规则会在派生页里
-//! 留下一条指向它的 `wasGeneratedBy`——图里就出现没有本体的引用。
+//! **One shared snapshot**: all the data reads take the caller's transaction (`&mut Transaction`), and the route side sets it
+//! to read-only REPEATABLE READ — the health check, the vocabulary, and every page read the database as of the same moment.
+//! If each page took its own connection from the pool, a rule committed after the vocabulary was sent would leave, in a derived page,
+//! a `wasGeneratedBy` pointing at it — a reference to an ontology that is not in the graph.
 //!
-//! **逐页校验用的是留下的那几行自己**：每个 page 查询把被引行的
-//! kb_id 与行本体**原子地一并选出**，校验在内存里跑。不能「先取一页、再去库里
-//! 问一次」——第二次问的是另一个时刻的状态，留下的行早已不是它。
+//! **Per-page validation uses the rows that were left behind**: each page query selects the referenced rows'
+//! kb_id **atomically together with** the row itself, and validation runs in memory. It cannot "fetch a page, then ask the database
+//! once more" — the second ask sees a state at another moment, and the rows left behind are no longer that state.
 //!
-//! 体检范围覆盖 **0070/0091 保护的每一条结构引用边**——不只这份导出真正解析的
-//! 那些。导出还没读的边（规则表自身、陈述属性、时间提及等）也在同一个快照里
-//! 先查：catalog 守卫（migration_0070_runs_under_any_search_path.rs）核对
-//! export_provenance_integrity.sql 的每条扫描分支都对应一条受保护的
-//! catalog 边，将来新加的受保护引用漏登记体检就直接红。
+//! The health check covers **every structural reference edge protected by 0070/0091** — not only those this export actually resolves.
+//! Edges the export has not yet read (the rules table itself, statement attributes, temporal mentions, etc.) are also checked
+//! first in the same snapshot: the catalog guard (migration_0070_runs_under_any_search_path.rs) verifies that every scan branch of
+//! export_provenance_integrity.sql maps each scan branch to one protected
+//! catalog edge: if a new protected reference is added later and not registered, the health check goes red straight away.
 
 use chrono::{DateTime, Utc};
 use sqlx::{Postgres, Transaction};
 use utopia_core::{AppError, AppResult};
 use uuid::Uuid;
 
-/// 一次取多少行。够大以免把往返次数拉满，够小以免一页就撑爆内存。
+/// How many rows to fetch at once. Big enough to keep round trips down, small enough that one page cannot exhaust memory.
 pub const PAGE: i64 = 500;
 
-/// 出处体检的唯一一份 SQL：运行时就跑它，catalog 守卫读的也是它——
-/// 边集合只有这一处登记，没有第二份要手工对齐的清单
+/// The only SQL for the provenance check: it runs at runtime, and the catalog guard reads this same one —
+/// the edge set is registered in exactly one place, with no second list to keep aligned by hand
 const PREFLIGHT_SQL: &str = include_str!("export_provenance_integrity.sql");
 
-/// 出处链越界的一类引用。同库外键只认 id、不认库：A 库的
-/// 行可以引用 B 库的对象，schema 什么都不拦。0070 的触发器挡新行；这里拦的是
-/// **存量坏行**与绕过触发器写进来的行。
+/// A class of reference whose provenance chain crosses out of its KB. Same-KB foreign keys check only the id, not the KB: a row in KB A
+/// may reference an object in KB B, and the schema blocks nothing. The 0070 trigger blocks new rows; what this catches is
+/// **bad rows already stored** and rows written past the trigger.
 ///
-/// 处置一律是**整份拒导**：把别库对象的 id 铸进本库 IRI
-/// （`urn:utopia:kb:A:document:{B 的文档}`）等于伪造身份——那份文件看着
-/// 完整，实则悬空。被词汇表解析的引用（谓词、属性类型、实体类型）越库则
-/// 静默消失——坏行一样不许放行。少导一行、换个 IRI 都不在选项里
+/// The disposition is always **reject the whole export**: minting another KB's object id under this KB's IRI
+/// (`urn:utopia:kb:A:document:{B's document}`) is forging an identity — the file looks
+/// complete but is actually dangling. A reference resolved by the vocabulary (predicate, attribute type, entity type) that crosses KBs
+/// would silently vanish — a bad row is not let through either. Dropping one row or swapping the IRI are not among the options.
 #[derive(Debug, sqlx::FromRow)]
 pub struct CrossKbViolation {
-    /// 哪条边：evidence.chunk | derivation.premise_fact | …
+    /// which edge: evidence.chunk | derivation.premise_fact | …
     pub edge: String,
     pub rows: i64,
 }
@@ -65,9 +65,9 @@ fn cross_kb_error(violations: &[CrossKbViolation]) -> AppError {
     )
 }
 
-/// 引用指着的东西**在本库，却不在导出集里**（合并掉的实体是唯一会缺席的
-/// 实体——`entities_page` 滤掉 `merged_into` 非空的行）。同库但缺席的引用
-/// 不能换 IRI、也不能静默省略：整份拒导，与越库同一处置。
+/// A reference points at something **in this KB but not in the export set** (a merged-away entity is the only one that can be
+/// absent — `entities_page` filters out rows with a non-empty `merged_into`). A same-KB but absent reference
+/// cannot be given a different IRI, nor silently omitted: the whole export is rejected, the same disposition as a cross-KB reference.
 fn unexported_error(violations: &[CrossKbViolation]) -> AppError {
     let detail = violations
         .iter()
@@ -90,23 +90,23 @@ fn tally(violations: &mut Vec<CrossKbViolation>, edge: &str, rows: i64) {
     }
 }
 
-/// 引用列的判定：**留下的是谁，就查谁**。`ref_kb` 由 page 查询与行本体原子地
-/// 一并选出——别库、悬空（NULL）都不算本库，一律判违规
+/// Judging a reference column: **whoever was left behind is who gets checked**. `ref_kb` is selected atomically together with
+/// the row by the page query — another KB or dangling (NULL) does not count as this KB; in every case it is a violation
 fn foreign(ref_kb: Option<Uuid>, kb_id: Uuid) -> bool {
     ref_kb != Some(kb_id)
 }
 
-/// 导出前的出处体检。逐类数一遍越界引用，有一行就整份拒导。
-/// 越界有两类，各自一条错：**别库/悬空**（`cross_kb`）与**同库但不在导出集**
-/// （`unexported`——合并掉的实体）。只报哪条边坏了、坏了几行——具体哪些行
-/// 坏是库里的事，不进面向导出的报错
+/// Provenance check before export. Counts out-of-bounds references class by class; a single row means the whole export is rejected.
+/// There are two classes of out-of-bounds, each with its own error: **other KB / dangling** (`cross_kb`) and **same KB but not in the export set**
+/// (`unexported` — merged-away entities). It reports only which edge is broken and how many rows — which rows are broken
+/// is the database's business and does not go into the error shown to the exporter.
 ///
-/// 扫的边 = **0070/0091 保护的全部结构引用边**（export_provenance_integrity.sql，
-/// 每条分支带一条 `@edge`/`@filter` 标记给 catalog 守卫核对）——连导出尚未
-/// 序列化的边也算：一份账本上任何一条受保护的同库引用断了，这份导出都不可信，
-/// 宁可整份拒。**必须在导出用的那条事务里跑**（REPEATABLE READ）：
-/// 体检与每一页查询看的是同一个快照，先体检后换连接会在两个时刻之间
-/// 漏掉刚提交的坏行
+/// Edges scanned = **all structural reference edges protected by 0070/0091** (export_provenance_integrity.sql,
+/// each branch carries an `@edge`/`@filter` marker for the catalog guard to verify) — including edges export has not yet
+/// serialized: if any protected same-KB reference on the ledger is broken, this export cannot be trusted,
+/// so it is better to reject the whole thing. **Must run inside the export's own transaction** (REPEATABLE READ):
+/// the check and every page query must see the same snapshot; switching connections after the check would leave a gap between two moments,
+/// in which a just-committed bad row could slip through
 pub async fn provenance_integrity(
     tx: &mut Transaction<'_, Postgres>,
     kb_id: Uuid,
@@ -152,8 +152,8 @@ pub struct ExportClass {
     pub key: String,
     pub label: String,
     pub description: String,
-    /// 导入来的类留着它原来的 IRI——schema.org 的 Organization 导出去还是
-    /// `schema:Organization`，读的人手里的词汇表对得上
+    /// An imported class keeps its original IRI — a schema.org Organization still exports as
+    /// `schema:Organization`, matching the vocabulary the reader has.
     pub iri: Option<String>,
     pub parents: Vec<Uuid>,
     pub disjoint: Vec<Uuid>,
@@ -168,7 +168,7 @@ pub struct ExportRelation {
     pub label: String,
     pub description: String,
     pub iri: Option<String>,
-    /// relation | attribute（后者值域是字面值）
+    /// relation | attribute (the latter's value domain is literal values)
     pub kind: String,
     pub datatype: Option<String>,
     pub unit: Option<String>,
@@ -179,8 +179,8 @@ pub struct ExportRelation {
     pub is_symmetric: bool,
     pub is_asymmetric: bool,
     pub is_irreflexive: bool,
-    /// 同表自指：导出 owl:inverseOf / rdfs:subPropertyOf。存量的合法性在
-    /// 迁移的递延约束里管，这里只负责把集合带上（越库/悬空 → 拒导）
+    /// Self-reference within the same table: exports owl:inverseOf / rdfs:subPropertyOf. Whether existing rows are legal is governed
+    /// by the deferred constraints in the migration; here we only carry the set along (cross-KB / dangling → reject)
     pub inverse_of: Option<Uuid>,
     pub sub_property_of: Option<Uuid>,
     pub domains: Vec<Uuid>,
@@ -194,8 +194,8 @@ pub struct ExportEntity {
     pub id: Uuid,
     pub canonical_name: String,
     pub type_id: Option<Uuid>,
-    /// type_id 指着的类的 kb（LEFT JOIN 一并选出）。别库/悬空 → 拒导：
-    /// 序列化按 id 进本库词汇表查类，查不着就是静默丢类型
+    /// The KB of the class that type_id points at (selected by a LEFT JOIN). Cross-KB / dangling → reject:
+    /// serialization looks the class up in this KB's vocabulary by id, and if it is not found the type would be silently dropped
     pub type_kb: Option<Uuid>,
 }
 
@@ -204,43 +204,43 @@ pub struct ExportFact {
     pub id: Uuid,
     pub subject_id: Uuid,
     pub predicate_id: Option<Uuid>,
-    /// 本体没接住这条关系时，模型的原话（0010）。导出去是为了让读的人看见
-    /// 「系统当时听见的是这个词，而词汇表里没有」
+    /// The model's own words when the ontology did not catch this relation (0010). Exported so the reader can see
+    /// "the system heard this word at the time, and the vocabulary has nothing for it"
     pub surface_predicate: Option<String>,
     pub object_id: Option<Uuid>,
     pub object_value: Option<serde_json::Value>,
-    /// 边上的属性（0037），加载后按事实 id 补
+    /// Attributes on the edge (0037), filled in by fact id after loading
     #[sqlx(skip)]
     pub qualifiers: Vec<utopia_core::models::FactQualifier>,
     pub valid_from: Option<DateTime<Utc>>,
     pub valid_from_precision: Option<String>,
     pub valid_to: Option<DateTime<Utc>>,
     pub valid_to_precision: Option<String>,
-    /// 读出来的区间（0022）：「现在仍成立」那条三元组按它判，不再自己解释 NULL
+    /// The read-out interval (0022): the "still holds now" triple is judged by it, rather than interpreting NULL itself
     pub holds_from: Option<DateTime<Utc>>,
     pub holds_to: Option<DateTime<Utc>>,
     pub recorded_at: DateTime<Utc>,
     pub invalidated_at: Option<DateTime<Utc>>,
     pub confidence: f32,
-    /// 规则算出来的隐含行（0044 决定 3 第五片）：读的人要能分辨它不是陈述直接说的
+    /// Implied rows computed by a rule (piece 5 of decision 3 of 0044): a reader must be able to tell that it is not directly stated by a statement
     pub implied: bool,
     pub supersedes: Option<Uuid>,
     pub documents: Vec<Uuid>,
     pub quotes: Vec<String>,
-    /// 证据文字的来源（0040），去重：一条陈述的引文里有没有扫描、转写、看图描述来的
+    /// Source of the evidence text (0040), deduplicated: whether a statement's quotation came from a scan, a transcription, or an image description
     pub quote_origins: Vec<String>,
-    /// 以下各列是被引行的 kb，与行本体原子地一并选出。
-    /// 别库或悬空（NULL）的引用不许被铸成本库 IRI，也不许静默跳过
+    /// The fields below are the KB of the referenced rows, selected atomically together with the row itself.
+    /// A reference to another KB or a dangling (NULL) one must not be minted under this KB's IRI, nor silently skipped
     pub subject_kb: Option<Uuid>,
     pub object_kb: Option<Uuid>,
     pub predicate_kb: Option<Uuid>,
     pub supersedes_kb: Option<Uuid>,
-    /// documents[] 里是否有别库或悬空的文档指针
+    /// Whether documents[] contains a document pointer to another KB or a dangling one
     pub foreign_document: bool,
-    /// 引文 JOIN 的段落里是否有别库或悬空的（quote_origins 的来源会静默消失）
+    /// Whether the passage joined for the quote contains one from another KB or dangling (quote_origins' sources would silently vanish)
     pub foreign_chunk: bool,
-    /// 主语/宾语指着**已合并**的实体：同库但不在导出集（merged_into IS NOT NULL
-    /// 的行 entities_page 不导）。与行本体原子地一并选出
+    /// Subject/object point at a **merged** entity: same KB but not in the export set (rows with merged_into IS NOT NULL
+    /// are not exported by entities_page). Selected atomically together with the row itself
     pub subject_merged: bool,
     pub object_merged: bool,
 }
@@ -250,10 +250,10 @@ pub struct ExportDerived {
     pub id: Uuid,
     pub subject_id: Uuid,
     pub predicate_id: Uuid,
-    /// 字面值结论（业务规则的归类与属性）没有实体宾语（0021）
+    /// A literal-valued conclusion (business rule's classification and attributes) has no entity object (0021)
     pub object_id: Option<Uuid>,
     pub object_value: Option<serde_json::Value>,
-    /// 公理规则。业务规则推的为 None——它的身份在 attribute_rule_id 上
+    /// Axiom rule. For a business-rule-inferred one it is None — its identity is on attribute_rule_id
     pub rule_id: Option<Uuid>,
     pub attribute_rule_id: Option<Uuid>,
     pub valid_from: Option<DateTime<Utc>>,
@@ -263,30 +263,30 @@ pub struct ExportDerived {
     pub derived_at: DateTime<Utc>,
     pub invalidated_at: Option<DateTime<Utc>>,
     pub confidence: f32,
-    /// transitive | symmetric | inverse | sub_property，或 business
+    /// transitive | symmetric | inverse | sub_property, or business
     pub rule: String,
-    /// 公理规则声明在哪个谓词上（`rules.predicate_id`）。inverse 与 sub_property 时它
-    /// 不是结论的谓词，导出要写明（0020 的 2026-09-25 revision，#902）。业务规则为 None
+    /// The predicate on which the axiom rule is declared (`rules.predicate_id`). For inverse and sub_property it is
+    /// not the conclusion's predicate, so the export must state it (0020 revision of 2026-09-25, #902). None for business rules
     pub rule_predicate: Option<Uuid>,
-    /// 业务规则的名字，进 RDF 当这条推理活动的标签
+    /// The name of the business rule, carried into RDF as the label of this inference activity
     pub rule_name: Option<String>,
-    /// 前提事实。审计要顺着它往下走到句子
+    /// Premise facts. An audit follows this down to the sentence
     pub premises: Vec<Uuid>,
-    /// 前提里是**另一条派生**的那些（0030）。与上面那列分开，是因为读回来的人
-    /// 要知道该去哪张表接着往下走；合成一列的话，一条链在导出里就断了
+    /// Those premises that are **another derivation** (0030). Kept separate from the column above, because the reader
+    /// needs to know which table to continue down; if folded into one column, a chain would break in the export
     pub premises_derived: Vec<Uuid>,
-    /// 被引行的 kb，与行本体原子地一并选出
+    /// The KB of the referenced row, selected atomically together with the row itself
     pub subject_kb: Option<Uuid>,
     pub object_kb: Option<Uuid>,
     pub predicate_kb: Option<Uuid>,
-    /// rule_id / attribute_rule_id 指着的规则行的 kb——它铸成 wasGeneratedBy
-    /// 的 Activity IRI
+    /// The KB of the rule row that rule_id / attribute_rule_id points at — it is minted as wasGeneratedBy
+    /// the Activity IRI
     pub rule_kb: Option<Uuid>,
     pub attribute_rule_kb: Option<Uuid>,
-    /// premises[] / premises_derived[] 里是否有别库或悬空的前提（两种前提分开报边）
+    /// Whether premises[] / premises_derived[] contains a premise from another KB or dangling (the two kinds report edges separately)
     pub foreign_fact_premise: bool,
     pub foreign_derived_premise: bool,
-    /// 主语/宾语指着已合并的实体：同库但不在导出集
+    /// Subject/object points at a merged entity: same KB but not in the export set
     pub subject_merged: bool,
     pub object_merged: bool,
 }
@@ -298,7 +298,7 @@ pub struct ExportDocument {
     pub external_key: Option<String>,
     pub doc_time: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
-    /// 删过的文档留着墓碑（#268）。导出里它仍在，只是记录轴上已经结束
+    /// A deleted document keeps a tombstone (#268). In the export it is still present, but already ended on the recording axis
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
@@ -319,8 +319,8 @@ pub async fn classes(
     .bind(kb_id)
     .fetch_all(&mut **tx)
     .await?;
-    // 父类与互斥类稍后要进本库词汇表按 id 查——查不着就是被静默丢掉。
-    // 能解析的就地解析：词汇表全集就在手里，不在集合里的引用就是越库/悬空
+    // Parent classes and disjoint classes are looked up by id later in this KB's vocabulary — if not found, they would be silently dropped.
+    // Those that can be resolved are resolved in place: the full vocabulary set is in hand, so a reference not in the set is cross-KB / dangling
     let own: std::collections::HashSet<Uuid> = classes.iter().map(|c| c.id).collect();
     let mut violations = Vec::new();
     for c in &classes {
@@ -353,9 +353,9 @@ pub async fn relations(
     .bind(kb_id)
     .fetch_all(&mut **tx)
     .await?;
-    // domain/range 的类 id 与 inverse/sub_property 的关系 id 都要进本库词汇表
-    // 查——查不着就静默丢公理。**两行全集都在手里**，不在集合里的引用就是
-    // 越库/悬空
+    // The class ids of domain/range and the relation ids of inverse/sub_property must both be looked up in this KB's vocabulary —
+    // if not found, the axiom is silently dropped. **Both complete sets are in hand**, so a reference not in the set is
+    // cross-KB / dangling
     let own_types: Vec<Uuid> = sqlx::query_scalar(
         "SELECT COALESCE(ARRAY(SELECT id FROM entity_types WHERE kb_id = $1), '{}')",
     )
@@ -391,7 +391,7 @@ pub async fn relations(
     Ok(relations)
 }
 
-/// 合并掉的实体不导出：它已经不是一个东西了，它的事实早已搬到留下的那个身上。
+/// Merged-away entities are not exported: they are no longer a thing; their facts moved long ago to the one that remains.
 pub async fn entities_page(
     tx: &mut Transaction<'_, Postgres>,
     kb_id: Uuid,
@@ -421,8 +421,8 @@ pub async fn entities_page(
     Ok(page)
 }
 
-/// **不过滤 `invalidated_at`。** 撤回的、被修正顶掉的、区间早已闭合的，全在里面
-/// ——它们各自带着两根轴上的时刻，读的人自己判断当时成立不成立（0019、0020）。
+/// **Does not filter `invalidated_at`.** Retracted rows, rows overwritten by a correction, and rows whose interval has long since closed are all in there
+/// — each carries its moments on both axes, and the reader judges for themselves whether it held at the time (0019, 0020).
 pub async fn facts_page(
     tx: &mut Transaction<'_, Postgres>,
     kb_id: Uuid,
@@ -472,8 +472,8 @@ pub async fn facts_page(
     .bind(PAGE)
     .fetch_all(&mut **tx)
     .await?;
-    // 留下的行逐个过：被铸成本库 IRI 的引用不许越库，进词汇表的引用不许查空。
-    // 检查用的是随行原子选出的 ref_kb——不是再去库里问一次的另一个时刻
+    // Go through the rows left behind one by one: a reference minted under this KB's IRI must not cross KBs, and a reference entering the vocabulary must not look up empty.
+    // The check uses the ref_kb selected atomically with the row — not another moment asked of the database
     let mut violations = Vec::new();
     let mut unexported = Vec::new();
     for f in &facts {
@@ -526,9 +526,9 @@ pub async fn facts_page(
     if !unexported.is_empty() {
         return Err(unexported_error(&unexported));
     }
-    // 边上的属性另一张表（0037），按事实 id 一次取回补上——把属性类型的 kb 与
-    // 实体值的 kb 一并选出：别库类型会被词汇表静默跳过，别库实体会被铸进本库
-    // IRI，两种行都得在序列化之前拦下来
+    // The attributes on the edge live in another table (0037); they are fetched back by fact id in one batch and filled in — selecting the attribute type's KB together with the
+    // entity value's KB: a cross-KB type would be silently skipped by the vocabulary, and a cross-KB entity would be minted into this KB's
+    // IRI; both kinds of row must be stopped before serialization
     {
         let ids: Vec<Uuid> = facts.iter().map(|f| f.id).collect();
         let mut by_fact = qualifiers_for_export(tx, &ids, kb_id).await?;
@@ -555,10 +555,10 @@ struct ExportQualifierRow {
     entity_merged: bool,
 }
 
-/// 导出专用的属性取数：与 graph::fact_qualifiers_for 同一形状，多选两列 kb。
-/// 那边用 INNER JOIN——被引类型不在时整行属性**静默消失**；导出不能这么吞。
-/// 别库的属性类型会被词汇表查空而静默跳过，别库的实体值会被铸进本库
-/// entity IRI——两种都按坏行拒
+/// Attribute fetch for export: the same shape as graph::fact_qualifiers_for, but selecting two extra KB columns.
+/// That one uses an INNER JOIN — when the referenced type is absent, the whole attribute row silently disappears; export cannot swallow it that way.
+/// An attribute type from another KB would be looked up empty in the vocabulary and silently skipped; an entity value from another KB would be minted into this KB's
+/// entity IRI — both are rejected as bad rows
 async fn qualifiers_for_export(
     tx: &mut Transaction<'_, Postgres>,
     fact_ids: &[Uuid],
@@ -615,7 +615,7 @@ async fn qualifiers_for_export(
             .or_default()
             .push(utopia_core::models::FactQualifier {
                 qualifier_type_id: r.qualifier_type_id,
-                // 过了校验 r 必然在：key/label 不会取不到
+                // Having passed validation, r must exist: the key/label cannot fail to be fetched
                 key: r.key.unwrap_or_default(),
                 label: r.label.unwrap_or_default(),
                 value: r.value,
@@ -632,9 +632,9 @@ pub async fn derived_page(
     after: Option<Uuid>,
 ) -> AppResult<Vec<ExportDerived>> {
     let page: Vec<ExportDerived> = sqlx::query_as(
-        // **两个 LEFT JOIN。** 表拓宽之后（0021）派生可能没有实体宾语、
-        // 也可能来自业务规则而不是公理——内连接会把这类结论整条挡在导出之外，
-        // 而 0020 承诺的正是「审计员不靠我们也能读全」
+        // **Two LEFT JOINs.** After the table was widened (0021), a derivation may have no entity object,
+        // and may come from a business rule rather than an axiom — an inner join would block whole conclusions of this kind from the export,
+        // yet what 0020 promises is exactly that "an auditor can read everything without relying on us"
         "SELECT d.id, d.subject_id, d.predicate_id, d.object_id, d.object_value,
                 d.rule_id, d.attribute_rule_id,
                 d.valid_from, d.valid_from_precision, d.valid_to, d.valid_to_precision,
@@ -700,7 +700,7 @@ pub async fn derived_page(
                 d.object_merged as i64,
             );
         }
-        // 派生的谓词非空（CHECK 保证），NULL 的 ref_kb 一样是越界/悬空
+        // The derived predicate is non-empty (guaranteed by CHECK); a NULL ref_kb is likewise out-of-bounds / dangling
         tally(
             &mut violations,
             "derived.predicate",
@@ -758,34 +758,34 @@ pub async fn documents_page(
     .await?)
 }
 
-/* ---- 认知状态（0062）----
+/* ---- Epistemic state (0062) ----
  *
- * 两张表两种东西，不合成一类：
- *   fact_conflicts   同一槽位上两条断言互不相让——数据里有争议，判据没毛病
- *   axiom_violations 当前数据撞上当前判据——数据或本体至少一边要动
+ * Two tables, two different things, not merged into one class:
+ *   fact_conflicts   two assertions in the same slot do not yield to each other — the data is disputed; the criterion itself is fine
+ *   axiom_violations current data hits the current criterion — at least one side, data or ontology, must change
  *
- * 只读：不走 `temporal::list_conflicts` 那种带惰性清理的读面（0051 已把它删了），
- * 也不触发检出。导出的是库里记下的状态。 */
+ * Read-only: it does not go through a read path with lazy cleanup like `temporal::list_conflicts` (0051 already removed that),
+ * and does not trigger detection. The export records the state stored in the database. */
 
-/// 两条事实争同一个槽位。`resolved` 的行也在——它记的是有过的争议，不是
-/// 待办；`withdrawn` 的是事实作废后由触发器退场的（0051），`resolved_at` 记的是
-/// 作废时刻，不是有人开过页面
+/// Two facts contest the same slot. A `resolved` row is also here — it records a dispute that once existed, not a
+/// to-do; a `withdrawn` one is retired by a trigger after its fact was voided (0051), and `resolved_at` records the
+/// moment of voiding, not the moment someone opened the page
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ExportFactConflict {
     pub id: Uuid,
     pub old_fact_id: Uuid,
     pub new_fact_id: Uuid,
-    /// 争议怎么被记下的：no_time | simultaneous | low_confidence | described_evidence
-    /// （此列无 CHECK，库里的旧值也可能进来；合同词表以 contest_integrity 为准）
+    /// How the dispute was recorded: no_time | simultaneous | low_confidence | described_evidence
+    /// (this column has no CHECK, so old values in the database may also come through; the contract vocabulary is authoritative per contest_integrity)
     pub reason: String,
     pub created_at: DateTime<Utc>,
     /// open | resolved | withdrawn
     pub status: String,
-    /// closed | kept_both | rejected_new；只在 resolved 时有
+    /// closed | kept_both | rejected_new; only present when resolved
     pub resolution: Option<String>,
-    /// resolved：裁决时刻；withdrawn：先作废那一边的时刻（0051）
+    /// resolved: the moment of the ruling; withdrawn: the moment of the side voided first (0051)
     pub resolved_at: Option<DateTime<Utc>>,
-    /// 两条事实的 kb，随行原子地一并选出：越库/悬空 → 拒导
+    /// The KB of both facts, selected atomically with the row: cross-KB / dangling → reject
     pub old_fact_kb: Option<Uuid>,
     pub new_fact_kb: Option<Uuid>,
 }
@@ -829,49 +829,49 @@ pub async fn fact_conflicts_page(
     Ok(page)
 }
 
-/// 一条「当前数据与当前判据不一致」的发现。`open` 意味着它已对账于**当前**
-/// 本体（0062）——改判据的那笔事务把它收编或重检出过了。
+/// A finding that "current data does not agree with the current criterion". `open` means it has been reconciled against the **current**
+/// ontology (0062) — the transaction that changed the criterion adopted it or re-detected it.
 ///
-/// 行是**可变的当前状态**，不是追加历史：resolved 之后又被算出来的同一处
-/// 违规会重开，`detected_at` 记的是最近一次检出/重开的时刻；更早的循环
-/// 不留在行里，导出也就照实不说它。
+/// The row is **mutable current state**, not an append-only history: if the same violation is computed again after being resolved, it reopens;
+/// `detected_at` records the moment of the most recent detection or reopening; earlier loops
+/// are not kept in the row, so the export does not claim them.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ExportAxiomViolation {
     pub id: Uuid,
     pub kind: String,
     pub left_fact: Uuid,
     pub right_fact: Uuid,
-    /// 环按顺序的完整事实链（其余种类存检出的证据，自环/签名为空）
+    /// The full chain of facts along the cycle, in order (other kinds store detection evidence; self-loops and signatures are empty)
     pub path: Vec<Uuid>,
     pub status: String,
     /// fact_retracted | fact_closed | axiom_relaxed | accepted | criterion_changed
     pub resolution: Option<String>,
-    /// 最近一次检出或重开的时刻（不是第一次发现）
+    /// The moment of the most recent detection or reopening (not the first discovery)
     pub detected_at: DateTime<Utc>,
-    /// 不再是 open 的时刻（收编或人裁）
+    /// The moment it stopped being open (adopted, or ruled on by a human)
     pub decided_at: Option<DateTime<Utc>>,
-    /// 以下两列**只在 open 行上解析**（0062）：open = 已按当前本体对账，
-    /// 判据必然指得回去；resolved 的行不连判据——促成它结案的本体可能早已不在
+    /// The two columns below are **resolved only on open rows** (0062): open = reconciled against the current ontology,
+    /// so the criterion must point back to something; a resolved row does not link to the criterion — the ontology that closed it may long be gone
     pub criterion_predicate: Option<Uuid>,
-    /// 判据的词：kind 本身，或 derived_contradiction 记下的 detail.axiom
-    /// （self_loop | asymmetry | cycle | functional | inverse_functional | signature）
+    /// The criterion's word: the kind itself, or detail.axiom recorded by derived_contradiction
+    /// (self_loop | asymmetry | cycle | functional | inverse_functional | signature)
     pub criterion_axiom: Option<String>,
-    /// 被引行的 kb，随行原子地一并选出
+    /// The KB of the referenced row, selected atomically together with it
     pub left_kb: Option<Uuid>,
     pub right_kb: Option<Uuid>,
     pub criterion_predicate_kb: Option<Uuid>,
-    /// path 里是否有越库或悬空的事实（环的证据链会按序铸成 IRI）
+    /// Whether a fact in the path is from another KB or dangling (the evidence chain of a cycle is minted as IRIs in order)
     pub foreign_path: bool,
 }
 
-/// detail.predicate_id 存成 JSON 文本，落到 uuid 前先验形——
-/// 畸形的值宁可解析失败（→ 拒导）也不能静默指错关系
+/// detail.predicate_id is stored as JSON text; check its form before casting to uuid —
+/// a malformed value should fail to parse (→ reject) rather than silently point at the wrong relation
 const UUID_TEXT_RE: &str =
     "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
 
-/// open 行的判据谓词解析式：derived_contradiction 的判据挂在 detail 记下的
-/// **派生谓词**上（axiom 声明在它那里）；其余种类就是 left_fact 的谓词。
-/// 分页与预检共用同一串——两处各写一份迟早漂移
+/// The predicate resolution for an open row's criterion: derived_contradiction's criterion sits on the **derived predicate** recorded in detail
+/// (the axiom is declared there); for other kinds it is the predicate of left_fact.
+/// Pagination and the pre-check share this one expression — writing it in two places would drift sooner or later
 fn criterion_predicate_sql() -> String {
     format!(
         "CASE WHEN v.kind = 'derived_contradiction'
@@ -881,13 +881,13 @@ fn criterion_predicate_sql() -> String {
     )
 }
 
-/// open 行的判据词解析式：derived_contradiction 看 detail.axiom，其余看 kind
+/// The criterion-word resolution for an open row: derived_contradiction looks at detail.axiom, the rest look at kind
 const CRITERION_AXIOM_SQL: &str =
     "CASE WHEN v.kind = 'derived_contradiction' THEN v.detail->>'axiom' ELSE v.kind END";
 
-/// kind / detail.axiom 的存储值 → 判据该用的词（0062 §4）。
-/// signature 的判据是一对签名（行不记哪一侧破的，合同也不装知道）。
-/// None = 不认识的存储值——open 行撞上它就要拒导，不能静默丢判据
+/// Stored values of kind / detail.axiom → the word the criterion should use (0062 §4).
+/// A signature's criterion is a pair of signatures (the row does not record which side broke, and the contract does not pretend to know).
+/// None = an unknown stored value — an open row hitting it must be rejected; the criterion must not be silently dropped
 fn criterion_terms(axiom: &str) -> Option<&'static [&'static str]> {
     Some(match axiom {
         "self_loop" => &["owl:IrreflexiveProperty"],
@@ -901,8 +901,8 @@ fn criterion_terms(axiom: &str) -> Option<&'static [&'static str]> {
 }
 
 impl ExportAxiomViolation {
-    /// 判据的 RDF 词项（`utopia:criterion` 的宾语，可能不止一个）。
-    /// open 行必然取得到——取不到说明存储值进了合同不认识的东西，拒导而不是瞎编
+    /// The RDF term of the criterion (the object of `utopia:criterion`; there may be more than one).
+    /// An open row must always obtain it — failing to obtain it means the stored value is something the contract does not recognize; reject rather than make it up
     pub fn criterion_terms(&self) -> Option<&'static [&'static str]> {
         self.criterion_axiom.as_deref().and_then(criterion_terms)
     }
@@ -955,8 +955,8 @@ pub async fn axiom_violations_page(
         );
         tally(&mut violations, "violation.path", v.foreign_path as i64);
         if v.status == "open" {
-            // open 的承诺是「已按当前本体对账」：判据指不回去，这份导出就在
-            // 替一个坏掉的不变式背书——拒导与越库同一条纪律
+            // The promise of open is "reconciled against the current ontology": if the criterion cannot be pointed back to, this export is
+            // vouching for a broken invariant — rejecting it follows the same discipline as cross-KB
             if v.criterion_predicate.is_none() || v.criterion_terms().is_none() {
                 unresolvable.push(CrossKbViolation {
                     edge: "violation.criterion".into(),
@@ -989,19 +989,19 @@ pub async fn axiom_violations_page(
     Ok(page)
 }
 
-/// 认知状态的**流前预检**（0062）：分页查询里也带同一批检查，但那时文件头
-/// 已经发出去，只能截断——所以先在这里数一遍，有一行就整份拒。
+/// Pre-stream check for epistemic state (0062): the paginated queries also carry the same checks, but by then the file header
+/// has already been sent and can only be truncated — so count first here, and reject the whole thing if there is a single bad row.
 ///
-/// 三类问题：
-/// - **越库/悬空**：conflict 的两条事实、violation 的 left/right/path 成员必须
-///   是本库的 facts 行（悬空=铸出不存在的 IRI，与越库同罪）
-/// - **合同外的值**：status/resolution/kind/reason 落进词表以外、或
-///   status↔resolution 不自洽（open 带着 resolution 之类）的脏行——
-///   `fact_conflicts.reason` 没有 CHECK 挡着，其余列有但 CHECK 只在新写时
-///   生效，存量脏行一样照实拒，不 echo 出去
-/// - **open 行判据不可解析**：open = 已对账于当前本体，判据必然指得回本库
-///   一条关系与一个合同认识的词（derived_contradiction 的 detail.predicate_id
-///   畸形也算——静默退到 left_fact 的谓词等于瞎指）
+/// Three classes of problem:
+/// - **Cross-KB / dangling**: a conflict's two facts, and a violation's left/right/path members, must
+///   be facts rows of this KB (dangling = minting a non-existent IRI, same sin as cross-KB)
+/// - **Values outside the contract**: status/resolution/kind/reason outside the vocabulary, or
+///   status and resolution inconsistent (e.g. open carrying a resolution) — dirty rows
+///   `fact_conflicts.reason` has no CHECK guarding it, and the other columns have CHECKs that only apply to new writes,
+///   so stored dirty rows are rejected as they are, and not echoed out
+/// - **Open row criterion not parseable**: open = reconciled against the current ontology, so the criterion must point back to
+///   a relation in this KB and a word the contract recognizes (a malformed derived_contradiction detail.predicate_id also counts —
+///   silently falling back to the left_fact predicate would be pointing blindly)
 pub async fn contest_integrity(tx: &mut Transaction<'_, Postgres>, kb_id: Uuid) -> AppResult<()> {
     #[derive(sqlx::FromRow)]
     struct ContestViolation {

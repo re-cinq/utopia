@@ -1,17 +1,17 @@
-//! 面板的「没落地的派生」按记录轴回放（#307 / 0019）。
+//! The panel's "derivation that did not land" is replayed on the record axis (#307 / 0019).
 //!
-//! 之前 `blocked_for_entity` 写死 `v.status = 'open'`：三月被发现、四月被人
-//! 裁掉的违规，在回放中的面板上仍然挂着——而该行此刻在 `axiom_violations`
-//! 上已经是 `resolved`。`violation_open_at` 是答案：和 0031 同款的「判定
-//! 在 T 时刻还开着」问法。
+//! Previously `blocked_for_entity` hardcoded `v.status = 'open'`: a violation detected in March and dismissed by a person in April
+//! still hung on the panel during replay, although that row is now `resolved` in `axiom_violations`.
+//! `violation_open_at` is the answer, in the same style as 0031's "judge whether it is
+//! still open at moment T".
 //!
-//! 三个方向都要钉：
+//! All three directions must be pinned:
 //!
-//! - **当下还开着的** 在所有时刻都出现（`status = 'open'` 与 held_at 同真）
-//! - **当下被裁的** 在 `decided_at` 之前仍出现，之后消失
-//! - **当下还没检测到的** 在 `detected_at` 之前不出现
+//! - **Still open now** appears at every moment (`status = 'open'` and held_at are both true)
+//! - **Dismissed now** still appears before `decided_at`, and disappears after
+//! - **Not yet detected now** does not appear before `detected_at`
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is not set. It builds and tears down its own data and never touches an existing DB.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -101,7 +101,7 @@ async fn blocked_for_entity_respects_as_of() -> anyhow::Result<()> {
     .bind(kb)
     .execute(&pool)
     .await?;
-    // Mira 上的断言事实：被两条违规拿来当 left_fact
+    // Assertion fact on Mira: used as left_fact by two violations
     sqlx::query(
         "INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_id, confidence)
          VALUES ($1, $2, $3, $4, $5, 0.9)",
@@ -113,7 +113,7 @@ async fn blocked_for_entity_respects_as_of() -> anyhow::Result<()> {
     .bind(acme)
     .execute(&pool)
     .await?;
-    // 派生事实：被两条违规拿来当 right_fact（得是事实才能填 FK）
+    // Derived fact: used as right_fact by two violations (must be a fact to fill the FK)
     sqlx::query(
         "INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_id, confidence)
          VALUES ($1, $2, $3, $4, $5, 0.9)",
@@ -136,7 +136,7 @@ async fn blocked_for_entity_respects_as_of() -> anyhow::Result<()> {
     .bind(acme)
     .execute(&pool)
     .await?;
-    // 「现在还开着」：3 月检测至今未裁
+    // "Still open now": detected in March and not dismissed to date
     sqlx::query(
         "INSERT INTO axiom_violations (id, kb_id, kind, left_fact, right_fact, status,
                                       detail, detected_at)
@@ -154,7 +154,7 @@ async fn blocked_for_entity_respects_as_of() -> anyhow::Result<()> {
     .bind(t("2026-03-15T00:00:00Z"))
     .execute(&pool)
     .await?;
-    // 「三月检测、四月被人裁掉」：当前 status=resolved，decided_at=4 月
+    // "Detected in March, dismissed by a person in April": currently status=resolved, decided_at=April
     sqlx::query(
         "INSERT INTO axiom_violations (id, kb_id, kind, left_fact, right_fact, status,
                                       resolution, decided_at,
@@ -190,7 +190,7 @@ async fn blocked_for_entity_respects_as_of() -> anyhow::Result<()> {
         async move { utopia_store::reasoning::blocked_for_entity(&pool, kb, mira, when).await }
     };
 
-    // 当下：resolved 那条已裁，open 那条留着 → 只有 still_open
+    // Now: the resolved one has been dismissed, the open one remains → only still_open
     let now = blocks(None).await?;
     assert_eq!(
         ids_sorted(now),
@@ -198,11 +198,11 @@ async fn blocked_for_entity_respects_as_of() -> anyhow::Result<()> {
         "当下：open 一条"
     );
 
-    // 2 月：两条都还没检测到 → 都没有
+    // February: neither has been detected yet → neither appears
     let feb = blocks(Some(t("2026-02-01T00:00:00Z"))).await?;
     assert!(feb.is_empty(), "2 月：检测之前都不到");
 
-    // 3 月 25 日：resolved 在 decided_at 之前仍开着；still_open 在 → 两条
+    // 25 March: resolved is still open before decided_at; still_open is there → both
     let late_mar = blocks(Some(t("2026-03-25T00:00:00Z"))).await?;
     assert_eq!(
         ids_sorted(late_mar),
@@ -210,7 +210,7 @@ async fn blocked_for_entity_respects_as_of() -> anyhow::Result<()> {
         "3 月 25 日：resolved 还在、still_open 还在"
     );
 
-    // 5 月：resolved 在 decided_at 之后消失、still_open 还在 → 一条
+    // May: resolved has disappeared after decided_at, still_open remains → one
     let may = blocks(Some(t("2026-05-01T00:00:00Z"))).await?;
     assert_eq!(
         ids_sorted(may),

@@ -1,6 +1,6 @@
-//! RC-009：迁移 9011 删掉同一篇文档排着的重复抽取，留最早那份，在跑的不动，别的文档不动。
+//! RC-009: migration 9011 deletes duplicate extractions queued for the same document, keeping the earliest one; a running one is left alone, and other documents are left alone.
 //!
-//! 这条 DELETE 不按 kb 过滤、看全库排着的抽取，所以自成一个二进制（为什么见 `store/main.rs`）。
+//! This DELETE does not filter by kb and looks at extractions queued across the whole DB, so it is its own binary (for why, see `store/main.rs`).
 
 use sqlx::PgPool;
 use uuid::Uuid;

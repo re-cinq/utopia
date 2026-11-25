@@ -1,4 +1,4 @@
-//! 写回测试只操作自己的任务行，不启动会认领全库任务的 worker。
+//! The writeback tests only touch their own task rows and do not start a worker that claims tasks across the whole database.
 
 use super::{persist_outcome, persist_with_retry, Job, JobOutcome, DEFER_WINDOW_SECS};
 use chrono::{DateTime, Utc};
@@ -72,7 +72,7 @@ async fn a_refused_write_retries_the_computed_result() -> anyhow::Result<()> {
     let object_name = format!("test_writeback_retry_{}", Uuid::now_v7().simple());
 
     let result: anyhow::Result<()> = async {
-        // sequence 不随拒写事务回滚，计数能证明第一次写入确实失败。
+        // The sequence is not rolled back with the rejected write transaction, so the count proves the first write really failed.
         sqlx::raw_sql(&format!(
             "CREATE SEQUENCE {object_name};
              CREATE FUNCTION {object_name}() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -137,7 +137,7 @@ async fn an_old_claim_cannot_overwrite_any_new_running_result() -> anyhow::Resul
     let ordinary = anyhow::anyhow!("network failure").context("provider request");
     let deferred = anyhow::anyhow!("index busy").context(Deferred::new(Duration::from_secs(17)));
 
-    // 窗口内和窗口外的旧 Deferred 都不能把新认领写成失败。
+    // Old Deferred tasks, both inside and outside the window, cannot turn a new claim into a failure.
     for expired in [false, true] {
         let job = running_job(&pool, 1).await?;
         let payload = if expired {
@@ -145,7 +145,7 @@ async fn an_old_claim_cannot_overwrite_any_new_running_result() -> anyhow::Resul
         } else {
             json!({})
         };
-        // 先提交重排，再从新事务认领；不伪造认领时间，也不认领其他测试的任务。
+        // Commit the reschedule first, then claim from a new transaction; do not fabricate the claim time, and do not claim other tests' tasks.
         sqlx::query("UPDATE jobs SET status = 'queued', attempts = 0, payload = $2 WHERE id = $1")
             .bind(job.id)
             .bind(payload)
@@ -221,7 +221,7 @@ async fn deferred_window_uses_completion_time_and_current_database_payload() -> 
         return Ok(());
     };
     let pool = PgPool::connect(&url).await?;
-    // 故意用早于当前时间的完成时刻，写回等待不能令有效的 Deferred 过期。
+    // Deliberately uses a completion time earlier than now, so the writeback wait cannot expire a valid Deferred.
     let completed_at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
     let error = anyhow::anyhow!("index busy").context(Deferred::new(Duration::from_secs(17)));
     for seconds_inside_window in [1, 0] {
@@ -229,7 +229,7 @@ async fn deferred_window_uses_completion_time_and_current_database_payload() -> 
         let since =
             completed_at - chrono::Duration::seconds(DEFER_WINDOW_SECS - seconds_inside_window);
         let payload = json!({"deferred_since": since.to_rfc3339(), "kept": "value"});
-        // handler 可以在认领后更新 payload，窗口起点以已写入数据库的值为准。
+        // The handler may update the payload after claiming; the window start follows the value already written to the database.
         sqlx::query("UPDATE jobs SET payload = $2 WHERE id = $1")
             .bind(job.id)
             .bind(&payload)
@@ -261,7 +261,7 @@ async fn deferred_window_uses_completion_time_and_current_database_payload() -> 
 
 #[tokio::test]
 async fn a_closed_pool_does_not_keep_writeback_retry_alive() -> anyhow::Result<()> {
-    // 已关闭的惰性池不会建立连接，此测试不依赖数据库。
+    // A closed lazy pool never opens a connection, so this test does not depend on the database.
     let pool = PgPool::connect_lazy("postgres://test:test@127.0.0.1:1/test")?;
     pool.close().await;
     let job = Job {
@@ -316,7 +316,7 @@ async fn closing_the_pool_cancels_writeback_while_it_waits_for_a_row_lock() -> a
     });
 
     let result: anyhow::Result<()> = async {
-        // 观测自己的后端确实在等这把锁，再关闭池，不靠固定睡眠猜测执行进度。
+        // Observe that its own backend is really waiting on this lock, then close the pool; do not guess progress with a fixed sleep.
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let waiting: bool = sqlx::query_scalar(
@@ -350,7 +350,7 @@ async fn closing_the_pool_cancels_writeback_while_it_waits_for_a_row_lock() -> a
     }
     .await;
 
-    // 失败路径也撤销自己的行锁并终止测试 task，不能把挂起的写回留给其他测试。
+    // The failure path also revokes its own row lock and terminates the test task; a pending writeback must not be left for other tests.
     writer.abort();
     let unlocked = locked.rollback().await;
     let closed = tokio::time::timeout(Duration::from_secs(2), writer_pool.close()).await;

@@ -1,24 +1,24 @@
-//! 传递环要整条路径同一时刻成立（#636），打在真库上。
+//! A transitive cycle must hold across its whole path at one moment (#636), run against a real DB.
 //!
-//! 纯逻辑那部分——两两重叠而三者无交、剪枝丢不了真环、随机图对拍——在
-//! `utopia-reason` 里跑。这里钉的是只有过一遍取数与落库才看得见的：
+//! The pure-logic part — pairwise overlap with no triple intersection, pruning never losing a real cycle, random-graph differential checks — runs in
+//! `utopia-reason`. What is pinned here is what only a pass through data-fetching and storage can see:
 //!
-//! 1. **时间上错开的环不进 Review；改对了时间，环就消失。** 人去把其中一条的结束
-//!    日期补上（302 的 `correct_interval`，作废 + 改写），重跑那一行被清掉。从前改完
-//!    照样算出同一个环——人按提示修了数据，队列却纹丝不动
-//! 2. **区间是按库里的写法读出来的**（`read_span`），每一种写法都要走到：
-//!    - 结束了不知哪天的，到说出它的那份证据为止（0022）——读成开放的，"former"
-//!      一句话就能凭空凑出一个今天还成立的环
-//!    - 没有起点的，从最早的证据起
-//!    - 事件在它命名的那个桶里成立：同一天与同一个月相交，相邻两天不交；没日期的
-//!      事件哪一刻都不成立（0031）
-//!    - 恒常谓词没有时间可错开，照报；把谓词改成状态，重跑就清掉
-//! 3. **同一对节点之间有两条边，一条从没与别的边同时成立**：环照样经由另一条被找到，
-//!    路径上是那一条
-//! 4. **裁决照旧**：公理放宽了而环仍同时成立，那行重开；认可过的重跑沉默；撤掉环上
-//!    一条，环不再算出来，裁决留着
+//! 1. **A cycle whose times are staggered is not queued for Review; once the time is corrected, the cycle disappears.** A person fills in the end date of one of them
+//!    (302's `correct_interval`, invalidate + rewrite), and the row from the re-run is cleared. Before, even after the fix
+//!    the same cycle was still computed — the person fixed the data as prompted, yet the queue did not move.
+//! 2. **Intervals are read from the way they are written in the DB** (`read_span`); every way of writing must be covered:
+//!    - Ended on an unknown day: held up to the evidence that states it (0022) — read as open, a single "former"
+//!      sentence could conjure from nothing a cycle that still holds today
+//!    - No start: counted from the earliest evidence
+//!    - An event holds within the bucket it names: intersects on the same day and the same month, and adjacent days do not intersect; an event with no date
+//!      holds at no moment (0031)
+//!    - An eternal predicate has no time to stagger, so it is reported as-is; turn the predicate into a state and the re-run clears it
+//! 3. **Two edges between the same pair of nodes, one of which never held at the same time as any other edge**: the cycle is still found via the other one,
+//!    and the path uses that one
+//! 4. **Verdicts carry over**: the axiom was relaxed and the cycle still holds at once, so that row reopens; an approved one stays silent on re-run; remove one edge on the cycle,
+//!    and the cycle is no longer computed, while the verdict stays
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is not set. It builds and tears down its own data and never touches an existing DB.
 
 use sqlx::PgPool;
 use utopia_store::graph::Validity;
@@ -127,15 +127,15 @@ fn ts(d: &str) -> chrono::DateTime<chrono::Utc> {
     format!("{d}T00:00:00Z").parse().unwrap()
 }
 
-/// 一条事实在库里怎么写时间。日期给到精度对齐的那一天（CHECK 要求截断过）
+/// How a fact is written in time in the DB. The date is given as the precision-aligned day (the CHECK requires truncation first)
 #[derive(Clone, Copy, Default)]
 struct When<'a> {
-    /// (日期, 精度)
+    /// (date, precision)
     from: Option<(&'a str, &'a str)>,
     to: Option<(&'a str, &'a str)>,
-    /// 结束了，不知哪天：`valid_to_precision = 'unknown'`，锚在这份证据的日期
+    /// Ended on an unknown day: `valid_to_precision = 'unknown'`, anchored to this evidence's date
     ended_unknown_as_of: Option<&'a str>,
-    /// 证据最早是哪天（`attested_from`）；不给就是此刻
+    /// The earliest day of evidence (`attested_from`); if not given, it is right now
     attested: Option<&'a str>,
 }
 
@@ -181,7 +181,7 @@ async fn fact(
     Ok(id)
 }
 
-/// open 的环，每个是排过序的事实集合
+/// An open cycle; each is a sorted set of facts
 async fn open_cycles(pool: &PgPool, f: &Fixture) -> anyhow::Result<Vec<Vec<Uuid>>> {
     let rows: Vec<Vec<Uuid>> = sqlx::query_scalar(
         "SELECT path FROM axiom_violations
@@ -200,7 +200,7 @@ fn sorted(mut v: Vec<Uuid>) -> Vec<Uuid> {
     v
 }
 
-/// 起库、跑、不管成败都拆
+/// Bring the DB up, run, and tear down whether it succeeded or not
 macro_rules! with_fixture {
     (|$pool:ident, $f:ident| $body:block) => {{
         let Some(url) = utopia_store::test_db::url() else {
@@ -213,8 +213,8 @@ macro_rules! with_fixture {
             let $pool = &$pool;
             async move { $body }.await
         };
-        // 先拆库：裁决行的 decided_by 指着这个组织的用户，而删组织时用户与库的
-        // 级联谁先谁后不保证
+        // Tear down the DB first: a verdict row's decided_by points to a user of this org, and when the org is deleted, the cascade order between users and the KB
+        // is not guaranteed
         sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
             .bind(fixture.kb)
             .execute(&$pool)
@@ -230,7 +230,7 @@ macro_rules! with_fixture {
 #[tokio::test]
 async fn a_cycle_is_one_moment_and_fixing_the_time_clears_it() -> anyhow::Result<()> {
     with_fixture!(|pool, f| {
-        // ---- 一、时间上错开的环：两段前后接上，三段两两重叠而三者无交
+        // ---- 1. Staggered-in-time cycles: two segments joined end to end; three segments overlapping pairwise but with no common point
         let [a, b, d, e, g] = entities(pool, f).await?;
         fact(
             pool,
@@ -269,15 +269,15 @@ async fn a_cycle_is_one_moment_and_fixing_the_time_clears_it() -> anyhow::Result
             "没有哪一刻整条成立的环不该进 Review"
         );
 
-        // ---- 二、真正同时成立的环照报
+        // ---- 2. Cycles that really do hold at the same time are still reported
         let [x, y] = entities(pool, f).await?;
         let xy = fact(pool, f, (x, f.part_of, y), span("2020-01-01", None)).await?;
         let yx = fact(pool, f, (y, f.part_of, x), span("2021-06-01", None)).await?;
         reasoning::run(pool, f.kb).await?;
         assert_eq!(open_cycles(pool, f).await?, vec![sorted(vec![xy, yx])]);
 
-        // ---- 三、人去把 X part_of Y 的结束日期补上：它 2021-06-01 结束，正是
-        // Y part_of X 开始的那天。改完重跑，那一行被清掉
+        // ---- 3. A person fills in the end date of X part_of Y: it ended 2021-06-01, which is exactly
+        // the day Y part_of X started. Re-run after the change, and that row is cleared
         utopia_store::temporal::correct_interval(
             pool,
             xy,
@@ -301,8 +301,8 @@ async fn a_cycle_is_one_moment_and_fixing_the_time_clears_it() -> anyhow::Result
     })
 }
 
-/// "former" 的那条读到证据为止。读成开放的话，一条早已结束、只是没写哪天结束的边，
-/// 会与今天才开始的反向边凑成一个环
+/// Read the "former" one up to its evidence. Read as open, an edge that had long ended but never had its end day written
+/// would combine with a reverse edge that only began today into a cycle
 #[tokio::test]
 async fn an_unknown_end_stops_where_the_evidence_does() -> anyhow::Result<()> {
     with_fixture!(|pool, f| {
@@ -312,7 +312,7 @@ async fn an_unknown_end_stops_where_the_evidence_does() -> anyhow::Result<()> {
             ..Default::default()
         };
 
-        // 证据 2020-06 说它已经结束；反向边 2021 年才开始
+        // Evidence from 2020-06 says it has already ended; the reverse edge only began in 2021
         let [a, b] = entities(pool, f).await?;
         fact(pool, f, (a, f.part_of, b), former).await?;
         fact(pool, f, (b, f.part_of, a), span("2021-01-01", None)).await?;
@@ -322,7 +322,7 @@ async fn an_unknown_end_stops_where_the_evidence_does() -> anyhow::Result<()> {
             "结束了不知哪天的不是还开着"
         );
 
-        // 反向边 2020 年初就开始了：在证据之前，两条确实同时成立过
+        // The reverse edge began in early 2020: it predates the evidence, so the two really did hold together at one point
         let [c, d] = entities(pool, f).await?;
         let cd = fact(pool, f, (c, f.part_of, d), former).await?;
         let dc = fact(pool, f, (d, f.part_of, c), span("2020-01-01", None)).await?;
@@ -332,7 +332,7 @@ async fn an_unknown_end_stops_where_the_evidence_does() -> anyhow::Result<()> {
     })
 }
 
-/// 没写起点的从最早的证据起，不是从来如此
+/// Where no start is written, it counts from the earliest evidence, not from always being so
 #[tokio::test]
 async fn a_missing_start_reads_from_the_evidence() -> anyhow::Result<()> {
     with_fixture!(|pool, f| {
@@ -341,7 +341,7 @@ async fn a_missing_start_reads_from_the_evidence() -> anyhow::Result<()> {
             ..Default::default()
         };
 
-        // 2023 年的证据说 A 属于 B（没说从哪天起）；B 属于 A 在 2022 年就结束了
+        // Evidence from 2023 says A belongs to B (not saying from when); B belonging to A ended in 2022
         let [a, b] = entities(pool, f).await?;
         fact(pool, f, (a, f.part_of, b), since("2023-01-01")).await?;
         fact(
@@ -354,7 +354,7 @@ async fn a_missing_start_reads_from_the_evidence() -> anyhow::Result<()> {
         reasoning::run(pool, f.kb).await?;
         assert!(open_cycles(pool, f).await?.is_empty());
 
-        // 证据是 2021 年的：落在反向边的区间里
+        // The evidence is from 2021: it falls within the reverse edge's interval
         let [c, d] = entities(pool, f).await?;
         let cd = fact(pool, f, (c, f.part_of, d), since("2021-01-01")).await?;
         let dc = fact(
@@ -370,8 +370,8 @@ async fn a_missing_start_reads_from_the_evidence() -> anyhow::Result<()> {
     })
 }
 
-/// 事件在它命名的桶里成立：2024-03-05 那天与 2024 年 3 月相交，与 3 月 6 日不交。
-/// 没日期的事件哪一刻都不成立
+/// An event holds within the bucket it names: the day 2024-03-05 intersects March 2024, and does not intersect March 6.
+/// An event with no date holds at no moment
 #[tokio::test]
 async fn an_event_holds_in_the_bucket_it_names() -> anyhow::Result<()> {
     with_fixture!(|pool, f| {
@@ -402,8 +402,8 @@ async fn an_event_holds_in_the_bucket_it_names() -> anyhow::Result<()> {
     })
 }
 
-/// 恒常谓词没有时间可以错开：日期写了也不看，照报。把谓词改成状态，重跑就清掉；
-/// 改回来，环又回来
+/// An eternal predicate has no time to stagger: its dates are not consulted even if written, so it is reported. Turn the predicate into a state and a re-run clears it;
+/// turn it back and the cycle returns
 #[tokio::test]
 async fn an_eternal_predicate_has_no_time_to_tell_apart() -> anyhow::Result<()> {
     with_fixture!(|pool, f| {
@@ -436,13 +436,13 @@ async fn an_eternal_predicate_has_no_time_to_tell_apart() -> anyhow::Result<()> 
     })
 }
 
-/// 同一对节点之间两条边：旧的那条从没与环上别的边同时成立，新的那条成立。环经由
-/// 新的那条被找到——先碰到旧的那条、被剪掉，不能让整个环跟着丢
+/// Two edges between the same pair of nodes: the old one never held at the same time as the other edges on the cycle, and the new one holds. The cycle is found via
+/// the new one — if the old one is hit first, it is pruned, and the whole cycle must not be lost along with it
 #[tokio::test]
 async fn a_parallel_edge_that_never_met_does_not_hide_the_one_that_did() -> anyhow::Result<()> {
     with_fixture!(|pool, f| {
         let [a, b, c] = entities(pool, f).await?;
-        // 先插旧的，顺序扫描先读到它
+        // Insert the old one first, so that the sequential scan reads it first
         fact(
             pool,
             f,
@@ -459,7 +459,7 @@ async fn a_parallel_edge_that_never_met_does_not_hide_the_one_that_did() -> anyh
     })
 }
 
-/// 裁决照旧：放宽了公理而环仍同时成立，重开；认可过的沉默；撤掉一条，环不再算出来
+/// Verdicts carry over: the axiom was relaxed and the cycle still holds at once, so it reopens; an approved one stays silent; remove one, and the cycle is no longer computed
 #[tokio::test]
 async fn decisions_on_a_cycle_still_hold() -> anyhow::Result<()> {
     with_fixture!(|pool, f| {
@@ -485,7 +485,7 @@ async fn decisions_on_a_cycle_still_hold() -> anyhow::Result<()> {
         assert_eq!((r.inserted, r.reopened), (0, 0), "认可过的重跑沉默");
         assert!(open_cycles(pool, f).await?.is_empty());
 
-        // 另一个环：撤掉其中一条
+        // Another cycle: remove one of its edges
         let [p, q] = entities(pool, f).await?;
         let pq = fact(pool, f, (p, f.part_of, q), span("2020-01-01", None)).await?;
         fact(pool, f, (q, f.part_of, p), span("2020-06-01", None)).await?;

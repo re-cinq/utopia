@@ -1,18 +1,18 @@
-//! 同名列按记录轴回放（#307 / 0019）。
+//! The same-name column is replayed on the record axis (#307 / 0019).
 //!
-//! 之前 `same_name_peers` 写死 `e.merged_into IS NULL`：三月并掉的「张伟」
-//! 在任何回放时刻都消失，而面板想告诉人的恰恰是「三月并掉之前它叫什么、
-//! 与谁同名」——把同一性的歧义藏在时间之外，会让人把两个独立实体当成
-//! 同一个去合并。
+//! Previously `same_name_peers` hardcoded `e.merged_into IS NULL`: a "Zhang Wei" merged away in March
+//! disappeared at every replay moment, yet what the panel wants to tell a person is precisely "what it was called before the March merge,
+//! and whom it shared a name with" — hiding the ambiguity of identity outside of time would make a person treat two independent entities as the
+//! same one to merge.
 //!
-//! 两个方向都要钉：
+//! Both directions must be pinned:
 //!
-//! - **三月并掉的实体**在 `as_of` 早于三月时重新出现（`entity_visible_at`
-//!   的回放语义）
-//! - **当下还活着的实体**在所有时刻都出现
-//! - **当下被作废的事实**不入度数量，而三月那条还活的事实要数
+//! - **The entity merged away in March** reappears when `as_of` is earlier than March (`entity_visible_at`
+//!   replay semantics)
+//! - **The entity still alive now** appears at every moment
+//! - **Facts invalidated now** do not count towards degree, while a fact from March that is still alive should be counted
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is not set. It builds and tears down its own data and never touches an existing DB.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -34,21 +34,21 @@ async fn same_name_peers_respects_as_of() -> anyhow::Result<()> {
         Uuid::now_v7(),
         Uuid::now_v7(),
     );
-    // 张伟 a：1 月记「works_at project_entity」，没作废；3 月与张伟 b 合并
+    // Zhang Wei a: recorded "works_at project_entity" in January, not invalidated; merged into Zhang Wei b in March
     let zhang_wei_a = Uuid::now_v7();
-    // 张伟 b：1 月记「works_at other_entity」，没作废——它就是目标，从不消失
+    // Zhang Wei b: recorded "works_at other_entity" in January, not invalidated — it is the target, so it never disappears
     let zhang_wei_b = Uuid::now_v7();
-    // 张伟 c：5 月记「works_at other_entity」，没作废——从未被合并
+    // Zhang Wei c: recorded "works_at other_entity" in May, not invalidated — never merged
     let zhang_wei_c = Uuid::now_v7();
     let project_entity = Uuid::now_v7();
     let other_entity = Uuid::now_v7();
     let works_at = Uuid::now_v7();
     let merge_id = Uuid::now_v7();
-    // 张伟 a 上的事实：1 月记下，3 月作废
+    // Facts on Zhang Wei a: recorded in January, invalidated in March
     let f_a_old = Uuid::now_v7();
-    // 张伟 b 上的事实：1 月记下
+    // Facts on Zhang Wei b: recorded in January
     let f_b = Uuid::now_v7();
-    // 张伟 c 上的事实：5 月记下（晚于合并）
+    // Facts on Zhang Wei c: recorded in May (after the merge)
     let f_c_new = Uuid::now_v7();
 
     sqlx::query("INSERT INTO organizations (id, name) VALUES ($1, 'as-of-peers-test')")
@@ -141,14 +141,14 @@ async fn same_name_peers_respects_as_of() -> anyhow::Result<()> {
         .execute(&pool)
         .await?;
     }
-    // 张伟 a 上 1 月记下那条事实在 3 月作废（之后被合并覆盖之前先收掉）
+    // The fact on Zhang Wei a recorded in January is invalidated in March (cleared before the later merge overwrites it)
     sqlx::query("UPDATE facts SET invalidated_at = $2 WHERE id = $1 AND invalidated_at IS NULL")
         .bind(f_a_old)
         .bind(t("2026-03-10T00:00:00Z"))
         .execute(&pool)
         .await?;
-    // 3 月合并 a → b（直接写 merged_into；本来这一步由 resolution::merge_entities
-    // 内部做，但这里是测同名列的可见性，没必要把整条合并路径走一遍）
+    // Merge a → b in March (writes merged_into directly; this step is normally done inside resolution::merge_entities,
+    // but this test is about the visibility of the same-name column, so there is no need to walk the whole merge path)
     sqlx::query(
         "INSERT INTO entity_merges (id, kb_id, source_id, target_id, merged_by, reason, created_at)
          VALUES ($1, $2, $3, $4, $5, 'duplicate person', $6)",
@@ -177,7 +177,7 @@ async fn same_name_peers_respects_as_of() -> anyhow::Result<()> {
         v
     };
 
-    // 当下：a 已被合并，只剩 b 和 c
+    // Now: a has been merged, leaving only b and c
     let now = peers_at(None).await?;
     assert_eq!(
         names(now),
@@ -185,7 +185,7 @@ async fn same_name_peers_respects_as_of() -> anyhow::Result<()> {
         "当下只剩独立的 Zhang Wei"
     );
 
-    // 2 月：a 还在活跃，c 已创建 → a、c 都与 b 同名
+    // February: a is still active, and c has been created → a and c both share a name with b
     let feb = peers_at(Some(t("2026-02-01T00:00:00Z"))).await?;
     assert_eq!(
         names(feb),
@@ -193,7 +193,7 @@ async fn same_name_peers_respects_as_of() -> anyhow::Result<()> {
         "2 月：合并之前，a 与 b 同名"
     );
 
-    // 4 月：a 已合并，c 已创建 → 只有 c
+    // April: a has been merged and c has been created → only c
     let apr = peers_at(Some(t("2026-04-01T00:00:00Z"))).await?;
     assert_eq!(
         names(apr),
@@ -201,7 +201,7 @@ async fn same_name_peers_respects_as_of() -> anyhow::Result<()> {
         "4 月：a 已合并，只剩 c"
     );
 
-    // 6 月：合并之后，c 已是唯一独立同名实体
+    // June: after the merge, c is the only independent same-name entity left
     let jun = peers_at(Some(t("2026-06-01T00:00:00Z"))).await?;
     assert_eq!(
         names(jun),
@@ -209,7 +209,7 @@ async fn same_name_peers_respects_as_of() -> anyhow::Result<()> {
         "6 月：a 已合并，c 已创建"
     );
 
-    // 拆夹具：合并记录的 merged_by 指着 user，先删它和 user，再删 organization（级联到库）
+    // Tear down the fixture: the merge record's merged_by points at a user, so delete that user first, then the organisation (cascading to the KB)
     sqlx::query("DELETE FROM entity_merges WHERE id = $1")
         .bind(merge_id)
         .execute(&pool)
@@ -225,9 +225,9 @@ async fn same_name_peers_respects_as_of() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 走真的合并路径：`merge_entities` 把被并实体的事实搬到目标身上。回放到合并之前，
-/// 被并的那个在同名列里的度数要按**当时**谁持有事实来数——与画布、实体面板一致。
-/// 只按记录轴过滤事实、不倒回主语，它在合并之前的时刻也会显示 0
+/// Takes the real merge path: `merge_entities` moves the merged entity's facts onto the target. On replay to before the merge,
+/// the merged-away entity's degree in the same-name column must be counted by who held the facts **at that time** — consistent with the canvas and the entity panel.
+/// Filtering facts on the record axis alone, without rewinding the subject, would show 0 for it even at moments before the merge
 #[tokio::test]
 async fn a_merged_peer_keeps_its_degree_before_the_merge() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {

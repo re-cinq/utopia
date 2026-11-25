@@ -1,9 +1,9 @@
-//! RC-010：删除、撤销删除的见证重算不在锁着来源行的那个事务里做。
+//! RC-010: re-computing the witness after a deletion, or after undoing a deletion, does not happen inside the transaction that locks the source row.
 //!
-//! - `documents::delete` 返回时见证已经挪到还在的证据上，身后不留 `reattest_facts` 任务；
-//! - 上传撞上墓碑、在调用方的事务里复活的文档，排下一份 `reattest_facts`，任务跑完见证才回来。
+//! - When `documents::delete` returns, the witnesses have already moved onto the evidence that remains, and no `reattest_facts` task is left behind;
+//! - A document whose upload hits a tombstone and is resurrected inside the caller's transaction queues a `reattest_facts`, and the witness returns only once that task has run.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is not set. It builds and tears down its own data and never touches an existing DB.
 
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
@@ -35,7 +35,7 @@ async fn queued_reattests(pool: &PgPool, kb: Uuid) -> anyhow::Result<Vec<serde_j
     .await?)
 }
 
-/// 一篇自己带日期的文档和它的一块正文；`sha256` 就是文件名，上传同名内容即撞上它
+/// A document carrying its own date, with one chunk of its body; `sha256` is the file name, so uploading the same content hits it
 async fn document(pool: &PgPool, kb: Uuid, own: DateTime<Utc>) -> anyhow::Result<(Uuid, Uuid)> {
     let (doc, chunk) = (Uuid::now_v7(), Uuid::now_v7());
     sqlx::query(

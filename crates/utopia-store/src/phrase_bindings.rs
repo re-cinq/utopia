@@ -1,12 +1,12 @@
-//! 关系短语按签名绑到属性的账本侧（0044 决定 3 的第二片，见 0066）。
+//! Ledger side of binding relation phrases to properties by signature (the second slice of 0044 decision 3, see 0066).
 //!
-//! 开放陈述的关系是文档自己的短语（`facts.phrase`），不选属性。这里做三件事：数出一个
-//! 库里有哪些签名（短语 × 主语的类 × 宾语的类或「值」），各带几条例句；记下每个签名判成
-//! 了什么（绑定）并判哪些过期了；给下一片（物化）一张「签名 → 属性、方向」的表。判定
-//! 本身——问模型、两票一致才绑——在 server 的 `phrase_alignment` 里，这里不认识模型。
+//! Open-statement relations are the document's own phrases (`facts.phrase`), and they do not choose a property. This module does three things: it counts
+//! the signatures present in a library (phrase × subject class × object class or "value"), each with a few example sentences; it records what each signature was judged to be
+//! (the binding) and which ones have gone stale; and it gives the next slice (materialization) a table of "signature → property, direction". The judgment
+//! itself -- asking the model, and binding only when two votes agree -- lives in `phrase_alignment` on the server; this module knows nothing about the model.
 //!
-//! 短语的归一同类别词：空白折成一个空格、去两端、小写；[`normalize`] 与 [`PHRASE_SQL`]
-//! 必须说同一件事。
+//! Phrases are normalized the same way as category words: whitespace collapsed to one space, trimmed at both ends, lowercased; [`normalize`] and [`PHRASE_SQL`]
+//! must say the same thing.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -14,14 +14,14 @@ use std::collections::HashMap;
 use utopia_core::{AppError, AppResult};
 use uuid::Uuid;
 
-/// SQL 侧的归一：与 [`normalize`] 一致。`$col` 由调用处替换成列名。
+/// SQL-side normalization, matching [`normalize`]. `$col` is replaced with a column name by the caller.
 const PHRASE_SQL: &str = "lower(btrim(regexp_replace($col, '\\s+', ' ', 'g')))";
 
 pub(crate) fn phrase_sql(col: &str) -> String {
     PHRASE_SQL.replace("$col", col)
 }
 
-/// 归一一个短语：空白折成一个空格、去两端、小写。"Acquired " 与 "acquired" 是一个短语。
+/// Normalize one phrase: collapse whitespace to one space, trim both ends, lowercase. "Acquired " and "acquired" are one phrase.
 pub fn normalize(phrase: &str) -> String {
     phrase
         .split_whitespace()
@@ -30,35 +30,35 @@ pub fn normalize(phrase: &str) -> String {
         .to_lowercase()
 }
 
-/// 一条签名：判它该绑到哪个属性时给模型看的全部。
+/// One signature: everything the model is shown when judging which property it should bind to.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct PhraseSignature {
-    /// 归一过的短语
+    /// The normalized phrase
     pub phrase: String,
-    /// 主语的类（类别词还没绑到类时为空）
+    /// The subject's class (empty while the category word is not yet bound to a class)
     pub subject_type_id: Option<Uuid>,
     pub subject_type_key: Option<String>,
-    /// 宾语的类；宾语是字面值时为空且 `object_is_value` 为真
+    /// The object's class; empty when the object is a literal value, in which case `object_is_value` is true
     pub object_type_id: Option<Uuid>,
     pub object_type_key: Option<String>,
     pub object_is_value: bool,
-    /// 这个签名下活着的开放陈述数
+    /// The number of live open statements under this signature
     pub count: i64,
-    /// 例句：最多 3 条「主语 —短语→ 宾语」，每条跟着它自己的引文
+    /// Examples: at most 3 "subject —phrase→ object" entries, each with its own quote
     pub examples: Vec<String>,
     pub quotes: Vec<String>,
     /// Statement identities in the same order as the live examples and quotes.
     pub example_statement_ids: Vec<Uuid>,
 }
 
-/// 库里每条 distinct 的签名：活着的开放陈述，按短语、两端的类、宾语是不是字面值分组。
-/// 采纳复用一条属性时在它自己的事务里读（不另占一条连接），所以收任何执行器
+/// Every distinct signature in the library: live open statements, grouped by phrase, the classes at both ends, and whether the object is a literal value.
+/// When adopting an existing property this is read inside its own transaction (it does not take another connection), so it accepts any executor
 pub async fn signatures<'e>(
     pool: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
     kb_id: Uuid,
 ) -> AppResult<Vec<PhraseSignature>> {
-    // 一条陈述可以有多条证据。计数、取例句前先为每条陈述选一条稳定的引用，
-    // 优先有完整位置的证据，避免证据多的陈述挤掉其他陈述。
+    // A statement can have several pieces of evidence. Before counting and taking examples, pick one stable reference per statement,
+    // preferring evidence with a full position, so a statement with lots of evidence does not crowd out the others.
     let sql = format!(
         "WITH live AS (
              SELECT f.id, {phrase} AS phrase,
@@ -114,13 +114,13 @@ pub async fn signatures<'e>(
     Ok(sqlx::query_as(&sql).bind(kb_id).fetch_all(pool).await?)
 }
 
-/// 一篇文档里活着的开放陈述落在哪些签名上（键同 [`PhraseSignature::key`]）。推送来的
-/// 文档抽完，本体只判这些签名（#1242）；别的签名还是对齐器的。
+/// Which signatures the live open statements in one document fall on (keys match [`PhraseSignature::key`]). After a pushed
+/// document is extracted, the ontology judges only these signatures (#1242); other signatures belong to the aligner.
 ///
-/// 证据按 `fact_evidence.document_id` 找（`fact_evidence_document_idx`），不经 `chunks`：
-/// `fact_evidence.chunk_id` 没有索引，经 chunk 找要全表扫一遍证据，830 万行的库上每篇
-/// 文档 12 秒，推送一阵时几十份同时跑，把数据库顶在 CPU 上限（#1471）；按文档列走索引
-/// 是 0.16 秒，行一样——证据的 document_id 写入时就等于它 chunk 的文档
+/// Evidence is found by `fact_evidence.document_id` (`fact_evidence_document_idx`), not through `chunks`:
+/// `fact_evidence.chunk_id` has no index, so finding it through chunks scans all the evidence; on a library with 8.3 million rows that took 12 seconds per
+/// document, and during a push dozens ran at once and pinned the database's CPU (#1471). Going by the document column through the index
+/// takes 0.16 seconds, with the same rows -- the evidence's document_id is set at write time to equal its chunk's document.
 pub async fn signature_keys_of_document(
     pool: &PgPool,
     kb_id: Uuid,
@@ -144,8 +144,8 @@ pub async fn signature_keys_of_document(
         .await?)
 }
 
-/// 按 id 取一条绑定的签名（人在队列里定它时用）：短语、两端的类、宾语是不是字面值，
-/// 例句照判定时记下的，陈述数同。
+/// Fetch one bound signature by id (used when a person decides it in the queue): phrase, the classes at both ends, whether the object is a literal value,
+/// examples as recorded at judging time, and the same statement count.
 pub async fn signature_of(
     pool: &PgPool,
     kb_id: Uuid,
@@ -167,33 +167,33 @@ pub async fn signature_of(
     .await?)
 }
 
-/// 一条签名判成了什么。
+/// What a signature was judged to be.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Binding {
     pub phrase: String,
     pub subject_type_id: Option<Uuid>,
     pub object_type_id: Option<Uuid>,
     pub object_is_value: bool,
-    /// `status = 'bound'` 时有值
+    /// Has a value when `status = 'bound'`
     pub relation_type_id: Option<Uuid>,
-    /// forward / reverse，`status = 'bound'` 时有值
+    /// forward / reverse; has a value when `status = 'bound'`
     pub direction: Option<String>,
     /// bound / none / undecided
     pub status: String,
     pub decided_at: DateTime<Utc>,
-    /// agent / person / ontology（短语正好是一条声明了的关系，#1242）
+    /// agent / person / ontology (the phrase is exactly a declared relation, #1242)
     pub decided_by: String,
-    /// 判定时输入的指纹；NULL = 这一列出现之前的判定
+    /// Fingerprint of the inputs at judging time; NULL = a judgment from before this column existed
     pub basis: Option<String>,
-    /// 一条只说了一刻的陈述，那一刻标的是状态的哪一端：start / end / none（#966）。
-    /// NULL = 未知：这一列之前的判定，或属性不是状态
+    /// For a statement that states only a single moment: which end of the state that moment marks, start / end / none (#966).
+    /// NULL = unknown: judgments from before this column, or the property is not a state
     pub marks: Option<String>,
-    /// 对齐器问过 marks 的时刻；NULL = 没问过。问过还没有值的不再问，等人（0053 修订）
+    /// The time the aligner asked about marks; NULL = never asked. Once asked with no value it is not asked again, it waits for a person (0053 revision)
     pub marks_asked_at: Option<DateTime<Utc>>,
 }
 
 impl Binding {
-    /// 和签名对上的键：短语 + 两端的类 + 宾语是不是字面值
+    /// The key that matches a signature: phrase + classes at both ends + whether the object is a literal value
     pub fn key(&self) -> (String, Option<Uuid>, Option<Uuid>, bool) {
         (
             self.phrase.clone(),
@@ -215,7 +215,7 @@ impl PhraseSignature {
     }
 }
 
-/// 库里全部绑定。
+/// All bindings in the library.
 pub async fn bindings(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Binding>> {
     Ok(sqlx::query_as(
         "SELECT phrase, subject_type_id, object_type_id, object_is_value,
@@ -228,12 +228,12 @@ pub async fn bindings(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Binding>> {
     .await?)
 }
 
-/// 一条判定看到的输入的指纹（0053）：两端类的祖先闭包（含自己）、宾语是不是字面值、
-/// 按继承命中的候选属性与各自的 `updated_at`。worker 每轮对活着的签名重算，与存下的
-/// 不一致就是过期——比的是**现在的输入**，不是时刻，于是父边的增删、模型请求途中的
-/// 编辑（#795）都看得见，时间戳看不见。
+/// The fingerprint of the inputs a judgment saw (0053): the ancestor closure of both ends' classes (including itself), whether the object is a literal value,
+/// the candidate properties hit by inheritance, and each one's `updated_at`. The worker recomputes this for live signatures each round; a mismatch with the stored value means stale --
+/// it compares the **current inputs**, not a timestamp, so adding or removing parent edges, and
+/// edits made while a model request is in flight (#795), are all seen; a timestamp would not see them.
 ///
-/// 只是缓存失效的键，不是安全用途：FNV-1a 64 位够用，也不用为它拉一个哈希依赖。
+/// This is only a cache-invalidation key, not for any security purpose: FNV-1a 64-bit is enough, and there is no need to pull in a hash dependency for it.
 pub fn basis_of(
     subject_closure: &[Uuid],
     object_closure: &[Uuid],
@@ -265,8 +265,8 @@ pub fn basis_of(
     format!("{h:016x}")
 }
 
-/// 库里每条属性最后一次改动的时刻，给指纹用。一轮读一次，不进视图——视图是给页面的，
-/// 页面不需要这个数
+/// The last time each property was changed in the library, for the fingerprint. Read once per round, not part of a view -- the view is for the page,
+/// and the page does not need this number
 pub async fn property_versions(
     pool: &PgPool,
     kb_id: Uuid,
@@ -279,9 +279,9 @@ pub async fn property_versions(
     Ok(rows.into_iter().collect())
 }
 
-/// 不再成立的绑定：绑到的属性在判定之后改过；或判成 none / undecided 之后库里有属性
-/// 新建或修改。负向判定没有选中的属性，已有属性的新定义也可能让它对得上。
-/// 属性或类被删了的，行已随级联消失。
+/// A binding that no longer holds: the property it bound to was edited after the judgment; or the judgment was none / undecided and since then a property in the library was created or changed.
+/// A negative judgment selected no property, and a new definition of an existing property may now match it.
+/// If the property or class was deleted, the row has already gone via cascade.
 pub async fn stale(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Binding>> {
     Ok(sqlx::query_as(
         "SELECT b.phrase, b.subject_type_id, b.object_type_id, b.object_is_value,
@@ -301,7 +301,7 @@ pub async fn stale(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Binding>> {
     .await?)
 }
 
-/// 一次判定要写的东西。
+/// What a judgment writes.
 pub struct Decision<'a> {
     pub relation_type_id: Option<Uuid>,
     /// forward / reverse
@@ -311,20 +311,20 @@ pub struct Decision<'a> {
     pub votes: &'a serde_json::Value,
     /// agent / person / ontology
     pub decided_by: &'a str,
-    /// 判定时输入的指纹（[`basis_of`]）：代理的判定必带，人的判定不带——人不按指纹重判
+    /// The fingerprint of the inputs at judging time ([`basis_of`]): an agent's judgment must carry it, a person's does not -- a person does not re-judge against a fingerprint
     pub basis: Option<&'a str>,
-    /// start / end / none：只说了一刻的陈述在状态属性下怎么读（#966）。只有 bound 带；
-    /// None = 未知，那样的陈述不算类型化行
+    /// start / end / none: how a single-moment statement reads under a state property (#966). Only bound carries it;
+    /// None = unknown, and such a statement does not count as a typed row
     pub marks: Option<&'a str>,
-    /// 这次判定问过 marks：对齐器把签名绑到状态属性时随判定一起问（0053 修订）。记下问的
-    /// 时刻，没有值的签名就不再问、进对齐队列等人。只有 bound 带
+    /// This judgment asked the marks: the aligner asks this together with the judgment when it binds a signature to a state property (0053 revision). It records the time asked,
+    /// so a signature without a value is not asked again and goes to the alignment queue for a person. Only bound carries it
     pub marks_asked: bool,
 }
 
-/// 记下一条签名的判定（有则改）。返回是否写入了。
+/// Record a signature's judgment (replacing any existing one). Returns whether it was written.
 ///
-/// **人的判定不被代理覆盖**：已有行是人判的而这次是代理或本体，原样留着、返回 false。
-/// 反过来人可以改代理的、本体的。
+/// **A person's judgment is never overwritten by an agent**: if the existing row was judged by a person and this one is from an agent or the ontology, the row is kept as is and false is returned.
+/// The reverse is allowed: a person may change an agent's or the ontology's judgment.
 pub async fn decide(
     pool: &PgPool,
     kb_id: Uuid,
@@ -381,19 +381,19 @@ fn validate_decision(sig: &PhraseSignature, d: &Decision<'_>) -> AppResult<Strin
     Ok(phrase)
 }
 
-/// 人的判定落库时随手排下的重算任务的种类。`main` 按它分发；载荷只有 `kb_id`——
-/// job 读的是**当前**的绑定，不回放判定时的属性（0051：回放旧载荷会盖掉后来的人）。
+/// The kind of recompute job queued alongside a person's judgment when it is saved. `main` dispatches on it; the payload carries only `kb_id` --
+/// the job reads the **current** binding and does not replay the properties from judgment time (0051: replaying an old payload would overwrite a later person).
 pub const MATERIALIZE_KIND: &str = "materialize_typed";
 
-/// 人的判定与它自己的重算任务**同一事务**提交（0051）。
+/// A person's judgment and its own recompute job are committed in **one transaction** (0051).
 ///
-/// 为什么不是「判定落库，然后看有没有 worker 在跑」：正在跑的那次对齐可能已经做完
-/// 最后一次读，这条判定就没有任何人替它算类型化行——它被接受了，却永远不投影。
-/// 一条判定配一个自己的 job，job 只在判定提交后可见，被谁先处理都读到最新的绑定，
-/// 于是最后一次判定总会被算到。代价是 N 次判定 N 次重算，后面的多半是空跑（0051
-/// 量过：100 次判定总收敛 593 ms）；「有一个在跑就不排」省下的正是那条会丢的投影。
+/// Why not "save the judgment, then see whether a worker is running": an alignment in progress may already have done its last read, so this judgment would have nothing
+/// to project typed rows for it -- it is accepted, yet never projected.
+/// One job per judgment, and the job only becomes visible after the judgment commits, so whichever job runs reads the latest binding,
+/// and the last judgment is always recomputed. The cost is N judgments and N recomputes, most of the later ones empty runs (0051
+/// measured: 100 judgments converge in 593 ms in total); "skip queuing if one is already running" would save exactly the one that gets lost.
 ///
-/// 返回 job id；代理不能盖人（`decide_on` 的规则）时什么都没写，返回 `None`。
+/// Returns the job id; when an agent may not overwrite a person (the rule in `decide_on`), nothing is written and `None` is returned.
 pub async fn decide_with_delivery(
     pool: &PgPool,
     kb_id: Uuid,
@@ -403,8 +403,8 @@ pub async fn decide_with_delivery(
     decide_with_delivery_budget(pool, kb_id, sig, d, 3).await
 }
 
-/// 预算单独成参只为了测「排队失败要连判定一起回滚」：0 会被 `enqueue` 拒掉，
-/// 那正是一次发生在判定写入之后的真实失败。生产入口固定给 3。
+/// The budget is its own parameter only so a test can check that a failed enqueue rolls back the judgment too: 0 is rejected by `enqueue`,
+/// which is exactly a real failure occurring after the judgment write. Production always passes 3.
 async fn decide_with_delivery_budget(
     pool: &PgPool,
     kb_id: Uuid,
@@ -486,12 +486,12 @@ pub async fn decide_on(
     Ok(changed)
 }
 
-/// 给这一列之前绑上的签名补问 marks 的结果（0053 修订 2026-09-27）。这一问只问一刻标哪一端，
-/// 不重判绑定：`value` 是两票都认这条绑定的属性与方向、又说了同一个值时的那个值，写下它；
-/// 否则是 None，绑定原样。两种都记下问过的时刻——问过的不再问，没有值的列进对齐队列等人。
+/// The result of asking marks for signatures bound before this column existed (0053 revision 2026-09-27). This ask only asks which end a single-moment statement marks,
+/// and does not re-judge the binding: `value` is the value when both votes accept the binding's property and direction and it says the same value; that value is written.
+/// Otherwise it is None and the binding is left as it is. Both outcomes record the time asked: anything asked is not asked again, and columns without a value go to the alignment queue for a person.
 ///
-/// 只写问的时候那条绑定：还是代理绑的、属性与方向没变、还没有值。途中人判过或重判过的，
-/// 这一问的答案不算数，返回 false
+/// Only writes if the binding from the time of asking still stands: still agent-bound, property and direction unchanged, still no value. If a person has judged or re-judged it in the meantime,
+/// this answer does not count, and it returns false
 pub async fn record_marks(
     pool: &PgPool,
     kb_id: Uuid,

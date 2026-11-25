@@ -1,24 +1,24 @@
-//! 分页翻完，每一行恰好出现一次（#646），打在真库上。
+//! Paging through to the end, each row appears exactly once (#646), run against a real DB.
 //!
-//! Review 的各档与台账都是 `LIMIT/OFFSET` 分页。排序键若不唯一，并列的行每次查询的
-//! 先后可以不同——翻到第二页时第一页见过的又出来一次，另一行一页也没出现。时间戳
-//! 作排序键时，逐条写入的行很少并列；**一个事务里写下的行全都并列**（`now()` 在事务
-//! 里是同一个值），而 Review 的队列正是成批写的。量过：一次检查插下 572 个环，按 200 条
-//! 一页翻，翻出 557 个。
+//! The Review tiers and the ledger all page with `LIMIT/OFFSET`. If the sort key is not unique, tied rows' order can differ from query to query —
+//! by the time one reaches the second page, a row seen on page one comes back once more, and another row never appears on any page. When a timestamp
+//! is the sort key, rows written one at a time rarely tie; **rows written within one transaction all tie** (`now()` is the same value within a transaction),
+//! and Review's queue is exactly what gets written in batches. Measured: one check inserted 572 cycles, paged 200 rows at a time
+//! yielded 557.
 //!
-//! 三份成批写下的数据，各翻一遍：
+//! Three batch-written sets of data, each paged through:
 //!
-//! 1. **公理违规**：一次 `reasoning::run` 插下几百个环，`open_violations` 翻
-//! 2. **本体缺陷**：一个语句插下几百行，`open_defects` 翻
-//! 3. **审核台账**：一个语句写下几百条审计事件，`review_history` 翻
+//! 1. **Axiom violations**: one `reasoning::run` inserts hundreds of cycles, and `open_violations` pages through
+//! 2. **Ontology defects**: one statement inserts hundreds of rows, and `open_defects` pages through
+//! 3. **Review ledger**: one statement writes hundreds of audit events, and `review_history` pages through
 //!
-//! 断言的不只是「每行一次」，而是**翻出来的序列恰好是按时间倒序、再按 id 倒序排好的
-//! 全部行**。只断言每行一次是靠运气的：并列行的先后取决于执行计划，旧的排序在这份
-//! 数据上三次里只错一次。行的 id 是随机的，与写入的物理顺序无关，所以只要排序在并列
-//! 处没有定下来，序列就对不上——每次都对不上。
+//! What it asserts is not merely "each row once", but that **the sequence paged out is exactly all the rows, ordered by timestamp descending and then id descending**.
+//! Asserting only once-per-row is luck: the order of tied rows depends on the execution plan, and the old sort went wrong one time in three on this data.
+//! Row ids are random and unrelated to physical write order, so whenever the sort is not pinned down at ties
+//! the sequence will not line up — it fails every time.
 //!
-//! 页长取质数（37），页边界落不到整齐的地方。没有 `UTOPIA_DATABASE_URL` 时跳过而不是
-//! 失败。自建自拆，绝不碰已有的库。
+//! The page size is prime (37), so page boundaries land nowhere tidy. Skipped rather than
+//! failed when `UTOPIA_DATABASE_URL` is not set. It builds and tears down its own data and never touches an existing DB.
 
 use sqlx::PgPool;
 use std::future::Future;
@@ -53,7 +53,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     Ok(Fixture { org, kb })
 }
 
-/// 一页一页翻到底，按翻到的先后接起来
+/// Page through to the end, joining the pages in the order they were fetched
 async fn page_through<F, Fut>(mut page: F) -> anyhow::Result<Vec<Uuid>>
 where
     F: FnMut(i64) -> Fut,
@@ -72,7 +72,7 @@ where
     }
 }
 
-/// 翻出来的就是全部行，一行一次，并且时间戳并列时按 id 倒序——排序是全序
+/// What comes back is all the rows, one each, and with timestamps tied the order is by id descending — the sort is a total order
 async fn assert_total_order(
     pool: &PgPool,
     what: &str,
@@ -109,8 +109,8 @@ async fn paging_through_a_batch_sees_every_row_exactly_once() -> anyhow::Result<
     let f = seed(&pool).await?;
 
     let result = async {
-        // ---- 一、公理违规：一个中心节点与 300 个节点两两互指，恒常谓词上就是 300 个环，
-        // 一次检查、一个事务插下
+        // ---- 1. Axiom violations: one central node mutually referencing 300 nodes, which on a constant predicate makes 300 cycles,
+        // inserted in one transaction by one check
         const CYCLES: usize = 300;
         let (etype, part_of) = (Uuid::now_v7(), Uuid::now_v7());
         sqlx::query("INSERT INTO entity_types (id, kb_id, key, label) VALUES ($1, $2, 't', 'T')")
@@ -160,7 +160,7 @@ async fn paging_through_a_batch_sees_every_row_exactly_once() -> anyhow::Result<
         let ids = format!("SELECT id FROM axiom_violations WHERE kb_id = '{}'", f.kb);
         assert_total_order(&pool, "公理违规", &seen, &ids, CYCLES).await?;
 
-        // ---- 二、本体缺陷：一个语句插下 250 行，detected_at 全相同
+        // ---- 2. Ontology defects: one statement inserts 250 rows, all with the same detected_at
         const DEFECTS: usize = 250;
         sqlx::query(
             "INSERT INTO ontology_defects (id, kb_id, kind, subject, other)
@@ -185,7 +185,7 @@ async fn paging_through_a_batch_sees_every_row_exactly_once() -> anyhow::Result<
         let ids = format!("SELECT id FROM ontology_defects WHERE kb_id = '{}'", f.kb);
         assert_total_order(&pool, "本体缺陷", &seen, &ids, DEFECTS).await?;
 
-        // ---- 三、审核台账：一个语句写下 250 条，created_at 全相同
+        // ---- 3. Review ledger: one statement writes 250 entries, all with the same created_at
         const EVENTS: usize = 250;
         sqlx::query(
             "INSERT INTO audit_events (id, kb_id, action, target_kind)
@@ -215,7 +215,7 @@ async fn paging_through_a_batch_sees_every_row_exactly_once() -> anyhow::Result<
         Ok::<_, anyhow::Error>(())
     }
     .await;
-    // 审计事件只许追加（删不掉），留在测试库里；它们挂在这个自建的库名下，不串到别处
+    // Audit events are append-only (cannot be deleted) and stay in the test DB; they hang under this self-built DB name and do not leak elsewhere
     sqlx::query("DELETE FROM organizations WHERE id = $1")
         .bind(f.org)
         .execute(&pool)

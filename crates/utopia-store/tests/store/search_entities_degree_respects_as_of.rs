@@ -1,17 +1,17 @@
-//! 实体搜索结果按记录轴回放（#307 / 0019）。
+//! Entity search results are replayed on the record axis (#307 / 0019).
 //!
-//! 之前 `search_entities` 写死 `node_sql(None, None)`：度量子查询拿的是「现在
-//! 还活着的边」。回放中的图上点搜索框，结果的 `degree` 还数今天的边——
-//! 同一个实体，两种视图下读出两个数。
+//! Previously `search_entities` hardcoded `node_sql(None, None)`: the degree subquery took "edges still alive now".
+//! On a graph being replayed, a search box's `degree` results still counted today's edges —
+//! the same entity read two numbers under two views.
 //!
-//! 三个方向都要断言，因为它们会以不同的方式坏掉：
-//! - 撤掉的边在 `as_of = 现在` **不算入** `degree`
-//! - 撤掉的边在作废时刻**之前**算入 `degree`（谓词没接上时永远只看「现在」，
-//!   回放照旧空数）
-//! - `recorded_at` 晚于 T 的边在 T **不算入** `degree`（只写下界会让三月看
-//!   见四月的修正）
+//! All three directions must be asserted, because they can break in different ways:
+//! - A retracted edge is **not counted** in `degree` at `as_of = now`
+//! - A retracted edge **is counted** in `degree` before the moment it was invalidated (when the predicate is not wired in, it always looks only at "now",
+//!   so replay stays empty as before)
+//! - An edge whose `recorded_at` is later than T is **not counted** in `degree` at T (writing only a lower bound would show March
+//!   the corrections made in April)
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is not set. It builds and tears down its own data and never touches an existing DB.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -30,10 +30,10 @@ async fn search_entities_degree_respects_as_of() -> anyhow::Result<()> {
     let person_type = Uuid::now_v7();
     let project_type = Uuid::now_v7();
     let leads = Uuid::now_v7();
-    // 两个 person 实体，让搜索词能同时命中两个，结果按 degree 倒序排
+    // Two person entities, so the search term can hit both at once; results are sorted by degree descending
     let alpha = Uuid::now_v7();
     let beta = Uuid::now_v7();
-    // 一个 project 实体（被指的那个对象）
+    // One project entity (the object being pointed at)
     let project_entity = Uuid::now_v7();
 
     sqlx::query("INSERT INTO organizations (id, name) VALUES ($1, 'as-of-search-test')")
@@ -89,7 +89,7 @@ async fn search_entities_degree_respects_as_of() -> anyhow::Result<()> {
         .await?;
     }
 
-    // alpha：1 月记下「leads project_entity」，没有作废
+    // alpha: recorded "leads project_entity" in January, not invalidated
     let f_alpha = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_id,
@@ -105,7 +105,7 @@ async fn search_entities_degree_respects_as_of() -> anyhow::Result<()> {
     .execute(&pool)
     .await?;
 
-    // beta：1 月记下「leads project_entity」→ 3 月作废；5 月又记下第二条
+    // beta: recorded "leads project_entity" in January → invalidated in March; a second one recorded in May
     let f_beta_old = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_id,
@@ -147,7 +147,7 @@ async fn search_entities_degree_respects_as_of() -> anyhow::Result<()> {
             .unwrap_or(-1)
     };
 
-    // 当下：alpha=1，beta=1（旧的已作废、新的还活着）
+    // Now: alpha=1, beta=1 (the old one is invalidated, the new one is alive)
     let now_rows =
         utopia_store::graph::search_entities(&pool, kb, "Person", 50, 0, None, false).await?;
     assert_eq!(find_degree(&now_rows.0, alpha), 1, "当下 alpha degree=1");
@@ -157,7 +157,7 @@ async fn search_entities_degree_respects_as_of() -> anyhow::Result<()> {
         "当下 beta degree=1（新的那条）"
     );
 
-    // 2 月：alpha 已记下=1；beta 的旧边还在作废之前=1
+    // February: alpha has recorded 1; beta's old edge is still there before its invalidation = 1
     let feb_rows = utopia_store::graph::search_entities(
         &pool,
         kb,
@@ -175,7 +175,7 @@ async fn search_entities_degree_respects_as_of() -> anyhow::Result<()> {
         "2 月 beta 旧边在作废之前 degree=1"
     );
 
-    // 4 月：alpha 还是 1；beta 旧边已作废、新边还没记下 → 0
+    // April: alpha is still 1; beta's old edge is invalidated and the new one not yet recorded → 0
     let apr_rows = utopia_store::graph::search_entities(
         &pool,
         kb,
@@ -193,7 +193,7 @@ async fn search_entities_degree_respects_as_of() -> anyhow::Result<()> {
         "4 月 beta 旧边已作废、新边还没记下 degree=0"
     );
 
-    // 6 月：alpha 还是 1；beta 新边已记下=1
+    // June: alpha is still 1; beta's new edge has been recorded = 1
     let jun_rows = utopia_store::graph::search_entities(
         &pool,
         kb,
@@ -218,9 +218,9 @@ async fn search_entities_degree_respects_as_of() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 回放时列表与总数也按当时可见的实体算，走真的合并路径。A 在四月并进 B：
-/// 三月搜「Zhang」要看见 A 和 B、各一度、总数 2；现在只剩 B。
-/// 只回放度数、列表还按 `merged_into IS NULL` 过滤的话，三月只看见 B
+/// On replay the list and total are also computed over the entities visible at that time, along the real merge path. A is merged into B in April:
+/// searching "Zhang" in March should see A and B, each with one degree, total 2; now only B remains.
+/// If only the degree were replayed while the list still filtered by `merged_into IS NULL`, March would see only B
 #[tokio::test]
 async fn a_search_in_replay_lists_the_entities_of_that_moment() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -267,7 +267,7 @@ async fn a_search_in_replay_lists_the_entities_of_that_moment() -> anyhow::Resul
         for (id, name, created) in [
             (a, "Zhang Wei A", "2026-01-01T00:00:00Z"),
             (b, "Zhang Wei B", "2026-01-01T00:00:00Z"),
-            // 五月才建：三月的搜索里不该有它
+            // Created only in May: it should not be in March's search
             (later, "Zhang Wei C", "2026-05-01T00:00:00Z"),
             (acme, "Acme", "2026-01-01T00:00:00Z"),
             (other, "Other Co", "2026-01-01T00:00:00Z"),

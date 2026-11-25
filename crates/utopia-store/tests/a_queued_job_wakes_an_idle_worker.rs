@@ -1,25 +1,25 @@
-//! #517：入队的任务不等轮询，空闲的 worker 立刻醒。
+//! #517: a queued task does not wait for polling; an idle worker wakes immediately.
 //!
-//! worker 空闲时不再干睡两秒，而是等 `utopia_jobs` 频道的通知，两秒轮询只做兜底
-//! （`run_at` 在未来的重试、重连期间丢掉的通知、几个 worker 被一条通知叫醒后没抢到的）。
-//! 这里守的是 worker 真正用的那个等待函数 `jobs::wait_for_work`，不起完整 worker：
-//! 完整 worker 会认领库里任何排队任务，共用一个测试库时会替别的测试把活干掉。
+//! When idle, the worker no longer sleeps for two seconds; it waits for notifications on the `utopia_jobs` channel, and the two-second poll is only a fallback
+//! (retries scheduled with a future `run_at`, notifications lost during reconnects, and workers woken by one notification that did not get the task).
+//! What is guarded here is the wait function the worker really uses, `jobs::wait_for_work`, without starting a full worker:
+//! a full worker claims any queued task in the database, and when the test database is shared it would steal work from other tests.
 //!
-//! 三件事：
-//! 1. **入队叫得醒。** 通知在轮询间隔之内到达，等待以 `Notified` 结束。
-//! 2. **通知只在提交之后。** 插入还在未提交的事务里时，等待只能靠轮询结束；提交后才醒。
-//!    这是 #517 点名的顺序隐患：先醒后见行的话，醒来一无所获，又回到轮询。
-//! 3. **没有通知也会醒。** 轮询那一臂还在，等满间隔以 `Polled` 结束。
+//! Three things:
+//! 1. **Enqueue wakes it.** The notification arrives within the poll interval, and the wait ends with `Notified`.
+//! 2. **Notification only after commit.** While the insert is still in an uncommitted transaction, the wait can only end by polling; it wakes after the commit.
+//!    This is the ordering hazard named in #517: if it woke before the row was visible, it would wake to nothing and go back to polling.
+//! 3. **Wakes even without a notification.** The poll arm is still there; after the full interval it ends with `Polled`.
 //!
-//! 三个测试共用一个频道，串行跑：并行的话彼此的通知会互相叫醒。
-//! 要对着一个没有别的进程往里写任务的库跑。
+//! The three tests share one channel and run serially: in parallel, their notifications would wake each other.
+//! Run it against a database that no other process writes tasks into.
 
 use sqlx::PgPool;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use utopia_store::jobs::{self, Wake};
 
-/// 短轮询：测试只关心「通知比轮询快」，不必等真正的两秒。
+/// Short poll: the test only cares that notification is faster than polling, without waiting for the real two seconds.
 const POLL: Duration = Duration::from_millis(300);
 static SERIAL: Mutex<()> = Mutex::const_new(());
 

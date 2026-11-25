@@ -1,23 +1,23 @@
-//! `inverseOf` / `subPropertyOf` 的落库与边界——打在真库上。
+//! Storage and boundaries of `inverseOf` / `subPropertyOf` — run against a real DB.
 //!
-//! **这里守的第一条是知识库隔离。** 列上的外键写的是
-//! `REFERENCES relation_types(id)`，它不认 `kb_id`：数据库层面，A 库的关系
-//! 完全可以指向 B 库的关系。RDF 导入那条路天然过不去（按 IRI 在本库里查），
-//! 而 HTTP 接口收的是裸 UUID——挡不住的话，拿到任意一个 id 就能让推理机
-//! 跨库读公理，推出来的边会带着另一个库的语义落进这个库。
+//! **The first thing guarded here is knowledge-base isolation.** The foreign key on the column is written as
+//! `REFERENCES relation_types(id)`, which does not know about `kb_id`: at the database level, a relation in KB A
+//! can perfectly well point at a relation in KB B. The RDF import path naturally cannot do this (it looks up by IRI within this KB), but
+//! the HTTP interface takes a bare UUID — if that is not blocked, then holding any id lets the reasoner
+//! read axioms across KBs, and derived edges land in this KB carrying another KB's semantics.
 //!
-//! 前端只列本库的关系。**那是界面礼貌，不是边界**：接口自己收 UUID，
-//! curl 一下就绕过去了。所以校验必须在 store 层，测试也必须在这里。
+//! The frontend only lists this KB's relations. **That is interface politeness, not a boundary**: the interface itself takes a UUID,
+//! and a curl gets around it. So the check must live in the store layer, and the test must live here too.
 //!
-//! 其余三条是同一族的形状约束：属性没有逆（宾语是字面值，无从谈起）、
-//! 属性不能当别人的逆、子属性不能是自己（库里有 CHECK，但撞上去是 500，
-//! 得在到达 CHECK 之前给出人话）。
+//! The other three rules are the same family of shape constraints: a property has no inverse (its object is a literal, so the notion does not apply),
+//! a property cannot be another's inverse, and a sub-property cannot be itself (the DB has a CHECK, but hitting it gives a 500,
+//! so a human-readable error must be given before the CHECK is reached).
 
 use sqlx::PgPool;
 use utopia_core::models::RelationAxioms;
 use uuid::Uuid;
 
-/// 一个 org 底下两个库。**两个是必需的**——这组测试的主角就是跨库那条线。
+/// Two KBs under one org. **Both are required** — the protagonist of this test group is exactly the cross-KB line.
 async fn two_kbs(pool: &PgPool) -> anyhow::Result<(Uuid, Uuid, Uuid)> {
     let (org, ws, a, b) = (
         Uuid::now_v7(),
@@ -45,7 +45,7 @@ async fn two_kbs(pool: &PgPool) -> anyhow::Result<(Uuid, Uuid, Uuid)> {
     Ok((org, a, b))
 }
 
-/// 建一条最普通的关系，不带任何链。
+/// Creates the simplest possible relation, with no chain at all.
 async fn plain(pool: &PgPool, kb: Uuid, key: &str) -> anyhow::Result<Uuid> {
     Ok(utopia_store::ontology::create_relation_type(
         pool,
@@ -76,11 +76,11 @@ async fn a_relation_points_only_inside_its_own_kb() -> anyhow::Result<()> {
         let works_at = plain(&pool, kb_a, "works_at").await?;
         let employs = plain(&pool, kb_a, "employs").await?;
         let ceo_of = plain(&pool, kb_a, "ceo_of").await?;
-        // 另一个库里的关系。名字取一样的——**同名不同库，正是最容易被当成
-        // 自己人的那种**
+        // A relation in the other KB. The name is the same — **a same name in a different KB is exactly the kind most easily taken
+        // for one's own**
         let foreign = plain(&pool, kb_b, "employs").await?;
 
-        // ---- 一、跨库指向：建的时候就该被拒
+        // ---- 1. Cross-KB pointing: should be rejected at creation time
         let err = utopia_store::ontology::create_relation_type(
             &pool,
             kb_a,
@@ -113,7 +113,7 @@ async fn a_relation_points_only_inside_its_own_kb() -> anyhow::Result<()> {
                 .await?;
         assert_eq!(leaked, 0, "被拒的那次不该留下半行");
 
-        // ---- 二、跨库指向：改的时候同样该被拒
+        // ---- 2. Cross-KB pointing: should be rejected on update too
         let err = utopia_store::ontology::update_relation_type(
             &pool,
             kb_a,
@@ -137,7 +137,7 @@ async fn a_relation_points_only_inside_its_own_kb() -> anyhow::Result<()> {
             "实得 {err:?}"
         );
 
-        // ---- 三、本库之内：写得进，也读得回
+        // ---- 3. Within this KB: can be written, and read back
         utopia_store::ontology::update_relation_type(
             &pool,
             kb_a,
@@ -182,7 +182,7 @@ async fn a_relation_points_only_inside_its_own_kb() -> anyhow::Result<()> {
         );
         assert_eq!(find(ceo_of).sub_property_of, Some(works_at));
 
-        // ---- 四、缺省 = 清空，与上面六位公理同一条规矩
+        // ---- 4. Default = clear, the same rule as the six axioms above
         utopia_store::ontology::update_relation_type(
             &pool,
             kb_a,
@@ -205,7 +205,7 @@ async fn a_relation_points_only_inside_its_own_kb() -> anyhow::Result<()> {
              和「我没碰逆」长得一模一样"
         );
 
-        // ---- 五、属性：不能有链，也不能当链的目标
+        // ---- 5. Properties: cannot have a chain, and cannot be the target of a chain
         let salary = utopia_store::ontology::create_relation_type(
             &pool,
             kb_a,
@@ -215,7 +215,7 @@ async fn a_relation_points_only_inside_its_own_kb() -> anyhow::Result<()> {
             RelationAxioms::default(),
             "",
             "attribute",
-            // 属性至少要挂一个类，这里借用一个现成的类
+            // A property must attach at least one class; here we borrow an existing class
             &[class(&pool, kb_a).await?],
             &[],
             Some("number"),
@@ -267,7 +267,7 @@ async fn a_relation_points_only_inside_its_own_kb() -> anyhow::Result<()> {
             "实得 {err:?}"
         );
 
-        // ---- 六、子属性不能是自己。**库里有 CHECK，但那是 500**
+        // ---- 6. A sub-property cannot be itself. **The DB has a CHECK, but that is a 500**
         let err = utopia_store::ontology::update_relation_type(
             &pool,
             kb_a,
@@ -291,8 +291,8 @@ async fn a_relation_points_only_inside_its_own_kb() -> anyhow::Result<()> {
             "得在撞上 CHECK 之前给出人话，而不是让人看到一个 500，实得 {err:?}"
         );
 
-        // 逆是自己**不拦**：那等于 symmetric，是合法声明。
-        // R0 会提示改用 `symmetric` 更直白，但那是提示不是错误
+        // Being its own inverse is **not blocked**: that amounts to symmetric, which is a legal declaration.
+        // R0 would suggest switching to `symmetric`, which is more direct, but that is a hint, not an error
         utopia_store::ontology::update_relation_type(
             &pool,
             kb_a,
@@ -323,7 +323,7 @@ async fn a_relation_points_only_inside_its_own_kb() -> anyhow::Result<()> {
     run
 }
 
-/// 借一个类给属性当 domain——属性没有类就建不出来。
+/// Borrow a class to serve as a property's domain — a property cannot be created without a class.
 async fn class(pool: &PgPool, kb: Uuid) -> anyhow::Result<Uuid> {
     Ok(utopia_store::ontology::create_entity_type(
         pool,

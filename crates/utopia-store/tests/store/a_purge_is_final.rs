@@ -1,17 +1,17 @@
-//! #268 下半：真删是终点。
+//! #268 second half: a real purge is the end point.
 //!
-//! 删除是事件、可撤销；purge 把内容真的抹掉，只对已删除的文档开放。这里守五件事：
+//! Deleting is an event and reversible; purge really wipes the content, and is open only for deleted documents. Five things are guarded here:
 //!
-//! 1. **没删不能清。** 活着的文档 purge 报错。
-//! 2. **清的是内容，不是记录。** 分块行、证据、版本行没了；文档行还在，打了 `purged_at`，
-//!    `external_key` 清空；事实保持作废；删除账本那行还在。
-//! 3. **别处还引用的原文不交出去。** 历史版本的指纹被另一篇文档用着，就不在待删名单上；
-//!    只有这篇独占的指纹才交给调用方去删文件。
-//! 4. **清了就回不来。** restore 报错，再 purge 也报错。
-//! 5. **身份让出来。** 同一份内容、同一个 external_key 可以再进来——是一篇新文档，不是
-//!    复活；「已删除」视图只列没清的墓碑。
+//! 1. **Nothing undeleted can be purged.** Purging a live document reports an error.
+//! 2. **What is purged is the content, not the record.** Chunk rows, evidence and version rows are gone; the document row remains, marked with `purged_at`,
+//!    with `external_key` cleared; facts stay voided; the deletion-ledger row remains.
+//! 3. **Original content still referenced elsewhere is not handed out.** A fingerprint of a historical version used by another document is not on the list to delete;
+//!    only the fingerprints this document owns exclusively are handed to the caller to delete the files.
+//! 4. **Once purged, it does not come back.** restore reports an error, and purging again also reports an error.
+//! 5. **The identity is released.** The same content with the same external_key can come in again — it is a new document, not
+//!    a revival; the "deleted" view lists only tombstones that have not been purged.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use sqlx::PgPool;
 use utopia_store::documents;
@@ -174,7 +174,7 @@ async fn count(pool: &PgPool, sql: &str, id: Uuid) -> anyhow::Result<i64> {
     Ok(sqlx::query_scalar(sql).bind(id).fetch_one(pool).await?)
 }
 
-/// (deleted_at 有, purged_at 有, external_key)
+/// (deleted_at set, purged_at set, external_key)
 async fn tombstone(pool: &PgPool, id: Uuid) -> anyhow::Result<(bool, bool, Option<String>)> {
     Ok(sqlx::query_as(
         "SELECT deleted_at IS NOT NULL, purged_at IS NOT NULL, external_key
@@ -193,7 +193,7 @@ async fn a_purge_is_final() -> anyhow::Result<()> {
     let pool = PgPool::connect(&url).await?;
     let f = seed(&pool).await?;
 
-    // 原文按内容寻址、跨库共用：指纹带上本次运行的随机后缀，别和库里残留的撞上
+    // Original content is addressed by content and shared across stores: the fingerprint carries this run's random suffix, so it does not collide with leftovers in the store
     let tag = Uuid::now_v7().simple().to_string();
     let (sha_a, sha_old, sha_b) = (
         format!("sha-a-{tag}"),
@@ -201,23 +201,23 @@ async fn a_purge_is_final() -> anyhow::Result<()> {
         format!("sha-b-{tag}"),
     );
     let run = async {
-        // 甲：现行内容 sha-a，历史版本 sha-old；丙的现行内容也是 sha-old——那份原文不独占
+        // A: current content sha-a, historical version sha-old; C's current content is also sha-old — that original is not exclusively owned
         let a = document(&pool, &f, "a.md", &sha_a, Some("key-a")).await?;
         version(&pool, a, &sha_old).await?;
         let _c = document(&pool, &f, "c.md", &sha_old, None).await?;
-        // 乙：删了但不清，该留在「已删除」视图里
+        // B: deleted but not purged, it should stay in the "deleted" view
         let b = document(&pool, &f, "b.md", &sha_b, None).await?;
         let a1 = chunk(&pool, &f, a).await?;
         let (x, y) = (entity(&pool, &f, "X").await?, entity(&pool, &f, "Y").await?);
         let only_a = fact(&pool, &f, x, y, a1).await?;
 
-        // 1. 没删不能清
+        // 1. Cannot purge what is not deleted
         assert!(documents::purge(&pool, f.kb, a).await.is_err());
 
         documents::delete(&pool, f.kb, a, Some(f.user)).await?;
         documents::delete(&pool, f.kb, b, Some(f.user)).await?;
 
-        // 2 + 3. 清内容，留记录；只交出独占的原文
+        // 2 + 3. Purge content, keep records; hand out only the exclusively owned original
         let report = documents::purge(&pool, f.kb, a).await?;
         assert_eq!(report.chunks, 1);
         assert_eq!(
@@ -271,11 +271,11 @@ async fn a_purge_is_final() -> anyhow::Result<()> {
             "the deletion stays on record"
         );
 
-        // 4. 回不来
+        // 4. Does not come back
         assert!(documents::restore(&pool, f.kb, a).await.is_err());
         assert!(documents::purge(&pool, f.kb, a).await.is_err());
 
-        // 5. 身份让出来：同内容同键再进来是一篇新文档；「已删除」视图只有乙
+        // 5. Identity released: the same content and key coming in again is a new document; the "deleted" view has only B
         let again = documents::create(
             &pool,
             f.kb,
@@ -302,7 +302,7 @@ async fn a_purge_is_final() -> anyhow::Result<()> {
     }
     .await;
 
-    // 组织删除不级联到库：库自己删，别在共用的测试库里留墓碑
+    // Deleting an organization does not cascade into the store: the store deletes itself, so no tombstones are left in the shared test store
     let _ = sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(f.kb)
         .execute(&pool)

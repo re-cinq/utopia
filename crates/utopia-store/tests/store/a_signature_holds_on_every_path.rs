@@ -1,12 +1,12 @@
-//! 关系的签名（domain / range）在抽取之外的写路径上也得算数（#190 / #196）。
+//! A relation's signature (domain / range) must hold on write paths other than extraction (#190 / #196).
 //!
-//! 抽取写入时按 #138 掰正方向或留空谓词，但**合并**会换掉主语的类型，守卫只装在抽取上
-//! 就被它绕过去。这里守两件事：
+//! Extraction writes correct the direction per #138 or leave the predicate empty, but **merging** swaps out the subject's class, and a guard installed only on extraction
+//! gets bypassed by it. Two things are guarded here:
 //!
-//! 1. 合并之后，被换了主语的事实若违反签名 → `axiom_violations` 里多一条 `signature`。
-//! 2. 一致性检查（R0）也能量出签名违规，事实撤了它就被清掉。
+//! 1. After a merge, a fact whose swapped subject now violates the signature → one extra `signature` entry in `axiom_violations`.
+//! 2. The consistency check (R0) can also measure signature violations, and the fact is cleared once it is retracted.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -16,7 +16,7 @@ struct Fixture {
     kb: Uuid,
     company: Uuid,
     person: Uuid,
-    /// schema.org 的 `employee (organization → person)`
+    /// schema.org's `employee (organization → person)`
     employee: Uuid,
     acme: Uuid,
     alice: Uuid,
@@ -162,7 +162,7 @@ async fn a_merge_that_breaks_the_signature_is_recorded() -> anyhow::Result<()> {
     let f = seed(&pool).await?;
 
     let run = async {
-        // Acme employee Alice：主语 company、宾语 person，合签名
+        // Acme employee Alice: subject company, object person, matches the signature
         sqlx::query(
             "INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_id)
              VALUES ($1, $2, $3, $4, $5)",
@@ -176,7 +176,7 @@ async fn a_merge_that_breaks_the_signature_is_recorded() -> anyhow::Result<()> {
         .await?;
         assert!(open_signature_breaks(&pool, f.kb).await?.is_empty());
 
-        // 1. 合并：把 Acme 并进 Bob（person），Acme employee Alice 的主语变成 person
+        // 1. Merge: merge Acme into Bob (person), so the subject of Acme employee Alice becomes person
         utopia_store::resolution::merge_entities(&pool, f.kb, f.acme, f.bob, None, "test")
             .await?;
         let edges = live_employee_edges(&pool, &f).await?;
@@ -194,7 +194,7 @@ async fn a_merge_that_breaks_the_signature_is_recorded() -> anyhow::Result<()> {
             "a merge that breaks the signature must show up as an open violation"
         );
 
-        // 2. 一致性检查量得出它，撤了事实就清掉
+        // 2. The consistency check measures it, and retracting the fact clears it
         let report = utopia_store::reasoning::run(&pool, f.kb).await?;
         assert_eq!(report.found, 1);
         assert_eq!(report.inserted, 0, "already recorded by the merge; the check must not duplicate it");
@@ -207,7 +207,7 @@ async fn a_merge_that_breaks_the_signature_is_recorded() -> anyhow::Result<()> {
         assert_eq!(report.cleared, 1, "a retracted fact takes its violation with it");
         assert!(open_signature_breaks(&pool, f.kb).await?.is_empty());
 
-        // 未分类的实体不算违反：类型是 NULL 的主语没有东西可比
+        // An unclassified entity is not a violation: a subject whose type is NULL has nothing to compare against
         let untyped = Uuid::now_v7();
         sqlx::query("INSERT INTO entities (id, kb_id, canonical_name) VALUES ($1, $2, 'Nobody')")
             .bind(untyped)

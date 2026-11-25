@@ -1,7 +1,7 @@
-//! 库的数据描述与约定是两列、两条写入路径——打在真库上（#570）。
+//! A store's data description and its conventions are two columns, two write paths — run against a real store (#570).
 //!
-//! 探索每跑一次重写描述；人写的约定探索不碰。混在一个字段里，下一次探索就把
-//! 人的答案盖了。这条测试守的就是「各写各的、互不覆盖」。
+//! Exploration rewrites the description on every run; conventions a person wrote are not touched by exploration. Mixed into one field, the next exploration would overwrite
+//! a person's answer. This test guards exactly "each writes its own, and neither overwrites the other".
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -36,7 +36,7 @@ async fn the_description_and_the_conventions_do_not_overwrite_each_other() -> an
     let kb = base(&pool).await?;
 
     let run = async {
-        // 人先写约定
+        // A person writes the convention first
         let no: Option<&str> = None;
         utopia_store::kbs::update(
             &pool,
@@ -53,7 +53,7 @@ async fn the_description_and_the_conventions_do_not_overwrite_each_other() -> an
             Some("Amounts are in cents.\nis_test = 1 is excluded."),
         )
         .await?;
-        // 探索写描述与问题
+        // Exploration writes the description and the questions
         utopia_store::kbs::set_data_description(
             &pool,
             kb,
@@ -75,7 +75,7 @@ async fn the_description_and_the_conventions_do_not_overwrite_each_other() -> an
             serde_json::json!(["Which ord_st values count?"])
         );
 
-        // 探索再跑一次：描述换了，约定原样
+        // Exploration runs again: the description changed, the convention as it was
         utopia_store::kbs::set_data_description(&pool, kb, "second run", &[]).await?;
         let got = utopia_store::kbs::get(&pool, kb).await?;
         assert_eq!(got.data_description.as_deref(), Some("second run"));
@@ -87,7 +87,7 @@ async fn the_description_and_the_conventions_do_not_overwrite_each_other() -> an
             "探索不碰人写的约定"
         );
 
-        // 人改约定（PATCH 只送这一项）：描述原样。送 null 等于不改——与 description 同一约定
+        // A person edits the convention (PATCH sends only this one): the description is unchanged. Sending null is the same as not changing — the same convention as description
         utopia_store::kbs::update(
             &pool,
             kb,
@@ -132,7 +132,7 @@ async fn the_description_and_the_conventions_do_not_overwrite_each_other() -> an
     }
     .await;
 
-    // 只删知识库，不删 org——用户是软删除的，测试也不该造一个产品里不存在的动作
+    // Delete only the knowledge base, not the org — users are soft-deleted, and the test should not invent an action the product does not have
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(kb)
         .execute(&pool)

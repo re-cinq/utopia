@@ -1,25 +1,25 @@
-//! 检索候选要**带上祖先**，否则提示词里没有泛化基类。
+//! Retrieval candidates must **carry their ancestors**, or the prompt contains no generalized base class.
 //!
-//! 为什么非要连库：`ancestors_of` 整个活在一段递归 SQL 里，多继承与菱形
-//! 走不走得通、会不会把同一个祖先展开两次，`cargo check` 一个字都不说。
+//! Why this needs a database: `ancestors_of` lives entirely inside one recursive SQL query, and whether multiple inheritance and diamonds work out,
+//! and whether the same ancestor gets expanded twice, is something `cargo check` says nothing about.
 //!
-//! 守的是这条实测出来的因果链：向量检索天然偏爱字面出现在正文里的叶子类
-//!（一个讲 Sutskever 的分块，976 个类里 `researcher` 排第 4、`person` 排第 359），
-//! 前 40 名里一个泛化基类都没有。于是两个症状一起出现——实体被判成
-//! `researcher`（schema.org 里它是 `Audience` 的子类），而
-//! `employee (organization → person)` 的签名退化成 `(* → *)`，模型根本没见过方向约束。
+//! What is guarded is this causal chain, found by measurement: vector retrieval naturally favors leaf classes that literally appear in the body text
+//!(for a chunk about Sutskever, among 976 classes `researcher` ranks 4th and `person` ranks 359th),
+//! and the top 40 contain no generalized base class at all. Two symptoms then appear together: an entity gets classified as
+//! `researcher` (in schema.org it is a subclass of `Audience`), and
+//! the signature `employee (organization → person)` degrades to `(* → *)`, so the model never sees the direction constraint.
 //!
-//! 从前这道地板由「内置类恒在」兜着，种子退场后判据悬空了。
+//! Until now this floor was held up by "built-in classes are always present"; once the seed was retired, the criterion hung in the air.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data.
 
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// 造一段菱形：`researcher → audience → thing`，`corporation → organization → thing`，
-/// 外加一个多继承的 `agent`（同时挂在 thing 与 organization 下）。
+/// Builds a diamond: `researcher → audience → thing`, `corporation → organization → thing`,
+/// plus a multi-inherited `agent` (attached under both thing and organization).
 ///
-/// 菱形是关键：没有去重的递归会把 `thing` 展开两次。
+/// The diamond is the key: a recursion without de-duplication would expand `thing` twice.
 async fn seed(pool: &PgPool) -> anyhow::Result<(Uuid, Vec<(&'static str, Uuid)>)> {
     let (org, ws, kb) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     sqlx::query("INSERT INTO organizations (id, name) VALUES ($1, 'floor-test')")
@@ -64,7 +64,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<(Uuid, Vec<(&'static str, Uuid)>)
         ("researcher", "audience"),
         ("organization", "thing"),
         ("corporation", "organization"),
-        // 多继承 + 菱形：agent 两条路都通到 thing
+        // Multiple inheritance + diamond: agent reaches thing by both paths
         ("agent", "thing"),
         ("agent", "organization"),
     ] {
@@ -86,7 +86,7 @@ async fn a_retrieved_leaf_brings_its_ancestors() -> anyhow::Result<()> {
         return Ok(());
     };
     let pool = PgPool::connect(&url).await?;
-    // 开跑前先扫地：断言 panic 会跳过 teardown
+    // Clean up before starting: an assertion panic would skip teardown
     sqlx::query("DELETE FROM organizations WHERE name = 'floor-test'")
         .execute(&pool)
         .await?;
@@ -94,25 +94,25 @@ async fn a_retrieved_leaf_brings_its_ancestors() -> anyhow::Result<()> {
     let id = |k: &str| ids.iter().find(|(n, _)| *n == k).unwrap().1;
 
     let run = async {
-        // 检索只捞到了叶子——正文写的是 "a researcher at the corporation"
+        // Retrieval only picked up the leaf -- the body text reads "a researcher at the corporation"
         let leaves = vec![id("researcher"), id("corporation")];
         let anc = utopia_store::ontology::ancestors_of(&pool, &leaves).await?;
 
         for k in ["audience", "thing", "organization"] {
             assert!(anc.contains(&id(k)), "祖先里少了 {k}——地板没补上");
         }
-        // 自己不算祖先：调用方会把两者并起来，重复只是噪声
+        // An entity is not its own ancestor: the caller merges the two, and a duplicate would be just noise
         for k in ["researcher", "corporation"] {
             assert!(!anc.contains(&id(k)), "{k} 是它自己，不该出现在祖先里");
         }
 
-        // **菱形去重**：agent 有两条路通到 thing，thing 只该出现一次
+        // **Diamond de-duplication**: agent reaches thing by two paths, but thing should appear only once
         let anc2 = utopia_store::ontology::ancestors_of(&pool, &[id("agent")]).await?;
         let things = anc2.iter().filter(|x| **x == id("thing")).count();
         assert_eq!(things, 1, "菱形继承把 thing 展开了 {things} 次");
         assert!(anc2.contains(&id("organization")), "多继承的另一条腿丢了");
 
-        // 空输入不该炸，也不该扫全表
+        // Empty input should not blow up, nor scan the whole table
         assert!(utopia_store::ontology::ancestors_of(&pool, &[])
             .await?
             .is_empty());

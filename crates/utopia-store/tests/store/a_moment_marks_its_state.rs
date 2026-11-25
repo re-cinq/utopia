@@ -1,25 +1,25 @@
-//! 只带一个日期的陈述绑在状态属性上（#966）。「Lin Zhao joined Meridian Systems on 2023-06-01」
-//! 的日期，时间解析照 0031 写事件的办法写在两端；绑到 works_for（状态）之后照抄，就是一段
-//! 2023-06-01 → 2023-06-01 的状态。世界轴按 `from <= T < to` 读状态，这一段任何时刻都不成立。
-//! 绑定现在说那个日期标的是什么（`phrase_bindings.marks`）：
+//! A statement carrying only one date, bound to a state attribute (#966). The date of "Lin Zhao joined Meridian Systems on 2023-06-01"
+//! is written at both ends, following the way 0031 writes events by time resolution; copying that over once bound to works_for (a state) gives a span
+//! 2023-06-01 → 2023-06-01. The world axis reads a state as `from <= T < to`, so this span holds at no moment.
+//! The binding now says what that date marks (`phrase_bindings.marks`):
 //!
-//! - start：从那天起。「joined」在「works for … from 2023-06-01」之前、之后，或只有它
-//!   （#966 的 A、B、C），都是一段从 2023-06-01 起、至今开着的状态；
-//! - end：到那天为止，关上开着的那段。终点说的是一个时段（「2024 年离开」）而开着的那段从
-//!   时段里开始时，关在时段的尽头；
-//! - none 或还没说：关系不算类型化行，陈述带着日期留在开放图谱；属性按那个日期命名的
-//!   时段读（0053 修订 2026-10-22，`materialize::period_tests`）。
+//! - start: from that day. Whether "joined" comes before, after, or is the only one with "works for … from 2023-06-01"
+//!   (A, B, C in #966), it is a state from 2023-06-01, open until now;
+//! - end: up to that day, closing the open span. An end that states a period ("left in 2024") while the open span began within
+//!   the period closes at the end of the period;
+//! - none, or not yet stated: the relation is not a typed row, and the statement stays in the open graph with its date; the attribute is read as a period named by that date
+//!   (0053 revision 2026-10-22, `materialize::period_tests`).
 //!
-//! 之前照抄写下的空段由物化作废重算，人写的、人改成一刻的不碰；声明成状态的属性下，两端
-//! 相等的行写入、改区间、关在起点都被拒（同时开始的冲突也不能关在那一刻），没有属性的行
-//! 照旧；已有的空段不并进后来的观察，也不被它关上；勘误改不了一段不成立的时间，也不能把
-//! 一刻的事件改成状态；规则没有 marks，只说了一刻的陈述不蕴含状态，只有起点的照旧。
+//! An empty span copied over earlier is voided and recomputed by materialization; rows a person wrote, or changed to a moment, are not touched. Under an attribute declared as a state, both ends
+//! equal: writing, changing the interval, and closing at its own start are all refused (a same-start conflict also cannot be closed at that moment); rows without an attribute
+//! stay as before; an existing empty span is not merged with later observations, nor closed by them; a correction cannot fix a span that holds at no time, nor turn
+//! a moment event into a state; rules have no marks, so a statement that states only a moment does not imply a state, and one with only a start stays as before.
 //!
-//! 终点因此挪到时段尽头的行记着原文说的是那个时段（`end_after_period`，#994）：收尾、精化
-//! 两条路都记；关在「until 2025」的行再读到「left in 2024」也记（人只改过起点的也记），时间线画
-//! 的终点被它说出来也记；搬主宾、勘误改出来的行带着它，改成事件的不带。
+//! An end moved to the end of a period therefore records that the source said that period (`end_after_period`, #994): both the closing and the refining paths record it; a row closed at "until 2025" that is later read as "left in 2024" also records it (as does one a person changed only the start of); when the end drawn on the timeline is stated by the source it records it too; rows carried by moving subject/object or by a correction carry it, and one changed to an event does not.
+//! Both paths record it; a row closed at "until 2025" that is later read as "left in 2024" also records it (as does one a person changed only the start of), and the end drawn on the timeline
+//! the end drawn on the timeline is recorded when the source says it; rows produced by swapping subject and object or by an erratum carry it, and rows changed into events do not.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
@@ -29,19 +29,19 @@ use utopia_store::graph::{self, Validity};
 use utopia_store::materialize::{materialize, Outcome};
 use uuid::Uuid;
 
-/// 一行类型化事实：起、止，和它是不是规则算的
+/// One typed fact row: start, end, and whether it was computed by a rule
 type ImpliedRow = (Option<DateTime<Utc>>, Option<DateTime<Utc>>, bool);
 
 fn t(s: &str) -> DateTime<Utc> {
     s.parse().expect("fixed timestamp")
 }
 
-/// 2023-06-01，日精度
+/// 2023-06-01, day precision
 fn day() -> DateTime<Utc> {
     t("2023-06-01T00:00:00Z")
 }
 
-/// 两端都是那一天：时间解析写一刻的样子
+/// Both ends are that same day: the shape time resolution writes for a moment
 fn moment() -> Validity<'static> {
     Validity {
         from: Some(day()),
@@ -54,7 +54,7 @@ fn moment() -> Validity<'static> {
     }
 }
 
-/// 只知道终点
+/// Only the end is known
 fn ending(at: DateTime<Utc>) -> Validity<'static> {
     Validity {
         from: None,
@@ -67,8 +67,8 @@ fn ending(at: DateTime<Utc>) -> Validity<'static> {
     }
 }
 
-/// 一个库：person、organization；works_for（状态）、acquired（事件）；Lin Zhao、
-/// Meridian Systems、Aster Labs
+/// One store: person, organization; works_for (state), acquired (event); Lin Zhao,
+/// Meridian Systems, Aster Labs
 struct Base {
     pool: PgPool,
     org: Uuid,
@@ -120,8 +120,8 @@ impl Base {
         })
     }
 
-    /// 一条开放陈述 Lin Zhao —phrase→ Meridian Systems，两端按时间解析写的形状给：一刻两端
-    /// 同值，「自」只有起点，「至」只有终点
+    /// One open statement Lin Zhao —phrase→ Meridian Systems, given the shape time resolution writes for both ends: a moment has
+    /// the same value at both ends; "from" has only a start, "until" has only an end
     async fn statement(
         &self,
         phrase: &str,
@@ -131,7 +131,7 @@ impl Base {
         self.statement_in(phrase, from, to, "day").await
     }
 
-    /// 同 [`Base::statement`]，两端是这个精度（「2024 年离开」是年精度的一刻）
+    /// Same as [`Base::statement`], with both ends at this precision ("left in 2024" is a moment at year precision)
     async fn statement_in(
         &self,
         phrase: &str,
@@ -143,7 +143,7 @@ impl Base {
             .await
     }
 
-    /// 同 [`Base::statement_in`]，宾语是这一个
+    /// Same as [`Base::statement_in`], with this one object
     async fn statement_to(
         &self,
         phrase: &str,
@@ -175,12 +175,12 @@ impl Base {
         Ok(id)
     }
 
-    /// 签名 (phrase, person, organization) 绑到 works_for，照原文方向，说那个日期标什么
+    /// Signature (phrase, person, organization) bound to works_for, in the original direction, saying what that date marks
     async fn bind(&self, phrase: &str, marks: Option<&str>) -> anyhow::Result<()> {
         self.bind_to(phrase, self.works_for, marks).await
     }
 
-    /// 同 [`Base::bind`]，绑到这条属性
+    /// Same as [`Base::bind`], bound to this attribute
     async fn bind_to(
         &self,
         phrase: &str,
@@ -207,8 +207,8 @@ impl Base {
         Ok(())
     }
 
-    /// 一行类型化的 Lin Zhao —works_for→ object，两端都是那一天：#966 之前照抄写下的样子。
-    /// `statement` 给了就是物化算的（`from_statement_id`），没给就是人写的
+    /// A typed Lin Zhao —works_for→ object row, with both ends that day: the shape copied over before #966.
+    /// If `statement` is given, it is what materialization computed (`from_statement_id`); if not, it was written by a person
     async fn empty_row(&self, object: Uuid, statement: Option<Uuid>) -> anyhow::Result<Uuid> {
         let id = Uuid::now_v7();
         sqlx::query(
@@ -229,7 +229,7 @@ impl Base {
         Ok(id)
     }
 
-    /// Lin Zhao 与 Meridian 之间活着的类型化行：(起, 止, 来源数)，按起点排
+    /// Live typed rows between Lin Zhao and Meridian: (start, end, number of sources), sorted by start
     async fn rows(
         &self,
     ) -> anyhow::Result<Vec<(Option<DateTime<Utc>>, Option<DateTime<Utc>>, i64)>> {
@@ -247,7 +247,7 @@ impl Base {
         .await?)
     }
 
-    /// 世界轴上某一刻，谁 works_for Meridian
+    /// Who works_for Meridian at a given moment on the world axis
     async fn at_meridian(&self, at: &str) -> anyhow::Result<Vec<String>> {
         let (nodes, edges) =
             graph::neighborhood(&self.pool, self.kb, self.meridian, 1, Some(t(at)), None).await?;
@@ -259,7 +259,7 @@ impl Base {
             .collect())
     }
 
-    /// 不看世界轴时，Meridian 身上的边：(id, 起, 止)
+    /// Edges on Meridian ignoring the world axis: (id, start, end)
     async fn edges(
         &self,
     ) -> anyhow::Result<Vec<(Uuid, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>> {
@@ -281,7 +281,7 @@ impl Base {
         )
     }
 
-    /// Lin Zhao —works_for→ object，走写入口（抽取、点头、人写的事实同一个门）
+    /// Lin Zhao —works_for→ object, through the write entry point (extraction, confirmation, and person-written facts share one gate)
     async fn write_to(&self, object: Uuid, v: Validity<'_>) -> anyhow::Result<Uuid> {
         let (fact, _) = graph::insert_fact(
             &self.pool,
@@ -316,8 +316,8 @@ fn refused_as_empty(e: &utopia_core::AppError) -> bool {
     format!("{e:?}").contains("empty_state_span")
 }
 
-/// #966 的三种顺序：「joined」（一刻）在「works for … from」（自）之前、之后，或只有它。
-/// 绑定说「joined」标的是开始：三种都是一段从 2023-06-01 起、至今开着的状态
+/// The three orders of #966: "joined" (a moment) before "works for … from" (from), after it, or the only one.
+/// The binding says what "joined" marks is the start: all three are a state from 2023-06-01, open until now
 #[tokio::test]
 async fn a_date_that_starts_a_state_opens_it_whatever_the_order() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -367,7 +367,7 @@ async fn a_date_that_starts_a_state_opens_it_whatever_the_order() -> anyhow::Res
     Ok(())
 }
 
-/// 标结束的短语：「left … on 2025-01-31」把开着的那段关在那一天。先读到哪一句都一样
+/// Phrase marking the end: "left … on 2025-01-31" closes the open span on that day. It does not matter which sentence is read first
 #[tokio::test]
 async fn a_date_that_ends_a_state_closes_it_there() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -411,8 +411,8 @@ async fn a_date_that_ends_a_state_closes_it_there() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 标「都不是」的日期，和绑定还没说标什么的日期：不算类型化行。陈述带着它的日期
-/// 留在开放图谱，画布上还是它
+/// A date marked "neither", and a date the binding has not yet said what to mark: not a typed row. The statement keeps its date
+/// in the open graph, and it still appears on the canvas
 #[tokio::test]
 async fn a_date_that_marks_neither_or_nothing_yet_computes_no_row() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -445,9 +445,9 @@ async fn a_date_that_marks_neither_or_nothing_yet_computes_no_row() -> anyhow::R
     Ok(())
 }
 
-/// 之前照抄写下的空段（#966 的 A）：物化作废它（还在表里），陈述按绑定重算——「works for
-/// … from」落成一段从那天起的状态；「joined」的绑定还没说标什么，它留在开放图谱；绑定说了
-/// start，它并进那一段。人写的空段不碰
+/// An empty span copied over earlier (#966's A): materialization voids it (it remains in the table), and the statement is recomputed by the binding — "works for
+/// … from" becomes a state from that day; the "joined" binding has not said what to mark, so it stays in the open graph; once the binding says
+/// start, it merges into that span. A person-written empty span is not touched
 #[tokio::test]
 async fn a_row_that_held_at_no_moment_is_computed_again() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -521,8 +521,8 @@ async fn a_row_that_held_at_no_moment_is_computed_again() -> anyhow::Result<()> 
     run
 }
 
-/// 不变量：声明成状态的属性下两端相等的行写不进去——写入（截到精度之后才相等的也算）、
-/// 改区间、关在它自己的起点都拒，原来的行不动。事件照旧写成一刻；没有属性的行照旧带着它的日期
+/// Invariant: under an attribute declared as a state, rows with equal ends cannot be written — refused at writing (also those that become equal only after truncation to precision),
+/// at changing the interval, and at closing at their own start; the original row does not change. Events are still written as a moment; rows with no attribute still carry their date
 #[tokio::test]
 async fn a_state_that_ends_where_it_starts_is_never_written() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -626,9 +626,9 @@ async fn a_state_that_ends_where_it_starts_is_never_written() -> anyhow::Result<
     run
 }
 
-/// 护栏：之前写下的空段（这里是人写的，物化不作废它）不把后来「自那天起」的观察并进去，
-/// 也不被「到哪天为止」的观察关上。同一天开始又结束的状态，不管先读到哪一句，都不写成空段，
-/// 也不让开着的那段一直开着：关在那一天的尽头
+/// Guard: an empty span written earlier (here person-written, so materialization does not void it) does not merge later observations of "from that day onward" into itself,
+/// nor is it closed by observations of "up to that day". A state that starts and ends on the same day is not written as an empty span, whichever sentence is read first,
+/// and the open span does not stay open forever: it is closed at the end of that day
 #[tokio::test]
 async fn a_row_that_holds_at_no_moment_neither_absorbs_nor_closes() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -695,8 +695,8 @@ async fn a_row_that_holds_at_no_moment_neither_absorbs_nor_closes() -> anyhow::R
     Ok(())
 }
 
-/// 勘误改一条之前写下的空段：新行接不了一段不成立的时间。验证时就拒；升级前就留给人的
-/// 那一笔，批了也不先撤旧行
+/// A correction to an earlier-written empty span: the new row cannot hold a span that holds at no time. Refused at validation; for the one left to a person before the upgrade,
+/// approving it does not void the old row first
 #[tokio::test]
 async fn a_revision_cannot_take_a_time_that_holds_at_no_moment() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -801,7 +801,7 @@ async fn a_revision_cannot_take_a_time_that_holds_at_no_moment() -> anyhow::Resu
             .await?;
         assert_eq!(status, "held");
 
-        // 一刻的事件改成状态属性：新行接过来的也是一段不成立的时间，同样拒
+        // A moment event changed into a state attribute: the new row would be a span that holds at no time, likewise refused
         let (acquisition, _) = graph::insert_fact(
             &pool,
             kb,
@@ -856,8 +856,8 @@ async fn a_revision_cannot_take_a_time_that_holds_at_no_moment() -> anyhow::Resu
     run
 }
 
-/// 规则没有 marks：只有起点的陈述照旧蕴含一段从那天起的状态；只说了一刻的陈述蕴含状态时
-/// 读法未知，不算隐含行
+/// The rule has no marks: a statement with only a start still implies a state from that day; a statement stating only a moment, when implying a state,
+/// has an unknown reading, so no implied row is created
 #[tokio::test]
 async fn a_rule_reads_a_start_date_but_not_a_single_date() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -901,9 +901,9 @@ async fn a_rule_reads_a_start_date_but_not_a_single_date() -> anyhow::Result<()>
     run
 }
 
-/// 人改成起止相等的行（#975 评审）：带着 from_statement_id、implied 和来源链接，看上去和照抄
-/// 一刻算出来的一样，可它的来源陈述不是那一刻，物化不作废它。照抄一刻写下的隐含行作废，
-/// 人改过的隐含行不碰
+/// A row a person changed to equal start and end (#975 review): it carries from_statement_id, implied and the source link, and looks the same as one
+/// computed from a moment copied over. But its source statement is not that moment, so materialization does not void it. A copied-over implied row from a moment is voided,
+/// and an implied row a person has changed is not touched
 #[tokio::test]
 async fn a_row_a_person_set_to_a_single_date_is_not_retired() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -911,8 +911,8 @@ async fn a_row_a_person_set_to_a_single_date_is_not_retired() -> anyhow::Result<
     };
     let base = Base::new(&pool).await?;
     let run = async {
-        // 「works for … from」算出一行；「was hired by … from」经规则蕴含一行，宾语另是一家，
-        // 两行不并；「signed with」只说了一刻，#966 之前规则照抄出一行空段
+        // "works for … from" yields one row; "was hired by … from" yields one row through a rule, with a different organization as object,
+        // so the two do not merge; "signed with" states only a moment, and before #966 the rule copied an empty span
         let works = base.statement("works for", Some(day()), None).await?;
         base.bind("works for", None).await?;
         let hired = base
@@ -956,7 +956,7 @@ async fn a_row_a_person_set_to_a_single_date_is_not_retired() -> anyhow::Result<
         let typed = row_of(works, "typed_fact_sources").await?;
         let implied = row_of(hired, "implied_fact_sources").await?;
         assert_ne!(typed, implied);
-        // 人把两行都改成那一天：不变量出现之前 `correct_interval` 就这样写，行带着它的来源
+        // A person changes both rows to that day: before the invariant existed, `correct_interval` wrote them this way, and the row carries its source
         sqlx::query(
             "UPDATE facts SET valid_to = valid_from, valid_to_precision = valid_from_precision
               WHERE id = ANY($1)",
@@ -1017,10 +1017,10 @@ async fn a_row_a_person_set_to_a_single_date_is_not_retired() -> anyhow::Result<
     run
 }
 
-/// 终点说的是一个时段，比的却是时刻（#975 评审）：「left … in 2024」存成 2024-01-01，年精度。
-/// 「works for … from 2024-03-01」从这个时段里开始，关在时段的尽头 2025-01-01，而不是另立一行
-/// `- → 2024`、让它一直开着到 2025 年以后。先读到哪一句都一样；行上记着终点说的是 2024
-/// （#994：收尾那条路和精化那条路都记）
+/// The end states a period, but the comparison is on a moment (#975 review): "left … in 2024" is stored as 2024-01-01, year precision.
+/// "works for … from 2024-03-01" starts within that period and closes at the period's end 2025-01-01, rather than forming a separate row
+/// `- → 2024` that stays open past 2025. It does not matter which sentence is read first; the row records that the end stated 2024
+/// (#994: both the closing path and the refining path record it)
 #[tokio::test]
 async fn a_coarse_end_closes_a_row_that_starts_inside_its_period() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -1080,8 +1080,8 @@ async fn a_coarse_end_closes_a_row_that_starts_inside_its_period() -> anyhow::Re
     Ok(())
 }
 
-/// 同一个时段的终点，对时段之前开始的行照旧关在时段的开头；对时段之后才开始的行不适用——
-/// 那是更早的一段的结束，各自一行，开着的那段照旧开着。先写哪一句都一样
+/// For the same period's end, rows starting before the period still close at its beginning; it does not apply to rows that start after the period —
+/// that is the end of an earlier span, each on its own row, and the open span stays open as before. It does not matter which sentence is written first
 #[tokio::test]
 async fn a_coarse_end_leaves_rows_outside_its_period_as_before() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -1142,10 +1142,10 @@ async fn a_coarse_end_leaves_rows_outside_its_period_as_before() -> anyhow::Resu
     Ok(())
 }
 
-/// 一个终点，两种说法（#994）：人写的 2024-03-01 起的一行关在「until 2025」，文档又说「left in
-/// 2024」，同一个终点：标上，并进那一行，它仍是人的（反过来的顺序是收尾那条路）；另一份文档再说
-/// 一次，标过的原样留着。人只把起点挪到 4 月的一行（Dune）也标。日精度写明的 2025-01-01（Aster）
-/// 是那一天，人改过的终点（Cobalt）是人的，都不改写
+/// One end, two phrasings (#994): a row starting 2024-03-01 that a person wrote, closed at "until 2025", and a document that says "left in
+/// 2024", the same end: marked and merged into that row, which stays the person's (the reverse order is the closing path); another document saying it again
+/// keeps it as it was marked. A row whose start a person moved only to April (Dune) is also marked. 2025-01-01 stated at day precision (Aster)
+/// is that day, and an end a person changed (Cobalt) stays the person's; none of these are rewritten
 #[tokio::test]
 async fn one_end_named_two_ways_is_marked() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -1193,7 +1193,7 @@ async fn one_end_named_two_ways_is_marked() -> anyhow::Result<()> {
         }
         base.bind("left", Some("end")).await?;
         materialize(&pool, base.kb).await?;
-        // 每个宾语活着的那一行：标记，仍是人的（不是这句算出来的），那边被取代过几行
+        // Each object's live row: marked, still the person's (not computed from this sentence); that side was superseded several times
         let rows: Vec<(String, bool, bool, i64)> = sqlx::query_as(
             "SELECT o.canonical_name, f.end_after_period, f.from_statement_id IS NULL,
                     (SELECT count(*) FROM facts g WHERE g.layer = 'typed'
@@ -1205,7 +1205,7 @@ async fn one_end_named_two_ways_is_marked() -> anyhow::Result<()> {
         .bind(base.kb)
         .fetch_all(&pool)
         .await?;
-        // Meridian 开着的那行先被「until 2025」关上、再被标上，各取代一次；Dune 改过一次起点
+        // The open row for Meridian was first closed by "until 2025", then marked; each superseded once. Dune had its start changed once
         let expected = [
             ("Aster Labs", false, 1),
             ("Cobalt", false, 1),
@@ -1221,8 +1221,8 @@ async fn one_end_named_two_ways_is_marked() -> anyhow::Result<()> {
     run
 }
 
-/// 时间线画的终点被原文说出来（#994）：works_for 声明成函数性、继任者 2025-01-01 起，时间线在那天
-/// 画上 Meridian 的终点（日精度）；「left in 2024」说的是同一刻，改成写明的年精度终点，记着说的是
+/// The end drawn on the timeline is stated in the source (#994): works_for is declared functional, the successor starts 2025-01-01; on that day the timeline
+/// draws Meridian's end (day precision); "left in 2024" states the same moment, changed to a stated year-precision end, recording that it was stated
 /// 2024
 #[tokio::test]
 async fn a_drawn_end_the_text_names_as_a_period_is_marked() -> anyhow::Result<()> {
@@ -1241,7 +1241,7 @@ async fn a_drawn_end_the_text_names_as_a_period_is_marked() -> anyhow::Result<()
         let next = Validity::starting(Some(next_year), Some("day"));
         let next = base.write_to(base.aster, next).await?;
         utopia_store::temporal::reconcile_moved_facts(&pool, base.kb, &[next]).await?;
-        // Meridian 那一行的终点：精度、是不是时间线画的、标记
+        // Meridian's row end: precision, whether the timeline drew it, the mark
         let end = || {
             sqlx::query_as::<_, (String, bool, bool)>(
                 "SELECT valid_to_precision, end_derived, end_after_period FROM facts
@@ -1268,9 +1268,9 @@ async fn a_drawn_end_the_text_names_as_a_period_is_marked() -> anyhow::Result<()
     run
 }
 
-/// 标记随行走（#994）：撤回合并搬主宾用的 `rehome_tx` 带着它；勘误改出来的行接旧行的标记——改到
-/// 同起点、还开着的一行的宾语上，那一行经同起点那条路关上；改到同起点、终点是时间线画的一行的
-/// 宾语上，那个终点改成写明的——都带着它；属性改成事件的，写入口丢掉它
+/// The mark travels with the row (#994): `rehome_tx`, used by retraction of a merge when it moves subject/object, carries it; a row produced by a correction inherits the old row's mark — changed to
+/// the object of an open row with the same start, that row is closed by the same-start path; changed to the object of a row whose end the timeline drew, that end becomes a stated one — both carry it;
+/// when the attribute becomes an event, the write entry point drops it
 #[tokio::test]
 async fn a_marked_end_rides_through_a_rehome_and_a_revision() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -1309,8 +1309,8 @@ async fn a_marked_end_rides_through_a_rehome_and_a_revision() -> anyhow::Result<
             .expect("the row was live");
         tx.commit().await?;
 
-        // 勘误改三次：宾语改回 Meridian，那边已有一行 2024-03-01 起开着；改到 Cobalt，那边同起点的
-        // 一行终点是时间线画的（日精度，上面写下的）；属性改成 acquired（事件）
+        // Correction made three times: object changed back to Meridian, where a row starting 2024-03-01 was already open; changed to Cobalt, where the same-start row
+        // has an end drawn by the timeline (day precision, written above); attribute changed to acquired (an event)
         let open = base.write_to(base.meridian, since).await?;
         let mut candidate = Candidate {
             fact_id: moved,
@@ -1327,7 +1327,7 @@ async fn a_marked_end_rides_through_a_rehome_and_a_revision() -> anyhow::Result<
             flag: Some("name_absent".into()),
             quote: None,
         };
-        // 一行的标记，和它取代的是哪一行
+        // A row's mark, and which row it superseded
         let read = |id: Uuid| {
             sqlx::query_as::<_, (bool, Option<Uuid>)>(
                 "SELECT end_after_period, supersedes FROM facts WHERE id = $1",
@@ -1381,9 +1381,9 @@ async fn a_marked_end_rides_through_a_rehome_and_a_revision() -> anyhow::Result<
     run
 }
 
-/// 两个值同一刻开始的冲突（works_for 声明成函数性）：人选「关上旧的」却不给日期，旧的就关在
-/// 新的起点——也是它自己的起点，一段不成立的状态，拒绝（`empty_state_span`）。冲突留着等人
-/// 给一个日期
+/// Conflict of two values starting at the same moment (works_for declared functional): a person chooses "close the old one" but gives no date, so the old one is closed at
+/// the new start — which is also its own start, a state that holds at no time, so it is refused (`empty_state_span`). The conflict stays for a person
+/// to give a date
 #[tokio::test]
 async fn closing_a_simultaneous_conflict_at_its_own_start_is_refused() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -1473,10 +1473,10 @@ async fn closing_a_simultaneous_conflict_at_its_own_start_is_refused() -> anyhow
     run
 }
 
-/// 人写的行不被第 0 步作废（#975 合并时补的守卫）。照它的来路造：属性原是事件，人写下一刻；
-/// 一条只说了那一刻的陈述物化时并进这一行，留下来源链接，行却不因此变成算出来的
-/// （`from_statement_id` 仍空）。后来本体页上把属性改成状态：这一行两端相等、有一条两端同值
-/// 的来源陈述，可它是人写的，不作废。同一句话另算出的那一行（带 `from_statement_id`）照旧作废
+/// A person-written row is not voided by step 0 (the guard added at merge time, #975). Built from its origin: the attribute was an event, and a person wrote a moment;
+/// a statement that states only that moment, when materialized, merged into this row, leaving a source link, but the row did not therefore become a computed one
+/// (`from_statement_id` stays empty). Later, on the ontology page, the attribute was changed to a state: this row has equal ends, and has a source statement with equal ends;
+/// but it was written by a person, so it is not voided. The row computed separately from the same sentence (with `from_statement_id`) is still voided as before
 #[tokio::test]
 async fn a_row_a_person_wrote_is_kept_when_a_single_date_merged_into_it() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -1525,7 +1525,7 @@ async fn a_row_a_person_wrote_is_kept_when_a_single_date_merged_into_it() -> any
             "the statement is a source of the person's row, which stays a person's"
         );
 
-        // 本体页上把 acquired 改成状态
+        // On the ontology page, acquired is changed to a state
         sqlx::query("UPDATE relation_types SET temporal = 'state' WHERE id = $1")
             .bind(base.acquired)
             .execute(&pool)

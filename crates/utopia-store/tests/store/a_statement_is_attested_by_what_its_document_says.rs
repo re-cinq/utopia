@@ -1,13 +1,13 @@
-//! 陈述的见证来自文档自己说的日期，没有就是没有（0064 决定 3、5）。
+//! A statement's attestation comes from the date the document itself states; if it states none, there is none (0064 decisions 3 and 5).
 //!
-//! - 抽取写下的开放陈述不再拿处理文档的那一刻当见证：文档没说就留空；
-//! - 留空的行在世界轴上任何时点都成立（下界开放）；没日期的事件除外，它照旧任何时点都不成立；
-//! - `attest_statement` 写上见证和那条日期的名字，只往早挪；
-//! - 物化出来的类型化行跟着它的来源陈述走；
-//! - 规则算出来的行也跟着它读的陈述走，类别词规则从实体算的行没有见证；人写的行只被规则的
-//!   结论并进来时，见证还是人写下它的那一刻。
+//! - An open statement written by extraction no longer takes the moment the document was processed as its attestation: if the document says nothing, the field is left empty;
+//! - A row left empty holds at any point on the world axis (open lower bound); events without a date are the exception, and still hold at no point;
+//! - `attest_statement` writes the attestation and the name of that date, and only ever moves it earlier;
+//! - A materialized typed row follows its source statement;
+//! - A row computed by a rule also follows the statement it reads; a row a category-word rule derives from an entity has no attestation; a row a person wrote gets an attestation
+//!     only when a rule's conclusion merges into it -- the attestation is still the moment the person wrote it.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
@@ -29,7 +29,7 @@ async fn anchor(
     )
 }
 
-/// 这一行在 T 时刻成立吗，按读路径自己的谓词
+/// Does this row hold at time T? Judged by the read path's own predicate
 async fn holds_at(pool: &PgPool, fact: Uuid, at: DateTime<Utc>) -> anyhow::Result<bool> {
     let sql = format!(
         "SELECT {} FROM facts f WHERE f.id = $1",
@@ -78,7 +78,7 @@ async fn an_unattested_statement_holds_at_every_moment_and_an_attested_one_from_
         let report_day = Utc.with_ymd_and_hms(2026, 9, 4, 0, 0, 0).unwrap();
         let earlier_report = Utc.with_ymd_and_hms(2026, 8, 28, 0, 0, 0).unwrap();
 
-        // 文档没说自己是哪天的：没有见证，任何时点都成立
+        // The document does not say which day it is from: no attestation, so it holds at any time
         let (statement, _) = graph::insert_open_statement(
             &pool,
             kb,
@@ -93,7 +93,7 @@ async fn an_unattested_statement_holds_at_every_moment_and_an_attested_one_from_
         assert!(holds_at(&pool, statement, long_ago).await?, "no time at all: holds at every moment");
         assert!(holds_at(&pool, statement, Utc::now()).await?);
 
-        // 它所在那一节的日期作证：从那天起读得到，之前读不到（0022 的下界）
+        // Attested by the date of the section it sits in: readable from that day on, not before (the lower bound from 0022)
         assert!(graph::attest_statement(&pool, statement, report_day, "提报日期 2026年9月4日").await?);
         assert_eq!(
             anchor(&pool, statement).await?,
@@ -101,7 +101,7 @@ async fn an_unattested_statement_holds_at_every_moment_and_an_attested_one_from_
         );
         assert!(!holds_at(&pool, statement, long_ago).await?);
         assert!(holds_at(&pool, statement, report_day).await?);
-        // 更早的文档也说过：见证往早挪，名字跟着；更晚的不动它
+        // An earlier document also states it: the attestation moves earlier and the name follows; a later one does not move it
         assert!(graph::attest_statement(&pool, statement, earlier_report, "提报日期 2026年8月28日").await?);
         assert!(!graph::attest_statement(&pool, statement, report_day, "提报日期 2026年9月4日").await?);
         assert_eq!(
@@ -109,7 +109,7 @@ async fn an_unattested_statement_holds_at_every_moment_and_an_attested_one_from_
             (Some(earlier_report), Some("提报日期 2026年8月28日".to_string()))
         );
 
-        // 物化出来的类型化行跟着来源陈述走；来源没有见证的，它也没有
+        // A materialized typed row follows its source statement; if the source has no attestation, neither does it
         let (typed, bare_typed) = (Uuid::now_v7(), Uuid::now_v7());
         let (bare, _) = graph::insert_open_statement(
             &pool,
@@ -146,7 +146,7 @@ async fn an_unattested_statement_holds_at_every_moment_and_an_attested_one_from_
             (Some(earlier_report), Some("提报日期 2026年8月28日".to_string()))
         );
         assert_eq!(anchor(&pool, bare_typed).await?, (None, None));
-        // 没日期的事件任何时点都不算成立（0022），没有见证也一样
+        // An event with no date holds at no time (0022), and the same goes without an attestation
         assert!(!holds_at(&pool, bare_typed, long_ago).await?);
         assert!(!holds_at(&pool, bare_typed, Utc::now()).await?);
         Ok::<(), anyhow::Error>(())
@@ -160,7 +160,7 @@ async fn an_unattested_statement_holds_at_every_moment_and_an_attested_one_from_
     run
 }
 
-/// 主语到宾语之间活着的那一行类型化事实
+/// The live typed fact between subject and object
 async fn typed_row(pool: &PgPool, kb: Uuid, subject: Uuid, object: Uuid) -> anyhow::Result<Uuid> {
     Ok(sqlx::query_scalar(
         "SELECT id FROM facts
@@ -174,9 +174,9 @@ async fn typed_row(pool: &PgPool, kb: Uuid, subject: Uuid, object: Uuid) -> anyh
     .await?)
 }
 
-/// 规则算出来的行（0073 的隐含行）跟着它读的陈述走：陈述没说时间，它就没有见证、任何时点
-/// 都成立；陈述后来作了证，它跟到那天。类别词规则从实体算的行没有陈述可跟，也没有见证。
-/// 人写的行被规则的结论并进来，见证还是人写下它的那一刻
+/// A row computed by a rule (the implied row from 0073) follows the statement it reads: if the statement states no time, it has no attestation and holds at any time;
+/// once the statement is later attested, it follows that day. A row a category-word rule derives from an entity has no statement to follow, and no attestation.
+/// A row a person wrote, when a rule's conclusion merges into it, keeps the attestation from the moment the person wrote it
 #[tokio::test]
 async fn a_row_a_rule_implies_follows_the_statement_it_read() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -192,8 +192,8 @@ async fn a_row_a_rule_implies_follows_the_statement_it_read() -> anyhow::Result<
         (ids[0], ids[1], ids[2], ids[3], ids[4], ids[5], ids[6]);
     let (lin, aster, meridian, film, uk, signed_rule, kind_rule) =
         (ids[7], ids[8], ids[9], ids[10], ids[11], ids[12], ids[13]);
-    // 两条批准了的规则：「signed with」（人 → 机构）蕴含 works_for；类别词「british film」
-    // 蕴含 country_of_origin，宾语由读数缓存给出
+    // Two approved rules: "signed with" (person → organization) implies works_for; the category word "british film"
+    // implies country_of_origin, with the object supplied by the reading cache
     sqlx::raw_sql(&format!(
         "INSERT INTO organizations(id,name) VALUES ('{org}','{RULE_ORG}');
          INSERT INTO workspaces(id,org_id,name) VALUES ('{ws}','{org}','{RULE_ORG}');
@@ -227,8 +227,8 @@ async fn a_row_a_rule_implies_follows_the_statement_it_read() -> anyhow::Result<
         let signed_day = Utc.with_ymd_and_hms(2026, 9, 4, 0, 0, 0).unwrap();
         let written_day = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
 
-        // 一条没说时间的陈述：规则从它算出的行没有见证，任何时点都成立——与同一条陈述物化
-        // 出来的行一样，不是算出它的那一刻。类别词算出的行也是
+        // A statement that states no time: the row a rule derives from it has no attestation and holds at any time -- the same as the row
+        // materialized from that statement, not the moment it was derived. Rows derived from a category word are the same
         let (signed, _) = graph::insert_open_statement(
             &pool,
             kb,
@@ -253,8 +253,8 @@ async fn a_row_a_rule_implies_follows_the_statement_it_read() -> anyhow::Result<
             assert!(holds_at(&pool, row, Utc::now()).await?);
         }
 
-        // 陈述后来由它所在那一节的日期作证，时间解析那条路：先给陈述作证，再同步类型化的行。
-        // 规则算出的行跟到那天，连同那条日期的名字；类别词那行没有陈述，照旧没有
+        // The statement is later attested by the date of the section it sits in, the time-resolution path: attest the statement first, then sync the typed rows.
+        // A row derived by a rule follows that day, together with the name of that date; a category-word row has no statement, so it still has none
         assert!(graph::attest_statement(&pool, signed, signed_day, "签约日 2026年9月4日").await?);
         utopia_store::materialize::sync_typed_attestation(&pool, kb, None).await?;
         let followed = (Some(signed_day), Some("签约日 2026年9月4日".to_string()));
@@ -262,13 +262,13 @@ async fn a_row_a_rule_implies_follows_the_statement_it_read() -> anyhow::Result<
         assert!(!holds_at(&pool, by_rule, long_ago).await?);
         assert!(holds_at(&pool, by_rule, signed_day).await?);
         assert_eq!(anchor(&pool, by_kind).await?, (None, None));
-        // 再物化一轮，不动它们
+        // Materialize one more round, leaving them alone
         utopia_store::materialize::materialize(&pool, kb).await?;
         assert_eq!(anchor(&pool, by_rule).await?, followed);
         assert_eq!(anchor(&pool, by_kind).await?, (None, None));
 
-        // 人写的行由人写下它的那一刻作证。规则从一条没说时间的陈述算出同一件事、并进这一行：
-        // 它有了规则的来源，见证不变
+        // A row a person wrote is attested by the moment the person wrote it. A rule derives the same fact from a statement that states no time, and merges into this row:
+        // it gains the rule as its source, and the attestation is unchanged
         let (by_hand, _) = graph::insert_fact(
             &pool,
             kb,

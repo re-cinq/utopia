@@ -1,19 +1,19 @@
-//! 集成测试连库的入口（#248）。
+//! Entry point for integration tests that connect to a database (#248).
 //!
-//! 每个连库测试都以同一句开头：没有 `UTOPIA_DATABASE_URL` 就跳过而不是失败，
-//! 本地随手 `cargo test` 不必先起库。可 CI 上也这么跳，绿色就成了假的：backend job
-//! 曾经没有库，24 个 store 集成测试全部静默返回，而有库的 migrations job 只跑了一个。
+//! Every DB-connected test opens with the same line: without `UTOPIA_DATABASE_URL` it skips rather than fails,
+//! so a plain local `cargo test` needs no database running first. On CI it also skips that way, so green becomes fake: the backend job
+//! once had no database, and all 24 store integration tests silently returned, while the migrations job, which did have one, ran only one.
 //!
-//! 所以跳过要分场合：设了 `UTOPIA_TEST_REQUIRE_DB` 的地方（CI 的 backend job，
-//! 它现在自带 Postgres），没有库就是失败——「本该跑的没跑」得看得见。
+//! So skipping depends on the context: where `UTOPIA_TEST_REQUIRE_DB` is set (CI's backend job,
+//! which now brings its own Postgres), having no database is a failure: what was meant to run but did not must stay visible.
 //!
-//! 这里只给地址，不迁移：绝大多数调用方假定库已经迁好。空库先跑
-//! `cargo run -p utopia-store --example migrate`，CI 也是这么做的。
+//! Here we only supply the address and do not migrate: most callers assume the database is already migrated. For an empty database, first run
+//! `cargo run -p utopia-store --example migrate`, as CI does too.
 
-/// 连库测试用的数据库地址。`None` = 这次跳过。
+/// The database address for DB-connected tests. `None` = skip this run.
 ///
-/// 设了 `UTOPIA_TEST_REQUIRE_DB` 而没有地址时 panic：这是给 CI 的——那里跳过
-/// 等于测试根本没执行，不能显示绿色
+/// Panics when `UTOPIA_TEST_REQUIRE_DB` is set without an address: this is for CI. There, skipping
+/// is the same as the test not running at all, so it must not show green.
 pub fn url() -> Option<String> {
     match std::env::var("UTOPIA_DATABASE_URL") {
         Ok(u) if !u.trim().is_empty() => Some(u),

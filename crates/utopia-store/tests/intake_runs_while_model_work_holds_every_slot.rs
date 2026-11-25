@@ -1,7 +1,7 @@
-//! #1300、#1351：常规名额全被调模型的任务占着时，同步和人判定后的物化照样有名额跑。
+//! #1300, #1351: when the regular slots are all held by model tasks, sync and materialization after human judgment still run in their slots.
 //!
-//! 起真实的 `run_worker`，它会认领库里任何排队任务，所以自成一个二进制（见
-//! `tests/store/main.rs`）。处理器只认带本测试标记的任务，别人的任务一概报错，不替人干活。
+//! Starts the real `run_worker`, which claims any queued task in the database, so it is its own binary (see
+//! `tests/store/main.rs`). The handler only accepts tasks carrying this test's marker; others' tasks all error out, so it does no one else's work.
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -30,7 +30,7 @@ async fn intake_runs_while_model_work_holds_every_slot() -> anyhow::Result<()> {
                 );
                 if job.kind == "extract_document" {
                     started.send(())?;
-                    // 一直占着唯一的常规名额，像一次在等模型许可的抽取
+                    // Holds the only regular slot all the time, like an extraction waiting for model permission
                     std::future::pending::<()>().await;
                 }
                 finished.send(job.kind)?;
@@ -39,7 +39,7 @@ async fn intake_runs_while_model_work_holds_every_slot() -> anyhow::Result<()> {
         },
     ));
     let queue = |kind: &'static str| {
-        // 放在一百年前，排在同优先级里库里别的一切前面
+        // Put a hundred years in the past, ahead of everything else in the database at the same priority
         sqlx::query("INSERT INTO jobs (kind, payload, run_at) VALUES ($1, $2, now() - interval '100 years')")
             .bind(kind)
             .bind(serde_json::json!({ "lane_test": mark }))

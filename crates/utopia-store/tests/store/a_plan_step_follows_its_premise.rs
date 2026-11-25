@@ -1,16 +1,16 @@
-//! 计划步骤的前提写成业务规则（0021），观察的变化落到前提上，推导（0002 R1）让依赖
-//! 旧值的步骤退场、无关的步骤不动、历史留在两根轴上（#875）。
+//! A plan step's premise is written as a business rule (0021); observed changes land on the premise; derivation (0002 R1) makes the steps that depend
+//! on the old value retire, unrelated steps stay put, and history is kept on both axes (#875).
 //!
-//! 步骤 S_A「从桌上取 cup-7」的前提是 cup-7 的 `location` 为 desk；S_B「从架上取
-//! box-3」读 box-3 自己的 `location`，是对照。结论只说建模的语义前提成立，不保证动作
-//! 安全或成功。
+//! Step S_A "take cup-7 from the desk" has the premise that cup-7's `location` is desk; S_B "take
+//! box-3 from the shelf" reads box-3's own `location`, as a control. The conclusion only says the modeled semantic premise holds; it does not guarantee the action is
+//! safe or successful.
 //!
-//! 前两个测试绕过了抽取与对齐：属性事实走类型化图谱的门（`graph::insert_value_fact`），
-//! 随后按唯一性方向对账——与人点头一条记忆事实（`pending::confirm`）同一条路。第三个
-//! 从开放陈述起步，经显式绑定、类型化物化与显式时间线对账，验证随后推导的撤回。
-//! 三个测试均使用真实 store 路径，不依赖模型或 HTTP 回放，不声称自动对齐闭环成立。
+//! The first two tests bypass extraction and alignment: attribute facts go through the gate of the typed graph (`graph::insert_value_fact`),
+//! and are then reconciled along the uniqueness direction — the same path as a person confirming a remembered fact (`pending::confirm`). The third
+//! starts from an open statement, goes through an explicit binding, typed materialization and an explicit timeline reconciliation, and verifies the subsequent retraction of the derivation.
+//! All three tests use the real store path, depend on no model or HTTP replay, and do not claim that the automatic alignment loop is closed.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
@@ -23,8 +23,8 @@ use utopia_store::temporal::{self, Uniqueness};
 use utopia_store::{materialize, ontology, reasoning};
 use uuid::Uuid;
 
-/// 世界时间。t0 早于一切、晚到；t1 初始观察；遮挡在 t1 与 t2 之间；t2 移动；
-/// t_end 是 B 那一段被人关上的时刻；NOW 是「现在」这一刻的世界时间
+/// World time. t0 is before everything, arriving late; t1 is the initial observation; an occlusion lies between t1 and t2; t2 is the move;
+/// t_end is the moment a person closed B's span; NOW is the world time at "now"
 const T0: &str = "2026-09-23T07:50:00Z";
 const T1: &str = "2026-09-23T08:00:00Z";
 const T_OCC: &str = "2026-09-23T08:05:00Z";
@@ -78,7 +78,7 @@ async fn seed(pool: &PgPool, name: &str) -> anyhow::Result<Fixture> {
     };
     let cup = class("cup", "Cup").await?;
     let boxed = class("box", "Box").await?;
-    // 步骤可执行写成归类结论：规则只会推类型或属性，不为这个实验加语法（0021）
+    // Steps executable are written as a classification conclusion: rules only infer types or attributes, and no syntax is added for this experiment (0021)
     let sa_ready = class("step_sa_ready", "S_A precondition holds").await?;
     let sb_ready = class("step_sb_ready", "S_B precondition holds").await?;
     let attribute = |key: &'static str, functional: bool| {
@@ -104,7 +104,7 @@ async fn seed(pool: &PgPool, name: &str) -> anyhow::Result<Fixture> {
             .await
         }
     };
-    // 一个东西同一时刻只在一处：声明 functional，时间线才会让后一个位置关上前一个
+    // One thing is in one place at a time: declare functional, so the timeline lets the later place close the earlier one
     let location = attribute("location", true).await?;
     let rfid_zone = attribute("rfid_zone", false).await?;
     let visibility = attribute("visibility", false).await?;
@@ -143,8 +143,8 @@ async fn cleanup(pool: &PgPool, org: Uuid) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 一条步骤规则：主类 `class` 的 `location`（或别的属性）落在 `places` 里 → 归到 `ready`。
-/// `groups` 是组间「或」的几组，每组一条条件（0029）
+/// A step rule: the `location` (or another attribute) of main class `class` falls within `places` → classified as `ready`.
+/// `groups` are the groups joined by "or" between groups, each group a condition (0029)
 async fn step_rule(
     pool: &PgPool,
     f: &Fixture,
@@ -181,8 +181,8 @@ async fn step_rule(
     .await?)
 }
 
-/// 一次观察：属性事实走类型化图谱的门，带唯一性的状态关系随后对账——与
-/// `pending::confirm` 落一条事实的顺序一样
+/// One observation: attribute facts go through the gate of the typed graph, and the state relation with uniqueness is reconciled afterwards — the same order
+/// as `pending::confirm` storing one fact
 async fn observe(
     pool: &PgPool,
     f: &Fixture,
@@ -232,7 +232,7 @@ struct Row {
     valid_to_precision: Option<String>,
 }
 
-/// 此刻活着的那几行（主语、属性、值）
+/// The rows alive at this moment (subject, attribute, value)
 async fn live_rows(
     pool: &PgPool,
     f: &Fixture,
@@ -254,7 +254,7 @@ async fn live_rows(
     .await?)
 }
 
-/// 一条规则在一个实体上此刻持有的结论（记录轴 = 现在），按世界起点排
+/// The conclusions one rule holds on an entity at this moment (record axis = now), sorted by world start
 async fn conclusions(
     pool: &PgPool,
     f: &Fixture,
@@ -274,7 +274,7 @@ async fn conclusions(
     .await?)
 }
 
-/// 规则在这个实体上、世界时刻 `at` 成立吗——走实体面板与 MCP `entity_facts` 读的那一个函数
+/// Whether the rule holds on this entity at world moment `at` — the same function that the entity panel and MCP `entity_facts` read
 async fn holds_at(
     pool: &PgPool,
     f: &Fixture,
@@ -291,7 +291,7 @@ async fn holds_at(
     )
 }
 
-/// 一条派生的前提（`fact_derivations`，按 seq）
+/// A premise of a derivation (`fact_derivations`, by seq)
 async fn premises(pool: &PgPool, derived: Uuid) -> anyhow::Result<Vec<Uuid>> {
     Ok(sqlx::query_scalar(
         "SELECT premise_fact_id FROM fact_derivations
@@ -302,14 +302,14 @@ async fn premises(pool: &PgPool, derived: Uuid) -> anyhow::Result<Vec<Uuid>> {
     .await?)
 }
 
-/// 记录轴上的一刻：库自己的钟，免得两个容器的钟对不齐
+/// A moment on the record axis: the store's own clock, so that the clocks of two containers do not drift apart
 async fn db_now(pool: &PgPool) -> anyhow::Result<DateTime<Utc>> {
     Ok(sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(pool)
         .await?)
 }
 
-/// 初始 → 重复 → 遮挡 → 移动 → 晚到的旧观察 → 明确结束 → 撤回，一条时间线走完
+/// Initial → repeated → occluded → moved → late-arriving old observation → explicit end → retracted: one timeline runs through all of them
 #[tokio::test]
 async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -338,7 +338,7 @@ async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Re
         )
         .await?;
 
-        // ---- 初始观察：A 在桌上、B 在架上
+        // ---- Initial observation: A is on the desk, B is on the shelf
         let a_desk = observe(&pool, &f, f.a, f.location, "desk", T1).await?;
         let b_shelf = observe(&pool, &f, f.b, f.location, "shelf", T1).await?;
         let r = reasoning::materialize(&pool, f.kb).await?;
@@ -352,7 +352,7 @@ async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Re
         assert_eq!((sa.len(), sb.len()), (1, 1));
         assert_eq!(sa[0].valid_from, Some(t(T1)));
         assert_eq!(sa[0].valid_to, None, "前提还开着，结论也开着");
-        // 前提定位得到：派生指着那条读数，证明读得出它
+        // The premise can be located: the derivation points to that reading, proving it can be read out
         assert_eq!(premises(&pool, sa[0].id).await?, vec![a_desk]);
         assert_eq!(premises(&pool, sb[0].id).await?, vec![b_shelf]);
         let proof = reasoning::proof(&pool, f.kb, sa[0].id)
@@ -367,7 +367,7 @@ async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Re
         assert!(holds_at(&pool, &f, f.a, rule_a, NOW, None).await?);
         assert!(holds_at(&pool, &f, f.b, rule_b, NOW, None).await?);
 
-        // ---- 同一份观察再来一遍：同断言同起点复用那一行，推导无事可做
+        // ---- The same observation again: same assertion, same start reuses that row, and derivation has nothing to do
         assert_eq!(
             observe(&pool, &f, f.a, f.location, "desk", T1).await?,
             a_desk
@@ -375,14 +375,14 @@ async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Re
         let r = reasoning::materialize(&pool, f.kb).await?;
         assert_eq!((r.inserted, r.invalidated, r.reproved), (0, 0, 0), "{r:?}");
 
-        // ---- 遮挡：没人写 location，另一个属性记下「看不见」。没看见 ≠ 不在桌上
+        // ---- Occlusion: nobody writes location, another attribute records "not visible". Not seen ≠ not on the desk
         observe(&pool, &f, f.a, f.visibility, "occluded", T_OCC).await?;
         let r = reasoning::materialize(&pool, f.kb).await?;
         assert_eq!((r.inserted, r.invalidated), (0, 0), "{r:?}");
         assert_eq!(conclusions(&pool, &f, f.a, rule_a).await?[0].id, sa[0].id);
         assert!(holds_at(&pool, &f, f.a, rule_a, NOW, None).await?);
 
-        // ---- 移动：A 被正面看到在架上。时间线把桌面那一段关在 t2（作废 + 改写）
+        // ---- Move: A is seen directly on the shelf. The timeline closes the desk span at t2 (void + rewrite)
         let before_move = db_now(&pool).await?;
         observe(&pool, &f, f.a, f.location, "shelf", T2).await?;
         let desk = live_rows(&pool, &f, f.a, f.location, "desk").await?;
@@ -406,7 +406,7 @@ async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Re
             (Some(t(T1)), Some(t(T2)))
         );
         assert_eq!(premises(&pool, sa_now[0].id).await?, vec![desk[0].id]);
-        // 旧结论作废而不删，记录轴回到移动之前它还在，前提链还指着当时那条读数
+        // The old conclusion is voided, not deleted; on the record axis rolled back to before the move it still exists, and the premise chain still points to the reading of that time
         let (old_invalidated,): (Option<DateTime<Utc>>,) =
             sqlx::query_as("SELECT invalidated_at FROM derived_facts WHERE id = $1")
                 .bind(sa[0].id)
@@ -418,14 +418,14 @@ async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Re
             holds_at(&pool, &f, f.a, rule_a, NOW, Some(before_move)).await?,
             "当时所知：移动之前的库认为 S_A 至今成立"
         );
-        // 无关步骤原样：同一行、没作废
+        // The unrelated step is unchanged: same row, not voided
         let sb_after = conclusions(&pool, &f, f.b, rule_b).await?;
         assert_eq!(sb_after.len(), 1);
         assert_eq!(sb_after[0].id, sb[0].id);
         assert!(holds_at(&pool, &f, f.b, rule_b, NOW, None).await?);
 
-        // ---- 晚到的旧观察：t0 时 A 在桌上，移动之后才送到。时间线按世界时间排，
-        //      它止于 t2，不会让桌面在「现在」复活
+        // ---- Late-arriving old observation: at t0 A was on the desk, but it arrived only after the move. The timeline sorts by world time,
+        //      it stops at t2 and does not let the desk come back to life at "now"
         observe(&pool, &f, f.a, f.location, "desk", T0).await?;
         reasoning::materialize(&pool, f.kb).await?;
         assert!(!holds_at(&pool, &f, f.a, rule_a, NOW, None).await?);
@@ -436,7 +436,7 @@ async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Re
             .map(|r| r.id)
             .collect();
 
-        // ---- 明确结束：B 在架上这一段止于 t_end（人在 Review 里关上它的那一步）
+        // ---- Explicit end: the segment with B on the shelf stops at t_end (the step where a person closes it in Review)
         let b_rows = live_rows(&pool, &f, f.b, f.location, "shelf").await?;
         assert_eq!(b_rows.len(), 1);
         temporal::close_superseded(&pool, b_rows[0].id, t(T_END), "second").await?;
@@ -451,7 +451,7 @@ async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Re
             .collect();
         assert_eq!(a_rows_after_end, a_rows_before_end, "关 B 不碰 A 的结论");
 
-        // ---- 撤回：B 那条读数被判为错读。结论整条作废，没有替代；证明还读得出当时靠的是什么
+        // ---- Retraction: B's reading is judged a misreading. The whole conclusion is voided, with no replacement; the proof can still read what it relied on at the time
         let b_closed = live_rows(&pool, &f, f.b, f.location, "shelf").await?;
         let sb_closed = conclusions(&pool, &f, f.b, rule_b).await?;
         assert_eq!((b_closed.len(), sb_closed.len()), (1, 1));
@@ -474,8 +474,8 @@ async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Re
     run
 }
 
-/// 一个步骤两条独立的证明（组间「或」）：撤掉一条仍成立、证明换成另一条；
-/// 最后一条也没了才退场
+/// One step has two independent proofs (or between groups): if one is retracted and still holds, the proof becomes the other;
+/// it retires only when the last one is also gone
 #[tokio::test]
 async fn a_step_with_two_proofs_stays_until_its_last_support_goes() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -497,7 +497,7 @@ async fn a_step_with_two_proofs_stays_until_its_last_support_goes() -> anyhow::R
         let seen = observe(&pool, &f, f.a, f.location, "desk", T1).await?;
         let tagged = observe(&pool, &f, f.a, f.rfid_zone, "desk", T1).await?;
         let r = reasoning::materialize(&pool, f.kb).await?;
-        // 两组推出同一段区间，落成一行；留下的证明是组序在前的那条（0029）
+        // Two groups derive the same interval, which lands as one row; the proof kept is the one whose group order comes first (0029)
         assert_eq!((r.rule_hits, r.inserted), (1, 1), "{r:?}");
         let step = conclusions(&pool, &f, f.a, rule).await?;
         assert_eq!(step.len(), 1);
@@ -529,9 +529,9 @@ async fn a_step_with_two_proofs_stays_until_its_last_support_goes() -> anyhow::R
     run
 }
 
-// ===================== 从开放陈述起步：对齐那一段 =====================
+// ===================== Starting from an open statement: the alignment segment =====================
 
-/// 一份带日期的文档和它的一块（推送来的陈述就是这样一份文档，`doc_time_source = 'source'`）
+/// A dated document and one of its chunks (a pushed statement is exactly such a document, `doc_time_source = 'source'`)
 async fn document(
     pool: &PgPool,
     f: &Fixture,
@@ -563,7 +563,7 @@ async fn document(
     Ok((doc, chunk))
 }
 
-/// 一条开放陈述「cup-7 —is on→ <place>」，证据是那一块、没有引文（0054 决定 4）
+/// One open statement "cup-7 —is on→ <place>", with evidence being that chunk and no quote (0054 decision 4)
 async fn statement(
     pool: &PgPool,
     f: &Fixture,
@@ -586,7 +586,7 @@ async fn statement(
     Ok(id)
 }
 
-/// 人把签名（is on × cup × 值）绑到 `location`，与 Review 里点下去的那一次同一个函数
+/// A person binds the signature (is on × cup × value) to `location`, through the same function as the one clicked in Review
 async fn bind_is_on(pool: &PgPool, f: &Fixture) -> anyhow::Result<()> {
     let sig = PhraseSignature {
         phrase: "is on".into(),
@@ -620,7 +620,7 @@ async fn bind_is_on(pool: &PgPool, f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 类型化行里 A 的 location = desk 那一行（活着的）
+/// In typed rows, the row for A's location = desk (live)
 async fn typed_desk(pool: &PgPool, f: &Fixture) -> anyhow::Result<Vec<Row>> {
     Ok(sqlx::query_as(
         "SELECT id, valid_from, valid_to, valid_to_precision FROM facts
@@ -634,8 +634,8 @@ async fn typed_desk(pool: &PgPool, f: &Fixture) -> anyhow::Result<Vec<Row>> {
     .await?)
 }
 
-/// 两份观察各是一份文档（一次观察一个身份）。物化随手对账，桌面那一段关在第二份的日期上，
-/// 步骤跟着退场——`POST /kbs/{id}/ontology/relation-types/{type_id}/reconcile` 就是这一步
+/// Each of the two observations is one document (one observation per identity). Materialization reconciles on the way, the desk span closes at the second document's date,
+/// and the step retires with it — `POST /kbs/{id}/ontology/relation-types/{type_id}/reconcile` is that step
 #[tokio::test]
 async fn an_explicit_reconcile_closes_the_earlier_place_and_the_step_leaves() -> anyhow::Result<()>
 {
@@ -661,8 +661,8 @@ async fn an_explicit_reconcile_closes_the_earlier_place_and_the_step_leaves() ->
         statement(&pool, &f, c2, "shelf", T2).await?;
         bind_is_on(&pool, &f).await?;
         let typed = materialize::materialize(&pool, f.kb).await?;
-        // 物化自己就对账了（#899）：桌面那一段在这里关上。显式对账仍然可用，只是没剩下
-        // 要改的
+        // Materialization already reconciled (#899): the desk span is closed here. An explicit reconcile is still available, it just has nothing left
+        // to change
         assert_eq!((typed.added, typed.corrected), (2, 1), "{typed:?}");
 
         let report = temporal::reconcile_predicate(&pool, f.kb, f.location).await?;
@@ -690,8 +690,8 @@ async fn an_explicit_reconcile_closes_the_earlier_place_and_the_step_leaves() ->
     run
 }
 
-/// #899：两份观察各是一份文档，绑定之后**物化自己**就把桌面那一段关上，不用再显式对账——
-/// 物化出来的行和抽取、点头写下的一样是新观察，写完就沿唯一性时间线重算
+/// #899: each of the two observations is one document; after binding, **materialization itself** closes the desk span, with no need for an explicit reconcile —
+/// the rows materialization produces are new observations, as those written by extraction and confirmation are, and after writing they recompute along the uniqueness timeline
 #[tokio::test]
 async fn a_later_bound_statement_closes_the_earlier_place() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -729,7 +729,7 @@ async fn a_later_bound_statement_closes_the_earlier_place() -> anyhow::Result<()
             "location is functional and a later place was materialized: the desk row is closed \
              without an explicit reconcile: {desk:?}"
         );
-        // 再跑一遍是空转：没有新行，也不再对账
+        // Running again is a no-op: no new rows, and no reconcile
         let again = materialize::materialize(&pool, f.kb).await?;
         assert_eq!(
             (again.added, again.merged, again.corrected, again.conflicts),
@@ -747,9 +747,9 @@ async fn a_later_bound_statement_closes_the_earlier_place() -> anyhow::Result<()
     run
 }
 
-/// #900：同一身份再推一份新内容（原地替换、记版本、`doc_time` 换成新的，新块顶替旧块）。
-/// 停在旧版上的证据按**它那一版**的日期算，所以后一次观察关得上前一段，而不是记成
-/// 「同时」的冲突
+/// #900: the same identity pushes new content again (replaced in place, version recorded, `doc_time` replaced with the new one, and the new chunk supersedes the old one).
+/// Evidence that stopped on the old version is dated by **that version's** date, so the later observation closes the earlier span, instead of being recorded as
+/// A "simultaneous" conflict
 #[tokio::test]
 async fn a_same_identity_update_closes_the_earlier_place() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -760,14 +760,14 @@ async fn a_same_identity_update_closes_the_earlier_place() -> anyhow::Result<()>
 
     let run = async {
         let (doc, c1) = document(&pool, &f, "cup-7.json", T1, "cup-7 is on desk").await?;
-        // 直接写进库的文档没有版本行：第一版按现在的日期补上，和摄入路径写下的一样
+        // A document written directly into the store has no version row: the first version is backfilled with today's date, as the ingest path writes it
         utopia_store::documents::record_version(&pool, doc, "cup-7-v1", 17).await?;
         statement(&pool, &f, c1, "desk", T1).await?;
         bind_is_on(&pool, &f).await?;
         let first = materialize::materialize(&pool, f.kb).await?;
         assert_eq!(first.added, 1, "{first:?}");
 
-        // 第二次推送：原地替换、记版本、doc_time 换成新的（ingest_item 的那一步），新块顶替旧块
+        // Second push: replaced in place, version recorded, doc_time replaced with the new one (that step of ingest_item), and the new chunk supersedes the old one
         utopia_store::documents::replace_content_and_enqueue_processing(
             &pool,
             doc,
@@ -778,7 +778,7 @@ async fn a_same_identity_update_closes_the_earlier_place() -> anyhow::Result<()>
             Some(t(T2)),
         )
         .await?;
-        // 那一步排下的处理任务这里不跑：抽取的结果由下面几行写出来
+        // The processing task queued by that step does not run here: the extraction result is written by the lines below
         sqlx::query("DELETE FROM jobs WHERE payload->>'document_id' = $1")
             .bind(doc.to_string())
             .execute(&pool)
@@ -813,7 +813,7 @@ async fn a_same_identity_update_closes_the_earlier_place() -> anyhow::Result<()>
             Some("unknown"),
             "after a same-identity update the desk row is closed: {desk:?}"
         );
-        // 版本表记着各自的日期
+        // The version table records each one's date
         let dates: Vec<(i32, Option<DateTime<Utc>>)> = sqlx::query_as(
             "SELECT version, doc_time FROM document_versions WHERE document_id = $1 ORDER BY version",
         )

@@ -1,10 +1,10 @@
-//! 绑到属性上的开放陈述算成类型化行时，值按属性的 datatype 与单位读（`materialize::attribute_value`）。
+//! When an open statement bound to an attribute becomes a typed row, its value is read in the attribute's datatype and unit (`materialize::attribute_value`).
 //!
-//! 一家公司三条陈述：「注册资本 2.3亿元」绑到单位万元的 number 属性，「成立 2008年11月」
-//! 绑到 date 属性，「注册资本 5000万美元」货币对不上。前两条算出 23000 与 2008-11；第三条
-//! 不写——陈述还在开放图谱里，原文的字没丢。从前三条都照抄原文的字落进类型化图谱。
+//! Three statements about one company: "registered capital 2.3亿元" bound to a number attribute in units of 万元, "founded 2008年11月"
+//! bound to a date attribute, and "registered capital 5000万美元", whose currency does not match. The first two compute 23000 and 2008-11; the third
+//! is not written — the statement is still in the open graph, the characters of the source are not lost. Before, all three copied the source characters into the typed graph.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use serde_json::json;
 use sqlx::PgPool;
@@ -39,7 +39,7 @@ async fn an_attribute_value_is_read_in_its_unit() -> anyhow::Result<()> {
         let id = Uuid::now_v7;
         let (company, capital, founded, lanshan) = (id(), id(), id(), id());
         let (in_yuan, in_dollars, month) = (id(), id(), id());
-        // 插进去的只有本地生成的 UUID 和写死的字
+        // Only locally generated UUIDs and fixed characters are inserted
         sqlx::raw_sql(&format!(
             r#"
             INSERT INTO entity_types (id, kb_id, key, label, color, shape) VALUES

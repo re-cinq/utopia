@@ -1,5 +1,5 @@
-//! 蕴含规则（0044 决定 3 第五片）：提案落库、人批与后续任务同事务、待读的字、缓存、
-//! 物化算隐含行、驳回退掉。没有 `UTOPIA_DATABASE_URL` 时跳过。
+//! Implication rules (0044 decision 3, slice five): proposals are stored, human approval and follow-up tasks share one transaction, pending reads, cache,
+//! materialization computes implied rows, rejection backs them out. Skipped when `UTOPIA_DATABASE_URL` is not set.
 use super::*;
 use crate::{materialize, phrase_bindings};
 use serde_json::json;
@@ -18,8 +18,8 @@ struct Fx {
     statement: Uuid,
 }
 
-/// 一个库：类 film / place，属性 country_of_origin / located_in / country；
-/// 「Loud Tour」是 british film；一条陈述 Loud Tour —located in→ Piedmont（place）
+/// One database: classes film / place, attributes country_of_origin / located_in / country;
+/// "Loud Tour" is a british film; one statement Loud Tour -located in-> Piedmont (place)
 async fn seed(pool: &PgPool) -> anyhow::Result<Fx> {
     let ids: Vec<Uuid> = (0..11).map(|_| Uuid::now_v7()).collect();
     let (org, ws, kb, film, place, coo, li, country, loud, piedmont, stmt) = (
@@ -107,10 +107,10 @@ async fn a_proposal_lands_once_and_a_person_decides_it_with_its_job() -> anyhow:
     let run = async {
         let p = phrase_rule(&f, Some("country_of_place"), f.country);
         let id = propose(&pool, f.kb, &p).await?.expect("first proposal");
-        // 同一条再提：代理的行被覆盖（返回 id），不是第二行
+        // Same one proposed again: the proxy's row is overwritten (returns the id), not a second row
         assert_eq!(propose(&pool, f.kb, &p).await?, Some(id));
         assert_eq!(list(&pool, f.kb, Some("proposed")).await?.len(), 1);
-        // 人批：状态 approved，同事务排了 read_phrases（要读数）
+        // Human approves: status approved, read_phrases queued in the same transaction (needs a value read)
         let job = decide_with_delivery(&pool, f.kb, id, true, &json!({}))
             .await?
             .expect("decided");
@@ -125,9 +125,9 @@ async fn a_proposal_lands_once_and_a_person_decides_it_with_its_job() -> anyhow:
             (r.status.as_str(), r.decided_by.as_str()),
             ("approved", "person")
         );
-        // 人判过的，代理再提也盖不掉
+        // Human-judged rows are not overwritten even if the proxy proposes again
         assert_eq!(propose(&pool, f.kb, &p).await?, None);
-        // 不要读数的规则，批了直接排物化
+        // Rules that need no read: approving queues materialization directly
         let plain = propose(&pool, f.kb, &phrase_rule(&f, None, f.country_of_origin))
             .await?
             .unwrap();
@@ -164,7 +164,7 @@ async fn an_approved_rule_waits_for_its_reading_then_implies_a_fact_with_evidenc
         .await?
         .unwrap();
         decide_with_delivery(&pool, f.kb, id, true, &json!({})).await?;
-        // 待读：陈述的宾语「piedmont」按 country_of_place
+        // To read: the statement's object "piedmont" by country_of_place
         let pending = pending_readings(&pool, f.kb).await?;
         assert_eq!(
             pending,
@@ -173,11 +173,11 @@ async fn an_approved_rule_waits_for_its_reading_then_implies_a_fact_with_evidenc
                 phrase: "piedmont".into()
             }]
         );
-        // 缓存没填：物化不算隐含行
+        // Cache not filled: materialization does not compute implied rows
         let o = materialize::materialize(&pool, f.kb).await?;
         assert_eq!(o.implied, 0);
         assert!(implied_rows(&pool, f.kb).await?.is_empty());
-        // 读数读出「United States」：库里没有就建，名字事实照记
+        // The read returns "United States": create it if the database lacks it, and the name fact is still recorded
         let us = resolve_or_create_named(&pool, f.kb, "United States").await?;
         assert_eq!(
             resolve_or_create_named(&pool, f.kb, "united states").await?,
@@ -193,8 +193,8 @@ async fn an_approved_rule_waits_for_its_reading_then_implies_a_fact_with_evidenc
         assert_eq!(o.implied, 1);
         let rows = implied_rows(&pool, f.kb).await?;
         assert_eq!(rows, vec![(f.loud_tour, f.country, Some(us))]);
-        // 证据从触发它的陈述抄来；来源记着规则与陈述
-        // 按库过滤：CI 上各测试并行共用一个库，别的库的来源行会被 fetch_one 先拿到
+        // Evidence is copied from the statement that triggered it; the source records the rule and the statement
+        // Filter by database: on CI the tests run in parallel sharing one database, and another database's source rows would be picked up first by fetch_one
         let src: (Uuid, Option<Uuid>) = sqlx::query_as(
             "SELECT i.rule_id, i.statement_id FROM implied_fact_sources i
                JOIN facts t ON t.id = i.fact_id WHERE t.kb_id = $1",
@@ -203,7 +203,7 @@ async fn an_approved_rule_waits_for_its_reading_then_implies_a_fact_with_evidenc
         .fetch_one(&pool)
         .await?;
         assert_eq!(src, (id, Some(f.statement)));
-        // 再跑一遍什么都不动
+        // Run it again, nothing changes
         let o = materialize::materialize(&pool, f.kb).await?;
         assert_eq!((o.implied, o.retired), (0, 0));
         anyhow::Ok(())
@@ -223,19 +223,19 @@ async fn rejecting_the_rule_or_losing_the_statement_retires_the_implied_row() ->
     crate::db::migrate(&pool).await?;
     let f = seed(&pool).await?;
     let run = async {
-        // 不要读数的规则：located in 的陈述还蕴含 country_of_origin = 陈述的宾语（就当测试）
+        // Rule needing no read: a located-in statement also implies country_of_origin = the statement's object (taken as a test)
         let id = propose(&pool, f.kb, &phrase_rule(&f, None, f.country_of_origin))
             .await?
             .unwrap();
         decide_with_delivery(&pool, f.kb, id, true, &json!({})).await?;
         assert_eq!(materialize::materialize(&pool, f.kb).await?.implied, 1);
         assert_eq!(implied_rows(&pool, f.kb).await?.len(), 1);
-        // 驳回：来源删、行作废
+        // Reject: source deleted, row voided
         decide_with_delivery(&pool, f.kb, id, false, &json!({})).await?;
         let o = materialize::materialize(&pool, f.kb).await?;
         assert_eq!(o.retired, 1);
         assert!(implied_rows(&pool, f.kb).await?.is_empty());
-        // 再批回来，行回来；陈述作废，行再退
+        // Approve again, the row comes back; statement voided, row backed out again
         decide_with_delivery(&pool, f.kb, id, true, &json!({})).await?;
         assert_eq!(materialize::materialize(&pool, f.kb).await?.implied, 1);
         sqlx::query("UPDATE facts SET invalidated_at=now() WHERE id=$1")
@@ -304,7 +304,7 @@ async fn a_kind_word_rule_implies_a_fact_for_every_thing_so_called() -> anyhow::
             implied_rows(&pool, f.kb).await?,
             vec![(f.loud_tour, f.country_of_origin, Some(uk))]
         );
-        // 读不出来也缓存：不再待读，也不算行
+        // Cache even when the read fails: no longer pending, and not counted as a row
         record_reading(&pool, f.kb, "country_of_nationality", "iberian", None, None).await?;
         assert!(pending_readings(&pool, f.kb).await?.is_empty());
         let _ = f.piedmont;

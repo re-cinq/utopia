@@ -1,13 +1,13 @@
-//! 类型消解的近邻那一路（#514），打在真库上。
+//! The near-neighbour path of type resolution (#514), run against a real DB.
 //!
-//! 规矩是：消解的答案是台账的函数，与候选按什么顺序、什么时机取回来无关。
-//! 所以并发地取只有在「同一个库给出同一批邻居」时才算安全。这里钉四样：
-//! - **顺序**：一批主语的邻居按送进去的顺序回来，下游裁决按这个顺序读
-//! - **并发上限不改答案**：上限 1 与上限 8 给出同一份结果；有没有索引也一样
-//! - **SQL 里的三道门**：自己不是自己的邻居；没判出类型的不当证据；同一篇文档的要标出来
-//! - **后代集合的记忆**：一批之内同一个粗类只问一次，没有粗类的不进表
+//! The rule is: the answer to resolution is a function of the ledger, independent of the order or timing in which candidates are fetched.
+//! So fetching concurrently is only safe when "the same KB gives the same batch of neighbours". Four things are pinned here:
+//! - **Order**: a batch of subjects' neighbours come back in the order they were sent in; downstream verdicts read in that order
+//! - **The concurrency cap does not change the answer**: a cap of 1 and a cap of 8 give the same result; so does having an index or not
+//! - **Three gates in the SQL**: an entity is not its own neighbour; an untyped entity is not used as evidence; ones from the same document are marked
+//! - **Memory of descendant sets**: within one batch, each coarse class is asked only once; a class with no coarse class does not enter the table
 //!
-//! 还有一条只有连库才验得出：两个连接的小池子也跑得完一整批，不会撞上取连接的超时。
+//! One more thing only a live DB can verify: two pooled connections can still run a whole batch to completion, without hitting a connection-acquisition timeout.
 
 use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
@@ -17,7 +17,7 @@ use utopia_store::resolution::{self, DescendantsMemo};
 use utopia_store::vector_index::{self, Target};
 use uuid::Uuid;
 
-/// 这个测试独占的维度：其它连库测试用 3 维
+/// The dimension this test owns exclusively: other DB tests use 3 dimensions
 const DIMS: usize = 5;
 const TYPED: usize = 40;
 
@@ -35,9 +35,9 @@ struct Fixture {
     person: Uuid,
     company: Uuid,
     employee: Uuid,
-    /// 三个待消解的主语
+    /// Three subjects awaiting resolution
     subjects: Vec<Uuid>,
-    /// 自己的向量是 3 维的主语
+    /// Subjects whose own vector is 3-dimensional
     three_dims_subject: Uuid,
 }
 
@@ -132,7 +132,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     )
     .await?;
 
-    // 主语 0 和 typed[0] 在同一篇文档里：一条事实，证据落在那篇文档的一块上
+    // Subject 0 and typed[0] are in the same document: one fact, with its evidence on a chunk of that document
     let same_doc_neighbour = typed[0];
     let (doc, chunk, fact) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     sqlx::query(
@@ -198,7 +198,7 @@ async fn the_neighbours_come_back_in_order_and_the_gates_hold() -> anyhow::Resul
     let run = async {
         vector_index::drop(&pool, Target::EntityProfiles, DIMS).await?;
 
-        // ---- 一、逐个问，作为基准
+        // ---- 1. Ask one at a time, as the baseline
         let mut serial: Vec<Neighbours> = Vec::new();
         for s in &f.subjects {
             serial.push(resolution::nearest_typed_entities(&pool, f.kb, *s, 10).await?);
@@ -219,7 +219,7 @@ async fn the_neighbours_come_back_in_order_and_the_gates_hold() -> anyhow::Resul
                 "另一维度的画像不是候选"
             );
         }
-        // 主语 0 的邻居里，typed 0 与它同一篇文档，别的都不是
+        // Among subject 0's neighbours, typed 0 is in the same document as it, and none of the others are
         let flagged: Vec<&str> = serial[0]
             .iter()
             .filter(|(_, _, _, _, same)| *same)
@@ -231,7 +231,7 @@ async fn the_neighbours_come_back_in_order_and_the_gates_hold() -> anyhow::Resul
         } else {
             assert!(flagged.is_empty(), "不在邻居里就没什么可标");
         }
-        // 自己的向量是 3 维的主语：没有 3 维的已定类邻居可比……除了那一条 3 维的
+        // Subjects whose own vector is 3-dimensional: there are no typed neighbours of 3 dimensions to compare against... except that one 3-dimensional one
         let odd = resolution::nearest_typed_entities(&pool, f.kb, f.three_dims_subject, 10).await?;
         assert_eq!(
             names(&odd),
@@ -239,7 +239,7 @@ async fn the_neighbours_come_back_in_order_and_the_gates_hold() -> anyhow::Resul
             "3 维的查询只找 3 维的，也不报错"
         );
 
-        // ---- 二、一批取：顺序与上限
+        // ---- 2. A batch fetch: order and cap
         let gathered_1 =
             resolution::nearest_typed_for_each_with(&pool, f.kb, &f.subjects, 10, 1).await?;
         let gathered_8 =
@@ -258,7 +258,7 @@ async fn the_neighbours_come_back_in_order_and_the_gates_hold() -> anyhow::Resul
             );
         }
 
-        // ---- 三、两个连接的池子也跑得完六十个
+        // ---- 3. Two pooled connections can still finish all sixty
         let tiny = PgPoolOptions::new()
             .max_connections(2)
             .acquire_timeout(std::time::Duration::from_secs(10))
@@ -272,7 +272,7 @@ async fn the_neighbours_come_back_in_order_and_the_gates_hold() -> anyhow::Resul
         }
         tiny.close().await;
 
-        // ---- 四、索引就位之后同一份答案
+        // ---- 4. The same answer once the index is in place
         let built = vector_index::build(&pool, Target::EntityProfiles, DIMS).await?;
         assert!(built.created);
         assert_eq!(built.name, "entities_profile_embedding_hnsw_5");
@@ -285,7 +285,7 @@ async fn the_neighbours_come_back_in_order_and_the_gates_hold() -> anyhow::Resul
             );
         }
 
-        // ---- 五、后代集合按粗类记一批
+        // ---- 5. Descendant sets are remembered per coarse class within a batch
         let mut memo = DescendantsMemo::default();
         let direct = |root: Uuid| {
             let pool = pool.clone();
@@ -316,7 +316,7 @@ async fn the_neighbours_come_back_in_order_and_the_gates_hold() -> anyhow::Resul
             "没有粗类：没有后代这个轴"
         );
         assert_eq!(memo.len(), 3, "没有粗类的不进表");
-        // 批内本体动了：记忆给的还是问过的那一份，直接问给的是新的——这就是「记住」
+        // The ontology changed within the batch: memory still returns the copy that was asked for, while a direct ask gives the new one — that is what "remembering" means
         let intern = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO entity_types (id, kb_id, key, label) VALUES ($1, $2, 'intern', 'intern')",

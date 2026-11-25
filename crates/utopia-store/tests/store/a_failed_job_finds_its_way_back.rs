@@ -1,16 +1,16 @@
-//! #216：失败的任务能回到队列。
+//! #216: failed tasks can find their way back to the queue.
 //!
-//! 此前 `failed` 就是终点——余额耗尽一批文档全失败，充值之后只能逐个点，或整源重抽
-//! （已成功的也重跑一遍模型）。`jobs::requeue_failed` 按范围重排：库、种类、失败时间
-//! 三个条件都可空。这里守三件事：
+//! Previously `failed` was a terminal state: when credits ran out a batch of documents all failed, and after topping up you could only click each one, or re-extract the whole source
+//! (which also reruns the model on those that had already succeeded). `jobs::requeue_failed` requeues by scope: library, kind, and failure time
+//! are all nullable. Three things are guarded here:
 //!
-//! 1. **按库圈得准。** 任务的 payload 只带 `document_id` / `source_id` / `kb_id` 三种
-//!    之一，按库重排要解到库——别的库的一条都不碰，没有库的（系统任务）只有不限库时才动。
-//! 2. **只动 failed 的**，`done` 与 `queued` 不动；重排后 `attempts` 归零、立即到期。
-//! 3. **种类与时间窗**：`kind` 只排那一种；`failed_since` 只排那之后失败的——
-//!    告警上的「再跑一遍」圈的正是那次故障窗口里的任务。
+//! 1. **Scoping by library is precise.** A task's payload carries only one of `document_id` / `source_id` / `kb_id`,
+//!    so requeueing by library must resolve to a library: none of another library's tasks are touched, and tasks without a library (system tasks) are touched only when the library is unlimited.
+//! 2. **Only failed ones are touched**: `done` and `queued` are left alone; after requeueing, `attempts` resets to zero and they are due immediately.
+//! 3. **Kind and time window**: `kind` requeues only that kind; `failed_since` requeues only those that failed after that moment:
+//!    the "run again" on an alert covers exactly the tasks from that outage window.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` it skips rather than fails. It sets up and tears down its own data and never touches an existing database.
 
 use chrono::{Duration, Utc};
 use sqlx::PgPool;
@@ -119,7 +119,7 @@ async fn a_failed_job_finds_its_way_back() -> anyhow::Result<()> {
 
     let run = async {
         let m = Duration::minutes(1);
-        // kb1：文档任务、库级任务、一条很早就失败的、一条已经成功的
+        // kb1: document tasks, a library-level task, one that failed long ago, and one that already succeeded
         let d1 = job(
             &pool,
             "process_document",
@@ -152,7 +152,7 @@ async fn a_failed_job_finds_its_way_back() -> anyhow::Result<()> {
             m,
         )
         .await?;
-        // kb2：来源任务
+        // kb2: a source task
         let s2 = job(
             &pool,
             "sync_source",
@@ -161,14 +161,14 @@ async fn a_failed_job_finds_its_way_back() -> anyhow::Result<()> {
             m,
         )
         .await?;
-        // 没有库的系统任务
+        // A system task with no library
         let sys = job(&pool, "noop", serde_json::json!({}), "failed", m).await?;
         ids.extend([d1, b1, old1, done1, s2, sys]);
 
         assert_eq!(jobs::failed_count(&pool, Some(f.kb1)).await?, 3);
         assert_eq!(jobs::failed_count(&pool, Some(f.kb2)).await?, 1);
 
-        // 3. 时间窗：只排最近一小时里失败的 kb1 任务
+        // 3. Time window: only requeue kb1 tasks that failed within the last hour
         let n = jobs::requeue_failed(
             &pool,
             RequeueScope {
@@ -197,7 +197,7 @@ async fn a_failed_job_finds_its_way_back() -> anyhow::Result<()> {
             "a system job has no base"
         );
 
-        // 3. 种类：kb1 里只排 process_document，老的那条这次回来
+        // 3. Kind: in kb1 only process_document is requeued; the old one comes back this time
         let n = jobs::requeue_failed(
             &pool,
             RequeueScope {
@@ -211,7 +211,7 @@ async fn a_failed_job_finds_its_way_back() -> anyhow::Result<()> {
         assert_eq!(state(&pool, old1).await?, ("queued".into(), 0));
         assert_eq!(jobs::failed_count(&pool, Some(f.kb1)).await?, 0);
 
-        // 1. 按库：kb2 的来源任务
+        // 1. By library: kb2's source task
         let n = jobs::requeue_failed(
             &pool,
             RequeueScope {
@@ -224,7 +224,7 @@ async fn a_failed_job_finds_its_way_back() -> anyhow::Result<()> {
         assert_eq!(n, 1);
         assert_eq!(state(&pool, s2).await?, ("queued".into(), 0));
 
-        // 不限库才动系统任务
+        // System tasks are touched only when the library is unlimited
         let before = jobs::failed_count(&pool, None).await?;
         let n = jobs::requeue_failed(
             &pool,
@@ -242,7 +242,7 @@ async fn a_failed_job_finds_its_way_back() -> anyhow::Result<()> {
     }
     .await;
 
-    // 自拆：任务表不随组织级联，手动清
+    // Teardown: the task table does not cascade with the organization, so clear it by hand
     let _ = sqlx::query("DELETE FROM jobs WHERE id = ANY($1)")
         .bind(&ids)
         .execute(&pool)

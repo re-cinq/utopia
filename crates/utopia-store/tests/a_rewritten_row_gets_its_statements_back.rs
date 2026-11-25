@@ -1,20 +1,20 @@
-//! 迁移 0096：#967 之前改写出来的行找回它由哪些陈述算出，之后物化重算出的重复行作废。
+//! Migration 0096: rows rewritten before #967 get back the statements they were derived from, and duplicate rows that materialization recomputed afterwards are voided.
 //!
-//! 坏的状态照它当时的来路造出来。一条陈述「Zhang San —leads→ Aurora，自 2023-01-10」
-//! 绑到 leads，一条已批准的短语规则从同一句蕴含 works_on。物化之后得到类型化行与隐含行。
-//! 两行都经 `correct_interval` 把起点改成 2023-02-01，再把修正行的链接抹掉——那正是
-//! #967 之前人改区间写出来的样子。再物化一次，旧代码的后果照样出现：陈述没有活着的行
-//! 代表，照原区间又算出两行（D 与 D2）。
+//! The bad state is built up the way it originally arose. A statement "Zhang San —leads→ Aurora, from 2023-01-10"
+//! is bound to leads, and an approved phrase rule implies works_on from the same sentence. After materialization there is a typed row and an implied row.
+//! Both rows have their start moved to 2023-02-01 through `correct_interval`, and then the link on the correction row is wiped -- which is exactly
+//! what a person's interval edit wrote before #967. Materializing again, the old code's consequence still appears: the statement has no live row
+//! representing it, so two rows (D and D2) are computed again over the original interval.
 //!
-//! 跑 0096 之后：两条修正行找回陈述与规则来源，D 与 D2 作废而仍在表里；人手写又改过的行、
-//! #967 之后带着链接改写的行都不动；人点头的事实给一条裸行补上起点（时间精化，另一次观察）
-//! 也不动——它链着一条物化行，却不是改写；再物化什么也不做，2023-01-20 那一刻没有人在管；
-//! 再跑一遍迁移，一样不动。
+//! After running 0096: the two correction rows get back their statement and rule sources, and D and D2 are voided but stay in the table; rows a person wrote and then edited,
+//! and rows rewritten with a link after #967, are left alone; a fact a person approved that gets a start filled in on a bare row (a time refinement, another observation)
+//! is also left alone -- it links to a materialized row, but it was not a rewrite; materializing again does nothing, and no one is managing the 2023-01-20 moment;
+//! running the migration once more changes nothing.
 //!
-//! 迁移的语句不按 kb 过滤，改的是全库的行，所以这个测试在 tests/ 顶层自成一个二进制
-//! （与 0057 的回填同理，见 `tests/store/main.rs`）。
+//! The migration's statement does not filter by kb and changes rows across the whole database, so this test is a binary of its own at the top of tests/
+//! (for the same reason as the 0057 backfill, see `tests/store/main.rs`).
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -29,7 +29,7 @@ fn t(s: &str) -> DateTime<Utc> {
     s.parse().expect("fixed timestamp")
 }
 
-/// 一行的链接：from_statement_id、implied、两张来源表里的陈述
+/// A row's links: from_statement_id, implied, and the statements in the two source tables
 async fn links(
     pool: &PgPool,
     fact: Uuid,
@@ -63,7 +63,7 @@ async fn live(pool: &PgPool, fact: Uuid) -> anyhow::Result<bool> {
     )
 }
 
-/// 修正行的链接抹掉：#967 之前的 `correct_interval` 写出来就是这样
+/// The correction row's link wiped: this is what `correct_interval` wrote before #967
 async fn as_before_967(pool: &PgPool, fact: Uuid) -> anyhow::Result<()> {
     sqlx::query("UPDATE facts SET from_statement_id = NULL, implied = FALSE WHERE id = $1")
         .bind(fact)
@@ -94,7 +94,7 @@ async fn correct_start(pool: &PgPool, fact: Uuid, from: &str) -> anyhow::Result<
     .expect("the row was live"))
 }
 
-/// 活着的某一谓词的类型化行（主语、宾语给定）
+/// A typed row for one live predicate (subject and object given)
 async fn rows(
     pool: &PgPool,
     kb: Uuid,
@@ -144,7 +144,7 @@ async fn a_rewritten_row_gets_its_statements_back() -> anyhow::Result<()> {
         let (zhang, li, wang, zhou, aurora, helios, nova) =
             (id(), id(), id(), id(), id(), id(), id());
         let (charter, kickoff, bare, by_hand) = (id(), id(), id(), id());
-        // 插进去的只有本地生成的 UUID 和写死的日期
+        // Only locally generated UUIDs and fixed dates are inserted
         sqlx::raw_sql(&format!(
             r#"
             INSERT INTO entity_types (id, kb_id, key, label, color, shape) VALUES
@@ -186,24 +186,24 @@ async fn a_rewritten_row_gets_its_statements_back() -> anyhow::Result<()> {
         .execute(&pool)
         .await?;
 
-        // 物化：三条陈述各一行 leads，每句另有一行规则蕴含的 works_on
+        // Materialize: three statements give three leads rows, and each sentence has another row from the rule's implied works_on
         materialize(&pool, kb).await?;
         let typed = rows(&pool, kb, zhang, leads).await?;
         let by_rule = rows(&pool, kb, zhang, works_on).await?;
         assert_eq!((typed.len(), by_rule.len()), (1, 1));
 
-        // #967 之前人改区间：修正行写出来没有链接
+        // Interval edited by a person before #967: the correction row was written without a link
         let corrected = correct_start(&pool, typed[0], "2023-02-01T00:00:00Z").await?;
         let corrected_rule = correct_start(&pool, by_rule[0], "2023-02-01T00:00:00Z").await?;
         as_before_967(&pool, corrected).await?;
         as_before_967(&pool, corrected_rule).await?;
-        // 对照：#967 之后改的一行带着链接；人手写的一行被改过
+        // Control: a row edited after #967 carries its link; a row a person wrote and then edited
         let after = rows(&pool, kb, li, leads).await?;
         let after = correct_start(&pool, after[0], "2024-08-01T00:00:00Z").await?;
         let by_hand = correct_start(&pool, by_hand, "2022-02-01T00:00:00Z").await?;
         let after_links = links(&pool, after).await?;
         assert_eq!(after_links.0, Some(kickoff), "#967 之后改写带着链接");
-        // 对照：人点头的事实给裸行补上起点——新行链着那条物化行，却是另一次观察
+        // Control: a fact a person approved gets a start filled in on a bare row -- the new row links to that materialized row, but it is a different observation
         let (refined, _) = graph::insert_fact(
             &pool,
             kb,
@@ -225,7 +225,7 @@ async fn a_rewritten_row_gets_its_statements_back() -> anyhow::Result<()> {
                 .await?;
         assert!(supersedes.is_some(), "the confirmed fact refines the bare row");
 
-        // 旧代码的后果：再物化一次，照陈述又算出两行，与修正行并排
+        // The old code's consequence: materializing once more computes two rows from the statement again, beside the correction rows
         let second = materialize(&pool, kb).await?;
         assert_eq!(
             (second.added, second.implied, second.merged),
@@ -247,7 +247,7 @@ async fn a_rewritten_row_gets_its_statements_back() -> anyhow::Result<()> {
 
         sqlx::raw_sql(MIGRATION).execute(&pool).await?;
 
-        // 两条修正行找回陈述与规则来源
+        // The two correction rows get back their statement and rule sources
         assert_eq!(
             links(&pool, corrected).await?,
             (Some(charter), false, vec![charter], vec![])
@@ -256,9 +256,9 @@ async fn a_rewritten_row_gets_its_statements_back() -> anyhow::Result<()> {
             links(&pool, corrected_rule).await?,
             (None, true, vec![], vec![charter])
         );
-        // 重复行作废，不删
+        // Duplicate rows are voided, not deleted
         assert!(!live(&pool, duplicate).await? && !live(&pool, duplicate_rule).await?);
-        // 对照不动
+        // Controls are left alone
         assert_eq!(links(&pool, after).await?, after_links);
         assert_eq!(links(&pool, by_hand).await?, (None, false, vec![], vec![]));
         assert_eq!(links(&pool, refined).await?, refined_links, "a refinement is not a rewrite");
@@ -266,7 +266,7 @@ async fn a_rewritten_row_gets_its_statements_back() -> anyhow::Result<()> {
             live(&pool, by_hand).await? && live(&pool, after).await? && live(&pool, refined).await?
         );
 
-        // 再物化什么也不做：陈述由修正行代表，规则的来源也在
+        // Materializing again does nothing: the statement is represented by the correction row, and the rule's source is there too
         assert_eq!(materialize(&pool, kb).await?, Outcome::default());
         let (nodes, edges) =
             graph::neighborhood(&pool, kb, aurora, 1, Some(t("2023-01-20T00:00:00Z")), None)
@@ -278,7 +278,7 @@ async fn a_rewritten_row_gets_its_statements_back() -> anyhow::Result<()> {
             .collect();
         assert!(names.is_empty(), "nobody on 2023-01-20: {names:?}");
 
-        // 再跑一遍，一样不动
+        // Run again: still no change
         sqlx::raw_sql(MIGRATION).execute(&pool).await?;
         assert_eq!(
             links(&pool, corrected).await?,

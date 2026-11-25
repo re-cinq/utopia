@@ -1,16 +1,16 @@
-//! 迁移 0101：这之前规则算出的行，见证跟着它读的陈述走。
+//! Migration 0101: rows the rule computed before this migration follow the statement whose witness they read.
 //!
-//! 照这之前的来路造：物化照常算出隐含行，再把它们的见证改回那时写下的样子——处理那一刻，
-//! 没有日期的名字。那时规则算的行入库时陈述没有见证就填此刻，陈述后来作了证也不跟。
+//! Built along the route from before: materialization computes the implied rows as usual, then their witnesses are changed back to what was written then — at the moment of processing,
+//! with a name that has no date. Rule-computed rows entering the database then filled in the current moment when the statement had no witness, and did not follow the statement when it was witnessed later.
 //!
-//! - 没说时间的陈述算出的行：留空，任何时点都成立
-//! - 陈述在物化之后才作了证的：跟到那天，连同那条日期的名字
-//! - 类别词从实体算出的行：没有陈述可跟，留空
-//! - 人写的行只被规则的结论并进来：见证还是人写下它的那一刻
+//! - Rows computed from a statement that gave no time: left empty, holds at any moment
+//! - Statement witnessed only after materialization: follows to that day, along with that date's name
+//! - Rows computed from a category word over entities: no statement to follow, left empty
+//! - Human-written rows merged in only by a rule's conclusion: the witness is the moment the person wrote the row
 //!
-//! 再跑一遍迁移，一样不动。迁移的语句不按 kb 过滤，改的是全库的行，所以这个测试在 tests/
-//! 顶层自成一个二进制（与 0096、0099 同理）。没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。
-//! 自建自拆，绝不碰已有的库。
+//! Running the migration again changes nothing either. The migration's statements are not filtered by kb; they change rows across the whole database, so this test is its own binary
+//! at the top level of tests/ (same reasoning as 0096 and 0099). Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset.
+//! Creates and tears down its own database, never touching an existing one.
 
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
@@ -32,7 +32,7 @@ async fn anchor(
     )
 }
 
-/// 主语到宾语之间活着的那一行类型化事实
+/// The one live typed-fact row between subject and object
 async fn typed_row(pool: &PgPool, kb: Uuid, subject: Uuid, object: Uuid) -> anyhow::Result<Uuid> {
     Ok(sqlx::query_scalar(
         "SELECT id FROM facts
@@ -127,9 +127,9 @@ async fn a_row_a_rule_implied_before_follows_its_statements() -> anyhow::Result<
         .await?;
         signed(meridian).await?;
         utopia_store::materialize::materialize(&pool, kb).await?;
-        // 物化之后陈述才作证：只动陈述，那时算出的行不跟
+        // Statement witnessed only after materialization: only the statement changes; rows computed then do not follow
         assert!(graph::attest_statement(&pool, later, signed_day, "签约日 2026年9月4日").await?);
-        // 这之前写下的样子：规则算的行都是处理那一刻，没有日期的名字
+        // The shape from before: rule-computed rows all come from the moment of processing, with a name that has no date
         sqlx::query(
             "UPDATE facts SET attested_from = $2, attested_by = NULL WHERE kb_id = $1 AND implied",
         )
@@ -145,7 +145,7 @@ async fn a_row_a_rule_implied_before_follows_its_statements() -> anyhow::Result<
             assert_eq!(anchor(&pool, row).await?, (Some(processed), None));
         }
 
-        // 跑两遍：第二遍一样不动
+        // Run twice: the second run changes nothing either
         for _ in 0..2 {
             sqlx::raw_sql(MIGRATION).execute(&pool).await?;
             assert_eq!(

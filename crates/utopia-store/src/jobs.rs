@@ -1,8 +1,8 @@
-//! 任务队列：Postgres `FOR UPDATE SKIP LOCKED` 消费。
-//! worker 与 API 同进程（tokio task），失败按 30s * attempts² 退避重试——
-//! 除非处理器把它标成了 `utopia_core::Terminal`，那种一次就到此为止（见 [`retry_delay`]）。
-//! 并发消费：调度循环按"运行中 < 目标数"续派，任务在独立 task 执行；
-//! 目标数经 AtomicUsize 热读——系统设置里改并发即时生效，无需重启。
+//! Task queue: Postgres `FOR UPDATE SKIP LOCKED` consumption.
+//! The worker runs in the same process as the API (tokio task); failures retry with a backoff of 30s * attempts²,
+//! unless the handler marks the task as `utopia_core::Terminal`, in which case it stops after one attempt (see [`retry_delay`]).
+//! Concurrent consumption: the scheduling loop tops up "running < target count", and each task runs in its own task;
+//! the target count is hot-read through an AtomicUsize, so changing concurrency in system settings takes effect immediately, no restart needed.
 
 use chrono::{DateTime, Utc};
 use sqlx::{postgres::PgListener, PgPool, Postgres, Transaction};
@@ -24,17 +24,17 @@ pub struct Job {
     pub locked_at: DateTime<Utc>,
 }
 
-/// 去重比较的条件：载荷去掉 `deferred_since` 后与 `$2` 相同。推迟（`persist_outcome`）会把它写进排着的
-/// 任务载荷里，它是记账、不属于任务要做的事，所以去重要忽略它，否则被推迟过的任务永远吸收不了新入队。
-/// 用宏是为了能拼进 `concat!` 的常量 SQL；`md5(...)` 那半句必须与迁移 9015 的索引表达式逐字一致，
-/// 计划器才用得上索引。
+/// The dedup comparison: the payload with `deferred_since` removed equals `$2`. Deferral (`persist_outcome`) writes it into the queued
+/// task payload. It is bookkeeping, not part of what the task does, so dedup must ignore it, otherwise a deferred task can never absorb new enqueues.
+/// A macro is used so the constant SQL can be built with `concat!`; the `md5(...)` half must match migration 9015's index expression word for word,
+/// or the planner would not use the index.
 macro_rules! same_payload_ignoring_deferral {
     () => {
         "md5((payload - 'deferred_since')::text) = md5($2::text) AND (payload - 'deferred_since') = $2"
     };
 }
 
-/// `enqueue_unless_pending` 的 SQL（文本未改，仅提出来供计划测试使用）。
+/// The SQL of `enqueue_unless_pending` (text unchanged; extracted only so plan tests can use it).
 const ENQUEUE_UNLESS_PENDING_SQL: &str = concat!(
     "INSERT INTO jobs (kind, payload, run_at)
          SELECT $1, $2, now() + make_interval(secs => $3)
@@ -77,19 +77,19 @@ const FIND_QUEUED_SQL: &str = concat!(
     " AND status = 'queued' ORDER BY id LIMIT 1"
 );
 
-/// 同种任务、同样载荷已经排着就不再排：一批文档各自抽完都想触发同一个库级任务
-/// （类型消解、对账），排十次跑十次是浪费，而且后九次看到的是第一次跑完的库。
-/// 返回 None = 已有一条在排队
-/// 排一件事，除非同样的一件**已经排着或正在跑**。
+/// The same kind of task with the same payload already queued is not queued again: when a batch of documents each finish extraction and all want to trigger the same library-level task
+/// (type resolution, reconciliation), queuing ten times runs it ten times, and the last nine see the library as the first run left it.
+/// Returns None = one is already queued
+/// Queue a thing unless the same thing is **already queued or running**.
 ///
-/// 与 [`enqueue_unless_queued`] 的差别只在「正在跑」那一半，而那一半正是批量编辑
-/// 会踩的：本体页一口气建 28 条属性，每建一条排一次，第一条开跑之后的 27 条都不再
-/// 与「排着的」撞上，于是排成 28 份，串行跑 28 遍。用这个入口的任务必须在**结束时
-/// 自己回头看有没有新活**（对齐的两个任务都这么做），否则跑着时来的那些变化会丢。
+/// The only difference from [`enqueue_unless_queued`] is the "running" half, and that half is what batch edits
+/// trip over: the ontology page creates 28 attributes in one go, queuing once per attribute; after the first starts running, the other 27 no longer
+/// collide with a "queued" one, so they become 28 queued copies that run serially 28 times. Tasks that use this entry point must **look back at the end
+/// for new work themselves** (both aligned tasks do this), otherwise changes that arrived while it was running would be lost.
 ///
-/// `after` 是**去抖**：一批编辑里第一条排下一个几秒后才跑的任务，其余每一条都撞上
-/// 这个「排着的」而不再排。没有它，空库上一次运行只要几百毫秒，42 次创建照样排出
-/// 十几份——「正在跑」这一半只有在任务真的在跑时才挡得住。
+/// `after` is **debounce**: in a batch of edits, the first one queues a task to run a few seconds later, and every other one hits
+/// this "queued" and does not queue again. Without it, on an empty database a run takes only a few hundred milliseconds, and 42 creations would still queue
+/// a dozen copies: the "running" half only blocks when the task is really running.
 pub async fn enqueue_unless_pending(
     pool: &PgPool,
     kind: &str,
@@ -121,9 +121,9 @@ pub async fn enqueue_unless_queued(
     Ok(id)
 }
 
-/// 同 [`enqueue_unless_queued`]，但排在调用方的事务里：任务与事务里别的写一起提交、
-/// 一起回滚。人定一个类别词时，判定和它的短语对齐任务要么都在、要么都不在——先提交
-/// 判定再排，进程在两步之间退出就只剩判定，它改了的签名没人去重判
+/// Same as [`enqueue_unless_queued`], but queued inside the caller's transaction: the task commits and rolls back together with the other writes in the transaction.
+/// When a person defines a category word, the judgment and the task aligned to its phrase are either both present or both absent: committing the judgment first and queuing after
+/// means a process exit between the two steps leaves only the judgment, and nobody dedupes the signature it changed.
 pub async fn enqueue_unless_queued_tx(
     tx: &mut Transaction<'_, Postgres>,
     kind: &str,
@@ -140,9 +140,9 @@ pub async fn enqueue_unless_queued_tx(
     Ok(row.map(|(id,)| id))
 }
 
-/// 同 [`enqueue_unless_queued_tx`]，但并进排着的那份时返回**它的 id**（调用方要把 job id 交出去）。
-/// 只认排着的、不认在跑的（决策 0051：在跑的任务可能已经读过这次判定之前的状态）。
-/// 末尾的 `None` 分支是竞态：排着的那份在检查与插入之间被领走了，就老实再排一份；测试里造不出来。
+/// Same as [`enqueue_unless_queued_tx`], but when merged into the queued copy, returns **its id** (the caller has to hand the job id out).
+/// Only matches queued copies, not running ones (decision 0051: a running task may already have read the state from before this judgment).
+/// The trailing `None` branch is a race: the queued copy was claimed between the check and the insert, so queue a new one honestly; tests cannot construct this.
 pub async fn enqueue_queued_once_tx(
     tx: &mut Transaction<'_, Postgres>,
     kind: &str,
@@ -175,8 +175,8 @@ pub async fn enqueue_queued_once_tx(
     }
 }
 
-/// 同 [`enqueue_unless_queued`]，但晚一点跑。挡的只是排着的，不挡在跑的——调用方
-/// 正是那个在跑的任务、想给自己之后再排一个的时候，用这个而不是 `enqueue_unless_pending`
+/// Same as [`enqueue_unless_queued`], but runs later. It only blocks queued copies, not running ones: the case where the caller
+/// is exactly the running task that wants to queue another one for itself later; use this rather than `enqueue_unless_pending`
 pub async fn enqueue_unless_queued_after(
     pool: &PgPool,
     kind: &str,
@@ -197,8 +197,8 @@ pub async fn enqueue_unless_queued_after(
     Ok(row.map(|(id,)| id))
 }
 
-/// 这个库有没有这一种任务排着或跑着（按 payload 里的 kb_id 看，不比整份 payload：
-/// 同一种任务的 payload 可能多带一个 reask）
+/// Whether this library has this kind of task queued or running (judged by kb_id in the payload, not by the whole payload:
+/// the same kind of task's payload may carry an extra reask)
 pub async fn pending_for_kb(pool: &PgPool, kind: &str, kb_id: Uuid) -> AppResult<bool> {
     Ok(sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM jobs
@@ -215,7 +215,7 @@ pub async fn enqueue(pool: &PgPool, kind: &str, payload: serde_json::Value) -> A
     enqueue_with_max_attempts(pool, kind, payload, 3).await
 }
 
-/// 入队并显式指定有限的重试预算。调用方不能把一个外部系统的任务变成无限重试。
+/// Enqueue with an explicit, finite retry budget. Callers cannot turn an external system's task into infinite retries.
 pub async fn enqueue_with_max_attempts(
     pool: &PgPool,
     kind: &str,
@@ -233,8 +233,8 @@ pub async fn enqueue_with_max_attempts(
     Ok(id)
 }
 
-/// 与 ledger 变更共用事务；不能先写 job、再写 entry，否则进程退出窗口会留下
-/// 一个无法从 entry 找到的 hydration 任务。
+/// Shares a transaction with the ledger change; the job must not be written before the entry, otherwise a process exit in the window would leave
+/// a hydration task that cannot be found from the entry.
 pub async fn enqueue_with_max_attempts_tx(
     tx: &mut Transaction<'_, Postgres>,
     kind: &str,
@@ -258,11 +258,11 @@ pub async fn enqueue_with_max_attempts_tx(
     Ok(id)
 }
 
-/// 排一份 `extract_document`，除非同一篇文档已经有一份排着（RC-009）。
+/// Queue one `extract_document` unless the same document already has one queued (RC-009).
 ///
-/// 抽取只带文档 id、跑的时候读当下的块，所以排着的第二份读到的和第一份一样；按
-/// `document_id` 比而不按整份载荷，两处入队的载荷不同。在跑的那份不算：它可能在新版本
-/// 写入之前就读完了。返回 `None` = 并进了排着的那份。
+/// Extraction carries only the document id and reads the current chunks when it runs, so a second queued copy reads the same as the first; match by
+/// `document_id` rather than the whole payload, since the two enqueue sites have different payloads. A running one does not count: it may have finished reading before
+/// the new version was written. Returns `None` = merged into the queued one.
 pub async fn enqueue_extraction(
     pool: &PgPool,
     payload: serde_json::Value,
@@ -274,7 +274,7 @@ pub async fn enqueue_extraction(
     Ok(id)
 }
 
-/// 同 [`enqueue_extraction`]，排在调用方的事务里。
+/// Same as [`enqueue_extraction`], but queued inside the caller's transaction.
 pub async fn enqueue_extraction_tx(
     tx: &mut Transaction<'_, Postgres>,
     payload: serde_json::Value,
@@ -298,8 +298,8 @@ pub async fn enqueue_extraction_tx(
     Ok(row.map(|(id,)| id))
 }
 
-/// 同 [`enqueue_with_max_attempts_tx`]，但 `after` 之后才到期。从插入这一刻
-/// （`clock_timestamp()`）算起：`now()` 是事务开始的时刻，事务长了，提交时延迟已经用掉
+/// Same as [`enqueue_with_max_attempts_tx`], but due only after `after`. It is counted from the moment of insertion
+/// (`clock_timestamp()`): `now()` is the transaction start time; if the transaction is long, the commit-time delay has already used up
 pub async fn enqueue_with_max_attempts_after_tx(
     tx: &mut Transaction<'_, Postgres>,
     kind: &str,
@@ -338,23 +338,23 @@ pub(crate) async fn notify_worker_tx(tx: &mut Transaction<'_, Postgres>) -> AppR
     Ok(())
 }
 
-/// 空闲轮询间隔。有通知时用不到它；它兜的是 `run_at` 在未来的重试、
-/// 重连期间丢掉的通知，以及几个 worker 被同一条通知叫醒后没抢到的那些（#517）。
+/// Idle polling interval. Not needed when notifications arrive; it covers retries whose `run_at` is in the future,
+/// notifications lost during reconnection, and those a few workers were woken for by the same notification but did not win (#517).
 pub const IDLE_POLL: Duration = Duration::from_secs(2);
 
-/// 一次空闲等待是怎么结束的。
+/// How an idle wait ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wake {
-    /// 有人入队，通知到了
+    /// Someone enqueued and the notification arrived
     Notified,
-    /// 等满一个轮询间隔，什么也没来
+    /// A full poll interval passed and nothing came
     Polled,
 }
 
-/// 建立唤醒监听。`None` = 建不起来，worker 只靠轮询，行为与没有通知时一样。
+/// Set up the wake-up listener. `None` = could not be set up; the worker relies on polling alone, behaving as if there were no notifications.
 ///
-/// 这条连接从池里取出后**一直握着**：LISTEN 是连接级状态，还回去就没了。
-/// 池上限（`db.rs`）从此少一条给别人用；jobs 只起一个 worker，所以只少这一条。
+/// Once this connection is taken from the pool it is **held the whole time**: LISTEN is connection-level state, and returning it loses it.
+/// The pool cap (`db.rs`) is one fewer for others from then on; jobs runs only one worker, so only this one is lost.
 pub async fn listen_for_jobs(pool: &PgPool) -> Option<PgListener> {
     let mut listener = match PgListener::connect_with(pool).await {
         Ok(listener) => listener,
@@ -370,11 +370,11 @@ pub async fn listen_for_jobs(pool: &PgPool) -> Option<PgListener> {
     Some(listener)
 }
 
-/// 空闲等待：通知先到就先醒，否则等满 `poll`。
+/// Idle wait: wake up if a notification arrives first, otherwise wait for the full `poll`.
 ///
-/// 监听出错不能立刻再认领：库能认领而监听连接重连不上（池满就是一种）的话，
-/// 循环会变成「认领一次、警告一行」的紧循环。出错就按轮询的节奏睡一觉，
-/// 下一轮 `recv` 自己会重连。
+/// A listening error must not immediately claim again: if the database can claim but the listen connection cannot reconnect (a full pool is one such case),
+/// the loop would become a tight loop of "claim once, warn one line". On error, sleep for one poll cycle;
+/// the next `recv` reconnects by itself.
 pub async fn wait_for_work(listener: Option<&mut PgListener>, poll: Duration) -> Wake {
     let Some(listener) = listener else {
         tokio::time::sleep(poll).await;
@@ -391,19 +391,19 @@ pub async fn wait_for_work(listener: Option<&mut PgListener>, poll: Duration) ->
     }
 }
 
-/// 重排失败任务的范围（#216）。三个条件都可空，空 = 不限。
+/// Scope for requeueing failed tasks (#216). All three conditions are nullable; empty = unlimited.
 ///
-/// **按库圈要解 payload**：任务表没有 kb 列，payload 只带 `document_id` /
-/// `source_id` / `kb_id` 三种之一，各自解到库。没有库的系统任务只在不限库时才动
+/// **Per-library scoping resolves the payload**: the task table has no kb column; a payload carries only one of `document_id` /
+/// `source_id` / `kb_id`, each resolved to its library. System tasks without a library are only touched when the library is unlimited.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RequeueScope<'a> {
     pub kb_id: Option<Uuid>,
     pub kind: Option<&'a str>,
-    /// 只排这个时刻之后失败的——告警上的「再跑一遍」圈的正是那次故障窗口
+    /// Only enqueue those that failed after this moment: the "run again" scope on the alert is exactly the failure window
     pub failed_since: Option<DateTime<Utc>>,
 }
 
-/// 库范围的 SQL 谓词，`$N` 是库 id；`requeue_failed` 与 `failed_count` 共用
+/// The library-scope SQL predicate; `$N` is the library id; `requeue_failed` and `failed_count` share
 const KB_SCOPE: &str = "(
        (j.payload ? 'kb_id' AND j.payload->>'kb_id' = $KB::text)
     OR (j.payload ? 'document_id' AND EXISTS (
@@ -413,11 +413,11 @@ const KB_SCOPE: &str = "(
             SELECT 1 FROM sources s
              WHERE s.id::text = j.payload->>'source_id' AND s.kb_id = $KB)))";
 
-/// 把范围内的 failed 任务放回队列：`attempts` 归零、立即到期。
+/// Put the failed tasks in scope back on the queue: `attempts` reset to zero, due immediately.
 ///
 /// RSS hydration is excluded: its source admission policy owns retries.
-/// 其他处理器都是幂等的（启动时回收孤儿就靠这一点）；
-/// 此前 `failed` 是终点，余额耗尽一批文档全失败，充值之后只能逐个点或整源重抽
+/// Other handlers are all idempotent (this is what makes reclaiming orphans at startup safe);
+/// before this, `failed` was a terminal state: when credits ran out, a batch of documents all failed, and after topping up you could only click each one or re-extract the whole source
 pub async fn requeue_failed(pool: &PgPool, scope: RequeueScope<'_>) -> AppResult<u64> {
     let mut tx = pool.begin().await?;
     let sql = format!(
@@ -443,7 +443,7 @@ pub async fn requeue_failed(pool: &PgPool, scope: RequeueScope<'_>) -> AppResult
     Ok(count)
 }
 
-/// 范围内 failed 的条数——设置页那一行「N 个失败任务」
+/// Count of failed items in scope: the settings page's line "N failed tasks"
 pub async fn failed_count(pool: &PgPool, kb_id: Option<Uuid>) -> AppResult<i64> {
     let sql = format!(
         "SELECT count(*) FROM jobs j
@@ -453,7 +453,7 @@ pub async fn failed_count(pool: &PgPool, kb_id: Option<Uuid>) -> AppResult<i64> 
     Ok(sqlx::query_scalar(&sql).bind(kb_id).fetch_one(pool).await?)
 }
 
-/// 一个任务此刻的样子，给「我刚排下去的那件事跑完了没」这个问题用（0051）。
+/// What one task looks like right now, for the question "did the thing I just queued finish?" (0051).
 #[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
 pub struct JobStatus {
     pub id: i64,
@@ -466,8 +466,8 @@ pub struct JobStatus {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// 按 id 读一个任务，**且只在它属于这个库时**。授权跟着库走：能看这个库的人能看
-/// 它的任务；别的库的任务 id 猜对了也只得到 None，与看不见的文档一样答 404。
+/// Read a task by id, **and only if it belongs to this library**. Authorization follows the library: whoever can see the library can see
+/// its tasks; a task id from another library, even if guessed correctly, returns only None, and answers 404 just like an invisible document.
 pub async fn status_in_kb(pool: &PgPool, kb_id: Uuid, id: i64) -> AppResult<Option<JobStatus>> {
     let sql = format!(
         "SELECT j.id, j.kind, j.status, j.attempts, j.max_attempts, j.last_error, j.run_at, j.updated_at
@@ -481,13 +481,13 @@ pub async fn status_in_kb(pool: &PgPool, kb_id: Uuid, id: i64) -> AppResult<Opti
         .await?)
 }
 
-/// 认领一个到期任务；没有则返回 None。
+/// Claim one due task; return None if there is none.
 ///
-/// 不调对话模型的任务排在前面（`job_priority`，迁移 0116，#1300）：同步、文档入库这些几秒
-/// 的活，不该等在几百个更早的抽取后面。`no_chat_only` 只认领这些，给保留通道用
+/// Tasks that do not call the chat model are queued first (`job_priority`, migration 0116, #1300): synchronous and document-ingest work, a few seconds
+/// of work, should not wait behind hundreds of earlier extractions. `no_chat_only` claims only these, for the reserved lane
 async fn claim_one(pool: &PgPool, no_chat_only: bool) -> AppResult<Option<Job>> {
-    // 写成字面量而不是绑定参数：这样它是索引条件，扫到优先级 0 的尽头就停；绑定参数只能
-    // 逐行筛，模型任务堆到上万条时，常规名额占满后每 200ms 都要把它们全扫一遍
+    // Written as a literal rather than a bound parameter: this makes it an index condition, so the scan stops at the end of priority 0; a bound parameter can only
+    // filter row by row, and when model tasks pile up to tens of thousands, after the regular slots fill up it would scan them all every 200ms
     let only = if no_chat_only {
         "AND job_priority(kind) = 0"
     } else {
@@ -510,17 +510,17 @@ async fn claim_one(pool: &PgPool, no_chat_only: bool) -> AppResult<Option<Job>> 
     Ok(job)
 }
 
-/// 下一次重试等多久；`None` = 到此为止。
+/// How long to wait before the next retry; `None` = stop here.
 ///
-/// 两个理由到此为止：**次数用完了**，或者**处理器说了这次不会因为重试而变好**
-/// （`utopia_core::Terminal`，见 issue #195）。后者以前不存在，于是余额耗尽的
-/// 任务照样把三次退避走完——七分钟里余额不会自己长回来，那三次只是把同一句
-/// 错误重说三遍，还把运维该看见的「失败」推迟了七分钟。
+/// Two reasons to stop here: **the attempts are used up**, or **the handler says this will not get better by retrying**
+/// (`utopia_core::Terminal`, see issue #195). The latter did not exist before, so a task whose credits ran out
+/// still ran through three backoffs: credits do not regrow in seven minutes, so those three retries just repeated the same
+/// error three times and delayed the "failed" that operators should see by seven minutes.
 ///
-/// 限流相反，它正是这套退避的服务对象：配额会自己恢复。#176 把两类分开就是
-/// 为了让它们各走各的路，而重试策略当时没跟上。
+/// Rate limiting is the opposite: it is exactly what this backoff serves, since quotas recover by themselves. #176 split the two classes precisely so
+/// they could take separate paths, but the retry policy had not caught up at the time.
 ///
-/// 抽成纯函数是为了能测——决定在这里，写库只是把决定落下去。
+/// Made a pure function so it can be tested: the decision is made here, and the database write only records it.
 fn retry_delay(attempts: i32, max_attempts: i32, terminal: bool) -> Option<i64> {
     if terminal || attempts >= max_attempts {
         return None;
@@ -528,20 +528,20 @@ fn retry_delay(attempts: i32, max_attempts: i32, terminal: bool) -> Option<i64> 
     Some(30i64 * i64::from(attempts) * i64::from(attempts))
 }
 
-/// 处理器挂上 `Deferred { retry_in }` 时下一次重试的等待秒数。**与失败次数无关**——
-/// 这是 `Deferred` 跟默认退避的关键区别：默认的 `30s × attempts²` 是「再试一次
-/// 也许能好」的递增，而 `Deferred` 是「现在条件不满足，`retry_in` 之后再试」，
-/// 与第几次没有关系。同一个等待条件挂回队列两次，两次都得到同一个 `run_at`
-/// 偏移，没有 60s、120s 的递增（#526）。
+/// The wait in seconds before the next retry when a handler returns `Deferred { retry_in }`. **Independent of the failure count**:
+/// this is the key difference between `Deferred` and the default backoff: the default `30s × attempts²` grows as "try once more, maybe it will be better",
+/// whereas `Deferred` is "the conditions are not met now, try again after `retry_in`", regardless of which attempt this is.
+/// The same wait condition requeued twice gets the same `run_at`
+/// offset, with no growing 60s, 120s (#526).
 ///
-/// 一条任务最多连续等多久（见 `mark_failed`）。一小时够一个大本体在远端嵌入模型上
-/// 补齐；过了还没好，多半是补齐任务自己在失败，该让这条抽取按失败处理、被人看见
+/// The longest a task may keep waiting in a row (see `mark_failed`). One hour is enough for a large ontology to be backfilled on a remote embedding model;
+/// if it is still not done after that, most likely the backfill job itself is failing, and this extraction should be treated as failed so a person sees it
 pub const DEFER_WINDOW_SECS: i64 = 60 * 60;
 
 fn deferred_retry_secs(retry_in: std::time::Duration) -> i64 {
-    // 截断到秒：底层 `run_at` 是 timestamptz，亚秒精度存不住，而几十毫秒也不值得
-    // 一行浮点换算。向上取整——少等一秒比早跑一秒好，前者无害，后者会把还在跑的
-    // embedding job 撞回锁上。
+    // Truncate to seconds: the underlying `run_at` is timestamptz, which cannot store sub-second precision, and tens of milliseconds are not worth
+    // a float conversion. Round up: waiting one second longer is better than running one second early; the former is harmless, the latter would knock the still-running
+    // embedding job back into its lock.
     let secs = retry_in.as_secs_f64().ceil();
     if !secs.is_finite() || secs < 1.0 {
         1
@@ -562,7 +562,7 @@ enum JobOutcome {
 impl JobOutcome {
     fn failed(job: &Job, err: &anyhow::Error) -> Self {
         let terminal = utopia_core::is_terminal(err);
-        // Terminal 优先；结果写回重试沿用同一分类和完整错误原文。
+        // Terminal first; result write-back retries use the same classification and the full original error text.
         let deferred_secs = if terminal {
             None
         } else {
@@ -576,7 +576,7 @@ impl JobOutcome {
     }
 }
 
-/// true = 本次写入；false = 已结束或领取失效。两者都结束这次写回。
+/// true = this write; false = already finished or claim invalid. Either way, this write-back ends.
 async fn persist_outcome(
     pool: &PgPool,
     job: &Job,
@@ -589,7 +589,7 @@ async fn persist_outcome(
         deferred_secs,
     } = outcome
     else {
-        // 成功要清掉前一次错误，避免任务显示 done 却仍带着失败原因。
+        // On success, clear the previous error, so a task showing done does not still carry a failure reason.
         let res = sqlx::query(
             "UPDATE jobs SET status = 'done', last_error = NULL, updated_at = now()
              WHERE id = $1 AND status = 'running' AND locked_at = $2",
@@ -602,8 +602,8 @@ async fn persist_outcome(
     };
 
     if let Some(secs) = deferred_secs {
-        // Deferred 退回认领消耗的次数；等待窗口耗尽后才走普通失败预算。
-        // 等待窗口和下次运行时刻固定在 handler 完成时，不随写回重试滑动。
+        // Deferred gives back the attempts consumed by claiming; only once the wait window is exhausted does the normal failure budget apply.
+        // The wait window and next run time are fixed when the handler finishes, and do not slide with write-back retries.
         let res = sqlx::query(
             "UPDATE jobs SET status = 'queued', last_error = $2,
                     attempts = GREATEST(0, attempts - 1),
@@ -626,7 +626,7 @@ async fn persist_outcome(
         if res.rows_affected() > 0 {
             return Ok(true);
         }
-        // 0 行也可能是旧领取；普通失败分支保留相同保护，不能覆盖新执行。
+        // Zero rows may also mean a stale claim; the normal failure branch keeps the same guard and must not overwrite a new execution.
     }
 
     let status = if backoff_secs.is_some() {
@@ -652,7 +652,7 @@ async fn persist_outcome(
     Ok(res.rows_affected() > 0)
 }
 
-/// 集成测试的单次写回入口；worker 保存结果后由 persist_with_retry 写回。
+/// The single write-back entry point for integration tests; in the worker, persist_with_retry writes back after the result is saved.
 #[doc(hidden)]
 pub async fn mark_failed(pool: &PgPool, job: &Job, err: &anyhow::Error) -> AppResult<()> {
     persist_outcome(pool, job, &JobOutcome::failed(job, err), Utc::now()).await?;
@@ -704,17 +704,17 @@ async fn persist_with_retry(
     }
 }
 
-/// 已完成任务的保留期。此前 done 的行永不删除：内部集群攒到 250 万行、924 MB，
-/// 每条 jobs 查询都在为它们买单。failed 的不删，因为 `requeue_failed` 要读它们。
+/// Retention period for completed tasks. Previously done rows were never deleted: the internal cluster accumulated 2.5 million rows, 924 MB,
+/// and every jobs query was paying for them. failed rows are not deleted, because `requeue_failed` reads them.
 const DONE_JOB_RETENTION: Duration = Duration::from_secs(14 * 24 * 3600);
 
-/// 清理已完成任务的间隔。
+/// Interval for cleaning up completed tasks.
 const DONE_JOB_PRUNE_EVERY: Duration = Duration::from_secs(3600);
 
-/// 每条 DELETE 语句最多删多少行：每批一条独立的短语句，不开长事务。
+/// Maximum rows deleted per DELETE statement: each batch is its own short statement, no long transaction.
 const PRUNE_BATCH: i64 = 5000;
 
-/// 删除 `updated_at` 早于保留期的 done 任务，返回删除总数。
+/// Delete done tasks whose `updated_at` is older than the retention period; return the total deleted.
 pub async fn prune_done(pool: &PgPool, older_than: Duration) -> AppResult<u64> {
     let cutoff = Utc::now() - older_than;
     let mut total = 0u64;
@@ -737,18 +737,18 @@ pub async fn prune_done(pool: &PgPool, older_than: Duration) -> AppResult<u64> {
     }
 }
 
-/// 常规名额全占满之后，还能再认领几个不调对话模型的任务（#1300）。
+/// After the regular slots are fully occupied, how many more tasks that do not call the chat model can still be claimed (#1300).
 ///
-/// 光排序不够：抽取等模型许可的时候照样占着 worker 名额。本地模型上名额常被等许可的
-/// 抽取占满，排在最前面的同步也只能等某个抽取跑完。这两个名额只给 `job_priority` 为 0
-/// 的任务，所以 `worker_concurrency` 管的是其余一切，同时在跑的最多再多两个
+/// Sorting alone is not enough: extraction holds a worker slot even while waiting for model permission. On a local model the slots are often filled by
+/// extractions waiting for permission, so the highest-priority synchronous task can only wait until one extraction finishes. These reserved slots are for tasks with `job_priority` 0 only,
+/// so `worker_concurrency` governs everything else, plus at most two more running at once
 pub const NO_CHAT_LANE: usize = 2;
 
-/// worker 调度循环：运行中任务数低于目标并发就继续认领（有活立即续派），
-/// 空闲时等入队通知、2s 轮询兜底（#517）；每个任务在独立 tokio task 中执行，长抽取不再阻塞同步。
-/// 常规名额满了，还有 [`NO_CHAT_LANE`] 个名额只认领不调对话模型的任务。
-/// `concurrency` 每轮热读——系统设置里改并发数即时生效。
-/// 任务分发逻辑由调用方以 handler 注入（store 不依赖上层 crate）。
+/// Worker scheduling loop: while the running task count is below the target concurrency, keep claiming (if work exists, dispatch again immediately),
+/// when idle wait for a queue notification, with a 2s poll as backup (#517); each task runs in its own tokio task, so long extractions no longer block synchronous work.
+/// When the regular slots are full, [`NO_CHAT_LANE`] further slots claim only tasks that do not call the chat model.
+/// `concurrency` is hot-read every round: changing the concurrency count in system settings takes effect immediately.
+/// Task dispatch logic is injected by the caller as a handler (the store does not depend on upper-layer crates).
 pub async fn run_worker<F, Fut>(pool: PgPool, concurrency: Arc<AtomicUsize>, handler: F)
 where
     F: Fn(Job) -> Fut + Clone + Send + Sync + 'static,
@@ -756,8 +756,8 @@ where
 {
     let running = Arc::new(AtomicUsize::new(0));
     let in_lane = Arc::new(AtomicUsize::new(0));
-    // 孤儿回收：进程被杀时 running 任务无人收尸，文档会永远停在 extracting。
-    // 单进程部署下，启动时仍为 running 的必是孤儿——一律重排队（处理器均幂等）。
+    // Orphan reclaim: when the process is killed, running tasks have no one to clean up, so documents stay stuck in extracting forever.
+    // In a single-process deployment, any task still marked running at startup must be an orphan: requeue all of them (handlers are all idempotent).
     match sqlx::query(
         "UPDATE jobs SET status = 'queued', locked_at = NULL, updated_at = now()
          WHERE status = 'running'",
@@ -796,7 +796,7 @@ where
             });
         }
         let cap = concurrency.load(Ordering::Relaxed).max(1);
-        // 常规名额满了就只往保留通道里认领，通道也满了才歇
+        // When the regular slots are full, claim only from the reserved lane, and stop only when that lane is full too
         let lane = running.load(Ordering::Relaxed) >= cap;
         if lane && in_lane.load(Ordering::Relaxed) >= NO_CHAT_LANE {
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -804,18 +804,18 @@ where
         }
         match claim_one(&pool, lane).await {
             Ok(Some(job)) => {
-                // 从哪边的名额认领的，跑完就还给哪边
+                // Claimed from whichever side's slot; give it back to that same side when done.
                 let running = if lane { &in_lane } else { &running }.clone();
                 running.fetch_add(1, Ordering::Relaxed);
                 let pool = pool.clone();
                 let handler = handler.clone();
                 tokio::spawn(async move {
-                    // **处理器 panic 也要收尸。** 直接 `handler(job).await` 的话，
-                    // panic 会把这个 spawn 出来的 future 一起掀掉：`mark_failed`
-                    // 不会跑（任务行永远停在 running，无错误无重试），`running`
-                    // 也不会减（每 panic 一次就永久少一个并发名额，攒够 cap 之后
-                    // 整个队列不再认领任何任务）。套一层 spawn，panic 变成
-                    // JoinError 拿回来，两件事就都还在。
+                    // **Handler panics must also be cleaned up.** If we call `handler(job).await` directly,
+                    // a panic would take down this spawned future with it: `mark_failed`
+                    // would not run (the task row stays running forever, no error and no retry), and `running`
+                    // would not decrement either (each panic permanently costs one concurrency slot, and after enough of them the cap is reached and
+                    // the whole queue no longer claims any task). Wrapping it in a spawn turns a panic into a
+                    // JoinError that comes back, so both of those are still handled.
                     let inner = {
                         let (handler, job) = (handler.clone(), job.clone());
                         tokio::spawn(async move { handler(job).await })
@@ -838,7 +838,7 @@ where
                     running.fetch_sub(1, Ordering::Relaxed);
                 });
             }
-            // 常规名额满着：随时可能空出一个，照旧 200ms 再看
+            // Regular slots are full: one may free up at any moment, so check again in 200ms as before
             Ok(None) if lane => tokio::time::sleep(Duration::from_millis(200)).await,
             Ok(None) => {
                 wait_for_work(listener.as_mut(), IDLE_POLL).await;
@@ -868,7 +868,7 @@ mod tests {
     use super::{deferred_retry_secs, retry_delay};
     use std::time::Duration;
 
-    /// 退避照旧：30s、120s、270s，第三次之后放弃。
+    /// Backoff unchanged: 30s, 120s, 270s, give up after the third.
     #[test]
     fn an_ordinary_failure_backs_off_and_then_gives_up() {
         assert_eq!(retry_delay(1, 3, false), Some(30));
@@ -876,24 +876,24 @@ mod tests {
         assert_eq!(retry_delay(3, 3, false), None);
     }
 
-    /// 标成没救的**第一次就到此为止**——那三次退避加起来是七分钟，
-    /// 而余额不会在七分钟里自己长回来（#195）。
+    /// Marked as hopeless: **stop after the first attempt**; those three backoffs add up to seven minutes,
+    /// and credits do not regrow by themselves in seven minutes (#195).
     #[test]
     fn a_terminal_failure_does_not_spend_the_budget() {
         assert_eq!(retry_delay(1, 3, true), None);
     }
 
-    /// `Deferred` 不随失败次数递增——同一等待条件两次排队得到的 `run_at`
-    /// 偏移相同，不会出现 60s、120s 的递增（#526）。
+    /// `Deferred` does not grow with the failure count: the same wait condition queued twice gets the same `run_at`
+    /// offset, with no 60s, 120s growth (#526).
     #[test]
     fn deferred_retry_is_independent_of_attempts() {
         assert_eq!(
             deferred_retry_secs(Duration::from_secs(30)),
             deferred_retry_secs(Duration::from_secs(30))
         );
-        // 截断到秒，向上取整：29.5s → 30s
+        // Truncate to seconds, rounding up: 29.5s becomes 30s
         assert_eq!(deferred_retry_secs(Duration::from_millis(29_500)), 30);
-        // 0/负数/NaN 都给 1s 下界——至少等一秒，比立刻重试的轮询间隔还短就是浪费
+        // 0, negative, and NaN all get a 1s floor: wait at least one second; anything shorter than the poll interval for an immediate retry is wasteful
         assert_eq!(deferred_retry_secs(Duration::ZERO), 1);
         assert_eq!(deferred_retry_secs(Duration::from_nanos(500)), 1);
     }

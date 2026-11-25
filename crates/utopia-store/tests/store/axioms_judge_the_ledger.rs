@@ -1,16 +1,16 @@
-//! 一致性检查打在真库上：取数、判断、落库、重跑。
+//! The consistency check against a real store: fetch the data, judge, store, rerun.
 //!
-//! 纯逻辑那部分在 `utopia-reason` 里已经有 12 个用例,不起库就能跑。这里钉的是
-//! 那一层看不见的四样,每一样都活在 SQL 或表约束里:
+//! The pure-logic part already has 12 cases in `utopia-reason`, and runs without a store. What is pinned here is
+//! the four things that layer cannot see, each of which lives in SQL or table constraints:
 //!
-//! - **取数的三个过滤**。被推翻的事实、没有谓词的事实、宾语是字面值的属性事实,
-//!   都不该参与——公理谈的是实体之间的关系
-//! - **没有公理就没有判据**。一个没导本体包的库跑出来是零,那是实情不是故障
-//! - **重跑幂等**。同一处矛盾不重复入库,而人表过态的那一行重跑不会被抹掉
-//!   （`ontology_proposals` 在这里踩过坑:重跑把被拒绝的提案刷回待看）
-//! - **陈旧的会被清掉**。事实撤了,那条违规就不该还挂在 Review 页上
+//! - **The three filters on the data fetched**. Facts that have been overturned, facts with no predicate, and attribute facts whose object is a literal
+//!   should take no part — axioms speak of relations between entities
+//! - **No axioms, no criterion**. A store with no ontology package loaded runs to zero, which is the truth, not a fault
+//! - **Rerunning is idempotent**. The same contradiction is not stored twice, and a row a person has already judged is not wiped by a rerun
+//!   (`ontology_proposals` hit a pitfall here: a rerun flipped rejected proposals back to pending)
+//! - **Stale ones are cleared**. Once a fact is retracted, its violation should not still hang on the Review page
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data.
 
 use sqlx::PgPool;
 use utopia_store::reasoning;
@@ -19,9 +19,9 @@ use uuid::Uuid;
 struct Fixture {
     org: Uuid,
     kb: Uuid,
-    /// 声明了 asymmetric + irreflexive
+    /// Declares asymmetric + irreflexive
     owns: Uuid,
-    /// 一位公理都没声明
+    /// Declares no axioms at all
     mentions: Uuid,
     a: Uuid,
     b: Uuid,
@@ -64,7 +64,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     .bind(kb)
     .execute(pool)
     .await?;
-    // 一位公理都没有——它的边永远不该被判成矛盾
+    // Not a single axiom — its edges should never be judged a contradiction
     sqlx::query(
         "INSERT INTO relation_types (id, kb_id, key, label) VALUES ($1, $2, 'mentions', 'mentions')",
     )
@@ -93,7 +93,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     })
 }
 
-/// 落一条关系事实,返回它的 id。
+/// Stores one relation fact, returns its id.
 async fn fact(pool: &PgPool, kb: Uuid, s: Uuid, p: Uuid, o: Uuid) -> anyhow::Result<Uuid> {
     let id = Uuid::now_v7();
     sqlx::query(
@@ -128,20 +128,20 @@ async fn the_ontology_is_the_only_judge() -> anyhow::Result<()> {
     let f = seed(&pool).await?;
 
     let run = async {
-        // ---- 一、没有矛盾的库跑出来是零
+        // ---- 1. A store with no contradictions runs to zero
         let quiet = fact(&pool, f.kb, f.a, f.owns, f.b).await?;
         let r = reasoning::run(&pool, f.kb).await?;
         assert_eq!(r.edges, 1);
         assert_eq!(r.predicates_with_axioms, 1, "mentions 一位都没声明,不该进来");
         assert_eq!(r.found, 0, "一条单向的 owns 不构成任何矛盾");
 
-        // ---- 二、公理说了才算数
-        // B owns A —— 与上面那条构成反对称违规
+        // ---- 2. Axioms only count when declared
+        // B owns A — together with the one above, forms an asymmetry violation
         let back = fact(&pool, f.kb, f.b, f.owns, f.a).await?;
-        // A mentions B / B mentions A —— 双向,但 mentions 没有公理,不该报
+        // A mentions B / B mentions A — two-way, but mentions has no axiom, so it should not be reported
         fact(&pool, f.kb, f.a, f.mentions, f.b).await?;
         fact(&pool, f.kb, f.b, f.mentions, f.a).await?;
-        // A owns A —— 自反违规
+        // A owns A — a reflexivity violation
         let loop_fact = fact(&pool, f.kb, f.a, f.owns, f.a).await?;
 
         let r = reasoning::run(&pool, f.kb).await?;
@@ -153,7 +153,7 @@ async fn the_ontology_is_the_only_judge() -> anyhow::Result<()> {
         );
         assert_eq!(r.inserted, 2);
 
-        // 自反那一条:两列指的是同一条事实
+        // The reflexivity case: the two columns refer to the same fact
         let (l, rr): (Uuid, Uuid) = sqlx::query_as(
             "SELECT left_fact, right_fact FROM axiom_violations
               WHERE kb_id = $1 AND kind = 'self_loop'",
@@ -164,13 +164,13 @@ async fn the_ontology_is_the_only_judge() -> anyhow::Result<()> {
         assert_eq!(l, loop_fact);
         assert_eq!(l, rr, "一条事实跟自己矛盾,不需要第二条");
 
-        // ---- 三、重跑不重复入库
+        // ---- 3. A rerun does not store it again
         let again = reasoning::run(&pool, f.kb).await?;
         assert_eq!(again.found, 2);
         assert_eq!(again.inserted, 0, "同一处矛盾第二次跑不该再插一行");
         assert_eq!(again.cleared, 0, "也不该把上一轮的清掉");
 
-        // ---- 四、人表过态的,重跑不抹
+        // ---- 4. A row a person has judged is not wiped by a rerun
         sqlx::query(
             "UPDATE axiom_violations SET status = 'resolved', resolution = 'accepted'
               WHERE kb_id = $1 AND kind = 'asymmetry'",
@@ -188,7 +188,7 @@ async fn the_ontology_is_the_only_judge() -> anyhow::Result<()> {
         .await?;
         assert_eq!(resolved, 1, "人的决定必须活过重跑");
 
-        // ---- 五、事实撤了,陈旧的 open 行要清掉
+        // ---- 5. Once a fact is retracted, the stale open row must be cleared
         sqlx::query("UPDATE facts SET invalidated_at = now() WHERE id = $1")
             .bind(loop_fact)
             .execute(&pool)
@@ -200,7 +200,7 @@ async fn the_ontology_is_the_only_judge() -> anyhow::Result<()> {
             "撤掉那条事实之后自反违规就不成立了"
         );
 
-        // ---- 六、属性事实不参与:宾语是字面值,公理谈的是实体之间的关系
+        // ---- 6. Attribute facts do not take part: the object is a literal, while axioms speak of relations between entities
         sqlx::query(
             "INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_value)
              VALUES ($1, $2, $3, $4, '\"2015\"'::jsonb)",
@@ -214,7 +214,7 @@ async fn the_ontology_is_the_only_judge() -> anyhow::Result<()> {
         let attrs = reasoning::run(&pool, f.kb).await?;
         assert_eq!(attrs.edges, 4, "字面值宾语的那条不该被取成边");
 
-        // ---- 七、没有本体包的库:结论是「没有判据」,不是「没有矛盾」
+        // ---- 7. A store with no ontology package: the conclusion is "no criterion", not "no contradiction"
         sqlx::query("UPDATE relation_types SET is_asymmetric = FALSE, is_irreflexive = FALSE WHERE kb_id = $1")
             .bind(f.kb)
             .execute(&pool)
@@ -231,7 +231,7 @@ async fn the_ontology_is_the_only_judge() -> anyhow::Result<()> {
     }
     .await;
 
-    // 连 org 一起删——只删 kb 会把 organizations / workspaces 留在开发库里
+    // Delete the org along with it — deleting only the kb would leave organizations / workspaces behind in the dev store
     sqlx::query("DELETE FROM organizations WHERE id = $1")
         .bind(f.org)
         .execute(&pool)

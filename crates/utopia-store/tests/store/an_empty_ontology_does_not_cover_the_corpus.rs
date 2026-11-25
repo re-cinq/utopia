@@ -1,10 +1,10 @@
-//! 文档说了、本体还放不下的有多少：没绑到类的类别词、没绑到属性的短语形状。
+//! How many things the document says that the ontology still cannot hold: category words not bound to a class, and phrase shapes not bound to a property.
 //!
-//! 工作台从前拿 0003 的 `ontology_misses` 说「本体覆盖了语料」，而开放图谱的抽取不往那张表
-//! 里写：一个一个类都没有的库，二十二个类别词没着落，页面上写的是「覆盖了」。这两个数是
-//! 本体代理读的那两样（0061 决定 2），别的库的不算。
+//! The workbench used to say "the ontology covers the corpus" by reading 0003's `ontology_misses`, but open-graph extraction does not write to that table.
+//! In a library with not one class, twenty-two category words had no home, yet the page said "covered". These two numbers are
+//! what the ontology agent reads (0061 decision 2); other libraries' numbers do not count.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_store::ontology::{uncovered, Uncovered};
@@ -39,14 +39,14 @@ async fn kind_words_and_phrases_with_no_place_are_counted_per_base() -> anyhow::
     .await?;
 
     let run = async {
-        // 什么都还没读过：没有要等的
+        // Nothing has been read yet: nothing to wait for
         let none = Uncovered {
             kind_words: 0,
             phrases: 0,
         };
         assert_eq!(uncovered(&pool, kb).await?, none);
 
-        // 读过文档、一个类都没有：每个类别词都没着落
+        // Documents read, yet not a single class: every category word is left without a home
         for word in ["person", "project", "city"] {
             sqlx::query(
                 "INSERT INTO type_bindings (id, kb_id, kind_word, status) VALUES ($1, $2, $3, 'none')",
@@ -59,7 +59,7 @@ async fn kind_words_and_phrases_with_no_place_are_counted_per_base() -> anyhow::
         }
         assert_eq!(uncovered(&pool, kb).await?.kind_words, 3);
 
-        // 加了一个类、一条属性：绑上的不算，判成 none 的和两票不一致的都算
+        // One class and one attribute added: those bound do not count; those judged none and those with inconsistent votes do count
         sqlx::raw_sql(&format!(
             "INSERT INTO entity_types(id,kb_id,key,label) VALUES ('{person}','{kb}','person','person');
              INSERT INTO relation_types(id,kb_id,key,label,kind,temporal,description)

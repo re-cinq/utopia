@@ -1,23 +1,23 @@
-//! 两点之间的路径（#558）：`paths_between(a, b)`——A 和 B 是怎么连上的。
+//! Paths between two points (#558): `paths_between(a, b)`: how A and B are connected.
 //!
-//! 「OpenAI 和 Anthropic 的关系」是一道图谱题，而图谱工具从前只有按名找实体和
-//! 倒出一个实体的全部事实。模型要答它，得把 OpenAI 的 555 条事实和 Anthropic 的
-//! 全倒进上下文自己连线；实测十六次里三次连上，三次查了六七轮后宣布「库里没有」。
-//! 库里有，两跳：OpenAI —employee→ Dario Amodei —founder→ Anthropic。
+//! "The OpenAI and Anthropic relationship" is a graph question, and the graph tools used to only find an entity by name and
+//! dump all facts about one entity. To answer it, the model had to dump OpenAI's 555 facts and Anthropic's
+//! all into context and wire them up itself; in sixteen real runs, three connected, and three times it searched six or seven rounds before declaring "nothing in the database".
+//! The database has it, two hops: OpenAI -employee-> Dario Amodei -founder-> Anthropic.
 //!
-//! **回的是链，不是节点集。** 一跳邻域展开已经有了（`graph::neighborhood`，给画布用），
-//! 拿来答关系题等于把倒事实换成倒邻居。这里每条结果都是从 a 到 b 的一条边序列，
-//! 短的在前，途经节点越冷门越靠前。
+//! **Returns chains, not node sets.** One-hop neighborhood expansion already exists (`graph::neighborhood`, for the canvas),
+//! and using it to answer relationship questions would mean dumping neighbors instead of facts. Each result here is an edge sequence from a to b,
+//! shortest first, and the more obscure the nodes along the way, the earlier it ranks.
 //!
-//! **两根时间轴都要过。** 带 `at` 时，路径上**每一条边**都得在那一刻成立——2019 年
-//! 的 OpenAI 和 Anthropic 之间还没有 Anthropic；带 `as_of` 时按当时的记录走，包括
-//! 当时还没合并的实体归谁（`record_axis::owner_at`）。这是普通图谱路径查询没有的
-//! 一半，也是这个库该露出来的那一半。
+//! **Both time axes must hold.** With `at`, **every edge** on the path must hold at that moment: in 2019 there was
+//! no Anthropic between OpenAI and Anthropic yet; with `as_of`, follow the records as they stood then, including
+//! who owned entities not yet merged at the time (`record_axis::owner_at`). This is half of what a plain graph path query lacks,
+//! and it is the half this database should expose.
 //!
-//! **搜索是两头对中间。** 三跳以内的路径 a–x–y–b，只要知道 a 的两跳邻接和 b 的一跳
-//! 邻居就能拼出来，不必把 a 的第三层也铺开——第三层是 OpenAI 这种点的几万条边。
-//! 枢纽（度数超过 `hub_degree` 的中间节点）不往下展：经过 Sam Altman 的路径两点之间
-//! 到处都是，说明不了什么；两端本身不受此限，起点是谁就从谁走。
+//! **Search meets in the middle.** A path of up to three hops a-x-y-b can be assembled from a's two-hop adjacency and b's one-hop
+//! neighbors, without spreading out a's third layer: the third layer is tens of thousands of edges for a node like OpenAI.
+//! Hubs (intermediate nodes with degree above `hub_degree`) are not expanded: paths between two points that go through Sam Altman are
+//! everywhere and prove nothing; the endpoints themselves are exempt, and the search walks out from whichever one is the start.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -27,18 +27,18 @@ use uuid::Uuid;
 
 use crate::{record_axis, world_axis};
 
-/// 搜索的边界。测试把 `hub_degree` 调小来验证枢纽不被穿越；产品用默认值。
+/// Search bounds. Tests shrink `hub_degree` to verify hubs are not crossed; the product uses the defaults.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
-    /// 最多几跳（1..=3；再长的路径两点之间到处都是，说明不了关系）
+    /// Maximum hops (1..=3; longer paths are everywhere between any two points and prove nothing about the relationship)
     pub max_hops: usize,
-    /// 最多回几条
+    /// Maximum number to return
     pub max_paths: usize,
-    /// 途经节点的度数上限：超过它的不往下展（两端不受此限）
+    /// Degree cap for intermediate nodes: above it, do not expand (endpoints exempt)
     pub hub_degree: i64,
-    /// 第二层展开最多读多少条边——按度数从小到大取途经节点，读满即止
+    /// Maximum edges to read for the second-layer expansion: take intermediate nodes by ascending degree, stop when the budget is read
     pub max_edges: i64,
-    /// 排序之前最多攒多少条候选：同一对节点之间多条边会让组合数爆开
+    /// Maximum candidates to collect before sorting: multiple edges between the same pair of nodes would blow up the combinatorics
     pub max_candidates: usize,
 }
 
@@ -54,8 +54,8 @@ impl Default for Limits {
     }
 }
 
-/// 路径上的一条边，带两端的名字和它自己的区间；方向由调用方按走向判断
-/// （`subject_id` 等于上一个节点就是顺着走的）
+/// An edge on the path, with the names of its two ends and its own interval; the caller judges the direction from the traversal
+/// (`subject_id` equal to the previous node means it is walked forward)
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct PathEdge {
     pub fact_id: Uuid,
@@ -71,11 +71,11 @@ pub struct PathEdge {
     pub holds_from: Option<DateTime<Utc>>,
     pub holds_to: Option<DateTime<Utc>>,
     pub confidence: f32,
-    /// 终点是时间线推出来的；区间是人改过的、改的是哪一端（#970，同 `EntityFact`）
+    /// The end is derived from the timeline; the interval was edited by a person, and which end was edited (#970, same as `EntityFact`)
     pub end_derived: bool,
     pub time_corrected: bool,
     pub corrected_ends: Option<String>,
-    /// 时间线关上它时接的那一行、接任的那一端，与修正备注（#970 第二步，同 `EntityFact`）
+    /// The row the timeline connected when it closed this, the end it took over, and the correction note (#970 step 2, same as `EntityFact`)
     pub closed_by_id: Option<Uuid>,
     pub closed_by: Option<String>,
     pub closed_by_value: Option<serde_json::Value>,
@@ -84,11 +84,11 @@ pub struct PathEdge {
 
 #[derive(Debug, Clone)]
 pub struct Path {
-    /// 从 a 到 b 的节点序列，含两端
+    /// Node sequence from a to b, including both ends
     pub nodes: Vec<Uuid>,
-    /// `nodes[i]` 与 `nodes[i+1]` 之间的边
+    /// Edge between `nodes[i]` and `nodes[i+1]`
     pub edges: Vec<PathEdge>,
-    /// 途经节点度数的 ln(1+d) 之和，越小越具体；两端不计
+    /// Sum of ln(1+d) over intermediate nodes' degrees; smaller means more specific; endpoints not counted
     pub specificity: f64,
 }
 
@@ -98,7 +98,7 @@ impl Path {
     }
 }
 
-/// 一条边碰到的两个实体（已经按 `as_of` 折算成当时的归属）
+/// The two entities at one edge (already converted to their ownership at that time via `as_of`)
 #[derive(Debug, Clone, Copy, sqlx::FromRow)]
 struct Touch {
     id: Uuid,
@@ -106,7 +106,7 @@ struct Touch {
     object_id: Uuid,
 }
 
-/// 候选：事实 id 序列与节点序列，排序前先攒起来
+/// Candidate: fact id sequence and node sequence, collected before sorting
 struct Candidate {
     nodes: Vec<Uuid>,
     facts: Vec<Uuid>,
@@ -126,7 +126,7 @@ pub async fn paths_between(
         return Ok(Vec::new());
     }
 
-    // a 的一跳：邻居 → 连到它的边
+    // a's one hop: neighbor -> the edge connecting to it
     let mut a_edges: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     for t in touching(pool, kb_id, &[a], at, as_of).await? {
         let other = if t.subject_id == a {
@@ -137,7 +137,7 @@ pub async fn paths_between(
         a_edges.entry(other).or_default().push(t.id);
     }
 
-    // b 的一跳（两跳以上才用得上）
+    // b's one hop (only needed for paths of two or more hops)
     let mut b_edges: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     if max_hops >= 2 {
         for t in touching(pool, kb_id, &[b], at, as_of).await? {
@@ -150,7 +150,7 @@ pub async fn paths_between(
         }
     }
 
-    // a 的第二层：只展非枢纽的一跳邻居，按度数从小到大读到 `max_edges` 为止
+    // a's second layer: expand only non-hub one-hop neighbors, reading in ascending degree until `max_edges`
     let mut adj2: HashMap<Uuid, Vec<(Uuid, Uuid)>> = HashMap::new();
     if max_hops >= 3 {
         let mids: Vec<Uuid> = a_edges
@@ -186,7 +186,7 @@ pub async fn paths_between(
         }
     }
 
-    // 拼候选：一跳直连，两跳交集，三跳经第二层碰到 b 的邻居
+    // Assemble candidates: direct one-hop, two-hop intersection, three-hop reaching b's neighbor via the second layer
     let mut candidates: Vec<Candidate> = Vec::new();
     let cap = limits.max_candidates.max(1);
     if let Some(direct) = a_edges.get(&b) {
@@ -246,7 +246,7 @@ pub async fn paths_between(
         return Ok(Vec::new());
     }
 
-    // 排序：短的在前；同长的按途经节点的冷门程度；再按置信度
+    // Sort: shorter first; for equal length, by how obscure the intermediate nodes are; then by confidence
     let mut mids: Vec<Uuid> = candidates
         .iter()
         .flat_map(|c| c.nodes[1..c.nodes.len() - 1].iter().copied())
@@ -282,8 +282,8 @@ pub async fn paths_between(
             .then(y.2.partial_cmp(&x.2).unwrap_or(std::cmp::Ordering::Equal))
     });
 
-    // 同一串节点、同一串有向谓词只回一条：同向的重复观察折叠，但 A → B 和
-    // A ← B 不是同一条关系，不能因遍历时两端相同而丢掉一个方向。
+    // Only one result per identical node chain and identical directed predicates: repeated observations in the same direction fold, but A -> B and
+    // A <- B are not the same relation, so a direction must not be dropped just because the two ends match during traversal.
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for (_, spec, _, c) in scored {
@@ -291,7 +291,7 @@ pub async fn paths_between(
             break;
         }
         let edges: Option<Vec<PathEdge>> = c.facts.iter().map(|f| detail.get(f).cloned()).collect();
-        // 细节查不到的边（as_of 时刻两端之一不可见）整条路径不要：链断了一环就不是链
+        // An edge whose details cannot be looked up (one end invisible at the as_of moment) drops the whole path: a chain broken at one link is not a chain
         let Some(edges) = edges else {
             continue;
         };
@@ -317,7 +317,7 @@ pub async fn paths_between(
     Ok(out)
 }
 
-/// 碰到这批实体的边（两个方向），两根时间轴都过，自环不要
+/// Edges touching this batch of entities (both directions), filtered by both time axes; self-loops excluded
 async fn touching(
     pool: &PgPool,
     kb_id: Uuid,
@@ -349,7 +349,7 @@ async fn touching(
     Ok(rows)
 }
 
-/// 这批实体各自的度数，同一套时间轴过滤下
+/// Each entity's degree in this batch, under the same time-axis filter
 async fn degrees(
     pool: &PgPool,
     kb_id: Uuid,
@@ -381,7 +381,7 @@ async fn degrees(
     Ok(rows.into_iter().collect())
 }
 
-/// 这批事实的两端名字、谓词与区间
+/// Both-end names, predicates, and intervals of this batch of facts
 async fn details(
     pool: &PgPool,
     kb_id: Uuid,

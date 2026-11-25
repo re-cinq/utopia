@@ -1,89 +1,89 @@
-//! 抽取丢弃信号：哪些事实抽出来了却没能落地，以及为什么。
+//! Extraction drop signals: which facts were extracted but failed to land, and why.
 //!
-//! 与 `ontology_misses` 分开是刻意的——那张表说的是"你的本体缺这些"，读者是
-//! 本体维护者，动作是加类型；这张说的是"这些事实没落地"，读者是上传文档的人，
-//! 动作是改文档或改本体。混在一个面板里两边都讲不清。
+//! Keeping this apart from `ontology_misses` is deliberate: that table says "your ontology lacks these", and its reader is
+//! the ontology maintainer, whose action is to add a type; this one says "these facts did not land", and its reader is the person who uploaded the document,
+//! whose action is to edit the document or the ontology. Mixed into one panel, neither side can be explained clearly.
 //!
-//! 记录失败不影响抽取（调用方一律 `let _ =`）——信号缺一条，远好过因为记信号
-//! 失败而中断整篇文档的抽取。
+//! Failing to record does not affect extraction (callers always use `let _ =`): missing one signal is far better than
+//! aborting the extraction of a whole document because recording a signal failed.
 
 use sqlx::PgPool;
 use utopia_core::models::ExtractionDrop;
 use utopia_core::AppResult;
 use uuid::Uuid;
 
-/// 原因码。前端按这个查文案，所以是稳定契约，不要改字面量。
-/// 都由开放抽取那条路（0044）发出；类型化那条路的原因码随它一起退场了
+/// Reason codes. The frontend looks up its copy by these, so they are a stable contract; do not change the literals.
+/// All are emitted by the open extraction path (0044); the typed path's reason codes were retired along with it
 pub mod reason {
-    /// 这一块整个没抽成：调用失败（端点不可用、请求没送到、等太久）或回复解析不了。
+    /// The whole block was not extracted: the call failed (endpoint unavailable, request not delivered, timed out) or the reply could not be parsed.
     ///
-    /// **与别的原因码不同，它丢的是一整块原文，不是一条陈述。** 任务的 `last_error`
-    /// 里也有这句话，可那是给排查的人看的；文档抽完之后还能看见「这一块没进去」的，
-    /// 只有这张表（0001：丢弃是一行，不是沉默）
+    /// **Unlike the other reason codes, it drops a whole block of source text, not one statement.** The task's `last_error`
+    /// also carries this, but that is for people debugging; once a document has finished extracting, the only place that still shows "this block did not get in" is
+    /// this table (0001: a drop is a row, not silence)
     pub const CHUNK_UNEXTRACTED: &str = "chunk_unextracted";
-    /// 陈述缺宾语也缺值
+    /// The statement has neither an object nor a value
     pub const OBJECT_MISSING: &str = "object_missing";
-    /// 模型给的这一条不合结构（缺短语之类）→ 只跳这一条，不牵连整块
+    /// The model's entry is malformed (e.g. missing phrase) -> skip only this entry, not the whole block
     pub const MALFORMED_ITEM: &str = "malformed_item";
-    /// 模型输出被截断（撞上 max_tokens）→ 已完整的那些留下，尾巴丢掉
+    /// Model output was truncated (hit max_tokens) -> keep the complete entries, drop the tail
     pub const TRUNCATED_REPLY: &str = "truncated_reply";
-    /// 这条陈述的值不在它自己的引文里（#729）：证据没写着这个数。
+    /// The statement's value is not in its own quote (#729): the evidence does not state this number.
     ///
-    /// 表格是这个错的产地——模型把一行五列压成五条只有值不同的陈述，引文却指向表上面
-    /// 那句导语。五条里至多一条对，而图上没有任何东西分得出是哪一条。**引文是这条陈述
-    /// 的全部依据**：值不在里面，它就不是文档说的
+    /// Tables are where this error comes from: the model squeezes one five-column row into five statements that differ only in value, while the quote points at
+    /// the lead-in sentence above the table. At most one of the five is right, and nothing in the graph can tell which. **The quote is this statement's
+    /// whole basis**: if the value is not in it, it is not what the document says
     pub const VALUE_NOT_IN_QUOTE: &str = "value_not_in_quote";
-    /// 模型报的别名（或它的引文）不在这一块原文里（0041 决定 2）：不记这个名字。
-    /// 名字是召回的桥，一座凭空的桥会把两个不相干的实体接到一起
+    /// The alias the model reported (or its quote) is not in this block of source text (0041 decision 2): do not record the name.
+    /// A name is a retrieval bridge; a bridge built from nothing would join two unrelated entities
     pub const NAME_NOT_IN_TEXT: &str = "name_not_in_text";
-    /// 模型报的别名，这次回复（或本文档前面几块）里已经是另一个实体的名字（0041 决定 2）：
-    /// 一个名字不会同时是两样东西的名字。「海探1项目」声明成了一个机构，就不是探测器的别名
+    /// The alias the model reported is already the name of another entity in this reply (or in earlier blocks of this document) (0041 decision 2):
+    /// one name cannot be the name of two things. If "Haitan-1 project" is declared an organization, it is not an alias of the probe
     pub const NAME_CLAIMED_BY_ANOTHER: &str = "name_claimed_by_another";
-    /// 宾语既没在回复里列出、库里也没有叫这个名字的东西：陈述照落，
-    /// 宾语落成字面值而不是节点（#559）。记下来是为了量：这一类里有多少
-    /// 本该是实体（模型漏报），有多少本来就是描述
+    /// The object is neither listed in the reply nor is there anything with this name in the database: the statement still lands,
+    /// with the object stored as a literal value rather than a node (#559). It is recorded so the count is known: how many of this kind
+    /// should have been entities (the model missed them), and how many were descriptions all along
     pub const OBJECT_UNDECLARED: &str = "object_undeclared";
-    /// 模型的引文在这一块里找不到原样的一句：陈述照落、引文照记，只是没有偏移
-    /// （`quote_start` / `quote_end` 留空）。这个信号数的是有多少条没定位到
+    /// The model's quote cannot be found verbatim in this block: the statement lands and the quote is kept, but without offsets
+    /// (`quote_start` / `quote_end` left empty). This signal counts how many could not be located
     pub const QUOTE_NOT_IN_CHUNK: &str = "quote_not_in_chunk";
-    /// 时间词不在它的引文里、也不在这一块里：不记这条时间提及。时间词是照抄的字，
-    /// 抄不出来的字就不是文档说的
+    /// A time phrase that is in neither its quote nor this block: do not record this time mention. A time phrase is copied text,
+    /// and words that cannot be copied are not what the document says
     pub const TIME_NOT_IN_QUOTE: &str = "time_not_in_quote";
-    /// 陈述、属性或名字指着一个回复里不存在的实体编号或已知句柄：跳过这一条
+    /// A statement, attribute or name points at an entity number or known handle that does not exist in the reply: skip this entry
     pub const UNKNOWN_REF: &str = "unknown_ref";
-    /// 短语就是那个值（「director nominees —ten (10)→ ten (10)」）：表格丢了列头时模型
-    /// 的写法之一。陈述照落（主语和值都在，信息没丢），记一笔让它可量。
-    /// 纯结构判断：两串字去掉首尾空白后相同
+    /// The phrase is the value itself (e.g. "director nominees -ten (10)-> ten (10)"): one of the ways the model
+    /// writes it when the table has lost its column header. The statement still lands (subject and value are both there, nothing lost), and one record makes it countable.
+    /// Purely structural check: the two strings are equal once leading and trailing whitespace is trimmed
     pub const PHRASE_IS_VALUE: &str = "phrase_is_value";
-    /// 短语就是主语的名字（「实物商品网上零售额 —实物商品网上零售额→ 127878亿元」）：
-    /// 同上，另一种写法，同样照落
+    /// The phrase is the subject's name (e.g. "physical goods online retail sales" -"physical goods online retail sales"-> "127878 hundred million yuan"):
+    /// Same as above, another way of writing it; it still lands
     pub const PHRASE_IS_SUBJECT: &str = "phrase_is_subject";
-    /// 宾语其实是个值（一个量、一个日期、表格的一格）：挪进值那一格，不建实体
-    /// （`open::values_are_not_things`）。数的是规则 2 和表格规则还有多少次没管住模型
+    /// The object is really a value (a quantity, a date, a table cell): move it into the value slot, do not create an entity
+    /// (`open::values_are_not_things`). It counts how many times rule 2 and the table rule still failed to keep the model in check
     pub const OBJECT_IS_VALUE: &str = "object_is_value";
-    /// 陈述绑到了一条属性，值却按属性声明的 datatype 与单位读不出来（「超过2000人」读不成
-    /// 数，「5000万美元」换不成万元）：陈述留在开放图谱，不落类型化行（`materialize`）。
-    /// 这一条由物化发出，不是抽取；每轮物化按库重写，detail 是属性的 key
+    /// The statement is bound to an attribute, but the value cannot be read under the datatype and unit the attribute declares ("over 2000 people" cannot be read as
+    /// a number, "USD 50 million" cannot be converted to 10k-yuan units): the statement stays in the open graph and does not land as a typed row (`materialize`).
+    /// This entry is emitted by materialization, not extraction; each materialization pass rewrites it per database, and detail is the attribute's key
     pub const ATTR_DATATYPE: &str = "attr_datatype";
 }
 
-/// 一轮物化读不出的值：(文档, 属性 key, 一个样例)。
+/// Values one materialization pass could not read: (document, attribute key, one sample).
 pub struct Unreadable {
     pub document_id: Uuid,
     pub detail: String,
     pub example: String,
 }
 
-/// 把一个库里某个原因码的行整个换成这一批（事务内）。物化是集合运算、每轮重算，
-/// 它发出的信号也按集合写：删掉这个原因码在这个库下的全部行，再按（文档, detail）
-/// 数一遍写回。用 `record` 的话每轮重算都会把同一条陈述再数一次
+/// Replace all rows of one reason code in a database with this batch (within a transaction). Materialization is a set operation recomputed every pass,
+/// so its signals are also written as a set: delete all rows for this reason code in this database, then count by (document, detail)
+/// and write them back. With `record`, every recomputation would count the same statement again
 pub async fn replace_reason_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     kb_id: Uuid,
     reason: &str,
     rows: &[Unreadable],
 ) -> AppResult<()> {
-    // 整库的语句不缓存（#1298）：缓存几次后换成通用计划，看不见这个库有多少行
+    // Whole-database statements are not cached (#1298): after a few runs the cache switches to a generic plan, which cannot see how many rows this database has
     sqlx::query("DELETE FROM extraction_drops WHERE kb_id = $1 AND reason = $2")
         .persistent(false)
         .bind(kb_id)
@@ -134,7 +134,7 @@ pub async fn record(
     Ok(())
 }
 
-/// 重抽开始时清掉这篇文档的旧信号——本轮要从头讲一遍这篇文档的故事。
+/// Clear this document's old signals when re-extraction starts: this pass tells the document's story again from the beginning.
 pub async fn clear_for_document(pool: &PgPool, document_id: Uuid) -> AppResult<()> {
     sqlx::query("DELETE FROM extraction_drops WHERE document_id = $1")
         .bind(document_id)
@@ -143,8 +143,8 @@ pub async fn clear_for_document(pool: &PgPool, document_id: Uuid) -> AppResult<(
     Ok(())
 }
 
-/// 一个 KB 的全部丢弃信号。行数按 (文档 × 原因 × 具体对象) 聚合后很小，
-/// 一次取回让 Library 既能算每篇的总数、又能直接展开详情，不必逐行发请求。
+/// All drop signals for one KB. Rows are aggregated by (document x reason x specific object) and stay small,
+/// so one fetch lets Library both compute each document's total and expand the details directly, without a request per row.
 pub async fn for_kb(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<ExtractionDrop>> {
     Ok(sqlx::query_as(
         "SELECT document_id, reason, detail, count, example FROM extraction_drops

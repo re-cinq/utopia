@@ -1,4 +1,4 @@
-//! 0061 cut 2 的第一片：人的例子比较现有对齐账本，不额外调用模型。
+//! First slice of 0061 cut 2: the human examples are compared against the existing alignment ledger, without making an extra model call.
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::{PgConnection, PgPool};

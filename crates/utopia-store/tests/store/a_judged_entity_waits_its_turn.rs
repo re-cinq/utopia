@@ -1,15 +1,15 @@
-//! 0016 C2：类型消解自动跑，看过的不再回头，同库的任务不重复排。
+//! 0016 C2: type resolution runs automatically, does not revisit entities already judged, and tasks for the same library are not queued twice.
 //!
-//! 候选查询按事实数排序、一轮六十个；自动跑若不跳过看过的，每一轮都是同一批，
-//! 后面的永远轮不到。这里守三件事：
+//! The candidate query sorts by fact count, sixty per round; if the automatic run does not skip the already-judged ones, every round is the same batch,
+//! and those behind it never get their turn. Three things are guarded here:
 //!
-//! 1. **自动跑跳过看过的，人点的不跳。** 打了 `type_resolved_at` 的实体在
-//!    `unattended = true` 时不出现，`false` 时照常出现。
-//! 2. **人拍过板的两条路都不碰。** `type_source = 'human'` 的实体谁也不重判。
-//! 3. **同种任务同载荷排着就不再排。** `enqueue_unless_queued` 第二次返回 None；
-//!    那条跑完（不再 queued）之后才能再排。
+//! 1. **The automatic run skips already-judged ones; a person's click does not skip.** An entity stamped with `type_resolved_at` does not appear when
+//!    `unattended = true`, and appears as usual when `false`.
+//! 2. **Both paths a person has signed off on are untouched.** An entity with `type_source = 'human'` is not re-judged by anyone.
+//! 3. **The same kind of task with the same payload, once queued, is not queued again.** `enqueue_unless_queued` returns None the second time;
+//!    it can only be queued again after that one finishes (no longer queued).
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` it skips rather than fails. It sets up and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_store::{jobs, resolution};
@@ -45,7 +45,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fx> {
     .bind(ws)
     .execute(pool)
     .await?;
-    // 一个有子类的类：现类还有子类，是候选查询的第三种条件
+    // A class with subclasses: the current class still has subclasses, the third kind of condition in the candidate query
     sqlx::query(
         "INSERT INTO entity_types (id, kb_id, key, label) VALUES ($1, $2, 'thing', 'Thing')",
     )
@@ -109,7 +109,7 @@ async fn a_judged_entity_waits_its_turn() -> anyhow::Result<()> {
         let human = entity(&pool, &f, "Decided", "human").await?;
         resolution::mark_type_judged(&pool, f.kb, &[seen]).await?;
 
-        // 1. 自动跑跳过看过的；人点的不跳
+        // 1. The automatic run skips the already-judged; a person's click does not skip
         let auto = candidates(&pool, &f, true).await?;
         assert!(auto.contains(&fresh));
         assert!(
@@ -119,10 +119,10 @@ async fn a_judged_entity_waits_its_turn() -> anyhow::Result<()> {
         let manual = candidates(&pool, &f, false).await?;
         assert!(manual.contains(&fresh) && manual.contains(&seen));
 
-        // 2. 人拍过板的两条路都不碰
+        // 2. Both paths a person has ruled on are untouched
         assert!(!auto.contains(&human) && !manual.contains(&human));
 
-        // 3. 同库的任务不重复排
+        // 3. Tasks for the same library are not queued twice
         let payload = serde_json::json!({ "kb_id": f.kb });
         let first = jobs::enqueue_unless_queued(&pool, "resolve_types", payload.clone()).await?;
         assert!(first.is_some());

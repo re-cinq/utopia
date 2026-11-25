@@ -1,19 +1,19 @@
-//! 同表自指的前向引用在**提交边界**上判（0070 §1b 递延复合外键）。
+//! A self-referencing forward reference within one table is judged at the **commit boundary** (0070 §1b, deferred composite foreign keys).
 //!
-//! `facts.supersedes`、`facts.from_statement_id`、`relation_types.inverse_of`、
-//! `relation_types.sub_property_of` 都指着同表的行——恢复/批量装载时目标可能
-//! 在本语句之后才落盘。`(kb_id, ref)` 复合外键把「存在且同库」并成一条约束，
-//! `DEFERRABLE INITIALLY DEFERRED` 让它在提交时重估，那时整批都在。
+//! `facts.supersedes`, `facts.from_statement_id`, `relation_types.inverse_of`, and
+//! `relation_types.sub_property_of` all point at rows of the same table -- during recovery or bulk load the target may only be flushed after this statement.
+//! The composite foreign key `(kb_id, ref)` folds "exists and in the same library" into one constraint, and
+//! `DEFERRABLE INITIALLY DEFERRED` makes it re-check at commit, when the whole batch is in place.
 //!
-//! 写入形状分三种，各自的墙不一样：
-//!   - **多行 INSERT / COPY**：一条语句一批行——递延外键在提交边界看整批，
-//!     跨库的过不了，同库的前向链进得来；
-//!   - **顺序语句**：递延外键同样把判断留到提交——同事务里「先插引用、
-//!     后插目标」现在合法，目标始终不到的提交时被拦；
-//!   - **replica 会话**（pg_restore --disable-triggers 的形状）：这一层其实
-//!     没有墙——触发器全关，外键的约束触发器同样静默，同库判定不挡装载。
-//!     那样的存量坏行由导出预检与 §0 审计兜底；本文件只验正常事务的
-//!     提交边界。
+//! Writes come in three shapes, each with a different wall:
+//!     - **Multi-row INSERT / COPY**: one statement, one batch of rows -- the deferred FK sees the whole batch at the commit boundary;
+//!         a cross-library reference fails, a forward chain within one library gets in;
+//!     - **Sequential statements**: the deferred FK again defers the check to commit -- within one transaction, "insert the reference first,
+//!         the target after" is now legal, and a target that never arrives is blocked at commit;
+//!     - **Replica session** (the shape of pg_restore --disable-triggers): this layer has no wall at all --
+//!         triggers are off, and the FK's constraint triggers are silent too, so the same-library check does not block the load.
+//!         Such bad rows already in storage are caught by the export pre-check and the §0 audit; this file only verifies
+//!         the commit boundary of ordinary transactions.
 
 use sqlx::{Acquire, PgPool};
 use uuid::Uuid;
@@ -26,7 +26,7 @@ struct Fixture {
     ent_b: Uuid,
 }
 
-/// 两个库各一件最小零件：实体——supersedes 的合法写法也要它们
+/// Two libraries, one minimal part each: an entity -- the legal form of supersedes also needs them
 async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     let (org, ws, a, b) = (
         Uuid::now_v7(),
@@ -83,9 +83,9 @@ async fn cleanup(pool: &PgPool, f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 多行 INSERT：引用行在前、目标行在后——FK 在语句末放行，BEFORE 逐行看时
-/// 目标还不在。**提交边界上的递延约束**是抓住它的地方：跨库的过不了，
-/// 同库的照样落
+/// Multi-row INSERT: the referencing row first, the target row after -- the FK is relaxed at the end of the statement, while a per-row BEFORE check sees
+/// the target not yet present. **The deferred constraint at the commit boundary** is where this gets caught: a cross-library one fails,
+/// a same-library one gets through
 #[tokio::test]
 async fn a_multi_row_insert_is_judged_at_commit() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -95,7 +95,7 @@ async fn a_multi_row_insert_is_judged_at_commit() -> anyhow::Result<()> {
     utopia_store::db::migrate(&pool).await?;
     let f = seed(&pool).await?;
 
-    // 引用行在前、别库目标行在后：BEFORE 看不见目标，递延约束看得见整批
+    // The referencing row first, the target in another library after it: BEFORE cannot see the target, the deferred constraint sees the whole batch
     let (newer, older) = (Uuid::now_v7(), Uuid::now_v7());
     let r = sqlx::query(
         "INSERT INTO facts (id, kb_id, subject_id, object_id, confidence, supersedes)
@@ -105,13 +105,13 @@ async fn a_multi_row_insert_is_judged_at_commit() -> anyhow::Result<()> {
     .bind(f.a)
     .bind(older)
     .bind(f.ent_a)
-    .bind(f.b) // 目标行落在别库
+    .bind(f.b) // .bind(f.b) // target row lands in another library
     .bind(f.ent_b)
     .execute(&pool)
     .await;
     assert!(r.is_err(), "多行 INSERT 里的跨库 supersedes 必须被拒");
 
-    // 同库的同样写法：两行同库，一条语句——合法
+    // The same shape within one library: both rows in the same library, one statement -- legal
     let (newer2, older2) = (Uuid::now_v7(), Uuid::now_v7());
     sqlx::query(
         "INSERT INTO facts (id, kb_id, subject_id, object_id, confidence, supersedes)
@@ -127,8 +127,8 @@ async fn a_multi_row_insert_is_judged_at_commit() -> anyhow::Result<()> {
     cleanup(&pool, &f).await
 }
 
-/// COPY 是恢复灌库的形状：先放行后校验只在语句提交边界做一次。别库目标
-/// 排在本批后面也过不了那道闸；同库的前向链照样进得来
+/// COPY is the shape of a restore load: relax first, verify once at the statement's commit boundary. A target in another library
+/// placed after this batch fails that gate too; a forward chain within one library still gets in
 #[tokio::test]
 async fn a_copy_batch_is_judged_at_commit() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -138,7 +138,7 @@ async fn a_copy_batch_is_judged_at_commit() -> anyhow::Result<()> {
     utopia_store::db::migrate(&pool).await?;
     let f = seed(&pool).await?;
 
-    // 跨库：newer 在前、older 在后，older 属 B 库——提交时被拦
+    // Cross-library: newer first, older after, and older belongs to library B -- blocked at commit
     let (newer, older) = (Uuid::now_v7(), Uuid::now_v7());
     let mut conn = pool.acquire().await?;
     let mut tx = conn.begin().await?;
@@ -162,7 +162,7 @@ async fn a_copy_batch_is_judged_at_commit() -> anyhow::Result<()> {
     let r = tx.commit().await;
     assert!(r.is_err(), "COPY 批里的跨库 supersedes 必须在提交时被拦下");
 
-    // 同库：同样的前向顺序，整条链合法
+    // Same library: the same forward order, the whole chain is legal
     let (newer2, older2) = (Uuid::now_v7(), Uuid::now_v7());
     let mut tx = conn.begin().await?;
     let mut copy = tx
@@ -186,8 +186,8 @@ async fn a_copy_batch_is_judged_at_commit() -> anyhow::Result<()> {
     cleanup(&pool, &f).await
 }
 
-/// 顺序写的前向引用同样归到提交边界：递延外键让「先插引用、后插目标」
-/// 在事务里合法，目标始终不到的写法在 COMMIT 被拦下
+/// A forward reference written sequentially is also judged at the commit boundary: the deferred FK makes "insert the reference first, the target after"
+/// legal within a transaction; a write whose target never arrives is stopped at COMMIT
 #[tokio::test]
 async fn a_sequential_forward_reference_is_judged_at_commit() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -197,7 +197,7 @@ async fn a_sequential_forward_reference_is_judged_at_commit() -> anyhow::Result<
     utopia_store::db::migrate(&pool).await?;
     let f = seed(&pool).await?;
 
-    // 目标始终不到：语句放行、提交时被拦
+    // The target never arrives: the statement is let through, blocked at commit
     let (newer, older) = (Uuid::now_v7(), Uuid::now_v7());
     let mut conn = pool.acquire().await?;
     let mut tx = conn.begin().await?;
@@ -214,7 +214,7 @@ async fn a_sequential_forward_reference_is_judged_at_commit() -> anyhow::Result<
     let r = tx.commit().await;
     assert!(r.is_err(), "目标始终不到的 supersedes 顺序写，提交时必须报");
 
-    // 同事务里目标后到：整条链在提交时齐了——合法
+    // Target arrives later in the same transaction: the whole chain is complete at commit -- legal
     let (newer2, older2) = (Uuid::now_v7(), Uuid::now_v7());
     let mut tx = conn.begin().await?;
     sqlx::query(
@@ -242,8 +242,8 @@ async fn a_sequential_forward_reference_is_judged_at_commit() -> anyhow::Result<
     cleanup(&pool, &f).await
 }
 
-/// UPDATE 装上的跨库 supersedes：目标已存在，BEFORE 逐行检查看得见它——
-/// 当场就报；真漏过去的那一层，递延约束在提交时兜底
+/// A cross-library supersedes set by an UPDATE: the target already exists, so the per-row BEFORE check can see it --
+/// it is reported right away; the layer that really slips past is the one the deferred constraint catches at commit
 #[tokio::test]
 async fn an_update_to_a_foreign_supersedes_fails() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -282,8 +282,8 @@ async fn an_update_to_a_foreign_supersedes_fails() -> anyhow::Result<()> {
     cleanup(&pool, &f).await
 }
 
-/// from_statement_id 是同一张表上的第二条自指边：陈述行在批尾、类型化事实
-/// 在批头的跨库写法，提交时一样被拦
+/// from_statement_id is the second self-referencing edge on the same table: the write shape with the statement row at the end of the batch and the typed fact at its head
+/// is blocked at commit in the same way when the statement is in another library
 #[tokio::test]
 async fn a_from_statement_is_judged_at_commit() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -293,7 +293,7 @@ async fn a_from_statement_is_judged_at_commit() -> anyhow::Result<()> {
     utopia_store::db::migrate(&pool).await?;
     let f = seed(&pool).await?;
 
-    // 类型化事实在前、别库陈述在后：BEFORE 看不见目标，递延约束看得见整批
+    // The typed fact first, the statement in another library after: BEFORE cannot see the target, the deferred constraint sees the whole batch
     let (typed, stmt) = (Uuid::now_v7(), Uuid::now_v7());
     let r = sqlx::query(
         "INSERT INTO facts (id, kb_id, subject_id, object_id, confidence,
@@ -305,7 +305,7 @@ async fn a_from_statement_is_judged_at_commit() -> anyhow::Result<()> {
     .bind(f.a)
     .bind(stmt)
     .bind(f.ent_a)
-    .bind(f.b) // 陈述行落在别库
+    .bind(f.b) // .bind(f.b) // statement row lands in another library
     .bind(f.ent_b)
     .execute(&pool)
     .await;
@@ -314,7 +314,7 @@ async fn a_from_statement_is_judged_at_commit() -> anyhow::Result<()> {
         "多行 INSERT 里的跨库 from_statement_id 必须被拒"
     );
 
-    // 同库的同样写法：类型化事实在前、同库陈述在后——合法
+    // The same shape within one library: typed fact first, same-library statement after -- legal
     let (typed2, stmt2) = (Uuid::now_v7(), Uuid::now_v7());
     sqlx::query(
         "INSERT INTO facts (id, kb_id, subject_id, object_id, confidence,
@@ -332,8 +332,8 @@ async fn a_from_statement_is_judged_at_commit() -> anyhow::Result<()> {
     cleanup(&pool, &f).await
 }
 
-/// 关系的同表自指同一条边界：inverse_of / sub_property_of 引用行在前、
-/// 目标行在后——别库的在提交时被拦，同库的放行
+/// The same boundary for the relation self-reference: the inverse_of / sub_property_of reference row first,
+/// the target row after -- a cross-library one is blocked at commit, a same-library one is let through
 #[tokio::test]
 async fn relation_self_links_are_judged_at_commit() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -343,7 +343,7 @@ async fn relation_self_links_are_judged_at_commit() -> anyhow::Result<()> {
     utopia_store::db::migrate(&pool).await?;
     let f = seed(&pool).await?;
 
-    // inverse_of：一条语句里 A 库的谓词在前、B 库的目标在后——提交时报
+    // inverse_of: in one statement the predicate in library A comes first and the target in library B after -- reported at commit
     let (inv, tgt) = (Uuid::now_v7(), Uuid::now_v7());
     let r = sqlx::query(
         "INSERT INTO relation_types (id, kb_id, key, label, inverse_of)
@@ -357,7 +357,7 @@ async fn relation_self_links_are_judged_at_commit() -> anyhow::Result<()> {
     .await;
     assert!(r.is_err(), "多行 INSERT 里的跨库 inverse_of 必须被拒");
 
-    // sub_property_of 同库、目标行在后：合法
+    // sub_property_of in the same library, target row after: legal
     let (child, parent) = (Uuid::now_v7(), Uuid::now_v7());
     sqlx::query(
         "INSERT INTO relation_types (id, kb_id, key, label, sub_property_of)

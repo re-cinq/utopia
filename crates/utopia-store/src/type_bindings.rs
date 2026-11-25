@@ -1,20 +1,20 @@
-//! 类别词绑到类的账本侧（0044 决定 3–4 的第一片，见 0065）。
+//! The ledger side of binding category words to classes (piece 1 of decisions 3–4 of 0044, see 0065).
 //!
-//! 开放抽取只记文档自己的类别词（`entities.specific_type`），不选类。这里做三件事：
-//! 数出一个库里有哪些类别词、各带什么例子与关系短语（签名）；记下每个类别词判成了
-//! 什么（绑定）并判哪些过期了；把绑上的类写到该类别词下的实体上（`type_source =
-//! 'aligned'`），或者在没有类对得上时按老流程提成「建议加类」。判定本身——问模型、
-//! 两票一致才绑——在 server 的 `type_alignment` 里，这里不认识模型。
+//! Open extraction only records the document's own category words (`entities.specific_type`) and does not pick a class. This does three things:
+//! counts which category words a KB has, and for each its examples and relation phrases (its signature); records what each category word was judged to be
+//! (the binding) and judges which ones have gone stale; writes the bound class onto entities under that category word (`type_source =
+//! 'aligned'`), or, when no class matches, falls back to the old flow and proposes "add a class". The judgment itself — asking the model,
+//! two votes must agree before binding — lives in the server's `type_alignment`; this module knows nothing about the model.
 //!
-//! 类别词在 Rust 与 SQL 两侧用同一种归一：空白折成一个空格、去两端、小写。
-//! [`normalize`] 与 [`KIND_WORD_SQL`] 必须说同一件事，否则 `signatures` 数出来的词
-//! `apply` 找不着。
+//! Category words are normalized the same way on the Rust and SQL sides: whitespace folded to one space, trimmed at both ends, lowercased.
+//! [`normalize`] and [`KIND_WORD_SQL`] must say the same thing, otherwise the words `signatures` counts
+//! cannot be found by `apply`.
 //!
-//! 代理的判定记下它看到的输入（`basis`，0053 的类别词那一半，#795）：给模型看的每个
-//! 候选类的 id、`updated_at` 与祖先闭包（[`ClassSnapshot::basis`]）。过期 = 按现在的类
-//! 重算出来的指纹对不上，不再比时刻——判定写在模型答完之后，答题期间改的定义时间戳
-//! 看不见，父边的增删也不碰 `updated_at`。写判定时在同一事务里再算一遍，对不上的回复
-//! 不收（[`decide_and_apply_if_current`]）。
+//! An agent's judgment records the input it saw (`basis`, the category-word half of 0053, #795): for each candidate class shown to the model, its
+//! id, `updated_at`, and ancestor closure ([`ClassSnapshot::basis`]). Stale means the fingerprint recomputed from the current classes no longer matches; moments are not compared, since the judgment is written after the model answers,
+//! so a definition edited during that time is invisible to timestamps, and adding or removing a parent edge does not touch `updated_at`. When the judgment is written, the fingerprint is recomputed in the same transaction, and
+//! a reply whose fingerprint does not match is
+//! not accepted ([`decide_and_apply_if_current`]).
 
 use chrono::{DateTime, Utc};
 use sqlx::{Executor, PgPool, Postgres, Transaction};
@@ -22,14 +22,14 @@ use std::collections::HashMap;
 use utopia_core::{AppError, AppResult};
 use uuid::Uuid;
 
-/// SQL 侧的归一：与 [`normalize`] 一致。`$col` 由调用处替换成列名。
+/// SQL-side normalization: matches [`normalize`]. `$col` is replaced by the column name at the call site.
 const KIND_WORD_SQL: &str = "lower(btrim(regexp_replace($col, '\\s+', ' ', 'g')))";
 
 fn kind_word_sql(col: &str) -> String {
     KIND_WORD_SQL.replace("$col", col)
 }
 
-/// 归一一个类别词：空白折成一个空格、去两端、小写。"Company " 与 "company" 是一个词。
+/// Normalize a category word: whitespace folded to one space, trimmed at both ends, lowercased. "Company " and "company" are one word.
 pub fn normalize(kind_word: &str) -> String {
     kind_word
         .split_whitespace()
@@ -38,22 +38,22 @@ pub fn normalize(kind_word: &str) -> String {
         .to_lowercase()
 }
 
-/// 一个类别词的签名：判它该绑到哪个类时给模型看的全部。
+/// A category word's signature: everything shown to the model when judging which class it should bind to.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct KindWordSignature {
-    /// 归一过的词
+    /// The normalized word
     pub kind_word: String,
-    /// 文档里见过的写法（最多 3 个，按出现次数）
+    /// Spellings seen in documents (at most 3, by occurrence count)
     pub words: Vec<String>,
-    /// 这个词下活着的实体数
+    /// The number of live entities under this word
     pub count: i64,
-    /// 例名（最多 3 个，有名字的在前，再按创建先后）
+    /// Example names (at most 3; named ones first, then by creation order)
     pub examples: Vec<String>,
-    /// 以这些实体为主语的开放陈述里最常见的关系短语（最多 3 个）
+    /// The most common relation phrases among open statements with these entities as subject (at most 3)
     pub phrases: Vec<String>,
 }
 
-/// 库里每个 distinct 的类别词：活着的（`merged_into` 空）、带类别词的实体。
+/// Each distinct category word in the KB: live (`merged_into` is empty) entities carrying the category word.
 pub async fn signatures<'e>(
     pool: impl Executor<'e, Database = Postgres>,
     kb_id: Uuid,
@@ -109,23 +109,23 @@ pub async fn signatures<'e>(
     Ok(sqlx::query_as(&sql).bind(kb_id).fetch_all(pool).await?)
 }
 
-/// 一个类别词判成了什么。
+/// What a category word was judged to be.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Binding {
     pub kind_word: String,
-    /// `status = 'bound'` 时有值
+    /// Has a value when `status = 'bound'`
     pub type_id: Option<Uuid>,
     /// bound / none / undecided
     pub status: String,
     pub decided_at: DateTime<Utc>,
     /// agent / person
     pub decided_by: String,
-    /// 代理判定时输入的指纹（[`ClassSnapshot::basis`]）。人的判定不带——人不按指纹重判；
-    /// 这一列出现之前的代理判定也为空，各重判一次
+    /// The fingerprint of the input the agent judged with ([`ClassSnapshot::basis`]). Human judgments do not carry one — humans are not re-judged by fingerprint;
+    /// agent judgments from before this column existed are also empty, and each of them is judged once more
     pub basis: Option<String>,
 }
 
-/// 库里全部绑定，按词序。
+/// All bindings in the KB, in word order.
 pub async fn bindings<'e>(
     pool: impl Executor<'e, Database = Postgres>,
     kb_id: Uuid,
@@ -139,16 +139,16 @@ pub async fn bindings<'e>(
     .await?)
 }
 
-/// 一个库此刻的类：每个类的 `updated_at` 与直接父类。判定的指纹从它算——开跑时在调模型
-/// 之前的快照事务里读一份，写判定时在写的事务里再读一份，两份算出来不一样就是答题
-/// 期间候选类变了
+/// The classes in a KB at this moment: each class's `updated_at` and direct parent. The fingerprint is computed from it. A snapshot is read at the start, in the transaction before the model is called,
+/// and another is read in the transaction that writes the judgment; if the two computed values differ, the candidate classes changed
+/// during the answering.
 #[derive(Debug, Clone, Default)]
 pub struct ClassSnapshot {
     versions: HashMap<Uuid, DateTime<Utc>>,
     parents: HashMap<Uuid, Vec<Uuid>>,
 }
 
-/// 读一个库的 [`ClassSnapshot`]。
+/// Read a KB's [`ClassSnapshot`].
 pub async fn class_snapshot<'e>(
     pool: impl Executor<'e, Database = Postgres>,
     kb_id: Uuid,
@@ -170,9 +170,9 @@ pub async fn class_snapshot<'e>(
 }
 
 impl ClassSnapshot {
-    /// 一个类别词判定的指纹：给模型看的每个候选类的 id、`updated_at` 与祖先闭包。
-    /// 候选的先后不算（第二票本来就倒着给）；候选已经不在了记成 gone，同样算变了。
-    /// 父边的增删不碰 `updated_at`，所以闭包要单独算进来。
+    /// A category word's judgment fingerprint: for each candidate class shown to the model, its id, `updated_at`, and ancestor closure.
+    /// The order of candidates does not count (the second vote is given in reverse anyway); a candidate that no longer exists is recorded as gone, which also counts as changed.
+    /// Adding or removing a parent edge does not touch `updated_at`, so the closure is included separately.
     pub fn basis(&self, candidates: &[Uuid]) -> String {
         let mut parts: Vec<String> = candidates
             .iter()
@@ -189,8 +189,8 @@ impl ClassSnapshot {
         fingerprint(&parts.join(";"))
     }
 
-    /// 一个类的全部祖先（不含自己），排好序。多继承与菱形按并集走，同一个祖先只进一次；
-    /// 编辑器不允许环，见过就不再走，万一有环也走得完
+    /// All ancestors of a class (excluding itself), sorted. Multiple inheritance and diamonds are treated as a union, with each ancestor entered once;
+    /// the editor does not allow cycles, so a visited one is not walked again, and even if there were a cycle the walk still terminates.
     fn ancestors(&self, id: Uuid) -> Vec<Uuid> {
         let mut seen: Vec<Uuid> = Vec::new();
         let mut stack: Vec<Uuid> = self.parents.get(&id).cloned().unwrap_or_default();
@@ -208,8 +208,8 @@ impl ClassSnapshot {
     }
 }
 
-/// 与 `phrase_bindings::basis_of` 同一个哈希：FNV-1a 64 位。只是缓存失效的键，不是安全
-/// 用途，不值得为它拉一个哈希依赖；也不去动那边——那边的值一变，全部短语判定都得重判
+/// The same hash as `phrase_bindings::basis_of`: FNV-1a 64-bit. It is only the key for cache invalidation, not a security
+/// use, and not worth pulling in a hash dependency for; nor do we touch that side — if its value changes, all phrase judgments would need re-judging.
 fn fingerprint(text: &str) -> String {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in text.as_bytes() {
@@ -219,12 +219,12 @@ fn fingerprint(text: &str) -> String {
     format!("{h:016x}")
 }
 
-/// 不再成立的绑定：绑到的类在判定之后改过；或判成 none / undecided 之后库里有类
-/// 新建或修改。负向判定没有选中的类，已有类的新定义也可能让它对得上。
-/// 绑到的类被删了的，行已随级联消失，这里不会出现。
+/// A binding no longer holds: the class it binds to was changed after the judgment; or, after a judgment of none / undecided, a class was
+/// created or modified in the library. A negative judgment has no selected class, and a new definition on an existing class may also make it match.
+/// If the bound class was deleted, the row has already gone via cascade, so it does not appear here.
 ///
-/// 对齐的 worker 已不读它：时间戳看不见模型答题期间的编辑（#795），过期改按指纹判
-/// （[`ClassSnapshot::basis`]）。留着给只要粗信号的调用方。
+/// The alignment worker no longer reads this: timestamps do not see edits made during the model's answering (#795), so staleness is judged by fingerprint
+/// ([`ClassSnapshot::basis`]). Kept for callers that only need a coarse signal.
 pub async fn stale(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT b.kind_word
@@ -242,11 +242,11 @@ pub async fn stale(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<String>> {
     .await?)
 }
 
-/// 记下一个类别词的判定（有则改）。返回是否写入了。
+/// Records a category word's judgment (replacing if present). Returns whether it was written.
 ///
-/// **人的判定不被代理覆盖**：已有行是人判的而这次是代理，原样留着、返回 false。
-/// 反过来人可以改代理的。`words` 传空时保留已有的写法——人在界面上拍板时手里
-/// 未必有签名。这里写下的判定不带指纹：代理的判定走 [`decide_and_apply_if_current`]。
+/// **A human's judgment is not overwritten by an agent**: if the existing row is a human's and this one is the agent's, it stays as-is and returns false.
+/// The reverse is allowed: a human may change an agent's. When `words` is empty, the existing spellings are kept — a human deciding in the UI may not have
+/// the signature at hand. A judgment written here carries no fingerprint; agent judgments go through [`decide_and_apply_if_current`].
 #[allow(clippy::too_many_arguments)]
 pub async fn decide<'e>(
     pool: impl Executor<'e, Database = Postgres>,
@@ -547,11 +547,11 @@ async fn write_decision_and_projection(
     Ok(written)
 }
 
-/// 把绑上的类写到这个类别词下每个活着的、人没定过类的实体上。返回改动数。
+/// Writes the bound class onto every live entity under this category word whose class a human has not set. Returns the number changed.
 ///
-/// 已在这个类上的不算改动（`IS DISTINCT FROM`：`type_id` 可能是 NULL）。有了类，
-/// 「建议加类」就不再是建议，`proposed_type` 一并清掉——否则本体页会继续为一个
-/// 已经有类的词喊着要建类。
+/// An entity already on this class is not a change (`IS DISTINCT FROM`: `type_id` may be NULL). Once it has a class,
+/// the "suggest a class" is no longer a suggestion, so `proposed_type` is cleared along with it — otherwise the ontology page would keep asking to create a class
+/// for a word that already has one.
 pub async fn apply<'e>(
     pool: impl Executor<'e, Database = Postgres>,
     kb_id: Uuid,
@@ -575,8 +575,8 @@ pub async fn apply<'e>(
     Ok(res.rows_affected())
 }
 
-/// 绑定变成 none 或失效时：按它对齐上去的实体失去那个类。只动 `aligned` 的行——
-/// 抽取判的、引擎猜的、人拍的都不是这条绑定给的。返回改动数。
+/// When a binding becomes none or goes stale: entities aligned to it through it lose that class. Only `aligned` rows are touched —
+/// classes that extraction judged, the engine guessed, or a human picked are not what this binding gave. Returns the number changed.
 pub async fn unapply<'e>(
     pool: impl Executor<'e, Database = Postgres>,
     kb_id: Uuid,
@@ -597,16 +597,16 @@ pub async fn unapply<'e>(
     Ok(res.rows_affected())
 }
 
-/// 把库里每条绑上的类补到它的类别词下还不在那个类上的实体上。返回改动数。
+/// Fills in, across the KB, each bound class onto entities under its category word that are not yet on that class. Returns the number changed.
 ///
-/// [`apply`] 只在判定落下那一刻投影一次，之后建的实体它看不见。抽取开抽时读一次
-/// 绑定表（`bound_map`），一篇文档抽到一半时「公司」才绑上企业类，这篇后半建的公司
-/// 就落成没有类的实体；几篇并发上传时第一篇的判定对其余几篇都是「抽到一半」。没有类
-/// 的主语进不了任何声明了定义域的属性的候选，它的属性陈述全判成「无」——四篇测试
-/// 文档里表格那篇的六条注册资本、成立时间、员工人数就是这么丢的（2026-10-22）。
+/// [`apply`] projects only once, at the moment a judgment lands, and cannot see entities created later. Extraction reads the binding table (`bound_map`) once when it starts, so when
+/// "company" is bound partway through one document, the enterprise class is bound, and the companies created in the second half of that document
+/// become entities with no class; when several documents upload concurrently, the first one's judgment counts as "partway through" for the others. A subject with no class
+/// cannot be a candidate for any attribute with a declared domain, so all its attribute statements come out as "none" — the six registered-capital, founding-date
+/// and headcount rows in the table of the fourth test document were lost exactly this way (2026-10-22).
 ///
-/// 每篇抽完、每轮类别词对齐开跑前各补一次。幂等：已在那个类上的不算改动。与 [`apply`]
-/// 同一条规矩：人定过类的不动（`type_source = 'human'`），`proposed_type` 一并清掉
+/// Run once after each document's extraction and before each category-word alignment round starts. Idempotent: entities already on that class are not changed. The same rule as [`apply`]
+/// applies: entities a human set a class for are left alone (`type_source = 'human'`), and `proposed_type` is cleared along with it
 pub async fn apply_bound<'e>(
     pool: impl Executor<'e, Database = Postgres>,
     kb_id: Uuid,
@@ -626,7 +626,7 @@ pub async fn apply_bound<'e>(
     Ok(res.rows_affected())
 }
 
-/// 抽取时用的绑定表：归一过的类别词 → 类 id，只有绑上的。
+/// Binding table used during extraction: normalized category word → class id, bound ones only.
 pub async fn bound_map(pool: &PgPool, kb_id: Uuid) -> AppResult<HashMap<String, Uuid>> {
     let rows: Vec<(String, Uuid)> = sqlx::query_as(
         "SELECT kind_word, type_id FROM type_bindings
@@ -638,11 +638,11 @@ pub async fn bound_map(pool: &PgPool, kb_id: Uuid) -> AppResult<HashMap<String, 
     Ok(rows.into_iter().collect())
 }
 
-/// 没有类对得上的类别词：把模型提的类名记在实体的 `proposed_type` 上，类型消解读它。
+/// For category words with no matching class: records the class name the model proposed on the entity's `proposed_type`; type resolution reads it.
 ///
-/// 只写第一次、最长 60 字；只提活着的、还没类的、人没
-/// 定过的实体——采纳时人定过的不会被认领，数进「将重新归类 N 个」里就是虚的。
-/// 返回写上的行数。
+/// Written only the first time, at most 60 characters; proposes only live entities that have no class yet and that a human has not
+/// set — a human-set entity would not be claimed on adoption, so counting it in "will be reclassified N" would be false.
+/// Returns the number of rows written.
 pub async fn propose(
     pool: &PgPool,
     kb_id: Uuid,
@@ -696,7 +696,7 @@ mod tests {
         s.parse().expect("timestamp")
     }
 
-    /// organization ⊂ legal_entity；agent 暂时没有父类
+    /// organization ⊂ legal_entity; agent has no parent class for now
     fn snapshot() -> (ClassSnapshot, [Uuid; 3]) {
         let ids = [Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()];
         let [org, legal, _] = ids;
@@ -726,7 +726,7 @@ mod tests {
         edited.versions.insert(org, at("2026-09-26T00:00:01Z"));
         assert_ne!(before, edited.basis(&[org]), "an edit moves updated_at");
 
-        // 父边的增删不碰 updated_at：org 的祖父变了，org 的指纹也得变
+        // Adding or removing a parent edge does not touch updated_at: if org's grandparent changes, org's fingerprint must change too
         let mut rooted = s.clone();
         rooted.parents.insert(legal, vec![agent]);
         assert_ne!(
@@ -748,7 +748,7 @@ mod tests {
     #[test]
     fn a_diamond_or_a_cycle_still_gives_one_closure() {
         let (mut s, [org, legal, agent]) = snapshot();
-        // 菱形：org → legal、org → agent，legal → agent
+        // Diamond: org → legal, org → agent, legal → agent
         s.parents.insert(org, vec![legal, agent]);
         s.parents.insert(legal, vec![agent]);
         assert_eq!(s.ancestors(org), {
@@ -756,7 +756,7 @@ mod tests {
             v.sort();
             v
         });
-        // 编辑器不许环；万一有，走得完且不把自己算进祖先
+        // The editor does not allow cycles; if one exists anyway, it still terminates and does not count itself as an ancestor
         s.parents.insert(agent, vec![org]);
         assert!(!s.ancestors(org).contains(&org));
         let _ = s.basis(&[org, legal, agent]);

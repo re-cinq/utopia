@@ -1,5 +1,5 @@
-//! 证据只在事实自己的库里读：别库事实的 id 拿到本库路径下问，答 NotFound，
-//! 不吐出别库的原句。
+//! Evidence is read only inside the fact's own database: asking for a fact id from another database under this database's path gets NotFound,
+//! and does not return another database's original sentence.
 
 use sqlx::PgPool;
 use uuid::Uuid;

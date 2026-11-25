@@ -1,7 +1,7 @@
-//! 边上的属性不进边的身份（0037）。
+//! Attributes on an edge do not enter the edge's identity (0037).
 //!
-//! 同一条边再听到一次带了金额的，是同一条边补上金额；同一条边两次金额打架，
-//! 先写者留着、报冲突，不覆盖。声明那一侧：只有本库的属性能当限定项，自己不行。
+//! The same edge heard again with an amount is the same edge gaining an amount; the same edge with two conflicting amounts
+//! keeps the first writer's value and reports the conflict, without overwriting. On the declaring side: only this database's attributes can serve as qualifiers, not the relation itself.
 
 use sqlx::PgPool;
 use utopia_store::graph::QualifierWrite;
@@ -38,7 +38,7 @@ async fn a_qualifier_is_added_to_the_same_edge_and_never_overwritten() -> anyhow
         .bind(kb)
         .execute(&pool)
         .await?;
-    // 一个属性定义（金额）、一条关系（投资）
+    // One attribute definition (amount), one relation (investment)
     let amount = utopia_store::ontology::create_relation_type(
         &pool,
         kb,
@@ -70,7 +70,7 @@ async fn a_qualifier_is_added_to_the_same_edge_and_never_overwritten() -> anyhow
     )
     .await?;
 
-    // 声明：属性能当限定项；关系不能；自己不能
+    // Declaration: attributes can be qualifiers; relations cannot; itself cannot
     utopia_store::ontology::set_relation_qualifiers(&pool, kb, invested, &[amount]).await?;
     let declared = utopia_store::graph::relation_types(&pool, kb)
         .await?
@@ -107,7 +107,7 @@ async fn a_qualifier_is_added_to_the_same_edge_and_never_overwritten() -> anyhow
         "只有属性能当限定项"
     );
 
-    // 追加式声明：只加不删、撞上已有的不报错、同样的校验
+    // Append-style declaration: only adds, never deletes; hitting an existing one does not error; the same validation
     utopia_store::ontology::add_relation_qualifier(&pool, kb, invested, amount).await?;
     utopia_store::ontology::add_relation_qualifier(&pool, kb, invested, amount).await?;
     let again = utopia_store::graph::relation_types(&pool, kb)
@@ -124,7 +124,7 @@ async fn a_qualifier_is_added_to_the_same_edge_and_never_overwritten() -> anyhow
         "追加式同样只认属性"
     );
 
-    // 一条边
+    // One edge
     let (a, b, fact) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     for (id, name) in [(a, "Vega"), (b, "Northwind")] {
         sqlx::query(
@@ -149,7 +149,7 @@ async fn a_qualifier_is_added_to_the_same_edge_and_never_overwritten() -> anyhow
     .execute(&pool)
     .await?;
 
-    // 第一次：写上；第二次同值：什么都不做；第三次不同值：报冲突、不覆盖
+    // First time: written; second with the same value: nothing; third with a different value: report the conflict, do not overwrite
     let five = serde_json::json!({ "value": 5000000000.0, "unit": "$" });
     let twenty = serde_json::json!({ "value": 20000000000.0, "unit": "$" });
     assert_eq!(
@@ -171,7 +171,7 @@ async fn a_qualifier_is_added_to_the_same_edge_and_never_overwritten() -> anyhow
     assert_eq!(q[0].value, Some(five), "打架时先写者留着，不覆盖");
     assert!(q[0].entity_id.is_none());
 
-    // 收拾：库删了，级联带走全部
+    // Cleanup: deleting the database cascades and takes everything along
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(kb)
         .execute(&pool)
