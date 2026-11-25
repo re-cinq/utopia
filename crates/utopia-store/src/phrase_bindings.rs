@@ -417,7 +417,7 @@ async fn decide_with_delivery_budget(
         tx.rollback().await?;
         return Ok(None);
     }
-    let id = crate::jobs::enqueue_with_max_attempts_tx(
+    let id = crate::jobs::enqueue_queued_once_tx(
         &mut tx,
         MATERIALIZE_KIND,
         serde_json::json!({ "kb_id": kb_id }),

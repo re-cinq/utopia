@@ -1443,7 +1443,7 @@ async fn adopt_map_to(
     if written > 0 {
         // 判定和它的投影一起提交（0051）。整次提交排一份，不是一条形状一份：这些判定都和这一份
         // 同一次提交，它跑时读当下的绑定，0051 要的「每条判定都有和它一起提交的任务」照样成立
-        utopia_store::jobs::enqueue_with_max_attempts_tx(
+        utopia_store::jobs::enqueue_queued_once_tx(
             tx,
             phrase_bindings::MATERIALIZE_KIND,
             json!({ "kb_id": kb_id }),

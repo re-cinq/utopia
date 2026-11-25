@@ -194,13 +194,12 @@ pub async fn decide_with_delivery(
     } else {
         crate::phrase_bindings::MATERIALIZE_KIND
     };
-    let job = crate::jobs::enqueue_with_max_attempts_tx(
-        &mut tx,
-        kind,
-        serde_json::json!({ "kb_id": kb_id }),
-        3,
-    )
-    .await?;
+    let payload = serde_json::json!({ "kb_id": kb_id });
+    let job = if kind == crate::phrase_bindings::MATERIALIZE_KIND {
+        crate::jobs::enqueue_queued_once_tx(&mut tx, kind, payload, 3).await?
+    } else {
+        crate::jobs::enqueue_with_max_attempts_tx(&mut tx, kind, payload, 3).await?
+    };
     tx.commit().await?;
     Ok(Some(job))
 }

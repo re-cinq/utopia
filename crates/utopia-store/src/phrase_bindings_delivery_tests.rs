@@ -209,9 +209,11 @@ async fn jobs_processed_in_any_order_converge_on_the_last_decision() -> anyhow::
     let f = seed(&pool).await?;
     let run = async {
         let first = decide_with_delivery(&pool, f.kb, &f.sig, bound(f.property)).await?;
+        // 先领走第一个 job：在跑的 job 不吸收新判定（0051），第二次判定才会有自己的 job
+        claim(&pool, first).await?;
         let second = decide_with_delivery(&pool, f.kb, &f.sig, none()).await?;
         assert!(first < second);
-        // 两个 job 都排着；先处理后来的，再处理先来的——每次都读当前绑定
+        // 两个 job 都在（一个在跑、一个排着）；先处理后来的，再处理先来的——每次都读当前绑定
         assert_eq!(jobs_for(&pool, f.kb).await?.len(), 2);
         materialize::try_materialize(&pool, f.kb).await?;
         materialize::try_materialize(&pool, f.kb).await?;
@@ -222,6 +224,57 @@ async fn jobs_processed_in_any_order_converge_on_the_last_decision() -> anyhow::
         );
         // 反过来：先绑、再解绑、先处理老的
         decide_with_delivery(&pool, f.kb, &f.sig, bound(f.property)).await?;
+        materialize::try_materialize(&pool, f.kb).await?;
+        assert_eq!(materialize::count(&pool, f.kb).await?, 1);
+        anyhow::Ok(())
+    }
+    .await;
+    cleanup(&pool, &f).await?;
+    run
+}
+
+async fn claim(pool: &PgPool, job: Option<i64>) -> anyhow::Result<()> {
+    sqlx::query("UPDATE jobs SET status = 'running' WHERE id = $1")
+        .bind(job)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_running_job_does_not_absorb_the_next_decision() -> anyhow::Result<()> {
+    let Some(url) = crate::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPool::connect(&url).await?;
+    crate::db::migrate(&pool).await?;
+    let f = seed(&pool).await?;
+    let run = async {
+        let running = decide_with_delivery(&pool, f.kb, &f.sig, bound(f.property)).await?;
+        claim(&pool, running).await?;
+        let next = decide_with_delivery(&pool, f.kb, &f.sig, none()).await?;
+        assert_ne!(next, running);
+        anyhow::Ok(())
+    }
+    .await;
+    cleanup(&pool, &f).await?;
+    run
+}
+
+#[tokio::test]
+async fn a_decision_covered_by_a_queued_job_returns_its_id_and_is_materialized_by_it(
+) -> anyhow::Result<()> {
+    let Some(url) = crate::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPool::connect(&url).await?;
+    crate::db::migrate(&pool).await?;
+    let f = seed(&pool).await?;
+    let run = async {
+        let first = decide_with_delivery(&pool, f.kb, &f.sig, none()).await?;
+        let second = decide_with_delivery(&pool, f.kb, &f.sig, bound(f.property)).await?;
+        assert_eq!(second, first);
+        assert_eq!(jobs_for(&pool, f.kb).await?.len(), 1);
         materialize::try_materialize(&pool, f.kb).await?;
         assert_eq!(materialize::count(&pool, f.kb).await?, 1);
         anyhow::Ok(())
