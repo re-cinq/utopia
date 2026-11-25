@@ -1,6 +1,6 @@
 import unittest
 
-from comments import anchors, code_projection, copied_translations, missing_anchors, comment_text, split_lines
+from comments import anchors, blanked_comments, code_projection, copied_translations, missing_anchors, comment_text, split_lines
 
 
 def comments_of(lines, is_rust=True):
@@ -93,6 +93,17 @@ class CopiedTranslations(unittest.TestCase):
     def test_short_repeated_lines_are_ignored(self):
         before = ["// 是", "// 否"]
         self.assertEqual(copied_translations(before, ["// yes", "// yes"]), [])
+
+
+class BlankedComments(unittest.TestCase):
+    def test_comment_with_text_that_became_empty_is_reported(self):
+        self.assertEqual(blanked_comments(["// 有字", "//!", "/// 也有字"], ["//", "//!", "/// has text"]), [1])
+
+    def test_already_empty_comment_is_fine(self):
+        self.assertEqual(blanked_comments(["///", "// a"], ["///", "// a"]), [])
+
+    def test_trailing_comment_that_was_emptied_is_reported(self):
+        self.assertEqual(blanked_comments(["// 注释"], ["//"]), [1])
 
 
 if __name__ == "__main__":
