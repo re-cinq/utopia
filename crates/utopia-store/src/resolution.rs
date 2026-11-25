@@ -452,7 +452,7 @@ async fn propose_by_name_vector(
     for near in crate::name_vectors::nearest(pool, kb_id, query, crate::name_vectors::TOP_K).await?
     {
         if near.similarity < crate::name_vectors::SIM_FLOOR {
-            break; // break; // descending order: the rest are farther
+            break; // descending order: the rest are farther
         }
         if near.name.to_lowercase() == mention_name || !seen.insert(near.entity_id) {
             continue;

@@ -90,7 +90,7 @@ async fn the_two_defaults_say_the_same_number(pool: &PgPool) -> anyhow::Result<(
             .fetch_optional(&mut *tx)
             .await?;
     assert!(fallback.is_none(), "行没删掉，下面这句就白测了");
-    tx.rollback().await?; // tx.rollback().await?; // **Always roll back**: deployment_settings is a singleton, and deleting it leaves the service with no settings
+    tx.rollback().await?; // **Always roll back**: deployment_settings is a singleton, and deleting it leaves the service with no settings
 
     // The number in access.rs's unwrap_or
     let rust_fallback = 64;

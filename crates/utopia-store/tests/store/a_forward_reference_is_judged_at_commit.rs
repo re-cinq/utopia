@@ -105,7 +105,7 @@ async fn a_multi_row_insert_is_judged_at_commit() -> anyhow::Result<()> {
     .bind(f.a)
     .bind(older)
     .bind(f.ent_a)
-    .bind(f.b) // .bind(f.b) // target row lands in another library
+    .bind(f.b) // target row lands in another library
     .bind(f.ent_b)
     .execute(&pool)
     .await;
@@ -305,7 +305,7 @@ async fn a_from_statement_is_judged_at_commit() -> anyhow::Result<()> {
     .bind(f.a)
     .bind(stmt)
     .bind(f.ent_a)
-    .bind(f.b) // .bind(f.b) // statement row lands in another library
+    .bind(f.b) // statement row lands in another library
     .bind(f.ent_b)
     .execute(&pool)
     .await;
