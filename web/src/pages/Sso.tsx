@@ -1,8 +1,8 @@
-/* 单点登录（0056）。
+/* Single sign-on (0056).
 
-   **绑定由本人完成**：账户页上「绑定身份」跳到身份提供方，回来时服务端核对还是那个
-   已登录的人才写绑定。管理页只列出谁绑了哪个 subject、能解绑——没有替别人绑定的入口，
-   那是一条冒充任何人登录的路（见 crates/utopia-server/src/api/oidc_routes.rs 的模块说明）。 */
+   **Binding is done by the person themselves**: on the account page, 'Link identity' goes to the identity provider, and on return the server checks that the person is still the one logged in before writing the binding. The admin page only lists who linked which subject, and can unlink; there is no entry for binding on someone else's behalf,
+   because that would be a way to impersonate anyone at login.
+   (see the module notes in crates/utopia-server/src/api/oidc_routes.rs). */
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
@@ -20,8 +20,8 @@ import {
   Tr,
 } from "../ui";
 
-/** 三行信息展示，只读——issuer/client_id/redirect_uri 由环境变量定，这里不能改。
- *  两列网格而不是一句话拼接：三个值长短不一，右列各自 truncate 更好读 */
+/** Three rows of info, read-only: issuer / client_id / redirect_uri are set by environment variables and cannot be changed here.
+ *  A two-column grid rather than one sentence joined together: the three values differ in length, so each right-hand column truncates more readably */
 function ConfigSummary({
   issuer,
   clientId,
@@ -148,7 +148,7 @@ export function SsoAdmin() {
   );
 }
 
-/** 账户页上的一节：我自己的绑定。没配单点登录的部署上整节不出现 */
+/** A section on the account page: my own bindings. On deployments without SSO configured, the whole section does not appear */
 export function SsoAccount() {
   const queryClient = useQueryClient();
   const me = useQuery({ queryKey: ["oidc-me"], queryFn: api.oidcMe });
@@ -163,8 +163,8 @@ export function SsoAccount() {
     onError: (e) => toast.error((e as Error).message),
   });
 
-  // 从身份提供方回来时带着结果（`?sso=linked` 或 `?sso_error=`）：提示一次，再把地址洗干净，
-  // 免得刷新一次又提示一次
+  // Returning from the identity provider carries a result (`?sso=linked` or `?sso_error=`): show the hint once, then clean the address,
+  // so that a refresh does not show the hint again
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const linked = params.get("sso") === "linked";

@@ -8,10 +8,10 @@ import { DEFAULT_STALE_MS, applyQueryDefaults } from "./queryDefaults";
 import { initTheme } from "./theme";
 import "./styles.css";
 
-// 主题先落到 <html> 再渲染：画布第一次读令牌时它得已经是对的
+// The theme is applied to <html> before rendering: the canvas reads the token for the first time and it must already be correct
 initTheme();
 
-// staleTime 按键分档，表在 queryDefaults.ts；这里只给全局默认（#518）
+// staleTime is tiered by key and the table lives in queryDefaults.ts; only the global default is set here (#518)
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

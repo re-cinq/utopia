@@ -4,7 +4,7 @@ import { createParser } from "eventsource-parser";
 
 export class ApiError extends Error {
   status: number;
-  /** 服务端给的稳定错误码（没有则是尚未转换的契约守卫，message 已是英文原句） */
+  /** Stable error code from the server (without one, it is an untranslated contract guard and message is already the English sentence) */
   code?: string;
   constructor(status: number, message: string, code?: string) {
     super(message);
@@ -13,18 +13,18 @@ export class ApiError extends Error {
   }
 }
 
-/** 服务端拒绝时回的正文 */
+/** Body returned when the server rejects a request */
 type Refusal = { error?: string; code?: string; detail?: string };
 
-/** 一次拒绝给人看的那句话。
+/** The sentence shown to the person for a rejection.
  *
- *  有 code 就查 i18n，没有（或这一条还没进表）就退回服务端的英文原句——
- *  服务端永远说英文，因为界面语言在客户端（docs/decisions/0004）。
- *  **普通请求与对话流共用这一处**：对话流从前只读 `error`，于是明明有译文的
- *  `no_chat_model` 在中文界面上也是一句英文 */
+ *  With a code, look it up in i18n. Without one (or when this entry is not in the table yet), fall back to the server's English sentence,
+ *  because the server always speaks English and the UI language lives on the client (docs/decisions/0004).
+ *  **Plain requests and the chat stream share this one place.** The chat stream used to read only `error`, so
+ *  `no_chat_model`, which has a translation, showed as English in the Chinese UI */
 function refusalMessage(body: Refusal, fallback: string): string {
   let message = body.error || fallback;
-  // code 来自网络，不是字面量——这一处 cast 换来 err 表本身的全量类型检查
+  // code comes from the network, not a literal. This one cast buys full type checking of the err table itself
   const worded = body.code
     ? (S.err as Record<string, string | undefined>)[body.code]
     : undefined;
@@ -33,13 +33,13 @@ function refusalMessage(body: Refusal, fallback: string): string {
   return message;
 }
 
-/** 对话流里的 `error` 帧：与请求被拒是同一个信封 `{error, code}`，用同一个函数读。
- *  读不成 JSON 的是旧格式的一句英文，原样显示 */
+/** The `error` frame in the chat stream. It has the same envelope `{error, code}` as a rejected request and is read by the same function.
+ *  If it is not valid JSON, it is the old format's single English sentence, shown as is */
 function streamFailure(data: string): string {
   try {
     const body: unknown = JSON.parse(data);
     if (body && typeof body === "object") return refusalMessage(body as Refusal, data);
-  } catch { /* 旧格式：纯文本 */ }
+  } catch { /* Old format: plain text */ }
   return data;
 }
 
@@ -53,7 +53,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!res.ok) {
-    // 措辞在这一个收口点定：22 个文件里的 toast.error(e.message) 一处都不用改
+    // The wording is fixed at this one choke point: the toast.error(e.message) calls in 22 files need no change
     let message = res.statusText;
     let code: string | undefined;
     try {
@@ -61,7 +61,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       code = body.code;
       message = refusalMessage(body, message);
     } catch {
-      // 非 JSON 响应体，保留 statusText
+      // Non-JSON response body, keep statusText
     }
     throw new ApiError(res.status, message, code);
   }
@@ -77,18 +77,18 @@ export interface User {
   created_at: string;
 }
 
-/** 个人访问令牌（0014）：给 MCP 客户端的长命钥匙，以发它的人的身份行事。
- *  有效权限 = 这个人的角色 ∩ scope；`kb_ids` 为空 = 这个人能进的全部库。 */
+/** Personal access token (0014): a long-lived key for MCP clients that acts as the identity of the person who issued it.
+ *  Effective permissions = the person's role ∩ scope. An empty `kb_ids` means every knowledge base this person can enter. */
 export interface TokenView {
   id: string;
   name: string;
-  /** 给人认的那一小截（`utp_pat_ab12`），够对上配置文件里那一串，又不足以复原 */
+  /** The small visible part (`utp_pat_ab12`), enough to match the string in the config file but not enough to reconstruct it */
   token_prefix: string;
   scope: "read" | "write";
   kb_ids: string[] | null;
   expires_at: string | null;
   last_used_at: string | null;
-  /** 撤销打戳不删行 */
+  /** Revoking stamps the row instead of deleting it */
   revoked_at: string | null;
   created_at: string;
 }
@@ -100,7 +100,7 @@ export interface Workspace {
   created_at: string;
 }
 
-/** 建库时可选的预置本体包（`GET /ontology-packs`）。 */
+/** Preset ontology packs that can be picked when creating a knowledge base (`GET /ontology-packs`). */
 export type OntologyPack = {
   id: string;
   name: string;
@@ -109,7 +109,7 @@ export type OntologyPack = {
   properties: number;
 };
 
-/** 场景包（0073）：名字与说明两种语言都给，界面按自己的语言挑 */
+/** Scenario pack (0073): both the name and the description are given in two languages, and the UI picks the one in its own language */
 export type ScenarioPack = {
   id: string;
   name: { zh: string; en: string };
@@ -126,33 +126,33 @@ export interface Kb {
   kind: string;
   description: string | null;
   visibility: "open" | "restricted";
-  /** 部署的公共默认空间（第一个建的库）：永远 open、不可删除 */
+  /** The deployment's public default space (the first knowledge base created): always open, cannot be deleted */
   is_default: boolean;
-  /** 抽取遇到本体外的说法时，是否允许系统自动补进本体并改写等它的事实。
-      关掉不影响"留意"：未匹配统计照常累积可见，只是变成你点一下的提案 */
+  /** Whether extraction may, when it meets a wording outside the ontology, add it to the ontology automatically and rewrite the facts that wait on it.
+      Turning this off does not affect "noticing": the unmatched-term stats still accumulate and show, they just become proposals you act on with a click */
   auto_extend_ontology: boolean;
-  /** 把推出来的事实写进账本（R1）。**缺省关**——推理往图里加东西，
-   *  而声明可能是错的，不该在用户没表态时就按它改图 */
+  /** Write inferred facts into the ledger (R1). **Off by default**: inference adds things to the graph,
+   *  and a declaration may be wrong, so the graph should not change based on it unless the user has opted in */
   materialize_inferences: boolean;
-  /** 抽取结束自动排一轮类型消解（只自动落地子树内精化的那一档） */
+  /** Automatically queue a round of type resolution once extraction finishes (only the refinements within a subtree that are safe to land automatically) */
   auto_type_resolution: boolean;
-  /** 治理开关（0025，缺省关）：agent 按先进先出过等人的重复对，先读台账里人的
-   *  先例再裁；打开就开始，关掉就停 */
+  /** Governance switch (0025, off by default): the agent takes repeated pairs that have waited on a person in first-in-first-out order, reads the
+   *  person's precedents in the ledger first, then decides. Turning it on starts it, turning it off stops it */
   governance: boolean;
-  /** 这次打开治理的时刻；保险丝只数它之后的撤回 */
+  /** When governance was switched on; the circuit breaker only counts withdrawals after this moment */
   governance_since: string | null;
-  /** 多久重推一次（分钟）。事实持续在变，只靠手点会让派生一直是缺的 */
+  /** How often to re-infer (in minutes). Facts keep changing, and relying on manual clicks alone would leave the derivations perpetually stale */
   inference_interval_minutes: number;
-  /** 上次推完的时间 */
+  /** When the last inference run finished */
   last_inference_at: string | null;
-  /** 内置本体按哪种语言播种、新描述写哪种语言。**跟语料走，不跟界面走**
-      （界面语言在客户端，见 docs/decisions/0004） */
+  /** Which language the built-in ontology is seeded in, and which language new descriptions are written in. **Follows the corpus, not the UI**
+      (The UI language lives on the client, see docs/decisions/0004) */
   ontology_lang: "en" | "zh";
-  /** 调用者在本库的角色（仅详情接口返回）：前端据此门控破坏性入口 */
+  /** The caller's role in this knowledge base (returned only by the detail endpoint): the frontend uses it to gate destructive entry points */
   my_role?: "viewer" | "editor" | "admin" | "owner" | null;
 }
 
-/** 账户层"我的知识库"行：库 + 我的角色 + 加入信息 + 概览统计。 */
+/** Account-level "My knowledge bases" row: the KB, my role, join info and overview stats. */
 export interface MyKb {
   kb: Kb;
   my_role: "viewer" | "editor" | "admin" | "owner" | null;
@@ -162,14 +162,14 @@ export interface MyKb {
   member_count: number;
 }
 
-/** 审计事件（纯审计展示）。 */
+/** Audit event (audit display only). */
 export interface AuditEvent {
   id: string;
   action: string;
   target_kind: string;
   target_id: string | null;
   detail: Record<string, unknown>;
-  /** null = 引擎自动（裁决器、一致性检查、推理）；有 id 没名字 = 账号已移除 */
+  /** null = the engine automatically (adjudicator, consistency checks, inference); an id with no name = the account has been removed */
   actor_id: string | null;
   actor_name: string | null;
   created_at: string;
@@ -191,36 +191,36 @@ export interface Doc {
   size_bytes: number;
   status: string;
   graph_status: string;
-  /** 摄入管道的失败原因 */
+  /** Failure reason of the ingestion pipeline */
   error: string | null;
-  /** 图谱抽取管道的失败原因（与 error 分列：两条管道各存各的） */
+  /** Failure reason of the graph extraction pipeline (kept apart from error: each of the two pipelines stores its own) */
   graph_error: string | null;
   chunk_count: number;
-  /** 文档标签。**今天没有任何界面用它**——故意留着，理由写在
-   *  `migrations/0002_ingest.sql` 的 `tags` 列上 */
+  /** Document tags. **No UI uses them today**, kept on purpose; the reason is written on
+   *  the `tags` column in `migrations/0002_ingest.sql` */
   tags: string[];
   missing_since: string | null;
-  /** 墓碑（#268）：删了但留着，可撤销 */
+  /** Tombstone (#268): deleted but kept, can be undone */
   deleted_at: string | null;
-  /** 真删过：内容没了，回不来 */
+  /** Really deleted: the content is gone and cannot come back */
   purged_at: string | null;
-  /** 这份文件的字要靠哪一种模型读、而那种模型没配（0040）：ocr / transcribe；文档此时是 failed */
+  /** Which kind of model must read this file's text when that model is not configured (0040): ocr / transcribe; the document is failed at this point */
   reader_needed: "ocr" | "transcribe" | null;
   created_at: string;
-  /** 文档日期——`#610`：从文件名或正文首行解析出来的「文件上写的日期」，
-   *  与 `created_at`（上传时刻）必须分开展示。`null` 表示没认出来（`#610` 决定 3） */
+  /** Document date (`#610`): the "date written on the file", parsed from the file name or the first line of the body,
+   *  must be shown separately from `created_at` (the upload time). `null` means it was not recognized (`#610` decision 3) */
   doc_time: string | null;
-  /** `doc_time` 是怎么来的：`"content"` = 文件名或正文，`"none"` = 没认出来。
-   *  上传时刻不在这里—— `created_at` 才是 */
+  /** How `doc_time` was derived: `"content"` = file name or body, `"none"` = not recognized.
+   *  The upload time is not here, `created_at` is that */
   doc_time_source: "content" | "none";
 }
 
-/** 一类抽取丢弃在一篇文档里的聚合：事实抽出来了，却没能落地。 */
+/** An aggregate of one kind of extraction that was dropped within a document: the facts were extracted, but could not land. */
 export interface ExtractionDrop {
   document_id: string;
-  /** 稳定的原因码，前端按它查文案（attr_domain_mismatch / low_confidence / ...） */
+  /** Stable reason code; the frontend looks up the copy by it (attr_domain_mismatch / low_confidence / ...) */
   reason: string;
-  /** 该原因下的具体对象（属性 key、谓词名、"salary@organization"） */
+  /** The specific object under this reason (attribute key, predicate name, "salary@organization") */
   detail: string;
   count: number;
   example: string | null;
@@ -235,52 +235,52 @@ export interface SourceView {
     feed_url?: string;
     content_mode?: "feed" | "full_new_items";
     endpoint?: string;
-    /** github_issues / github_repo：owner/name */
+    /** github_issues / github_repo: owner/name */
     repo?: string;
-    /** github_issues：PR 在 GitHub 模型里也是工单，默认不收 */
+    /** github_issues: a PR is also an issue in the GitHub model, not collected by default */
     include_pull_requests?: boolean;
-    /** gitlab_issues：合并请求默认不收，与 GitHub 的 PR 同一个理由 */
+    /** gitlab_issues: merge requests are not collected by default, same reason as GitHub PRs */
     include_merge_requests?: boolean;
-    /** github_repo / gitlab_repo：给了就整列替换默认的 glob（markdown；隐藏目录、node_modules、vendor） */
+    /** github_repo / gitlab_repo: when given, it replaces the default glob list entirely (markdown; hidden directories, node_modules, vendor) */
     include?: string[];
     exclude?: string[];
-    /** jira_issues：站点地址，如 https://issues.apache.org/jira */
+    /** jira_issues: the site address, e.g. https://issues.apache.org/jira */
     base_url?: string;
-    /** jira_issues：项目 key，如 KAFKA；gitlab_repo / gitlab_issues：项目路径，如 group/subgroup/name */
+    /** jira_issues: the project key, e.g. KAFKA; gitlab_repo / gitlab_issues: the project path, e.g. group/subgroup/name */
     project?: string;
-    /** google_drive：选中的文件夹（名字只给界面看，同步只认 id） */
+    /** google_drive: the selected folder (the name is only for display, sync matches on the id only) */
     folders?: { id: string; name: string }[];
-    /** google_drive：连上的 Google 账号；`connected_at` 有值即已连接（令牌从不下发） */
+    /** google_drive: the connected Google account; a value in `connected_at` means it is connected (tokens are never sent down) */
     account_email?: string | null;
     connected_at?: string;
-    /** google_drive：连上的那个 Utopia 用户；浏览与选文件夹只给他 */
+    /** google_drive: the Utopia user who connected; only this user may browse and pick folders */
     connected_by?: string;
-    /** google_drive：连上的那个人连接时的名字，断开前的确认里用 */
+    /** google_drive: the name of the person who connected, used in the confirmation before disconnecting */
     connected_by_name?: string;
-    /** false = 这个来源下的文档只检索、不抽取（schema 文档，0035 决定 7）；缺省抽取 */
+    /** false = documents under this source are only retrieved, not extracted (schema documents, 0035 decision 7); defaults to extracted */
     extract?: boolean;
   } | null;
   icon: string | null;
   sync_interval_minutes: number | null;
   sync_cron: string | null;
-  /** null = 文档不衰减；打开后的设置（RC-003），手写的对象可能缺字段，缺的取默认值 */
+  /** null = documents do not decay; a setting from after opening (RC-003). Hand-written objects may lack fields, and missing ones take the default */
   decay: Partial<DecaySettings> | null;
   last_sync_at: string | null;
   last_sync_status: "never" | "queued" | "running" | "ok" | "failed";
   last_sync_error: string | null;
   last_sync_added: number;
-  /** 工单来源读到了哪里（ADR 0072）：消费到的更新时刻，且那一刻的整组都读完了。
-   *  null = 没有游标（首轮同步，或这一类来源不用游标）。说的是「读到哪」，
-   *  不是 `last_sync_at` 的「这一轮什么时候跑」 */
+  /** How far the ticket source has been read (ADR 0072): the update time that was consumed, and at that moment the whole batch had been read.
+   *  null = no cursor (first sync round, or this kind of source does not use a cursor). It says "how far was read",
+   *  not the "when this round ran" of `last_sync_at` */
   sync_checkpoint: string | null;
   doc_count: number;
   missing_count: number;
-  /** 全文补全那一块；**不是 RSS 全文来源的就是 null**，不用再拿 kind 与
-   *  content_mode 自己推一遍适不适用（0026 / #417） */
+  /** The full-text backfill part; **null for sources that are not RSS full-text sources**, so there is no need to infer again from kind and
+   *  content_mode whether it applies (0026 / #417) */
   rss_full_content: RssFullContentSummary | null;
 }
 
-/** 来源的衰减设置（RC-003）：超过 max_items 就淘汰分最低的、至少 min_age_days 天的文档。 */
+/** The source's decay setting (RC-003): once over max_items, evict the lowest-scoring documents that are at least min_age_days old. */
 export interface DecaySettings {
   max_items: number;
   half_life_days: number;
@@ -288,15 +288,15 @@ export interface DecaySettings {
   min_age_days: number;
 }
 
-/** 一个 RSS 来源当前代的全文补全进度。五个计数一起读，所以一起给。 */
+/** Full-text backfill progress for the current generation of an RSS source. The five counts are read together, so they are given together. */
 export interface RssFullContentSummary {
   state: "pending" | "active" | "disabled";
   pending: number;
-  /** queued 与 hydrating 合成一格 */
+  /** queued and hydrating are merged into one bucket */
   queued: number;
   retrying: number;
   complete: number;
-  /** terminal、deleted、superseded 合成一格 */
+  /** terminal, deleted and superseded are merged into one bucket */
   terminal: number;
 }
 
@@ -308,7 +308,7 @@ export interface SearchResult {
   filename: string;
 }
 
-/** 这个库走到哪一步了（#313）。凭据不出库：模型那项只说配没配 */
+/** How far this knowledge base has got (#313). Credentials do not leave the KB: the model item only says whether it is configured */
 export interface Readiness {
   has_chat_model: boolean;
   documents: number;
@@ -320,14 +320,14 @@ export interface Readiness {
 export interface LlmSettingsView {
   chat_base_url?: string | null;
   chat_model?: string | null;
-  /** 推理强度：none | minimal | low | medium | high；空 = 端点默认 */
+  /** Reasoning effort: none | minimal | low | medium | high; empty = endpoint default */
   chat_reasoning_effort?: string | null;
   has_chat_key?: boolean;
   embed_base_url?: string | null;
   embed_model?: string | null;
   embed_dim?: number | null;
   has_embed_key?: boolean;
-  /** mineru | ark（0065） */
+  /** mineru | ark (0065) */
   ocr_provider?: string;
   ocr_base_url?: string | null;
   ocr_backend?: string | null;
@@ -353,14 +353,14 @@ export interface OrgUser {
   is_admin: boolean;
 }
 
-/** 一个身份提供方 subject 绑定到的账号（0056） */
+/** The account that an identity provider subject is bound to (0056) */
 export interface OidcIdentity {
   user_id: string;
   subject: string;
   email: string;
 }
 
-/** 问数数据源（凭据不下发,只有 host:port/db 摘要）。 */
+/** Data source for question-answering (no credentials sent down, only a host:port/db summary). */
 export interface DataSourceView {
   id: string;
   name: string;
@@ -374,7 +374,7 @@ export interface DataSourceView {
 export interface GraphNode {
   id: string;
   name: string;
-  // 没判出类型时为 null（0009）
+  // null when the type could not be determined (0009)
   type_key: string | null;
   type_label: string | null;
   color: string;
@@ -393,7 +393,7 @@ export interface SyncRun {
   error: string | null;
 }
 
-/** 分块的抽取产物（文档查看器右栏）。 */
+/** Extraction output of a chunk (the right column of the document viewer). */
 export interface ChunkFact {
   chunk_id: string;
   fact_id: string;
@@ -401,9 +401,9 @@ export interface ChunkFact {
   is_open_statement: boolean;
   subject_id: string;
   subject: string;
-  /** 本体没认下这条关系时是原文说法；两者都拿不出时为 null */
+  /** When the ontology did not recognize this relation, this is the wording from the source text; null if neither can be produced */
   predicate: string | null;
-  /** true = 名字来自原文，不是本体认下的关系 */
+  /** true = the name comes from the source text, not from a relation the ontology recognized */
   inferred: boolean;
   object_id: string | null;
   object: string | null;
@@ -412,18 +412,18 @@ export interface ChunkFact {
   confidence: number;
 }
 
-/** 一条推出来的事实，连同它的证明（实体面板的「推出来的」那一档）。
+/** An inferred fact, together with its proof (the "inferred" tier of the entity panel).
  *
- * `premises` 是这一档存在的理由：不给出前提的话，一条派生边跟一条普通的边
- * 在界面上看不出区别，而那正是「推理污染知识」的样子。 */
-/** 一条条件：这个属性、这样比、跟这个值比 */
+ * `premises` is the reason this tier exists: without the premises, a derived edge looks no different from an ordinary edge
+ * in the UI, and that is exactly what "inference contaminating knowledge" looks like. */
+/** One condition: this attribute, compared this way, against this value */
 export interface RuleCondition {
-  /** 组号：同组「与」，组间「或」（决定记录 0029）。不带 = 第 0 组 */
+  /** Group number: AND within a group, OR between groups (decision record 0029). Absent = group 0 */
   group?: number;
   predicate_id: string;
   /** gt | gte | lt | lte | between | in | not_in | present */
   op: string;
-  /** 数字 / [lo,hi] / 字符串数组；present 不带 */
+  /** number / [lo,hi] / string array; present takes no value */
   operand?: unknown;
   predicate_label?: string;
   /** x = rule subject (default); y = the entity reached by the one declared join */
@@ -443,7 +443,7 @@ export interface RuleInput {
   conditions: RuleCondition[];
 }
 
-/** 一条规则标住的一个实体，连同让它成立的那几条读数 */
+/** An entity flagged by one rule, together with the readings that made it hold */
 export interface RuleMatch {
   derived_id: string;
   entity_id: string;
@@ -454,7 +454,7 @@ export interface RuleMatch {
   object_id?: string | null;
   object_entity?: string | null;
   relation_predicate?: string | null;
-  /** 「全烃 = 12.3」这种可读形态，按前提顺序 */
+  /** A readable form such as "total hydrocarbons = 12.3", in premise order */
   premises: string[];
 }
 
@@ -469,15 +469,15 @@ export interface BusinessRule extends Omit<RuleInput, "conclusion" | "join_predi
   conclude_predicate_label: string | null;
   join_predicate_id?: string | null;
   join_predicate_label?: string | null;
-  /** 此刻凭它成立的结论条数 */
+  /** The number of conclusions currently holding because of it */
   derived_count: number;
-  /** 上次跑的时候有几个实体的读数组合没展开完。**大于零就意味着少推了** */
+  /** On the last run, the number of entities whose reading combinations were not fully expanded. **Greater than zero means some inferences were missed** */
   capped: number;
-  /** 当前定义是第几版。改判据或结论就加一，改名不算。老的夹具没有它，界面按第 1 版读 */
+  /** Which version the current definition is. Changing the criterion or the conclusion adds one; renaming does not count. Old fixtures lack it, and the UI reads them as version 1 */
   version?: number;
 }
 
-/** 规则定义史的一版：说了什么、从什么时候到什么时候、此刻凭它成立几条 */
+/** One version in the history of a rule definition: what it said, from when to when, and how many instances hold under it right now */
 export interface RuleVersion {
   id: string;
   seq: number;
@@ -494,7 +494,7 @@ export interface RuleVersion {
   recorded_at: string;
   superseded_at: string | null;
   derived_count: number;
-  /** 定义里提到的类与谓词现在叫什么；改名或删掉的查不到，界面就显示 id */
+  /** What the classes and predicates named in the definition are called now; renamed or deleted ones cannot be found, and the UI shows the id */
   labels: Record<string, string>;
 }
 
@@ -502,27 +502,27 @@ export interface DerivedFact {
   id: string;
   subject_id: string;
   subject: string;
-  /** 字面值结论（规则推出的归类与属性）没有实体宾语 */
+  /** Literal-valued conclusions (classifications and attributes inferred by rules) have no entity object */
   object_id: string | null;
   object: string;
   predicate: string;
-  /** 靠哪条规则推的 */
-  /** 靠哪条规则推的。后两种是 0017 补上的跨谓词规则 */
+  /** Which rule inferred it */
+  /** Which rule inferred it. The last two kinds are cross-predicate rules added by 0017 */
   rule: "transitive" | "symmetric" | "inverse" | "sub_property" | "business";
-  /** 业务规则的名字。公理推的为 null——公理没有名字 */
+  /** The name of the business rule. Null for axiom inferences, since axioms have no name */
   rule_name?: string | null;
-  /** 凭业务规则定义的哪一版推出的。公理推的为 null */
+  /** Which version of the business rule definition inferred it. Null for axiom inferences */
   rule_version?: number | null;
   valid_from: string | null;
   valid_to: string | null;
   confidence: number;
   derived_at: string;
-  /** 直接前提，按推导顺序 */
+  /** Direct premises, in derivation order */
   premises: string[];
 }
 
-/** 一条**没有落地**的派生（0017 §3）：推出来了，撞上一条断言，拦在图外。
- *  没有自己的 id，用那条违规的 id 指它——面板、幽灵边、Review 卡片三处靠它对上 */
+/** A derivation that was **not landed** (0017 §3): it was inferred, but hit an assertion and was blocked from the graph.
+ *  It has no id of its own; it is pointed at by the id of the violation it hit. The panel, ghost edges and the Review card all match on it */
 export interface BlockedDerivation {
   violation_id: string;
   subject_id: string;
@@ -539,11 +539,11 @@ export interface BlockedDerivation {
   premises: string[];
 }
 
-/** 证明的一步：一条前提，连同它的证据（0002 R2）。
+/** One step of a proof: a premise, together with its evidence (0002 R2).
  *
- * 那一步自己的前提在 `premises` 里再往下一层。所以证明是一棵树，
- * 深度与推理同一条上限。断言那一步 `premises` 是空的——它的叶子是
- * `evidence` 里的原句，不必再往下问
+ * The step's own premises sit one level further down in `premises`, so a proof is a tree,
+ * with the same depth limit as inference. For an assertion step, `premises` is empty: its leaves are
+ * the source sentences in `evidence`, and there is no need to ask further down
  */
 export interface ProofStep {
   seq: number;
@@ -557,10 +557,10 @@ export interface ProofStep {
   valid_from: string | null;
   valid_to: string | null;
   confidence: number;
-  /** 这条前提后来被撤了；派生随之失效，证明仍要读得出当时靠的是什么 */
+  /** This premise was later withdrawn; the derivation is then invalid, but the proof must still show what it relied on at the time */
   retracted: boolean;
   evidence: Evidence[];
-  /** 这一步自己的前提（0030）：按 seq 展开的子证明。叶子的 premises 为空 */
+  /** The step's own premises (0030): sub-proofs expanded by seq. The leaves have empty premises */
   premises: ProofStep[];
 }
 
@@ -569,8 +569,8 @@ export interface Proof {
   steps: ProofStep[];
 }
 
-/** 审核页的分档。**与服务端的 queue 参数是同一组字面量**——拼错会拿到
- *  一个明确的 unknown_queue 错误，而不是悄悄的空列表。 */
+/** Tiers of the review page. **These are the same literal values as the server's queue parameter** — a typo gets an explicit unknown_queue error
+ *  rather than a silently empty list. */
 export type ReviewQueue =
   | "pending"
   | "duplicates"
@@ -580,23 +580,23 @@ export type ReviewQueue =
   | "mappings"
   | "violations"
   | "defects"
-  // 对齐器两票不一致的签名与类别词（#725，0044 决定 3）
+  // Signatures and category words the aligner's two votes disagree on (#725, 0044 decision 3)
   | "alignment"
-  // 勘误 agent 被闸门拦下、等人答的动作（0044 决定 7）
+  // Actions the erratum agent was blocked by the gate and that await an answer from a person (0044 decision 7)
   | "errata"
   | "merges"
-  // agent 的每一笔（0025）：建议、自动裁决与人的回答
+  // Every entry of the agent (0025): suggestions, automatic adjudications and the person's answers
   | "agent";
 
-/** 重复项按两边类型的关系筛：any 全部；same 两边都有类型且相等；conflict 都有且不等 */
+/** Filter duplicates by the relation of their two types: any = all; same = both sides have types and they are equal; conflict = both have types and they differ */
 export type ReviewTypeFilter = "any" | "same" | "conflict";
 
-/** 各档的真实条数。左栏的徽标读它，不读列表长度 */
+/** The real count for each tier. The badge in the left column reads this, not the list length */
 export interface ReviewCounts {
-  /** 记忆抽出、等人点头的事实（0015） */
+  /** Facts extracted from memory, waiting for a person's approval (0015) */
   pending: number;
   duplicates: number;
-  /** 重复项里两边同类型 / 类型冲突的各多少（#428）；没类型的一侧哪档都不算 */
+  /** Among duplicates, how many have the same type on both sides versus a type conflict (#428); a side with no type counts in neither tier */
   duplicates_same_type: number;
   duplicates_type_conflict: number;
   conflicts: number;
@@ -605,29 +605,29 @@ export interface ReviewCounts {
   mappings: number;
   violations: number;
   defects: number;
-  /** 对齐器拿不定的签名与类别词（#725） */
+  /** Signatures and category words the aligner cannot decide (#725) */
   alignment: number;
-  /** 勘误 agent 留给人的动作（0044 决定 7） */
+  /** Actions left to a person by the erratum agent (0044 decision 7) */
   errata: number;
   merges: number;
-  /** agent 写下、等人回答的建议（0025） */
+  /** Suggestions the agent wrote, waiting for an answer (0025) */
   agent: number;
-  /** agent 的全部记录（Agent 队列翻页用） */
+  /** All of the agent's records (for paging through the Agent queue) */
   agent_rows: number;
-  /** 这个库的 govern 任务此刻在跑 */
+  /** The govern task of this knowledge base is running right now */
   agent_running: boolean;
-  /** 还没轮到 agent 看的对 */
+  /** Pairs the agent has not yet got to */
   agent_queue: number;
 }
 
-/** 类型消解的一条建议：一个待精化的实体、送去检索的画像、以及候选类。
+/** One suggestion from type resolution: an entity to refine, the profile sent to retrieval, and the candidate classes.
  *
- * `profile` 回给调用方是有意的——检索找不着的时候，第一个要看的就是
- * 「我们拿什么去找的」，而不是猜是画像不对还是类的描述不对。 */
+ *  `profile` is returned to the caller on purpose: when retrieval finds nothing, the first thing to check is
+ *  "what did we search with", not guess whether the profile or the class description is wrong. */
 export interface TypeSuggestion {
   entity_id: string;
   name: string;
-  /** 现在挂着的类，可能没有（0009） */
+  /** The class currently attached, which may be none (0009) */
   coarse: string | null;
   coarse_description: string | null;
   proposed_type: string | null;
@@ -643,9 +643,9 @@ export interface TypeSuggestion {
   }[];
 }
 
-/** 跑完一轮的结果。**三档分开报**：自动改了的、留给人的、裁决说「都不是」的。
- *  最后那一档带着理由——这一步押在「选择都不是是个体面答案」上，
- *  不记理由，最大的那一档就是不透明的。 */
+/** The result of one round. **Reported in three separate tiers**: what was changed automatically, what is left to a person, and what the adjudicator said was "none of these".
+ *  The last tier carries its reason: this step rests on "none of the choices is a decent answer",
+ *  and without the reason the biggest tier would be opaque. */
 export interface ResolutionOutcome {
   batch: string | null;
   retyped: number;
@@ -658,7 +658,7 @@ export interface ResolutionOutcome {
     choice: string;
     confidence: number;
     reason: string | null;
-    /** 选中的类不在粗类的子树里——换的是分类轴，不是往下走一格 */
+    /** The chosen class is not in the subtree of the coarse class: the axis of classification was switched, not moved one step down */
     crosses_axis: boolean;
   }[];
   left_alone: {
@@ -672,7 +672,7 @@ export interface ResolutionOutcome {
 export interface ReviewSide {
   id: string;
   name: string;
-  // 没判出类型时为 null（0009）
+  // null when the type could not be determined (0009)
   type_label: string | null;
   color: string;
   disambiguator: string | null;
@@ -680,7 +680,7 @@ export interface ReviewSide {
   top_facts: string[];
 }
 
-/** agent 在一对上留下的、还开着的建议（0025）；卡片上的裁决就是对它的回答 */
+/** Open suggestions the agent left on a pair (0025); the verdict on the card is an answer to it */
 export interface ReviewProposal {
   id: string;
   action: "merge" | "keep" | "unsure";
@@ -699,7 +699,7 @@ export interface ReviewItem {
   proposal: ReviewProposal | null;
 }
 
-/** agent 的一笔（0025）：看了哪一对、想怎么办、凭什么、人怎么答的 */
+/** One entry of the agent (0025): which pair it looked at, what it wanted to do, on what grounds, and how the person answered */
 export interface AgentDecision {
   id: string;
   run_id: string;
@@ -708,15 +708,15 @@ export interface AgentDecision {
   action: "merge" | "keep" | "unsure";
   confidence: number;
   reason: string | null;
-  /** 它被给看的先例：同对 / 同名 / 撤回各一条一条，类型对的习惯是一条汇总 */
+  /** The precedents it was shown: one entry each for same-pair / same-name / withdrawn; type-pair habits are one summary entry */
   precedents: AgentPrecedent[];
   status: "proposed" | "applied" | "accepted" | "overridden" | "reverted" | "superseded";
   merge_id: string | null;
-  /** defer 留给人的那一个问题；只有 unsure 的行才有 */
+  /** The one question deferred to a person; only rows marked unsure have it */
   question: string | null;
-  /** 第二层看了什么：一条一次查询 */
+  /** What the second tier looked at: one query per entry */
   trace: { tool: string; args: Record<string, string>; note: string }[];
-  /** 第二层花的模型调用 */
+  /** The model calls spent by the second tier */
   calls: number;
   created_at: string;
   decided_at: string | null;
@@ -733,42 +733,42 @@ export type AgentPrecedent =
       left: string;
       right: string;
       at: string;
-      /** 人拍板时写的那一句（0026）；0026 之前的决定没有 */
+      /** The sentence written when a person decided (0026); decisions before 0026 have none */
       why?: string | null;
     }
   | { family: "type_pair"; merged: number; kept: number; reverted: number };
 
-/** 数据映射的一条口径：业务概念 → 数据资产定义（见 docs/decisions/0011）。
+/** One convention of data mapping: business concept → data asset definition (see docs/decisions/0011).
  *
- * 字段是列而不是 JSON 里的键——从前它是一条 `mapped_to` 事实，
- * 这几样全塞在 `object_value` 里。 */
+ * The fields are columns, not keys in JSON: previously this was a `mapped_to` fact,
+ * and all of these were stuffed into `object_value`. */
 export interface ConceptMapping {
   id: string;
   concept_id: string;
   concept_name: string;
-  /** 挂载的数据源。同一概念在不同源上可以有不同定义 */
+  /** Mounted data sources. The same concept may have different definitions on different sources */
   source: string;
   table_name: string | null;
   expr: string | null;
   sql: string | null;
   unit: string | null;
   summary: string | null;
-  /** 派生指标：算出来的，不是表里的列 */
+  /** Derived metric: computed, not a column in the table */
   derived: boolean;
   status: "proposed" | "confirmed" | "rejected";
 }
-/** 一条口径改动之前的样子。**整版快照而不是差异**（0006）：
- *  读的时候要回答的是「当时是什么」，差异得从头重放才答得出来 */
+/** The shape of a convention before a change. **A full snapshot rather than a diff** (0006):
+ *  when reading, the question is "what was it at that time", which a diff can only answer by replaying from the start */
 export interface MappingRevision {
   id: string;
   before: Record<string, unknown>;
-  /** 改的人；用户是软删除的，所以归因不会因为人离职而丢 */
+  /** The person who changed it; users are soft-deleted, so attribution is not lost when a person leaves */
   changed_by_name: string | null;
   changed_at: string;
 }
-/** 一处公理违规（0002 R0）。判据来自本体自己声明的公理，没声明就不报 */
-/** derived_contradiction 独有（0017）：推出来的那条三元组——它没有落库，
- *  只能在这里写出来。其它种类是 `{}` */
+/** One axiom violation (0002 R0). The criterion comes from the axioms the ontology declares itself; if none are declared, nothing is reported */
+/** Only for derived_contradiction (0017): the triple that was inferred. It was never persisted,
+ *  so it can only be written out here. Other kinds are `{}` */
 export interface ViolationDetail {
   axiom?: "functional" | "inverse_functional" | "asymmetry" | "self_loop";
   rule?: "transitive" | "symmetric" | "inverse" | "sub_property";
@@ -795,27 +795,27 @@ export interface AxiomViolation {
     | "inverse_functional"
     | "signature"
     | "derived_contradiction";
-  /** 判据来自哪条关系。判「公理写错了」时从这里进本体去改 */
+  /** Which relation the criterion came from. When judging "the axiom is written wrong", this is where to go into the ontology to change it */
   predicate: string | null;
   left_fact: string;
   left_text: string;
-  /** 自反那一类与 left 相同——一条事实跟自己矛盾 */
+  /** The reflexive kind is the same as left: one fact contradicts itself */
   right_fact: string;
   right_text: string;
-  /** `path` 的长度：环上的、互斥组里的事实，派生的前提；自环与签名为 0 */
+  /** The length of `path`: facts on the cycle, facts in a mutually exclusive group, and premises of a derivation; self-loops and signatures are 0 */
   path_len: number;
   detected_at: string;
   detail: ViolationDetail;
-  /** 审核线索（0017 §2），一次只给一条：旧断言没写结束日期、有同名实体、
-   *  抽取置信度低。没有就空 */
+  /** A review lead (0017 §2), given one at a time: an old assertion has no end date, there is a same-name entity,
+   *  or the extraction confidence is low. Empty if none */
   hint: "stale" | "duplicate" | "unsure" | null;
-  /** 环上的每一条事实（按顺序），或互斥组里的每一条（按 id）；自环与签名为空。
-   *  撤事实要指名撤哪条（#202） */
+  /** Every fact on the cycle (in order), or every fact in the mutually exclusive group (by id); self-loops and signatures are empty.
+   *  To retract a fact you must name which one to retract (#202) */
   path: { id: string; text: string }[];
 }
-/** 本体自己的一处自相矛盾。**与 AxiomViolation 不是一回事**：那个说
- *  「事实与定义抵触」，这个说「定义自己站不住」，后者更根本 */
-/** 对齐队列里的一条（#725）：一条短语签名，或一个类别词，都是对齐器两票不一致、等人定的 */
+/** The ontology's own self-contradiction. **Not the same thing as AxiomViolation**: that one says
+ *  "the facts conflict with the definition", this one says "the definition itself does not hold up", which is more fundamental */
+/** One entry in the alignment queue (#725): a phrase signature or a category word, which the aligner's two votes disagreed on and a person must decide */
 export type AlignmentItem =
   | {
       kind: "phrase";
@@ -826,7 +826,7 @@ export type AlignmentItem =
       object_is_value: boolean;
       statement_count: number;
       examples: string[];
-      /** 两票；候选多到没问模型时两票为空、`reason` 说明（0053） */
+      /** The two votes; when there are too many candidates to ask the model, both votes are empty and `reason` explains (0053) */
       votes: {
         first?: AlignmentVote | null;
         second?: AlignmentVote | null;
@@ -834,8 +834,8 @@ export type AlignmentItem =
         candidates?: number;
       } | null;
       decided_at: string;
-      /** 人绑过、还没说单个日期标哪一端的签名（#966）：现在绑到的属性与方向。
-       *  两票不一致的条目两个都是 null */
+      /** A signature a person has bound but has not yet said which end a single date marks (#966): the attribute and direction bound now.
+       *  Both are null for entries whose two votes disagree */
       bound_to: string | null;
       direction: "forward" | "reverse" | null;
     }
@@ -850,7 +850,7 @@ export type AlignmentItem =
       decided_at: string;
     }
   | {
-      /** 对齐器提的一条蕴含规则（0044 决定 3 第五片） */
+      /** A rule of implication proposed by the aligner (0044 decision 3, slice five) */
       kind: "rule";
       id: string;
       trigger: "phrase" | "kind_word";
@@ -866,30 +866,30 @@ export type AlignmentItem =
       votes: { agent?: { property: string; reading: string | null } | null } | null;
       decided_at: string;
     };
-/** 勘误 agent 被闸门拦下的一笔（0044 决定 7）：它想撤、改或加什么，凭哪句原话，为什么留给人 */
+/** One entry the erratum agent was blocked by the gate (0044 decision 7): what it wanted to retract, change or add, on which quoted sentence, and why it was left to a person */
 export interface ErrataItem {
   id: string;
   document_id: string;
   document: string;
   action: "retract" | "revise" | "add";
-  /** 结构报的理由；空 = 抽样看到的 */
+  /** The reason for the structural report; empty = seen in the sample */
   flag: "domain" | "range" | "name_absent" | "no_date" | null;
   fact_id: string | null;
-  /** 动作指向的那条事实：撤的就是看的那条，改的是改成的，加的是加的 */
+  /** The fact the action points at: a retraction targets the one it looked at, a change targets the one it changes to, an addition is the added one */
   proposed: { subject: string; property: string; object: string } | null;
   reason: string;
   quote: string | null;
-  /** 闸门的理由：`derived 2` / `answered 1` / `contradiction CEO of`（0027 的写法） */
+  /** The gate's reason: `derived 2` / `answered 1` / `contradiction CEO of` (the 0027 format) */
   detail: string | null;
   created_at: string;
 }
 export interface AlignmentVote {
   property: string;
   direction: "forward" | "reverse";
-  /** 状态属性下，只带一个日期的陈述那个日期标的是什么（#966）；事件与恒常没有 */
+  /** Under a state attribute, which date a statement carrying only one date marks (start or end); events and constants have none (#966) */
   marks?: AlignmentMarks | null;
 }
-/** 单个日期在状态上标的是开始、结束，还是都不是（`phrase_bindings.marks`，#966） */
+/** Whether a single date on a state marks the start, the end, or neither (`phrase_bindings.marks`, #966) */
 export type AlignmentMarks = "start" | "end" | "none";
 
 export interface OntologyDefect {
@@ -900,11 +900,11 @@ export interface OntologyDefect {
     | "subclass_cycle"
     | "disjoint_with_ancestor"
     | "inherits_disjoint"
-    // 0017 加的三类：都在谓词上，前两类关于逆，第三类是子属性成环
+    // The three kinds added by 0017: all on predicates; the first two concern the inverse, the third is a sub-property forming a cycle
     | "inverse_of_itself"
     | "inverse_not_mutual"
     | "sub_property_cycle"
-    // 0017：两条规则加在一起产出互斥的派生，按规则对聚合报一次
+    // 0017: two rules together produce mutually exclusive derivations; reported once per rule pair in aggregate
     | "rules_disagree";
   subject_label: string | null;
   other_label: string | null;
@@ -912,7 +912,7 @@ export interface OntologyDefect {
   detected_at: string;
   detail: DefectDetail;
 }
-/** rules_disagree 独有：哪两条规则、撞在哪条公理上、几对、几个例子 */
+/** rules_disagree only: which two rules, which axiom they collide on, how many pairs, and how many examples */
 export interface DefectDetail {
   count?: number;
   rules?: {
@@ -937,21 +937,21 @@ export interface FactReviewItem {
   quote: string | null;
 }
 
-/** 一句记忆抽出、等人点头的事实（0015）。`quote` 是那句记忆的全文——
- *  确认界面把原句放在三元组上面，人对着原句判断，而不是凭空判断三元组。 */
+/** One sentence of memory extracted as a fact, waiting for a person's approval (0015). `quote` is the full text of that sentence
+ *  The confirm screen puts the source sentence above the triple, so the person judges against the sentence, not the triple in a vacuum. */
 export interface PendingFactItem {
   id: string;
   subject_id: string;
   subject_name: string;
   predicate_id: string | null;
-  /** 本体里的关系名；为空时显示 `proposed_predicate`（斜体，标明是原话） */
+  /** The relation name in the ontology; when empty, `proposed_predicate` is shown (italic, marking it as the original wording) */
   predicate_label: string | null;
   proposed_predicate: string | null;
-  /** 开放陈述（0044）：文档自己的关系短语；有它就没有 predicate，那不是缺陷 */
+  /** Open statement (0044): the document's own relation phrase; when present there is no predicate, which is not a defect */
   phrase: string | null;
-  /** 按文档角色词记的限定：值或实体 */
+  /** Qualifier recorded by the document's role word: a value or an entity */
   qualifiers: { role: string; value?: unknown; entity_id?: string; entity_name?: string }[] | null;
-  /** 照抄的时间词，不是算出来的日期 */
+  /** A time word copied verbatim, not a computed date */
   time_words: { text: string; char_start: number }[] | null;
   object_id: string | null;
   object_name: string | null;
@@ -963,12 +963,12 @@ export interface PendingFactItem {
   quote: string;
   proposed_by: string | null;
   proposed_by_name: string | null;
-  /** 经 MCP 记进来时，那个 agent 的令牌名；网页端对话里为空 */
+  /** When recorded via MCP, the token name of that agent; empty for chats in the web UI */
   proposed_token_name: string | null;
   created_at: string;
 }
 
-/** 时态冲突（自动闭合拿不准的那些）：旧事实 vs 新事实。 */
+/** A temporal conflict (the ones auto-closing is unsure about): the old fact versus the new fact. */
 export interface ConflictItem {
   id: string;
   reason: "no_time" | "simultaneous" | "low_confidence";
@@ -987,35 +987,35 @@ export interface ConflictItem {
   new_confidence: number;
 }
 
-/** 决策台账事件（audit_events 的 review 域切片）：detail 是决策时的自包含快照。 */
+/** A decision-ledger event (the review-domain slice of audit_events): detail is a self-contained snapshot taken at decision time. */
 export interface ReviewHistoryEvent {
   id: string;
   action: string;
   target_kind: string;
   target_id: string | null;
   detail: Record<string, unknown>;
-  /** null = 系统（AI 裁决器） */
+  /** null = the system (AI adjudicator) */
   actor_name: string | null;
   created_at: string;
 }
 
-/** 一档队列里等着的：多少条、最老的一条从什么时候起等（空队列是 null） */
+/** For one queue tier: how many items are waiting, and since when the oldest has waited (null for an empty queue) */
 export interface QueueWait {
   count: number;
   oldest_at: string | null;
 }
 
-/** 一个时间窗口里的决定 */
+/** Decisions within a time window */
 export interface DecidedWindow {
   total: number;
-  /** 其中台账上没有 actor 的——AI 裁决器自己办的 */
+  /** Among these, those with no actor in the ledger: done by the AI adjudicator itself */
   automatic: number;
   by_action: { action: string; count: number }[];
-  /** actor_id 为 null 的一行是裁决器；label 是台账里的身份快照 */
+  /** A row with actor_id null is the adjudicator; label is the identity snapshot in the ledger */
   by_actor: { actor_id: string | null; label: string | null; count: number }[];
 }
 
-/** 一个时间窗口里 agent 写下的行，按现在的状态数 */
+/** Rows the agent wrote within a time window, by their current state count */
 export interface AgentWindow {
   applied: number;
   proposed: number;
@@ -1024,9 +1024,9 @@ export interface AgentWindow {
   reverted: number;
 }
 
-/** 审核台总览（#377）：等着办的、办过的、库的成色。与左栏计数同一套口径 */
+/** Review desk overview (#377): what is waiting to be handled, what has been handled, and the state of the KB. Same counting rules as the left-column counts */
 export interface ReviewSummary {
-  /** agent 在这个库里做过什么（0025） */
+  /** What the agent has done in this knowledge base (0025) */
   agent: { running: boolean; queue: number; open: number; last_7d: AgentWindow; last_30d: AgentWindow };
   waiting: Record<
     | "pending"
@@ -1043,7 +1043,7 @@ export interface ReviewSummary {
   decided: {
     last_7d: DecidedWindow;
     last_30d: DecidedWindow;
-    /** 近 14 天，一天一条，含零 */
+    /** The last 14 days, one entry per day, zeros included */
     daily: { day: string; count: number }[];
   };
   health: {
@@ -1064,7 +1064,7 @@ export interface MergeLog {
   reverted_at: string | null;
 }
 
-/** 边上的属性（0037）：`{ key: "amount", value: { value: 4e9, unit: "$" } }` */
+/** Attributes on an edge (0037): `{ key: "amount", value: { value: 4e9, unit: "$" } }` */
 export interface FactQualifier {
   qualifier_type_id: string;
   key: string;
@@ -1078,44 +1078,44 @@ export interface GraphEdge {
   id: string;
   source: string;
   target: string;
-  /** 本体没认下这条关系时是原文说法；两者都拿不出时为 null（0052 之前的老数据） */
+  /** When the ontology did not recognize this relation, this is the wording from the source text; null if neither can be produced (old data from before 0052) */
   predicate: string | null;
   label: string | null;
-  /** 这条边是从哪条开放陈述算出来的，那条陈述的原话（0044 决定 1）：
-   *  画布一条陈述只画一条边，有类型化行就画它，原话跟在这里不丢 */
+  /** Which open statement this edge was computed from, that statement's source wording (0044 decision 1):
+   *  the canvas draws one edge per statement; the typed row is drawn when it exists, and the original wording is kept here without loss */
   said_as: string | null;
-  /** true = 这条边的名字来自原文，不是本体认下的关系 */
+  /** true = the name of this edge comes from the source text, not from a relation the ontology recognized */
   inferred: boolean;
-  /** true = 这条边是**推出来的**，不是任何人断言的（R1）。
-   *  与 `inferred` 不是一回事：那个说「名字来自原文」，这个说「不是谁说的」 */
+  /** true = this edge is **inferred**, not asserted by anyone (R1).
+   *  Not the same as `inferred`: that one says "the name comes from the source text", this one says "nobody said it" */
   derived: boolean;
-  /** 推它出来的那条规则；断言的边为 null。
-   *  界面靠它认出 `inverse`——那种边与来源边是同一件事的两种说法，
-   *  画两条只是把冗余画了两遍（见 Graph 的 `layOutParallelEdges`） */
+  /** The rule that inferred it; null for asserted edges.
+   *  The UI uses it to recognize `inverse`: that kind of edge and its source edge are two ways of saying the same thing,
+   *  and drawing both would only draw the redundancy twice (see `layOutParallelEdges` in Graph) */
   rule: string | null;
-  /** 推它出来用到的前提事实 id（按证明顺序）；断言的边为空。
-   *  并边要靠它认准来源——只按节点对匹配会把说法挂到错的边上 */
+  /** The fact ids of the premises used to infer it (in proof order); empty for asserted edges.
+   *  Edge pairing relies on it to pick the right source: matching on node pairs alone would hang the wording on the wrong edge */
   premises: string[];
   valid_from: string | null;
   valid_to: string | null;
-  /** **读出来的**区间（0022）：没起点的事实从最早的证据起，结束了不知哪天的到说出
-   *  它的那份文档为止。滑杆按这两个过滤；上面那两个是原文说了什么，只用来显示。
-   *  前端不自己解释 NULL——规则只在服务端的 world_axis 里有一份 */
+  /** The **read-out** interval (0022): a fact with no start is taken from the earliest evidence, and an end of unknown date runs up to
+   *  the document that said it ended. The slider filters on these two; the two above are what the source text said, shown for display only.
+   *  The frontend does not interpret NULL itself: the rule lives in one place only, world_axis on the server */
   holds_from: string | null;
   holds_to: string | null;
   confidence: number;
-  /** 有争议（0017 §3）：有一条 open 的公理违规或时态冲突指着它。整条边画成警戒色 */
+  /** Disputed (0017 §3): an open axiom violation or temporal conflict points at it. The whole edge is drawn in warning colour */
   contested: boolean;
-  /** 幽灵边（0017 §3）：没落地的派生。`id` 是那条 `derived_contradiction` 违规的 id；
-   *  `derived` 同时为 true，跟着派生开关走。点它打开主语的面板 */
+  /** Ghost edge (0017 §3): a derivation that did not land. `id` is the id of that `derived_contradiction` violation;
+   *  `derived` is also true and follows the derivation toggle. Clicking it opens the subject's panel */
   blocked: boolean;
-  /** 边上的属性（0037） */
+  /** Attributes on the edge (0037) */
   qualifiers: FactQualifier[];
-  /** 文档的角色词（0044）：不是本体属性，另放一处 */
+  /** Document role words (0044): not ontology attributes, kept in a separate place */
   statement_qualifiers: StatementQualifier[];
 }
 
-/** 实体的一个名字（0041）。`canonical` 是面板标题上那个；曾用名在世界轴上有结束 */
+/** One name of an entity (0041). `canonical` is the one in the panel title; a former name has an end on the world axis */
 export interface NameView {
   fact_id: string;
   name: string;
@@ -1129,82 +1129,82 @@ export interface NameView {
   evidence_count: number;
 }
 
-/** 开放陈述按文档角色词记的限定（0044）：值或实体 */
+/** Qualifiers recorded by the document's role words on an open statement (0044): a value or an entity */
 export interface StatementQualifier {
   role: string;
   value: unknown | null;
   entity_id: string | null;
   entity_name: string | null;
-  /** 说这个值的那几块（0070）：两块活着的块说法不同，各自一条 */
+  /** The blocks that state this value (0070): two living blocks that word it differently each get their own entry */
   chunk_ids: string[];
 }
 
 export interface EntityFact {
   id: string;
   direction: "out" | "in";
-  /** 同 GraphEdge：本体外的关系回落到原文说法，两者都没有时为 null */
+  /** Same as GraphEdge: a relation outside the ontology falls back to the source wording; null when neither exists */
   predicate_key: string | null;
   predicate_label: string | null;
-  /** 这条边是从哪条开放陈述算出来的，那条陈述的原话（0044 决定 1）：
-   *  画布一条陈述只画一条边，有类型化行就画它，原话跟在这里不丢 */
+  /** Which open statement this edge was computed from, that statement's source wording (0044 decision 1):
+   *  the canvas draws one edge per statement; the typed row is drawn when it exists, and the original wording is kept here without loss */
   said_as: string | null;
-  /** true = 名字来自原文，不是本体认下的关系 */
+  /** true = the name comes from the source text, not from a relation the ontology recognized */
   inferred: boolean;
-  /** 关系的时态类别。没有谓词就无从谈起，为 null */
+  /** The temporal category of the relation. Without a predicate there is nothing to speak of, so it is null */
   temporal: string | null;
   other_id: string | null;
   other_name: string | null;
-  /** 字面值宾语（属性事实/问数映射）：{"value":…} 或 {"summary":…} */
+  /** Literal-valued object (attribute facts / question-answering mapping): {"value":…} or {"summary":…} */
   object_value: Record<string, unknown> | null;
-  /** 边上的属性（0037） */
+  /** Attributes on the edge (0037) */
   qualifiers: FactQualifier[];
-  /** 文档的角色词（0044）：不是本体属性，另放一处 */
+  /** Document role words (0044): not ontology attributes, kept in a separate place */
   statement_qualifiers: StatementQualifier[];
   valid_from: string | null;
   valid_to: string | null;
-  /** 读出来的区间（0022），与 GraphEdge 同义：「此刻成立」按它判 */
+  /** The read-out interval (0022), same meaning as in GraphEdge: "holds right now" is judged by it */
   holds_from: string | null;
   holds_to: string | null;
-  /** 见证从文档的哪条日期来，照文档的字（0064）：「提报日期 2026年9月4日」。没有起止的
-      事实，`holds_from` 就是见证的日期——它是「截至」，不是起点 */
+  /** Records which date in the document the evidence comes from, quoted as the document words it (0064): "submission date 4 September 2026". For a fact with no start or end,
+      `holds_from` is the date of the evidence: it means "as of", not a start */
   attested_by?: string | null;
   valid_from_precision: string | null;
-  /** year | month | day，外加 unknown = 原文说它结束了但没说哪天 */
+  /** year | month | day, plus unknown = the source text says it ended but not on which day */
   valid_to_precision: string | null;
   confidence: number;
   evidence_count: number;
-  /** 证据全部停留在来源文档的旧版（未被现行内容确认；不代表事实失效） */
+  /** All evidence stays in an older version of the source document (not confirmed by the current content; does not mean the fact is invalid) */
   stale: boolean;
-  /** 修正行：区间闭合来自引擎对账/人工裁决而非抽取原文 */
+  /** Correction row: the interval was closed by engine reconciliation or a human ruling, not from the extracted source text */
   corrected: boolean;
-  /** 有争议（0017 §3）：哪一种、Review 里那一项的 id、派生撞断言时推出来的那句话。
-   *  行不压暗——断言仍然活着 */
+  /** Disputed (0017 §3): which kind, the id of that item in Review, and the sentence inferred when a derivation hits an assertion.
+   *  The row is not dimmed: the assertion is still alive */
   contested: {
     kind: string;
     ref_id: string;
     derived?: string | null;
   } | null;
-  /** 证据集合里最新的文档时间（开放事实的"最后确认时间"） */
+  /** The latest document time among the evidence set (the "last confirmed time" of an open fact) */
   last_evidence_time: string | null;
 }
 
-/** 实体的一次认知变更（记录时间轴上的事件，与 EntityFact 的有效时间轴正交）。
+/** A cognitive change to an entity (an event on the recording timeline, orthogonal to the validity timeline of EntityFact).
  *
- * 不是每个事件都来自一条事实：retyped / retype_reverted 来自改类账本，
- * 没有谓词、没有对方、没有方向。 */
+ * Not every event comes from a fact: retyped / retype_reverted come from the retyping ledger,
+ * and have no predicate, no counterpart and no direction. */
 export interface EntityHistoryEvent {
-  /** 事实事件才有；改类事件为 null */
+  /** Only fact events have this; for retyping events it is null */
   fact_id: string | null;
-  /** 记录时刻：写入 = recorded_at，作废 = invalidated_at，改类 = 改类那一刻 */
+  /** Time of recording: a write = recorded_at, an invalidation = invalidated_at, a retyping = the moment of retyping */
   at: string;
   kind:
     | "asserted"
     | "corrected"
     | "rejected"
     | "merged"
-    /** 别人并进了它：事实搬到它名下 */
+    /** Another entity was merged into it: its facts moved under it */
     | "merged_in"
-    /** 它并进了别人：这个 id 从此不再单独存在 */
+    /** It was merged into another entity: this id no longer exists on its own from now on */
     | "merged_away"
     | "merge_reverted"
     | "retyped"
@@ -1216,16 +1216,16 @@ export interface EntityHistoryEvent {
   valid_from: string | null;
   valid_to: string | null;
   valid_from_precision: string | null;
-  /** year | month | day，外加 unknown = 原文说它结束了但没说哪天 */
+  /** year | month | day, plus unknown = the source text says it ended but not on which day */
   valid_to_precision: string | null;
   confidence: number | null;
-  /** null = 引擎自动（抽取写入 / 时态对账闭合 / 高置信自动改类） */
+  /** null = the engine automatically (extraction write / temporal reconciliation closing / high-confidence automatic retyping) */
   actor_name: string | null;
   action: string | null;
   document_id: string | null;
   filename: string | null;
   quote: string | null;
-  /** 改类事件的两端。起点为 null = 从「未分类」改过来（0009 之后最常见的一种） */
+  /** The two ends of a retyping event. A null start = retyped from "unclassified" (the most common kind since 0009) */
   from_type_label: string | null;
   to_type_label: string | null;
 }
@@ -1265,20 +1265,20 @@ export interface OntologyRegressionCase {
 }
 
 export interface Evidence {
-  /** 模型在这一块里实际用的谓词说法。本体外的谓词不落到关系上，界面显示的就是这里 */
+  /** The predicate wording the model actually used in this chunk. Predicates outside the ontology do not land on the relation; this is what the UI shows */
   proposed_predicate: string | null;
   quote: string | null;
   chunk_id: string;
   document_id: string;
   filename: string;
   seq: number;
-  /** 证据出自文档的第几版 */
+  /** Which version of the document the evidence came from */
   doc_version: number;
-  /** 文档已有更新版本（证据停留在旧版；不代表事实失效） */
+  /** The document has a newer version (the evidence stays in the old one; does not mean the fact is invalid) */
   stale: boolean;
-  /** 这条证据的文档已被删除；事实还活着是因为另有出处（#268） */
+  /** The document for this evidence has been deleted; the fact is still alive because it has another source (#268) */
   document_deleted: boolean;
-  /** 这块文字从哪来（0040）；证明链那条路不带，缺席即原文 */
+  /** Where this block of text came from (0040); the proof-chain path does not carry it, and its absence means the source text */
   origin?: "stated" | "ocr" | "transcribed" | "described";
   origin_model?: string | null;
   anchor?: Record<string, unknown> | null;
@@ -1288,10 +1288,10 @@ export interface ChunkFull {
   id: string;
   seq: number;
   text: string;
-  /** 这块文字从哪来（0040） */
+  /** Where this block of text came from (0040) */
   origin: "stated" | "ocr" | "transcribed" | "described";
   origin_model: string | null;
-  /** ocr: {page, bbox?}；transcribed: {start_ms, end_ms, speaker} */
+  /** ocr: {page, bbox?}; transcribed: {start_ms, end_ms, speaker} */
   anchor: Record<string, unknown> | null;
 }
 
@@ -1302,11 +1302,11 @@ export interface EntityTypeView {
   color: string;
   shape: "circle" | "square";
   builtin: boolean;
-  /** 全部父类（subClassOf 可以有多个） */
+  /** All parent classes (subClassOf can have several) */
   parents: string[];
-  /** 与它互斥的类：**声明「不可能同时是」** */
+  /** Classes disjoint with it: **declares "cannot be both at once"** */
   disjoint: string[];
-  /** 左栏画树时挂在哪一支下。不参与语义，只管展示 */
+  /** Which branch it hangs under when the left column draws the tree. It has no semantics, it only affects display */
   primary_parent: string | null;
   description: string;
   /** How the type asks to be shown (RC-008): the `utopia:*` literals of its ontology file */
@@ -1321,24 +1321,24 @@ export interface RelationTypeView {
   temporal: string;
   functional: boolean;
   inverse_functional: boolean;
-  /** 其余四条 OWL 公理。**推理机的判据全在这里** */
+  /** The other four OWL axioms. **All of the reasoner's criteria are here** */
   is_transitive: boolean;
   is_symmetric: boolean;
   is_asymmetric: boolean;
   is_irreflexive: boolean;
-  /** 指向另一个关系的两条：`p⁻¹ = q` 与 `p ⊑ q`。是 id 不是布尔，
-   *  所以界面上是下拉框 */
+  /** The two entries pointing at another relation: `p⁻¹ = q` and `p ⊑ q`. They are ids, not booleans,
+   *  so the UI shows them as dropdowns */
   inverse_of: string | null;
   sub_property_of: string | null;
   builtin: boolean;
   description: string;
-  /** relation（宾语是实体）| attribute（宾语是字面值） */
+  /** relation (object is an entity) | attribute (object is a literal value) */
   kind: "relation" | "attribute";
-  /** 可以当主语的类。attribute 至少一个；relation 留空 = 不限 */
+  /** Classes that may be the subject. An attribute needs at least one; for a relation, empty = unrestricted */
   domains: string[];
-  /** 可以当宾语的类。只对 relation 有意义——attribute 的值域是 datatype */
+  /** Classes that may be the object. Only meaningful for relations; an attribute's range is its datatype */
   ranges: string[];
-  /** 这条关系的边能带哪些属性（0037）：属性定义的 id */
+  /** Which attributes an edge of this relation can carry (0037): ids of attribute definitions */
   qualifiers: string[];
   datatype: "text" | "number" | "date" | "bool" | null;
   unit: string | null;
@@ -1347,7 +1347,7 @@ export interface RelationTypeView {
   usage: number;
 }
 
-/** 一条能力问题（0061 决定 1）：本体该答得上来的问题，代理提本体时照着看 */
+/** One capability question (0061 decision 1): a question the ontology should be able to answer, which the agent checks when it proposes the ontology */
 export interface CompetencyQuestion {
   id: string;
   kb_id: string;
@@ -1362,16 +1362,16 @@ export interface CompetencyQuestion {
   last_result: unknown | null;
 }
 
-/** 本体的两个数（0061 决定 5） */
+/** The two numbers of the ontology (0061 decision 5) */
 export interface QuestionReport {
   questions: {
     accepted: number;
     proposed: number;
     checked: number;
     answered: number;
-    /** 答上了且途中从图谱拿到过事实 */
+    /** Answered, and facts were fetched from the graph on the way */
     answered_with_graph: number;
-    /** 答上了且只走了图谱：本体本身答的 */
+    /** Answered using only the graph: the ontology itself answered it */
     answered_graph_only: number;
   };
   proposals: {
@@ -1383,29 +1383,29 @@ export interface QuestionReport {
     changed: number;
     changed_share: number | null;
   };
-  /** 文档说了、本体还放不下的：没有类的类别词、没绑到属性的短语形状（代理读的就是这两样） */
+  /** Mentioned in the document but the ontology cannot hold yet: category words with no class, phrase shapes not bound to an attribute (these two are what the agent reads) */
   uncovered: { kind_words: number; phrases: number };
 }
 
 
-/** 一条谓词的一端挂着两个以上开放值（#341）。
+/** One end of a predicate has more than one open value (#341).
  *
- *  本体自己长出来的库里没人声明过唯一性，于是接任不闭合前任：两条 `leads`
- *  都开着，"六月谁在管"两个都答。引擎不自动推断这个公理（它驱动账本改写），
- *  所以只能把证据摆出来问人。 */
+ *  No one declared uniqueness in a library that grew out of the ontology, so a successor does not close out its predecessor: two `leads`
+ *  both stay open, and "who is in charge in June" answers both. The engine does not infer this axiom automatically (it drives rewriting of the ledger),
+ *  so the only option is to lay the evidence out and ask a person. */
 export interface UniquenessCandidate {
   predicate_id: string;
   key: string;
   label: string;
   kind: string;
-  /** subject = 主语侧（functional）；object = 宾语侧（inverse functional） */
+  /** subject = subject side (functional); object = object side (inverse functional) */
   side: "subject" | "object";
   axiom: "functional" | "inverse_functional";
-  /** 已经声明过、只是还没对过账（导入的，或声明之前就在的行） */
+  /** Already declared, just not yet reconciled (imported, or rows that existed before the declaration) */
   declared: boolean;
   holders: number;
   open_facts: number;
-  /** 对账会闭合几条，几条拿不准要进人审 */
+  /** How many reconciliations would close, and how many of the uncertain ones must go to human review */
   would_close: number;
   would_review: number;
   examples: {
@@ -1419,20 +1419,20 @@ export interface UniquenessCandidate {
   }[];
 }
 
-/** `description` 与 `reason` 不是一回事：description 逐字进抽取提示词，是模型判断
-    "什么算这个类"的唯一依据；reason 只是给人看的"为什么该加"。喂错了这个类会成为
-    下一个倾倒场——实测 technology 就是这么来的。 */
-/** 代理提的一条多带的几格（0061）：谁提的、服务哪些问题、会绑上哪些形状。
-    Suggest 的一份没有这些，渲染照旧 */
+/** `description` and `reason` are not the same thing: description goes verbatim into the extraction prompt and is the only basis the model uses to judge
+    "what counts as this class"; reason is only for people, "why it should be added". Feeding the wrong class description makes it the next dumping ground,
+    as measured, that is how technology came about. */
+/** Extra columns an agent proposal carries (0061): who proposed it, which questions it serves, which shapes it would bind.
+    A Suggest entry without these still renders as before */
 export interface AgentProposalFields {
   proposed_by?: "suggest" | "agent";
-  /** 服务的能力问题 id */
+  /** Id of the capability question served */
   serves?: string[];
-  /** 会归到这个类下的类别词 */
+  /** Category words that will fall under this class */
   kind_words?: string[];
-  /** 原文里的几句，给人核对定义用 */
+  /** A few sentences from the source text, for a person to check the definition against */
   examples?: string[];
-  /** 本体里离这条提案最近的已有元素（按向量）：采纳前看它是不是其实已经有了 */
+  /** The closest existing element in the ontology to this proposal (by vector): check before adopting whether it already exists */
   closest?: { key: string; label: string; distance: number }[];
   domains?: string[];
   ranges?: string[];
@@ -1443,7 +1443,7 @@ export interface AgentProposalFields {
       subject: string | null;
       object: string | null;
       value: boolean;
-      /** map_to 的形状：读属性的方向 forward | reverse */
+      /** Shape of map_to: direction for reading the attribute, forward | reverse */
       direction?: string;
     }[];
     kind_words?: string[];
@@ -1464,15 +1464,15 @@ export interface OntologyProposals {
     functional?: boolean;
     description?: string;
     reason?: string;
-    /** 这条关系归并了哪些表层说法。有它才谈得上把等待的事实改写过去 */
+    /** Which surface wordings this relation has merged. Only with these can waiting facts be rewritten to it */
     forms?: string[];
   })[];
   /**
-   * 宾语是字面值的说法（"成立日期 = 2015"）。
+   * Wordings whose object is a literal value ("date of establishment = 2015").
    *
-   * 跟 relation_types 分开是因为它们要的东西不一样：属性有 datatype，
-   * 而把它当关系建出来，那个值就会变成一个假实体。domain 不在这里——
-   * 服务端从事实的主语类型里取，猜错会让整条被丢弃
+   * Kept separate from relation_types because they need different things: an attribute has a datatype,
+   * and building it as a relation would turn the value into a fake entity. domain is not here:
+   * the server takes it from the subject type of the fact, and a wrong guess drops the whole thing
    */
   attribute_types?: (AgentProposalFields & {
     key: string;
@@ -1484,17 +1484,17 @@ export interface OntologyProposals {
     forms?: string[];
   })[];
   /**
-   * 本体里**已经有**这个意思，只需把说法挂过去。
+   * The ontology **already has** this meaning, the wording only needs to be attached to it.
    *
-   * 跟 relation_types 的区别是不建东西：同一个意思长出第二个 key，
-   * 这批事实就永久分在两处，谁也认不出它们本是一回事。
+   * The difference from relation_types is that nothing is built: a second key grows for the same meaning,
+   * and these facts stay split in two places forever, with nobody recognizing that they are the same thing.
    */
   map_to?: (AgentProposalFields & {
     key: string;
-    /** 服务端标的：目标落在关系还是属性上。两条改写路径不一样，
-        而模型只答得出一个 key，看不出它在哪一档。代理提的还有 class */
+    /** Set by the server: whether the target lands on a relation or an attribute. The two rewrite paths differ,
+        and the model can only answer one key, so it cannot tell which tier it is in. The agent's proposal also carries class */
     kind?: string;
-    /** 代理提的：目标的标签，人看键看不懂 */
+    /** From the agent's proposal: the label of the target; people cannot read keys */
     label?: string;
     forms?: string[];
     reason?: string;
@@ -1502,7 +1502,7 @@ export interface OntologyProposals {
 }
 
 
-/** 一个类/属性在这次导入里的去向。key_taken = key 被另一个 IRI 占着，报告但不动 */
+/** Where a class/attribute went in this import. key_taken = the key is held by another IRI; reported, not changed */
 export interface PlannedItem {
   iri: string;
   key: string;
@@ -1513,21 +1513,21 @@ export interface PlannedItem {
   conflict_with?: string | null;
 }
 
-/** 预览与落库返回同一个计划：点确认之后发生的事就是刚看过的事 */
+/** Preview and commit return the same plan: what happens after clicking confirm is exactly what was just previewed */
 export interface ImportPlan {
   format: string;
   triples: number;
   classes: PlannedItem[];
   relations: PlannedItem[];
   attributes: PlannedItem[];
-  /** 出现过但今天不消费的公理 → 次数。不是已跳过，是暂未投影 */
+  /** Axioms that appeared but are not consumed today → counts. Not skipped; not yet projected */
   unprojected: [string, number][];
   classes_without_description: number;
   functional_relations: number;
 }
 
-/** 一次导入记下的账。**键与 `owl_import.rs` 写进 `summary` 的一一对应**；
- *  全是可选的——老记录可能缺字段，界面按缺失处理而不是显示 0 */
+/** The ledger recorded for an import. **Keys correspond one-to-one with what `owl_import.rs` writes into `summary`**;
+ *  all are optional: older records may lack fields, and the UI treats them as missing rather than showing 0 */
 export interface OntologyImportSummary {
   classes_created?: number;
   classes_updated?: number;
@@ -1538,15 +1538,15 @@ export interface OntologyImportSummary {
   relations_superseded?: number;
   relations_updated?: number;
   functional_relations?: number;
-  /** 逆属性 / 父属性连上了几条——目标 IRI 不在这个库里时会静默跳过 */
+  /** How many inverse / parent property links were made. Silently skipped when the target IRI is not in this knowledge base */
   inverse_linked?: number;
   sub_property_linked?: number;
   attributes_seen?: number;
   attributes_created?: number;
-  /** **按原因分组的计数**，不是一个数：`{no_domain: 3, unknown_domain: 1}`。
-   *  跳过一个属性的理由不止一种，而理由才是人下一步要处理的东西 */
+  /** **Counts grouped by reason**, not a single number: `{no_domain: 3, unknown_domain: 1}`.
+   *  There is more than one reason to skip a property, and the reason is what the person has to act on next */
   attributes_skipped?: Record<string, number>;
-  /** 没投影下来的 IRI 与出现次数（服务端最多记 30 条） */
+  /** IRIs that were not projected, with their occurrence counts (the server records at most 30) */
   unprojected?: [string, number][];
   triples?: number;
 }
@@ -1563,7 +1563,7 @@ export interface OntologyImportView {
 
 export interface Source {
   n: number;
-  /** 缺省 = 文档 chunk 引用；charter = 内置手册（跳 /docs/{slug}#{anchor}） */
+  /** Default = document chunk reference; charter = built-in handbook (jumps to /docs/{slug}#{anchor}) */
   kind?: "charter";
   chunk_id?: string;
   document_id?: string;
@@ -1572,11 +1572,11 @@ export interface Source {
   heading?: string;
   filename: string;
   excerpt: string;
-  /** 块里被引到的那几句（图谱事实的引文，#968 的后续）：界面在原文里把它们标出来 */
+  /** The few sentences in the block that are cited (quotes for graph facts, a follow-up to #968): the UI marks them in the source text */
   quotes?: string[];
 }
 
-/** Agentic 对话的行动轨迹（工具调用一步一条）。 */
+/** The action trail of an agentic chat (one entry per tool call step). */
 export interface ChatStep {
   kind:
     | "search"
@@ -1590,42 +1590,42 @@ export interface ChatStep {
     | "changes"
     | "query"
     | "tool";
-  /** 数据：查询、实体名、来源名、工具名。照原样显示 */
+  /** Data: queries, entity names, source names, tool names. Shown as is */
   label: string;
-  /** 服务端写的英文。**有 `status` 的步骤不读它**，界面按下面的字段自己说（#942）；
-   *  那之前存下的消息只有它。问数与 remember 的 detail 是数据（目的、记下的那句话） */
+  /** English written by the server. **Steps with a `status` do not read it**; the UI speaks from the fields below (#942);
+   *  messages stored before that only have it. The detail of question-answering and remember is data (the purpose, the sentence recorded) */
   detail: string;
   status?: "ok" | "failed" | "not_found" | "invalid";
-  /** 列出了几个；`total` 是一共有几个（列出来的少于有的时候） */
+  /** How many were listed; `total` is how many there are in all (when fewer are listed than exist) */
   count?: number;
   total?: number;
-  /** 列到上限就停了，后面可能还有，总数不知道 */
+  /** Stopped at the listing limit; there may be more after, and the total is unknown */
   more?: boolean;
-  /** 世界时间：问的是那时成立的事实。RFC 3339 */
+  /** World time: asks for facts that held at that time. RFC 3339 */
   valid_at?: string;
-  /** 记录时间：按那时（`as_of`）或那之前（`before`）记下的。RFC 3339 */
+  /** Recording time: records made at that time (`as_of`) or before it (`before`). RFC 3339 */
   as_of?: string;
   before?: string;
-  /** changes 的窗口，YYYY-MM-DD；没有 until 就是开到现在 */
+  /** Window for changes, YYYY-MM-DD; without until it runs up to now */
   since?: string;
   until?: string;
-  /** paths_between：最短的那条几跳 */
+  /** paths_between: how many hops the shortest one takes */
   hops?: number;
-  /** 参数不对时是哪一个；`missing` 分开没给与给错了 */
+  /** Which argument is wrong; `missing` is separate from given-but-wrong */
   param?: string;
   missing?: boolean;
-  /** 问数跑的那条 SQL（#936） */
+  /** The SQL that question-answering ran (#936) */
   sql?: string;
-  /** `remember` 那一步带着它：那句记忆落成的 chunk。对话里的确认卡按它取
-   *  待确认项（0015）；回放时也据此重画 */
+  /** The `remember` step carries it: the chunk the memory was saved as. The confirmation card in the conversation fetches
+   *  pending items by it (0015); replay also redraws from it */
   chunk_id?: string;
-  /** 这一步发生时正文已经有多长（UTF-16 码元，与 `string.length` 同一单位）。
-   *  据此把轨迹穿回正文里，而不是全堆在最前面。
-   *  **这条迁移之前的消息没有它**——缺省时整段轨迹回到顶部，即旧的样子 */
+  /** How long the body already was when this step happened (UTF-16 code units, the same unit as `string.length`).
+   *  The trail is threaded back into the body by it, rather than all piled at the top.
+   *  **Messages from before this migration do not have it**: when absent, the whole trail goes back to the top, the old way */
   at?: number;
 }
 
-/** 会话行（Chat 左栏列表）。 */
+/** Session row (the Chat left-column list). */
 export interface ConversationRow {
   id: string;
   title: string;
@@ -1634,7 +1634,7 @@ export interface ConversationRow {
   message_count: number;
 }
 
-/** 会话消息（含落库的行动轨迹与引用，历史回放用）。 */
+/** Session message (includes the stored action trail and citations, used for history replay). */
 export interface ConversationMessage {
   id: string;
   role: "user" | "assistant";
@@ -1645,25 +1645,25 @@ export interface ConversationMessage {
   created_at: string;
 }
 
-/** 告警中心的一组（0005）：**连着的、同类的几次故障**。
+/** One group in the alert centre (0005): **consecutive failures of the same kind**.
  *
- * 存储那边仍是一次故障一行，折叠在服务端读的时候做——这样翻页数的是组，
- * 一段连续故障不会被页边界切断。 */
+ * Storage still holds one failure per row; the folding is done when the server reads, so paging counts groups,
+ * and a run of consecutive failures is not cut by a page boundary. */
 export type AlertGroup = {
   kb_id: string | null;
-  /** 系统级告警没有库名 */
+  /** System-level alerts have no knowledge base name */
   kb_name: string | null;
-  /** `source.sync_failed` / `llm.unreachable` —— 措辞在 i18n 里按这个查 */
+  /** `source.sync_failed` / `llm.unreachable` — the wording is looked up in i18n by this */
   kind: string;
   severity: "info" | "warning" | "error";
-  /** 这一组几次 */
+  /** How many times in this group */
   count: number;
-  /** 其中我没读过的几次 */
+  /** Of those, how many I have not read */
   unread: number;
   latest_at: string;
-  /** 跟 latest_at 一起圈出这一组，标已读时原样发回去 */
+  /** Together with latest_at, delimits this group; sent back as is when marking it read */
   earliest_at: string;
-  /** 明细，最多几条，新的在前 */
+  /** Detail, at most a few entries, newest first */
   lines: {
     name?: string;
     error?: string;
@@ -1691,7 +1691,7 @@ export const api = {
     );
   },
   alertsUnread: () => request<{ unread: number }>("/api/v1/alerts/unread"),
-  /** 失败任务回队列（#216）。库内一条、全局一条（管理员）；范围可按种类与失败时间收窄 */
+  /** Returns a failed task to the queue (#216). One per knowledge base, one global (admin); the scope can be narrowed by kind and failure time */
   failedJobs: (kbId: string) =>
     request<{ failed: number }>(`/api/v1/kbs/${kbId}/jobs/failed`),
   requeueJobs: (
@@ -1739,15 +1739,15 @@ export const api = {
         new_password: newPassword,
       }),
     }),
-  /** 我发过的个人令牌（0014）。撤销过的也在——撤过这件事本身要看得见 */
+  /** Personal tokens I have issued (0014). Revoked ones are included too: the fact of revoking must stay visible */
   tokens: () => request<{ tokens: TokenView[] }>("/api/v1/me/tokens"),
-  /** 发一枚。**明文只在这一次的响应里**，列表永远给不出它 */
+  /** Issue one. **The plaintext is only in this one response**; the list can never give it back */
   issueToken: (body: {
     name: string;
     scope: "read" | "write";
-    /** 缺省 = 这个人能进的全部库 */
+    /** Default = every knowledge base this person can enter */
     kb_ids?: string[] | null;
-    /** 0 = 不过期 */
+    /** 0 = never expires */
     expires_in_days: number;
   }) =>
     request<{ token: string; info: TokenView }>("/api/v1/me/tokens", {
@@ -1757,8 +1757,8 @@ export const api = {
   revokeToken: (tokenId: string) =>
     request<{ ok: boolean }>(`/api/v1/me/tokens/${tokenId}`, { method: "DELETE" }),
   workspaces: () => request<Workspace[]>("/api/v1/workspaces"),
-  /** 这个工作区，以及**我在里面是什么角色**。建库要 Admin+（见 api/kbs.rs
-   *  的 create），而 `GET /workspaces` 那份列表不带角色 */
+  /** This workspace, and **what role I hold in it**. Creating a KB needs Admin+ (see the create in api/kbs.rs),
+   *  and the `GET /workspaces` list does not carry the role */
   workspaceRole: (workspaceId: string) =>
     request<{ workspace: Workspace; role: string }>(
       `/api/v1/workspaces/${workspaceId}`,
@@ -1766,8 +1766,8 @@ export const api = {
 
   kbs: (workspaceId: string) =>
     request<Kb[]>(`/api/v1/workspaces/${workspaceId}/kbs`),
-  /** 审计台账。**分页 + 筛选**——台账是合规材料，只看最近 100 条等于查不了历史。
-   *  `action` 是前缀：`entity.` 捞出 entity.retyped / entity.renamed 一族。 */
+  /** The audit ledger. **Paged + filtered**: the ledger is compliance material, and seeing only the latest 100 entries means history cannot be queried.
+   *  `action` is a prefix: `entity.` picks up the entity.retyped / entity.renamed family. */
   kbAudit: (
     kbId: string,
     opts: {
@@ -1790,7 +1790,7 @@ export const api = {
     return request<{
       events: AuditEvent[];
       total: number;
-      /** 这个库实际发生过的动作，筛选下拉按它填 */
+      /** The actions that actually happened in this knowledge base; the filter dropdown is populated from it */
       actions: string[];
     }>(`/api/v1/kbs/${kbId}/audit?${p}`);
   },
@@ -1802,9 +1802,9 @@ export const api = {
       name: string;
       description?: string | null;
       visibility?: string;
-      /** 预置本体包 id，顺序有意义：第一个会认领同名的种子类 */
+      /** Preset ontology pack ids; order matters: the first one claims seed classes with the same name */
       ontology_packs?: string[];
-      /** 场景包 id（0073）：按场景预置的类、属性和能力问题 */
+      /** Scenario pack id (0073): classes, attributes and capability questions preset for a scenario */
       scenario_packs?: string[];
     },
   ) =>
@@ -1841,10 +1841,10 @@ export const api = {
   adminDeployment: () =>
     request<{
       open_registration: boolean;
-      /** 外层兜底，防任务无限堆积；真正的节流是按模型的限额 */
+      /** Outer safety net against tasks piling up without limit; the real throttle is the per-model limit */
       worker_concurrency: number;
       default_model_concurrency: number;
-      /** 新建知识库的本体语言默认值。**不是界面语言**——那个在客户端 */
+      /** Default ontology language for a new knowledge base. **Not the UI language**, which lives on the client */
       default_ontology_lang: "en" | "zh";
       model_limits: {
         base_url: string;
@@ -1891,20 +1891,20 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** 已停用的账号。**没有它恢复就够不着**——那个人从所有列表里消失，
-   *  而恢复接口要的正是他的 id */
+  /** Deactivated accounts. **Without this, restoring is out of reach**: the person vanished from every list,
+   *  and the restore endpoint needs exactly their id */
   deactivatedUsers: () => request<OrgUser[]>("/api/v1/users/deactivated"),
-  /** 恢复一个停用的账号 */
+  /** Restore a deactivated account */
   adminReactivateUser: (userId: string) =>
     request<{ ok: boolean }>(`/api/v1/admin/users/${userId}`, {
       method: "POST",
     }),
-  /** 停用一个账号（软删除）。归因照旧查得到——审计、合并日志、改类账本都靠它 */
+  /** Deactivate an account (soft delete). Attribution is still queryable: the audit, the merge log and the retyping ledger all rely on it */
   adminDeactivateUser: (userId: string) =>
     request<{ ok: boolean }>(`/api/v1/admin/users/${userId}`, {
       method: "DELETE",
     }),
-  /** 授予或收回系统管理员（#1233） */
+  /** Grant or revoke system administrator (#1233) */
   adminSetSystemAdmin: (userId: string, isAdmin: boolean) =>
     request<{ ok: boolean }>(`/api/v1/admin/users/${userId}`, {
       method: "PUT",
@@ -1921,8 +1921,8 @@ export const api = {
     request<{ ok: boolean }>(`/api/v1/admin/data-sources/${id}`, {
       method: "DELETE",
     }),
-  /** 存之前先试一次：**不落库**。回来的是 ok，连不上时还有一句原因——
-   *  密码错、库名拼错、端口不通是三件不同的事 */
+  /** Try it once before saving: **nothing is stored**. The response is ok; when it cannot connect there is still a reason:
+   *  wrong password, mistyped database name and unreachable port are three different things */
   adminTestConnString: (conn_string: string) =>
     request<{ ok: boolean; engine?: string; error?: string }>(
       "/api/v1/admin/data-sources/test",
@@ -1932,8 +1932,8 @@ export const api = {
     request<{ ok: boolean }>(`/api/v1/admin/data-sources/${id}/test`, {
       method: "POST",
     }),
-  /** 这个源授权给了哪些工作区（0014）。授权与挂载是两层：
-   *  授权由系统管理员写，挂载由 KB 管理员在授权过的集合里挑 */
+  /** Which workspaces this source is authorized for (0014). Authorization and mounting are two layers:
+   *  a system administrator writes authorization, and a KB administrator picks from the authorized set to mount */
   dataSourceGrants: (id: string) =>
     request<{ workspaces: { id: string; name: string }[] }>(
       `/api/v1/admin/data-sources/${id}/grants`,
@@ -1943,15 +1943,15 @@ export const api = {
       `/api/v1/admin/data-sources/${id}/grants/${workspaceId}`,
       { method: "PUT" },
     ),
-  /** 收回授权。**连同该工作区里已挂上的一起卸掉**，返回卸了几个 */
+  /** Revoke authorization. **Also unmounts whatever is already mounted in that workspace**, and returns how many were unmounted */
   revokeDataSource: (id: string, workspaceId: string) =>
     request<{ ok: boolean; unmounted: number }>(
       `/api/v1/admin/data-sources/${id}/grants/${workspaceId}`,
       { method: "DELETE" },
     ),
 
-  /** 一页口径。**Viewer 就能看**——问数的答案直接由口径决定，
-   *  看得见答案却看不见口径，等于要人信一个不给看的算法 */
+  /** One page of definitions. **Viewers can see it**: the answer to a question-answer is decided directly by the definition,
+   *  and seeing the answer without the definition is like asking people to trust an algorithm they cannot inspect */
   mappings: (
     kbId: string,
     opts: {
@@ -1971,8 +1971,8 @@ export const api = {
       items: ConceptMapping[];
       total: number;
       counts: { proposed: number; confirmed: number; rejected: number };
-      // 最近一轮探索的账（#503）。单看列表答不了「漏了多少」——
-      // 十二条提议对着八十列的宽表与刚好覆盖完一个小库长得一样。
+      // The ledger of the most recent exploration round (#503). The list alone cannot say "how much was missed":
+      // a wide table of 80 columns and a small library fully covered look the same. */
       last_run?: {
         id: string;
         started_at: string;
@@ -1990,7 +1990,7 @@ export const api = {
       };
     }>(`/api/v1/kbs/${kbId}/mappings${qs ? `?${qs}` : ""}`);
   },
-  /** 改一条口径。改之前那一版自动进 revisions */
+  /** Change one definition. The version from before the change is automatically put into revisions */
   reviseMapping: (
     kbId: string,
     mappingId: string,
@@ -2019,8 +2019,8 @@ export const api = {
     request<{ data_sources: DataSourceView[] }>(
       `/api/v1/kbs/${kbId}/data-sources/available`,
     ),
-  /** 挂载。**`schema_error` 非空时挂载仍然成了**——源是真挂上的，只是它的
-   *  库表结构没摄进来，问数看不见有哪些表。同一件事会进告警中心 */
+  /** Mounting. **It counts as mounted even when `schema_error` is non-empty**: the source really is mounted, only its
+   *  database schema was not ingested, so question-answering cannot see which tables exist. The same thing goes into the alert centre */
   mountDataSource: (kbId: string, dsId: string) =>
     request<{
       ok: boolean;
@@ -2043,15 +2043,15 @@ export const api = {
       { method: "POST" },
     ),
 
-  /** 文库一页。**服务端筛选与分页**——从前一次取回整库、前端切片，
-   *  而客户端筛选只筛得到已经拿下来的那些 */
+  /** One page of the library. **Server-side filtering and paging**: previously the whole library was fetched at once and the frontend sliced it,
+   *  and client-side filtering could only filter what had already been fetched */
   documents: (
     kbId: string,
     opts: {
       source?: string;
       q?: string;
       graph?: string;
-      /** "deleted" = 「已删除」视图：只列墓碑（#268） */
+      /** "deleted" = the "Deleted" view: lists only tombstones (#268) */
       state?: "deleted";
       limit: number;
       offset: number;
@@ -2068,24 +2068,24 @@ export const api = {
     return request<{
       docs: Doc[];
       total: number;
-      /** 下面四个**只按来源作用域算**，不受名字/状态筛选影响——
-       *  它们是批量按钮的作用范围 */
+      /** The four below are **computed by source scope only**, unaffected by the name/status filters:
+       *  they are the scope of the batch buttons */
       ready: number;
-      /** `graph_status = 'done'`：抽取进度条的分子 */
+      /** `graph_status = 'done'`: the numerator of the extraction progress bar */
       done: number;
       extracting: number;
       failed: number;
-      /** 整库的墓碑数（删了、没清的），不随作用域变 */
+      /** Tombstone count for the whole knowledge base (deleted, not yet purged), does not change with scope */
       deleted: number;
     }>(`/api/v1/kbs/${kbId}/documents?${p}`);
   },
-  /** 一键重试这个作用域里全部抽取失败的文档 */
+  /** One-click retry of all failed-extraction documents in this scope */
   retryFailedDocs: (kbId: string, source?: string) =>
     request<{ queued: number; found: number }>(
       `/api/v1/kbs/${kbId}/documents/retry-failed${source ? `?source=${source}` : ""}`,
       { method: "POST" },
     ),
-  /** 整库一次取回：行数按 (文档 × 原因 × 对象) 聚合后很小，避免逐行发请求 */
+  /** Fetch the whole knowledge base in one go: once rows are aggregated by (document × reason × object) it is small, avoiding a request per row */
   extractionDrops: (kbId: string) =>
     request<{ drops: ExtractionDrop[] }>(
       `/api/v1/kbs/${kbId}/extraction-drops`,
@@ -2104,10 +2104,10 @@ export const api = {
       `/api/v1/documents/${id}`,
       { method: "DELETE" },
     ),
-  /** 撤销删除（#268）：文档、分块、随之作废的事实原路复活 */
+  /** Undo a deletion (#268): documents, chunks and the facts that were invalidated along with them come back the same way */
   restoreDocument: (id: string) =>
     request<{ ok: boolean }>(`/api/v1/documents/${id}/restore`, { method: "POST" }),
-  /** 真删（#268 下半）：只对已删除的开放，库管理员，不可撤销 */
+  /** Hard delete (#268, second half): only for items already deleted; knowledge base admin; cannot be undone */
   purgeDocument: (id: string) =>
     request<{ ok: boolean; chunks: number; blobs: number }>(
       `/api/v1/documents/${id}/purge`,
@@ -2132,13 +2132,13 @@ export const api = {
     request<{
       nodes: GraphNode[];
       edges: GraphEdge[];
-      /** 库里一共有多少。**与 nodes.length 不是一回事**——画布只画度数最高的
-       *  那一批，把上限当成规模显示是这个接口从前最误导人的地方 */
+      /** How many there are in the knowledge base in total. **Not the same as nodes.length**: the canvas draws only
+       *  the highest-degree batch, and showing the cap as the size was the most misleading thing this endpoint used to do */
       total_nodes?: number;
       total_edges?: number;
     }>(`/api/v1/kbs/${kbId}/graph/overview${limit ? `?limit=${limit}` : ""}`),
-  /** 邻域视图**没有总数**：它本来就只是一小片，说「共 325 个」没有意义。
-   *  两个字段声明成可选，好让调用方与总览共用一个类型 */
+  /** The neighbourhood view has **no total**: it is only a small slice to begin with, so saying "325 in total" means nothing.
+   *  The two fields are declared optional so that callers and the overview can share one type */
   graphNeighborhood: (kbId: string, entityId: string) =>
     request<{
       nodes: GraphNode[];
@@ -2146,8 +2146,8 @@ export const api = {
       total_nodes?: number;
       total_edges?: number;
     }>(`/api/v1/kbs/${kbId}/graph/neighborhood?entity=${entityId}&hops=2`),
-  /** 按名字找实体。**一并回总数**——「宁分勿合」会造出一堆同名，
-   *  固定十条时想找的那个可能根本不在这十条里 */
+  /** Find entities by name. **Also returns the total**: "split rather than merge" creates many with the same name,
+   *  and the one you are looking for may not be among the fixed ten */
   searchEntities: (kbId: string, q: string, limit = 10) =>
     request<{ entities: GraphNode[]; total: number }>(
       `/api/v1/kbs/${kbId}/entities?q=${encodeURIComponent(q)}&limit=${limit}`,
@@ -2156,20 +2156,20 @@ export const api = {
     request<{
       entity: GraphNode;
       facts: EntityFact[];
-      /** 这个实体的名字（0041）：本名、简称、曾用名，各带出处与有效期。
-       *  名字事实不在 facts 里——它不是一条「关于它的事」 */
+      /** This entity's names (0041): the real name, short names and former names, each with source and validity period.
+       *  Name facts are not in facts: a name is not "a fact about it" */
       names: NameView[];
-      /** 推出来的那些**单独一个键**，不掺进 facts：混在同一个列表里，
-       *  用户看不出「文档里写的」和「引擎推的」的区别 */
+      /** Things inferred are kept under **their own key**, not mixed into facts: in one list
+       *  users could not tell "written in the document" from "the engine inferred it" */
       derived: DerivedFact[];
-      /** 没落地的派生（0017 §3）：连 `derived_facts` 都不在，所以也单独一个键 */
+      /** Derivations that did not land (0017 §3): not even in derived_facts, so they also get a key of their own */
       blocked: BlockedDerivation[];
-      /** 同名的其他实体。**打开面板就给**——合并入口要长在能看见同名的地方，
-       *  而不是藏在「改一次名」之后 */
+      /** Other entities with the same name. **Given as soon as the panel opens**: the merge entry must sit where same-name entities are visible,
+       *  not be hidden behind "rename once" */
       same_name: GraphNode[];
     }>(`/api/v1/kbs/${kbId}/entities/${entityId}`),
-  /** 认知变更历史（记录时间轴）：服务端分页 */
-  /** 人工修正实体的类型或名字。同名不拦——返回的 same_name 供界面提示是否合并。 */
+  /** History of cognitive changes (recording timeline): paged by the server */
+  /** Manually correct an entity's type or name. A same name is not blocked: the returned same_name lets the UI prompt whether to merge. */
   updateEntity: (
     kbId: string,
     entityId: string,
@@ -2180,8 +2180,8 @@ export const api = {
       { method: "PATCH", body: JSON.stringify(body) },
     ),
 
-  /** 人工修正一条事实的有效区间（302）。**整体替换**：四个值一起提交，
-   *  服务端作废旧行、插修正行——不是原地改，所以这次修改会出现在 History 上。 */
+  /** Manually correct the validity interval of a fact (302). **Whole replacement**: all four values are submitted together,
+   *  the server voids the old row and inserts a correction row: it is not an in-place edit, so the change shows up in History. */
   updateFactTime: (
     kbId: string,
     factId: string,
@@ -2204,11 +2204,11 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** 这个库走到哪一步了（#313）：四个页面的空状态共用。只回布尔与计数 */
+  /** How far this knowledge base has got (#313): shared by the empty states of four pages. Returns only booleans and counts */
   readiness: (kbId: string) =>
     request<Readiness>(`/api/v1/kbs/${kbId}/readiness`),
 
-  /* ---- 业务规则（0021 / #277）：人写下的判据，引擎按物化的节奏跑 ---- */
+  /* ---- Business rules (0021 / #277): criteria written by a person; the engine runs them on the materialization schedule ---- */
   rules: (kbId: string) =>
     request<{ rules: BusinessRule[] }>(`/api/v1/kbs/${kbId}/rules`),
   createRule: (kbId: string, body: RuleInput) =>
@@ -2224,7 +2224,7 @@ export const api = {
       description?: string;
       enabled?: boolean;
       conditions?: RuleCondition[];
-      /** 结论整组替换：三格互相定义，只改一格会留下半截状态 */
+      /** Replace the conclusion set as a whole: the three fields define each other, so changing only one would leave a half-state */
       conclusion?: "typing" | "attribute" | "relation";
       conclude_type_id?: string;
       conclude_predicate_id?: string;
@@ -2236,19 +2236,19 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
-  /** 一条规则此刻标了谁。规则卡片上那个数字点开就是它 */
+  /** Who one rule is currently flagging. The number on the rule card opens this list */
   ruleMatches: (kbId: string, ruleId: string, page = 0, per = 20) =>
     request<{ matches: RuleMatch[]; total: number }>(
       `/api/v1/kbs/${kbId}/rules/${ruleId}/matches?page=${page}&per=${per}`,
     ),
-  /** 一条规则的定义史：改过几次、每一版怎么说 */
+  /** The definition history of one rule: how many times it changed and what each version said */
   ruleVersions: (kbId: string, ruleId: string) =>
     request<{ versions: RuleVersion[] }>(`/api/v1/kbs/${kbId}/rules/${ruleId}/versions`),
   deleteRule: (kbId: string, ruleId: string) =>
     request<{ ok: boolean }>(`/api/v1/kbs/${kbId}/rules/${ruleId}`, {
       method: "DELETE",
     }),
-  /** 立刻跑一遍。物化默认一小时一轮，而写规则的人想马上看见它推出了什么 */
+  /** Run once right away. Materialization runs hourly by default, but the person writing the rule wants to see what it inferred immediately */
   runRules: (kbId: string) =>
     request<{
       rules: number;
@@ -2256,9 +2256,9 @@ export const api = {
       capped: number;
       inserted: number;
       invalidated: number;
-      /** 链跑了几轮：1 就是没有链，2 就是一条规则读了另一条的结论（0030） */
+      /** How many rounds the chain ran: 1 means no chain; 2 means one rule read another rule's conclusion (0030) */
       rounds: number;
-      /** 跑满上限还在产出：链比 MAX_DEPTH 长，后面那几环没接上 */
+      /** Still producing when the cap is reached: the chain is longer than MAX_DEPTH, and the last links are not connected */
       rounds_capped: boolean;
     }>(`/api/v1/kbs/${kbId}/rules/run`, { method: "POST" }),
 
@@ -2270,13 +2270,13 @@ export const api = {
     request<{ evidence: Evidence[] }>(
       `/api/v1/kbs/${kbId}/facts/${factId}/evidence`,
     ),
-  /** 一条派生事实的证明（0002 R2）：前提按推导顺序，每条带证据，一路到原句。
-   *  派生已失效时回 null——不是错误 */
+  /** The proof of a derived fact (0002 R2): premises in derivation order, each with evidence, all the way to the source sentence.
+   *  Returns null when the derivation is no longer valid; that is not an error */
   derivedProof: (kbId: string, derivedId: string) =>
     request<{ proof: Proof | null }>(
       `/api/v1/kbs/${kbId}/derived/${derivedId}/proof`,
     ),
-  /** 没落地的派生的证明链（0017 §3）：前提在违规的 path 里 */
+  /** The proof chain of a derivation that did not land (0017 §3): the premises are in the violation's path */
   blockedProof: (kbId: string, violationId: string) =>
     request<{ steps: ProofStep[] | null }>(
       `/api/v1/kbs/${kbId}/violations/${violationId}/proof`,
@@ -2291,7 +2291,7 @@ export const api = {
     request<{ job_id: number }>(`/api/v1/documents/${id}/reprocess`, {
       method: "POST",
     }),
-  /** 来源级全量重抽（增量语义：既有决策保留） */
+  /** Full re-extraction for the source (incremental semantics: existing decisions are kept) */
   reExtractSource: (kbId: string, sourceId: string) =>
     request<{ queued: number }>(
       `/api/v1/kbs/${kbId}/sources/${sourceId}/re-extract`,
@@ -2299,7 +2299,7 @@ export const api = {
         method: "POST",
       },
     ),
-  /** 图谱重建（清算语义：清空图层后全量重抽；KB admin） */
+  /** Rebuild the graph (liquidation semantics: clear the graph layer, then re-extract in full; KB admin) */
   rebuildGraph: (kbId: string) =>
     request<{
       entities_removed: number;
@@ -2364,13 +2364,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  /** 一端挂着两个以上开放值的谓词（#341）：本体没人声明唯一性时接任不闭合前任 */
+  /** A predicate with more than one open value at one end (#341): when no one declared uniqueness in the ontology, a successor does not close out its predecessor */
   uniquenessCandidates: (kbId: string) =>
     request<{ candidates: UniquenessCandidate[] }>(
       `/api/v1/kbs/${kbId}/ontology/uniqueness`,
     ),
 
-  /** 补上声明之后把已经在账上的开放行对一遍。声明本身走 updateRelationType */
+  /** After a declaration is made, run the open rows already on the ledger through it once. The declaration itself goes through updateRelationType */
   reconcileRelationType: (kbId: string, id: string) =>
     request<{ corrected: number; conflicts: number }>(
       `/api/v1/kbs/${kbId}/ontology/relation-types/${id}/reconcile`,
@@ -2396,30 +2396,30 @@ export const api = {
         method: "DELETE",
       },
     ),
-  /** 上次算出来、还没人表态的提案（0049）。刷新页面靠它，不必重跑模型 */
+  /** Proposals last computed that nobody has yet responded to (0049). Page refresh relies on it, so the model need not run again */
   storedProposals: (kbId: string) =>
     request<OntologyProposals>(`/api/v1/kbs/${kbId}/ontology/proposals`),
-  /** 一条提案有人拒绝了。改状态不删行——拒绝留痕，下一轮 Suggest 不再刷回待看。
-   *  只收拒绝：采纳走 adoptProposal，元素和采纳的状态一起提交（0061 决定 3） */
+  /** A proposal was rejected by someone. Changing the status does not delete the row: the rejection leaves a trace, and the next Suggest round does not bring it back as pending.
+   *  Only rejection is recorded here: adopting goes through adoptProposal, with the element and the adopted status committed together (0061 decision 3) */
   decideProposal: (
     kbId: string,
     section: string,
     key: string,
     status: "rejected",
-    /** 拒绝的理由（0061）：下一轮代理读得到 */
+    /** The reason for rejection (0061): the next agent round can read it */
     reason?: string,
   ) =>
     request<{ ok: boolean }>(`/api/v1/kbs/${kbId}/ontology/proposals`, {
       method: "POST",
       body: JSON.stringify({ section, key, status, reason }),
     }),
-  /** 叫本体代理来看一眼（0061 决定 2）：排一份任务，结果落在 storedProposals */
+  /** Have the ontology agent take a look (0061 decision 2): queue a task, and the result lands in storedProposals */
   proposeOntology: (kbId: string) =>
     request<{ queued: boolean }>(`/api/v1/kbs/${kbId}/ontology/propose`, {
       method: "POST",
       body: "{}",
     }),
-  /** 采纳代理的一条提案（0061 决定 3）：元素、回归用例、采纳的状态和后续任务一次提交 */
+  /** Adopt one of the agent's proposals (0061 decision 3): the element, the regression case, the adopted status and the follow-up task are committed in one go */
   adoptProposal: (
     kbId: string,
     section: string,
@@ -2435,13 +2435,13 @@ export const api = {
   ) =>
     request<{
       id: string;
-      /** 复用时留着没写的形状或类别词，各带人定成了什么：代理读过之后人另定了、和提案不一样的 */
+      /** Shapes or category words that were left unwritten when reusing, each with what the person decided: the person decided differently from the proposal after the agent read it */
       skipped: ({ phrase: string } | { kind_word: string })[];
     }>(`/api/v1/kbs/${kbId}/ontology/proposals/adopt`, {
       method: "POST",
       body: JSON.stringify({ section, key, ...(edits ?? {}) }),
     }),
-  /** 能力问题（0061 决定 1） */
+  /** Capability question (0061 decision 1) */
   listQuestions: (kbId: string) =>
     request<CompetencyQuestion[]>(`/api/v1/kbs/${kbId}/questions`),
   createQuestion: (
@@ -2469,17 +2469,17 @@ export const api = {
     request<{ ok: boolean }>(`/api/v1/kbs/${kbId}/questions/${qid}`, {
       method: "DELETE",
     }),
-  /** 让代理给库提问题（0061 决定 1）：排任务，结果是 proposed 的问题 */
+  /** Have the agent ask the knowledge base questions (0061 decision 1): queues a task, and the result is a proposed question */
   proposeQuestions: (kbId: string) =>
     request<{ queued: boolean }>(`/api/v1/kbs/${kbId}/questions/propose`, {
       method: "POST",
       body: "{}",
     }),
-  /** 两个数（0061 决定 5） */
+  /** The two numbers (0061 decision 5) */
   questionReport: (kbId: string) =>
     request<QuestionReport>(`/api/v1/kbs/${kbId}/questions/report`),
 
-  /** 上传本体文件只算出计划，一个字节都不写库 */
+  /** Uploading an ontology file only computes a plan; not a single byte is written to the knowledge base */
   previewOntologyImport: (kbId: string, file: File) => {
     const form = new FormData();
     form.append("file", file, file.name);
@@ -2488,7 +2488,7 @@ export const api = {
       { method: "POST", body: form },
     );
   },
-  /** 执行刚看过的那个计划——服务端重新算一遍，两条路径共用同一段代码 */
+  /** Execute the plan that was just previewed: the server recomputes it, and both paths share the same code */
   applyOntologyImport: (kbId: string, file: File) => {
     const form = new FormData();
     form.append("file", file, file.name);
@@ -2581,27 +2581,27 @@ export const api = {
   documentExtractions: (docId: string) =>
     request<{ facts: ChunkFact[] }>(`/api/v1/documents/${docId}/extractions`),
 
-  /** 审核队列的各档**真实条数**。与列表分开取——列表有一页的上限，数数没有。
-   *  从前徽标读的是数组长度，而接口固定只回 100 条，于是 164 条写成 100。 */
+  /** **Real counts** of each tier of the review queue. Fetched separately from the list: the list has a page limit, counting does not.
+   *  The badge used to read the array length, and the endpoint always returns only 100, so 164 showed as 100. */
   review: (
     kbId: string,
     queue: ReviewQueue,
     limit: number,
     offset: number,
-    /** 只对 duplicates 有意义：按两边类型的关系筛（#428） */
+    /** Only meaningful for duplicates: filter by the relation of the two sides' types (#428) */
     types: ReviewTypeFilter = "any",
   ) =>
     request<{
       counts: ReviewCounts;
       queue: ReviewQueue;
-      /** 只有当前这一档的一页。类型按档不同，调用处按 queue 收窄 */
+      /** Only one page of the current tier. Types differ by tier, so the call site narrows by queue */
       items: unknown[];
     }>(
       `/api/v1/kbs/${kbId}/review?queue=${queue}&limit=${limit}&offset=${offset}&types=${types}`,
     ),
-  /** 一批重复项同一个动作（#428）：每条各自裁、各自记台账，回来逐条说成没成 */
-  /** `rationale`：人拍板时写的那一句（0026）——什么让你这么定。可不写；写了就跟着
-   *  决定一起进台账，下一次裁决器和 agent 读到的先例就不只是结果 */
+  /** One action for a batch of duplicates (#428): each is decided and recorded in the ledger individually, and the reply says item by item whether each succeeded */
+  /** `rationale`: the sentence written when a person ruled (0026): what made you decide this. Optional; if written, it goes into
+   *  the ledger together with the decision, so the precedent the next adjudicator and agent read is more than the result */
   reviewBatch: (kbId: string, ids: string[], action: "merge" | "keep", rationale?: string) =>
     request<{
       decided: number;
@@ -2610,7 +2610,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ids, action, rationale: rationale || null }),
     }),
-  /** 闭合日期带精度（year | month | day）：写多少位就是多少精度，服务端照存 */
+  /** Closing dates carry precision (year | month | day): the digits written set the precision, and the server stores them as given */
   closeFact: (kbId: string, factId: string, validTo: string, precision: string) =>
     request<{ ok: boolean }>(`/api/v1/kbs/${kbId}/facts/${factId}/close`, {
       method: "POST",
@@ -2631,7 +2631,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  /** 一句记忆抽出的全部待确认项（0015）。空数组 = 这句话没有等着人的东西了 */
+  /** All pending items extracted from one sentence of memory (0015). An empty array = this sentence has nothing left waiting on a person */
   pendingForChunk: (kbId: string, chunkId: string) =>
     request<{ items: PendingFactItem[] }>(
       `/api/v1/kbs/${kbId}/review/pending?chunk_id=${chunkId}`,
@@ -2646,7 +2646,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ action, rationale: rationale || null }),
     }),
-  /** 对一条数据映射口径表态（0011）。改状态不删行——拒绝留痕，下一轮探索不再提议它 */
+  /** Take a position on one data-mapping convention (0011). Changing the status does not delete the row: rejection leaves a trace, and the next exploration round will not suggest it again */
   decideMapping: (
     kbId: string,
     mappingId: string,
@@ -2659,56 +2659,56 @@ export const api = {
         body: JSON.stringify({ status }),
       },
     ),
-  /** 跑一遍一致性检查。同步返回——纯计算，没有模型调用也没有网络 */
+  /** Run a consistency check. Returns synchronously: it is pure computation, with no model call and no network */
   runConsistencyCheck: (kbId: string) =>
     request<{
       edges: number;
-      /** **零和零不一样**：没有公理时结论是「没有判据」，不是「未发现矛盾」 */
+      /** **Zero and zero are not the same**: with no axioms the conclusion is "no criteria", not "no contradiction found" */
       predicates_with_axioms: number;
       found: number;
       inserted: number;
       cleared: number;
-      /** 环没搜完的谓词数（#642）。不为零时那些谓词上的环只报了一部分 */
+      /** How many predicates the cycle search did not finish (#642). When not zero, the cycles on those predicates report only part of the picture */
       cycles_capped: number;
       classes: number;
-      /** 本体自己的矛盾**单独回**，不加进 found：两个数不是一类东西 */
+      /** The ontology's own contradictions are returned **separately**, not added to found: the two counts are not the same kind of thing */
       defects_found: number;
       defects_new: number;
     }>(`/api/v1/kbs/${kbId}/consistency/check`, { method: "POST" }),
-  /** 人定一条短语签名：属性与方向，或没有（陈述留在开放图谱）。判定和它的重算任务
-   *  一次提交，答 202 和 job id（0051）；类型化图谱在后台重算，`review` / `graph`
-   *  事件到了就是算完了，也可以拿 job id 去 `/kbs/{id}/jobs/{job_id}` 问 */
+  /** A person sets a phrase signature: an attribute and direction, or none (the statement stays in the open graph). The judgment and its recompute task
+   *  are submitted together; the reply is 202 with a job id (0051). The typed graph recomputes in the background; when the `review` / `graph`
+   *  events arrive, it is done. The job id can also be queried at `/kbs/{id}/jobs/{job_id}` */
   decideAlignmentPhrase: (
     kbId: string,
     bindingId: string,
     property: string | null,
     direction: "forward" | "reverse",
-    /** 只在状态属性下给；null = 不说（只带一个日期的陈述留在开放图谱） */
+    /** Given only under a state attribute; null = no statement (a statement carrying only one date stays in the open graph) */
     marks: AlignmentMarks | null,
   ) =>
     request<{ ok: boolean; job_id: number; status: "accepted" }>(
       `/api/v1/kbs/${kbId}/review/alignment/phrases/${bindingId}`,
       { method: "POST", body: JSON.stringify({ property, direction, marks }) },
     ),
-  /** 人批或驳一条蕴含规则：答 202 和 job id，隐含事实在后台算（0044 决定 3 第五片） */
+  /** A person approves or rejects an implication rule: replies 202 with a job id, and the implied facts are computed in the background (0044 decision 3, slice five) */
   decideAlignmentRule: (kbId: string, ruleId: string, approve: boolean) =>
     request<{ ok: boolean; job_id: number; status: "accepted" }>(
       `/api/v1/kbs/${kbId}/review/alignment/rules/${ruleId}`,
       { method: "POST", body: JSON.stringify({ approve }) },
     ),
-  /** 人答勘误 agent 留下的一笔（0044 决定 7）：批了就执行，否了只记 */
+  /** A person answers an entry left by the erratum agent (0044 decision 7): approve to execute, reject to only record */
   decideErrata: (kbId: string, actionId: string, approve: boolean) =>
     request<{ ok: boolean }>(`/api/v1/kbs/${kbId}/review/errata/${actionId}`, {
       method: "POST",
       body: JSON.stringify({ approve }),
     }),
-  /** 人定一个类别词：类，或没有。它名下的实体换类，短语签名跟着重判 */
+  /** A person sets a category word: a class, or none. Entities under it that change class have their phrase signature re-judged */
   decideAlignmentKindWord: (kbId: string, kindWord: string, cls: string | null) =>
     request<{ ok: boolean }>(
       `/api/v1/kbs/${kbId}/review/alignment/kind-words/${encodeURIComponent(kindWord)}`,
       { method: "POST", body: JSON.stringify({ class: cls }) },
     ),
-  /** 对一处本体缺陷表态。**两个出路**——它压根没看数据，没有「数据错了」这条 */
+  /** Take a position on one ontology defect. **Two ways out**: it never looked at the data, so there is no "the data is wrong" option */
   decideDefect: (
     kbId: string,
     defectId: string,
@@ -2718,11 +2718,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ resolution }),
     }),
-  /** 跑一遍推理（R1）。开关关着时后端回 inference_off */
-  /** 类型消解：**只算不写**。回执里带着送去检索的画像——检索找不着时，
-   *  第一个要看的就是「我们拿什么去找的」 */
-  /** 手动合并：把 source 并进 target。**方向要紧**——source 消失，
-   *  它的事实搬到 target 上；合并可整体回滚（entity_merges 记着快照） */
+  /** Run inference once (R1). When the switch is off, the backend replies inference_off */
+  /** Type resolution: **computes only, writes nothing**. The receipt carries the profile sent to retrieval: when retrieval finds nothing,
+   *  the first thing to check is "what did we search with" */
+  /** Manual merge: merge source into target. **The direction matters**: source disappears,
+   *  its facts move onto target; a merge can be rolled back as a whole (entity_merges keeps the snapshot) */
   mergeEntities: (kbId: string, source: string, target: string, rationale?: string) =>
     request<{ ok: boolean }>(`/api/v1/kbs/${kbId}/entities/merge`, {
       method: "POST",
@@ -2733,13 +2733,13 @@ export const api = {
       `/api/v1/kbs/${kbId}/ontology/type-resolution/preview`,
       { method: "POST" },
     ),
-  /** 跑一遍并落库。三档分开回：自动改的、留给人的、说「都不是」的 */
+  /** Run and commit. Returns the three tiers separately: automatically changed, left to a person, and "none of these" */
   typeResolutionApply: (kbId: string) =>
     request<ResolutionOutcome>(`/api/v1/kbs/${kbId}/ontology/type-resolution`, {
       method: "POST",
     }),
-  /** 认可一个「粗类 → 细类」的配对，并把带上的实体改过去。
-   *  **认可的是类对，改的是实体**——认可一次，之后同一对不再进人工 */
+  /** Approve a "coarse class → fine class" pair, and change the entities carried along.
+   *  **The class pair is approved, the entities are changed**: approve once, and the same pair no longer goes to manual review */
   approveRefinement: (
     kbId: string,
     body: { from_type_id: string; to_type_id: string; entity_ids: string[] },
@@ -2748,7 +2748,7 @@ export const api = {
       `/api/v1/kbs/${kbId}/ontology/type-resolution/approve`,
       { method: "POST", body: JSON.stringify(body) },
     ),
-  /** 撤销一整批：把那批实体放回原来的类 */
+  /** Undo a whole batch: put those entities back in their original classes */
   typeResolutionUndo: (kbId: string, batchId: string) =>
     request<{ reverted: number }>(
       `/api/v1/kbs/${kbId}/ontology/type-resolution/${batchId}`,
@@ -2756,17 +2756,17 @@ export const api = {
     ),
   runInference: (kbId: string) =>
     request<{
-      /** 编译出来的规则条数。为零时是「没有规则」而不是「推不出东西」 */
+      /** Number of compiled rules. When zero, it means "no rules", not "nothing can be inferred" */
       rules: number;
       edges: number;
       derived: number;
       inserted: number;
-      /** 前提没了、跟着作废的 */
+      /** Premise gone, so it is invalidated along with it */
       invalidated: number;
-      /** 撞上单谓词上限、没推完的谓词个数 */
+      /** Number of predicates that hit the single-predicate cap and were not fully inferred */
       capped: number;
     }>(`/api/v1/kbs/${kbId}/inference/run`, { method: "POST" }),
-  /** 对一处公理违规表态。三个出路——第三个是这一档独有的：可能是定义错了 */
+  /** Take a position on one axiom violation. Three ways out; the third is unique to this tier: the definition itself may be wrong */
   decideViolation: (
     kbId: string,
     violationId: string,
@@ -2799,8 +2799,8 @@ export const api = {
     }),
   reviewSummary: (kbId: string) =>
     request<ReviewSummary>(`/api/v1/kbs/${kbId}/review/summary`),
-  /** 回答 agent 的一笔（0025）：merge / keep 答一条建议，revert 撤回一条自动合并，
-   *  merge 也能推翻一条自动分开。走的是人的裁决路径，成为新先例 */
+  /** Answer one agent entry (0025): merge / keep answers a suggestion, revert withdraws one automatic merge,
+   *  and merge can also overturn an automatic split. It goes through the person's ruling path and becomes a new precedent */
   agentAnswer: (
     kbId: string,
     decisionId: string,
@@ -2835,7 +2835,7 @@ export const api = {
       },
     ),
 
-  /** 只测 `card` 那一张卡，回来的也只有那一项（#1424） */
+  /** Test only the `card` one, and only that item is returned (#1424) */
   testSettings: (workspaceId: string, card: "chat" | "embed" | "ocr" | "transcribe") =>
     request<{
       /** `ok` only when all three request shapes the jobs send pass; `checks` has each one (#1354) */
@@ -2849,8 +2849,8 @@ export const api = {
       ocr?: { ok: boolean; version?: string | null; error?: string };
       transcribe?: { ok: boolean; error?: string };
     }>(`/api/v1/workspaces/${workspaceId}/settings/test?card=${card}`, { method: "POST" }),
-  /** 读扫描件的服务、转写模型各自一个保存：存它们不碰对话与嵌入那几列。
-   *  `requeued`：因为缺它而等着的文件，这一存重新排进了处理队列几份 */
+  /** The scanned-document reading service and the transcription model are each saved separately: saving them does not touch the chat and embedding columns.
+   *  `requeued`: files that were waiting for the missing one; this save put this many back into the processing queue */
   saveOcrSettings: (
     workspaceId: string,
     body: { provider: string; base_url: string; api_key: string; backend: string; model: string },
@@ -2868,11 +2868,11 @@ export const api = {
       { method: "PUT", body: JSON.stringify(body) },
     ),
 
-  /** 是否配置了单点登录（0056）。四项环境变量缺一个都是 false——
-   *  登录页据此决定要不要露出那个按钮 */
+  /** Whether single sign-on is configured (0056). If any one of the four environment variables is missing, this is false,
+   *  and the login page uses it to decide whether to show the button */
   oidcStatus: () =>
     request<{ enabled: boolean; password_login: boolean }>("/api/v1/auth/oidc/status"),
-  /** 谁的哪个身份提供方 subject 绑定到了这个部署的哪个账号（只读 + 解绑） */
+  /** Which identity provider subject is bound to which account in this deployment, and who bound it (read-only + unbind) */
   oidcIdentities: () =>
     request<{
       issuer: string;
@@ -2880,25 +2880,25 @@ export const api = {
       redirect_uri: string;
       identities: OidcIdentity[];
     }>("/api/v1/admin/oidc/identities"),
-  /** 我自己的绑定。绑定本身走 `/api/v1/auth/oidc/start?link=1`，由本人在身份提供方那边完成 */
+  /** My own binding. Binding itself goes through `/api/v1/auth/oidc/start?link=1`, which the person completes at the identity provider */
   oidcMe: () =>
     request<{ enabled: boolean; linked: boolean; subject?: string | null }>(
       "/api/v1/auth/oidc/me",
     ),
   oidcUnlinkMe: () =>
     request<{ ok: boolean }>("/api/v1/auth/oidc/me", { method: "DELETE" }),
-  /** 管理员解绑。没有替人绑定的接口——那是一条冒充别人登录的路 */
+  /** Admin unbind. There is no endpoint to bind on someone else's behalf: that would be a way to log in as another person */
   oidcUnlink: (userId: string) =>
     request<{ ok: boolean }>(`/api/v1/admin/oidc/identities/${userId}`, {
       method: "DELETE",
     }),
 };
 
-/** RAG 对话：SSE 流式。返回中止函数。 */
+/** RAG chat: streamed over SSE. Returns an abort function. */
 export const conversationsApi = {
-  /** **可搜可翻页**：标题会重（同一个问题问两次就重了），而固定一百条之后的
-   *  会话界面上根本不存在。搜的是标题与消息正文两处——人记得住的往往是
-   *  问过的那句话，不是标题 */
+  /** **Searchable and pageable**: titles repeat (asking the same question twice makes a duplicate), and sessions beyond the fixed hundred
+   *  do not exist in the session UI at all. Search covers two places, the title and the message body: what people remember is often
+   *  the sentence they asked, not the title */
   list: (kbId: string, q = "", limit = 30, offset = 0) => {
     const p = new URLSearchParams({
       limit: String(limit),
@@ -2909,7 +2909,7 @@ export const conversationsApi = {
       `/api/v1/kbs/${kbId}/conversations?${p}`,
     );
   },
-  /** 改标题。标题本来是从第一句话自动取的，而一段对话跑偏是常态 */
+  /** Rename. The title was originally taken automatically from the first sentence, and it is normal for a conversation to drift off course */
   rename: (kbId: string, id: string, title: string) =>
     request<{ ok: boolean }>(`/api/v1/kbs/${kbId}/conversations/${id}`, {
       method: "PATCH",
@@ -2931,22 +2931,22 @@ export const conversationsApi = {
 };
 
 export interface ChatHandlers {
-  /** `messageId`：这一问存下的 id。答到一半失败了，凭它重答（#936）；老的服务端不发 */
+  /** `messageId`: the id this question was saved under. If the answer failed halfway, it is used to answer again (#936); old servers do not send it */
   onConversation: (id: string, messageId?: string, generationId?: string) => void;
   onSources: (s: Source[]) => void;
   onStep: (s: ChatStep) => void;
   onDelta: (text: string) => void;
   onDone: (stopped: boolean) => void;
   onError: (message: string, error?: ApiError) => void;
-  /** 接上一个已经在跑的回答：这是它此刻的样子，**覆盖，不是追加** */
+  /** Attach to an answer that is already running: this is its state right now. **Overwrites, does not append** */
   onSnapshot?: (s: { generation_id: string; content: string; steps: ChatStep[]; sources: Source[] }) => void;
-  /** 这个会话没有在跑的生成——最常见的答案，不是错误 */
+  /** No generation is running for this session: the most common outcome, and not an error */
   onIdle?: () => void;
 }
 
-/** 接上一个正在生成的回答（刷新页面之后走这里）。
+/** Attach to an answer being generated (after a page refresh, this path is used).
  *
- *  与 `streamChat` 读的是同一条事件流，只是多了开头那份快照。 */
+ *  It reads the same event stream as `streamChat`, with the snapshot at the start added. */
 export function reattachChat(
   kbId: string,
   conversationId: string,
@@ -2965,7 +2965,7 @@ export function reattachChat(
 
 export function streamChat(
   kbId: string,
-  /** `retry_message_id`：重答这场对话最后那个没有回答的问题（#936），不再存一遍 */
+  /** `retry_message_id`: answer again the last question of this conversation that has no answer (#936), without saving it again */
   body: { conversation_id?: string; message: string; retry_message_id?: string },
   handlers: ChatHandlers,
 ): () => void {
@@ -2982,7 +2982,7 @@ export function streamChat(
   );
 }
 
-/** SSE 的读法只有一份：发起请求的方式不同，收下来之后的处理完全一样。 */
+/** There is only one way to read SSE: the ways of starting the request differ, but what happens after it is received is entirely the same. */
 function consumeChatStream(
   open: (signal: AbortSignal) => Promise<Response>,
   handlers: ChatHandlers,

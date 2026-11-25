@@ -1,13 +1,13 @@
 import { S } from "./i18n";
 import { toast } from "./toast";
 
-/** 把一段文字放进剪贴板，交回放没放成。
+/** Puts a piece of text on the clipboard. Returns false if that did not work.
  *
- *  `navigator.clipboard` 只在安全上下文里有：https，或者 localhost。在局域网里用
- *  http 打开的部署上它是 undefined——自托管最常见的那种打开方式——这时候直接调它，
- *  按钮按了什么也不发生，也不报错。那里退回 `execCommand("copy")`：选中一个看不见的
- *  textarea 再复制。这个接口已经不推荐了，但浏览器都还认，而且它只在剪贴板 API
- *  用不了的时候才走到。两样都不成就交回 false，由调用方说出来，不静默。 */
+ *  `navigator.clipboard` exists only in secure contexts: https, or localhost. On a deployment opened over http on the LAN (the most common way self-hosted instances are opened),
+ *  it is undefined, and calling it directly
+ *  does nothing when the button is pressed and throws no error. There, fall back to `execCommand("copy")`: select an invisible
+ *  textarea and copy it. This API is no longer recommended, but browsers still support it, and it only runs when the clipboard API
+ *  is unavailable. If neither works, return false and let the caller say so, rather than failing silently. */
 export async function copyText(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
@@ -15,12 +15,12 @@ export async function copyText(text: string): Promise<boolean> {
       return true;
     }
   } catch {
-    // 权限被拒、页面没有焦点：走下面的老办法
+    // Permission denied, or the page does not have focus: use the old method below
   }
   const focused = document.activeElement as HTMLElement | null;
   const area = document.createElement("textarea");
   area.value = text;
-  // 只读：手机上不弹键盘；固定在视口里、透明：不把页面滚走，也看不见
+  // Read-only: on phones the keyboard does not pop up; fixed in the viewport and transparent, so it does not scroll the page away and cannot be seen
   area.setAttribute("readonly", "");
   area.style.position = "fixed";
   area.style.top = "0";
@@ -39,8 +39,8 @@ export async function copyText(text: string): Promise<boolean> {
   }
 }
 
-/** 复制，再用一条提示说出结果：成了说 `copied`，不成说复制不了。
- *  各页的复制按钮都走这里；对话里那几个自己换图标，只在失败时提示 */
+/** Copies, then states the result with a toast: says `copied` on success, says it cannot copy on failure.
+ *  Each page's copy button goes through here; the chat ones swap in their own icon and only show a message on failure */
 export async function copyAndSay(text: string, copied: string): Promise<boolean> {
   const ok = await copyText(text);
   if (ok) toast.success(copied);

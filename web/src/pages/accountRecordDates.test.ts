@@ -18,7 +18,7 @@ vi.mock("@tanstack/react-router", async (original) => ({
 import { MyKbs } from "./MyKbs";
 import { Tokens } from "./Tokens";
 
-// 上海早上八点前，UTC 还是前一天：记录时刻按 UTC 切出日子，看的人就看到前一天
+// Before 8 a.m. in Shanghai, UTC is still the previous day: slicing the day by the record's UTC instant makes the viewer see the previous day
 beforeAll(() => {
   process.env.TZ = "Asia/Shanghai";
 });
@@ -33,20 +33,20 @@ const days = (html: string) => html.match(/\d{4}-\d{2}-\d{2}/g);
 
 describe("record moments on the account pages", () => {
   it("dates tokens by the reader's calendar, not by UTC", () => {
-    // 10 月 16 日早上 07:30 发的 30 天令牌，11 月 15 日 07:30 到期，07:45 用过
+    // 10 // A 30-day token issued at 07:30 on October 16 expires on November 15 at 07:30; it was used at 07:45
     const laptop: TokenView = {
       id: "t1", name: "laptop", token_prefix: "utp_pat_ab12", scope: "read", kb_ids: null,
       created_at: "2026-10-15T23:30:00Z", expires_at: "2026-11-14T23:30:00Z",
       last_used_at: "2026-10-15T23:45:00Z", revoked_at: null,
     };
-    // 10 月 1 日凌晨 04:00 发的旧令牌，16 日早上 06:10 撤掉
+    // 10 // An old token issued at 04:00 on October 1 was revoked at 06:10 on the 16th
     const old: TokenView = {
       ...laptop, id: "t2", name: "old", token_prefix: "utp_pat_cd34",
       created_at: "2026-09-30T20:00:00Z", expires_at: null, last_used_at: null,
       revoked_at: "2026-10-15T22:10:00Z",
     };
     const html = render(Tokens, [[["tokens"], { tokens: [laptop, old] }]]);
-    // 一行一行：用过、到期、发放；撤掉的那把只有发放和撤销
+    // Line by line: used, expires, issued; the token that was revoked has only issued and revoked
     expect(days(html)).toEqual(["2026-10-16", "2026-11-15", "2026-10-16", "2026-10-01", "2026-10-16"]);
   });
 
@@ -58,7 +58,7 @@ describe("record moments on the account pages", () => {
       governance_since: null, inference_interval_minutes: 60, last_inference_at: null,
       ontology_lang: "en",
     };
-    // Alice 在上海早上 07:30 把我加进来；另一个库是我自己在零点整加入的
+    // Alice added me at 07:30 in Shanghai in the morning; the other library I joined myself at exactly midnight
     const research: MyKb = {
       kb, my_role: "editor", joined_at: "2026-10-15T23:30:00Z", added_by_name: "Alice",
       doc_count: 3, member_count: 2,

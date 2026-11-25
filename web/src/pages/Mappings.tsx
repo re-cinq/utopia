@@ -1,11 +1,11 @@
-// 数据映射：业务概念在数据库里对应什么、怎么算。
+// Data mapping: what each business concept corresponds to in the database, and how it is computed.
 //
-// **这一页在此之前不存在**，而它管的东西一直都在：口径由探查任务提出、在
-// 「审阅」里被确认，然后沉进问数的 system prompt——人再也看不见它，也改不动。
-// `mappings::revise` 连同它的留痕表从建表起就是零调用的。
+// **This page did not exist before**, yet what it manages has always been there: definitions were proposed by the profiling task, confirmed in
+// "Review", and then sank into the question-answering system prompt, where people could never see or change them.
+// `mappings::revise` and its audit table have been called zero times since they were created.
 //
-// 审批留在同一个端点上（`review/mappings/{id}`，那里已经在写审计流水），
-// 搬的是界面不是逻辑：判断一条口径对不对要看得见表结构，而那在这一页。
+// Approval stays on the same endpoint (`review/mappings/{id}`, which already writes the audit trail).
+// What moves is the interface, not the logic: judging whether a definition is right requires seeing the table structure, and that lives on this page.
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Database, Plug, Plus, Search } from "lucide-react";
@@ -72,8 +72,8 @@ const TONE: Record<string, ChipTone> = {
   rejected: "neutral",
 };
 
-/** 「这个数怎么算」。SQL / 表达式 / 表名按这个优先级取一个——
- *  三者都在回答同一个问题，而 SQL 最具体、表名最粗 */
+/** "How is this number computed". Take one of SQL / expression / table name, in that priority order:
+ *  all three answer the same question, and SQL is the most specific while the table name is the coarsest */
 const howComputed = (m: ConceptMapping) =>
   m.sql ?? m.expr ?? m.table_name ?? null;
 
@@ -143,11 +143,11 @@ export function Mappings() {
   ];
 
   return (
-    /* **左栏切功能，不是标签页**：定义与数据源是两件不同的事（一个是判读，
-       一个是登记连接），全站凡是这种切换都在左栏（文库、审阅、本体都是）。
-       从前这里是一排按钮做的标签，选中那个还是实心主按钮——在这套语汇里
-       实心说的是"这一屏最该按的那一下"，四个标签四个行动号召。
-       内容区也从设置页那套居中限宽（max-w-4xl）改成内容页的铺满（px-8 py-6）。 */
+    /* **The left column switches features, not tabs:** definitions and data sources are two different things (one is judgement,
+       the other is registering connections). Everywhere on the site, such switches live in the left column (the library, review and ontology all do).
+       Before, this was a row of buttons acting as tabs, with the selected one a solid primary button; in this vocabulary,
+       solid means "the most important press on this screen", and four tabs would be four calls to action.
+       The content area also changed from the settings page's centred, width-limited layout (max-w-4xl) to the full-bleed content-page layout (px-8 py-6). */
     <div className="flex h-full">
       <aside className={`${RAIL_CLS} u-rail-list px-2 py-3`}>
         {(["definitions", "sources"] as const).map((t) => (
@@ -174,12 +174,12 @@ export function Mappings() {
         <DataSources kbId={kb.id} onExplored={refresh} />
       ) : (
         <div className="space-y-4">
-          {/* 筛选是下拉，不是一排按钮：四档状态是"挑一个看"，与全站其它页面的
-              筛选同一副控件（Dropdown），计数跟在标签里 */}
+          {/* The filter is a dropdown, not a row of buttons: the four status tiers are "pick one to look at", the same control (Dropdown)
+              as the filters on the other pages of the site, with the count following the label */}
           <div className="flex items-center gap-2 flex-wrap">
-            {/* 筛选条与 Members、文库、图谱同一副身材：**带放大镜的 w-64 输入框在前**，
-                下拉跟在后面。这里从前是下拉在前、输入框 flex-1——一个人从一页走到
-                另一页，同样的一条工具行，控件换了顺序、搜索框还横跨整屏。 */}
+            {/* The filter bar has the same build as Members, the library and the graph: **the w-64 input with a magnifier comes first**,
+                with the dropdown following. Before, the dropdown came first and the input was flex-1: a person moving from one page to
+                another saw the same toolbar row with the controls in a different order, and the search box spanning the whole screen. */}
             <Input
               icon={<Search size={13} />}
               className="w-64"
@@ -197,17 +197,17 @@ export function Mappings() {
                 setStatus(v as StatusFilter);
                 setPage(0);
               }}
-              /* 计数写进括号里，不是用间隔点挂在后面。「Pending · 0」读起来是
-                 两样并列的东西（这一页别处的 `·` 正是这个用法：口径 · 来源 ·
-                 表），而这里的 0 不是第二个字段，是「Pending 有几条」——
-                 括号说的就是这个从属关系。 */
+              /* The count goes inside the brackets, not hung on after with an interpunct. "Pending · 0" reads as
+                 two items side by side (the `·` used elsewhere on this page is exactly that usage: definition · source ·
+                 table), whereas the 0 here is not a second field; it is "how many are Pending":
+                 the brackets say exactly that subordinate relationship. */
               options={FILTERS.map((f) => ({
                 value: f.key,
                 label: f.n != null ? `${f.label} (${f.n})` : f.label,
               }))}
             />
-            {/* **一条工具行**：筛选、搜索、全选、批量动作排在一起。
-                从前它们各占一行，三行控件压在内容上面，读到列表要先翻过一块 */}
+            {/* **One toolbar row**: filter, search, select all and batch actions sit together.
+                Before, each took its own row, three rows of controls stacked on top of the content, and you had to scroll past them to reach the list */}
             {selectable.length > 0 && (
               <Checkbox
                 checked={selectable.every((m) => picked.has(m.id))}
@@ -262,10 +262,10 @@ export function Mappings() {
           {status === "rejected" && (
             <p className="text-small text-ink-2">{S.mapping.rejectedHint}</p>
           )}
-          {/* 最近一轮探索的账（#503）。**单看列表答不了「漏了多少」**——十二条
-              提议对着八十列的宽表与刚好覆盖完一个小库长得一样。这条贴出来人才能
-              从「等量提议」里看出覆盖范围。filtered out of view 反而更糟：搜索框
-              在搜索的时候人最容易忘上一次跑了多深 */}
+          {/* The ledger of the most recent exploration round (#503). **The list alone cannot answer "how much was missed"**: twelve
+              proposals look the same against an eighty-column wide table as they do when they exactly cover a small base. Posting this lets people
+              see the coverage among the "equal number of proposals". Filtering it out of view would be worse: while searching,
+              people most easily forget how deep the last run went */}
           {data.data?.last_run ? (
             <p className="text-small text-ink-2">
               {S.mapping.lastRun({
@@ -291,8 +291,8 @@ export function Mappings() {
               </EmptyState>
             </div>
           ) : (
-            /* 一个面板装多行，不是一行一张卡片（DESIGN.md 6）：这一页是
-               一队待表态的口径，同构的一组，跟文库、检索、成员一副样子 */
+            /* A panel holds several rows, not one card per row (DESIGN.md 6): this page is
+               a team of definitions awaiting a stance, a uniform group, with the same look as the library, search and members */
             <div className="glass rounded-panel divide-y divide-line">
               {data.data?.items.map((m) => (
                 <MappingRow
@@ -335,8 +335,8 @@ export function Mappings() {
   );
 }
 
-/** 一条口径。**未表态的才给确认/拒绝两个按钮**——已表过态的给「编辑」，
- *  因为改口径和第一次拍板是两件事：前者要留痕（revisions），后者不用。 */
+/** A definition. **Only the ones with no stance yet get the confirm / reject buttons**; ones already ruled on get "Edit",
+ *  because revising a definition and making the first ruling are two different things: the former leaves a trail (revisions), the latter does not. */
 function MappingRow({
   kbId,
   mapping: m,
@@ -422,14 +422,14 @@ function MappingRow({
           onCancel={() => setEditing(false)}
         />
       ) : (
-        /* 行里的动作：**拍板那一下描边，其余是 ghost，都不是实底。**十一行
-           十一个实底按钮等于把一整页染成动作，而一屏最多一个 primary。
-           但「不是实底」不等于「长成一句话」——从前这三个是 `LinkButton`：
-           没有内距、没有 hover 底、颜色就是正文那档灰，跟它们上面那行说明
-           一个样，看着不像能点。ghost 补回控件该有的两件事：一圈内距，
-           和指针停上去的那块底。静止时仍然轻。
-           拒绝**静止时就该是红的**：它是点了就生效的那一下，人要在按之前
-           看出来它跟「编辑」不是一类，而不是划过去才发现。 */
+        /* Actions in the row: **the ruling press is outlined; the rest are ghost, none is solid.** Eleven rows
+           of eleven solid buttons would paint a whole page as actions, and a screen should have at most one primary.
+           But "not solid" does not mean "looks like a sentence". Before, these three were `LinkButton`s:
+           no padding, no hover background, and the colour was the body text's grey, so they looked like the explanation line above them
+           and did not look clickable. Ghost restores the two things a control needs: a ring of padding,
+           and a background on pointer hover. At rest it is still light.
+           Reject **should be red even at rest**: it is the press that takes effect on click, and a person should be able to tell before pressing
+           that it is not the same kind as "Edit", rather than discovering it on hover. */
         <div className="mt-2 -ml-2 flex items-center gap-1 flex-wrap">
           {m.status === "proposed" && (
             <>
@@ -550,8 +550,8 @@ function EditForm({
   );
 }
 
-/** 改版历史。**留痕表从建表起就没人读过**——0006 说留它是为了答得出
- *  「上季度这个数是怎么算的」，这里是那句话的兑现处。 */
+/** Revision history. **The audit table has never been read since it was created**: 0006 says it is kept so that one can answer
+ *  "how was this number computed last quarter", and this is where that sentence is fulfilled. */
 function RevisionList({
   kbId,
   mappingId,
@@ -565,8 +565,8 @@ function RevisionList({
   });
 
   if (revs.isPending) return <Loading>{S.nav.loading}</Loading>;
-  // **取失败要说取失败。** `?? []` 会把一次 500 画成「还没改过」——
-  // 一条改过口径的记录被说成从没改过，比报错难查得多
+  // **A failed fetch must say it failed.** `?? []` would draw a 500 as "not revised yet":
+  // a record that was revised being described as never revised is much harder to debug than an error
   if (revs.isError)
     return (
       <div className="mt-3 border-t border-line pt-3">
@@ -604,9 +604,9 @@ function RevisionList({
   );
 }
 
-/** 知识库层的数据源挂载。**从 KB 设置搬来的**——挂哪个库和口径怎么定，
- *  是同一件事的两半：不知道有哪些表，就判断不了口径对不对。
- *  注册新连接仍是部署级动作，管理员给直达入口，其他人指路找管理员。 */
+/** Mounting of data sources at the knowledge-base level. **Moved here from KB settings**: which base to mount and how the definition is decided
+ *  are two halves of the same thing: without knowing which tables exist, you cannot judge whether a definition is right.
+ *  Registering a new connection is still a deployment-level action: admins get a direct entry point, others are pointed to an admin. */
 function DataSources({
   kbId,
   onExplored,
@@ -627,16 +627,16 @@ function DataSources({
   });
   const [picked, setPicked] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
-  // 与 notice 分开：一个是「成了」，一个是「成了一半」，配色也不同
+  // Kept separate from the notice: one says "it succeeded", the other "it succeeded halfway", and the colours differ too
   const [warning, setWarning] = useState<string | null>(null);
   const invalidate = () =>
     queryClient.invalidateQueries({ queryKey: ["kbDataSources", kbId] });
 
   const mount = useMutation({
     mutationFn: (dsId: string) => api.mountDataSource(kbId, dsId),
-    // **挂载成了、schema 没成，是两件事。** 服务端此时回的是 ok（源确实挂上了），
-    // 所以不能照着 `schema_tables: 0` 说「已摄入 0 张表」——那等于说成功了。
-    // 说清楚半成的是哪一半，同一件事也进了告警中心
+    // **Mounted, but the schema did not come through, are two different things.** The server replies ok at this point (the source did mount),
+    // so we cannot read `schema_tables: 0` as "ingested 0 tables": that would say it succeeded.
+    // Say clearly which half failed; the same event also goes to the alerts centre
     onSuccess: (r) => {
       setPicked("");
       setNotice(null);

@@ -1,5 +1,5 @@
-/* 内置文档：随应用打包（私有部署离线可用），版本与部署一致。
-   公开路由——不依赖会话，登录前也可读（开发者接接口时未必有账号）。 */
+/* Built-in docs: bundled with the app (so private deployments work offline), with a version that matches the deployment.
+   Public route: does not depend on a session, and is readable before login (developers wiring up an API may not have an account). */
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
@@ -22,13 +22,13 @@ import ingestMd from "../docs/ingest.md?raw";
 import mcpMd from "../docs/mcp.md?raw";
 import { fetchMe } from "../authSession";
 
-/** 文档清单：slug → 标题 + 内容（构建期打进 bundle） */
+/** Doc list: slug → title + content (bundled into the bundle at build time) */
 const DOCS: { slug: string; title: string; body: string }[] = [
   { slug: "ingest", title: "Ingest interfaces", body: ingestMd },
   { slug: "mcp", title: "Agents over MCP", body: mcpMd },
 ];
 
-/** 全文检索（客户端，文档已在 bundle 里）：命中行 → 文档 + 以命中词为中心的摘录 */
+/** Full-text search (client-side; the docs are already in the bundle): a hit row → the doc + an excerpt centred on the matched word */
 function searchDocs(q: string): { slug: string; title: string; snippet: string }[] {
   const needle = q.trim().toLowerCase();
   if (needle.length < 2) return [];
@@ -115,14 +115,14 @@ export function DocsPage() {
   const toc = tocOf(doc.body);
   const mainRef = useRef<HTMLElement>(null);
   const [activeHeading, setActiveHeading] = useState<string | null>(null);
-  // 标题：`Utopia | {文章名}`——Charter 是门脸字标，标题直接给文章
+  // Title: `Utopia | {article name}`. Charter is the storefront wordmark, and the title just gives the article
   usePageTitle(S.app.name, doc.title);
-  // 公开页也感知登录态：已登录给用户菜单，未登录给 Sign in
+  // Public pages are also aware of login state: logged in gets the user menu, logged out gets Sign in
   const me = useQuery({ queryKey: ["me"], queryFn: fetchMe, retry: false });
   const health = useQuery({ queryKey: ["health"], queryFn: api.health });
 
-  // 滚动跟随：视口上沿之上最近的标题为当前小节；
-  // 滚到底强制激活最后一节（短末节永远越不过判定线）
+  // Scroll-follow: the nearest heading above the top edge of the viewport is the current section;
+  // scrolling to the bottom forces the last section active (a short final section can never get past the decision line)
   const onScrollSpy = () => {
     const main = mainRef.current;
     if (!main) return;
@@ -153,7 +153,7 @@ export function DocsPage() {
     };
   }, [q]);
 
-  // 键盘呼起：⌘K / Ctrl+K 任何时候生效；`/` 仅在焦点不在输入框时（别劫持打字）
+  // Keyboard summon: ⌘K / Ctrl+K works at any time; `/` only when focus is not in an input (do not hijack typing)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = document.activeElement;
@@ -180,13 +180,13 @@ export function DocsPage() {
     <div className="h-screen flex flex-col overflow-hidden">
       <header className="glass-strong relative z-40 border-x-0 border-t-0 h-12 shrink-0 flex items-center px-2">
         <SectionMark className="pl-3" text={S.docs.brand} title={S.docs.backTitle} />
-        {/* 居中搜索：检索打包在本地的全部文档；宽度对齐正文栏（max-w-3xl 去掉 px-8） */}
+        {/* Centred search over all the docs bundled locally; width aligned to the body column (max-w-3xl without px-8) */}
         <div
           ref={searchRef}
           className="absolute left-1/2 -translate-x-1/2 w-[min(44rem,55vw)]"
         >
           <div className="relative">
-            {/* 中号：与别处的搜索框同一个高度（32），小号在顶栏里显得矮一截 */}
+            {/* Medium: same height as the search boxes elsewhere (32); small would look shorter than the ones in the top bar */}
             <Input
               className="w-full"
               icon={<Search size={13} />}
@@ -195,8 +195,8 @@ export function DocsPage() {
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
-            {/* 快捷键提示：输入中不占视线。⌘ 用 lucide 图标；
-                Ctrl 无图形符号（⌘ 是 Mac 专属键符），Windows 规范写法就是文字 */}
+            {/* Shortcut hint: stays out of the way while typing. ⌘ uses a lucide icon;
+                Ctrl has no graphic symbol (⌘ is a Mac-only key glyph), so the Windows convention is plain text */}
             {!q && (
               <kbd className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1 rounded-cell border border-line bg-surface px-2 py-1 font-sans text-fine text-ink-2">
                 {IS_MAC ? <Command size={9} /> : <span>Ctrl</span>}
@@ -230,7 +230,7 @@ export function DocsPage() {
           )}
         </div>
 
-        {/* 右侧与 App、账户页同一份：换页时不该动。没登录就只剩一个「登录」 */}
+        {/* The right side is the same as on the App and account pages, and should not change on page switch. When logged out, only a single "Log in" remains */}
         <HeaderActions
           link={{ to: "/", label: S.account.backToApp }}
           version={health.data?.version}
@@ -245,7 +245,7 @@ export function DocsPage() {
         />
       </header>
 
-      {/* 整页滚动（滚动条贴窗口最右），侧栏 sticky 钉住——正规文档站布局 */}
+      {/* Whole-page scroll (the scrollbar hugs the window's right edge); the sidebar is pinned sticky: the standard docs-site layout */}
       <main
         ref={mainRef}
         onScroll={onScrollSpy}
@@ -265,12 +265,12 @@ export function DocsPage() {
             ))}
           </aside>
 
-          {/* 上下都留足空白：标题不顶着头，末段内容能滚到屏幕中部——人读屏幕中间。
-              排版交给官方 @tailwindcss/typography（prose，16px 基准），
-              自定义只剩：标题锚点 id、外链新开、表格横向滚动容器 */}
-          {/* 排版走官方的 shadcn/typeset（src/typeset.css）：容器里的
-              标题、列表、表格、代码全由它管，内容本身不带一个类；
-              字号与字体在 `.typeset-docs` 那个预设里调，颜色接我们的令牌 */}
+          {/* Generous space above and below: the heading does not sit against the top, and the last section can scroll to mid-screen, since people read the middle of the screen.
+              Typography is left to the official @tailwindcss/typography (prose, 16px base);
+              the only custom parts are the heading anchor ids, external links opening in a new tab, and the scroll container for wide tables */}
+          {/* Typography goes through the official shadcn/typeset (src/typeset.css): inside the container,
+              headings, lists, tables and code are all handled by it, and the content itself carries no class;
+              font size and face are tuned in the `.typeset-docs` preset, and colours follow our tokens */}
           <article className="typeset typeset-docs [&_h1]:scroll-mt-6 [&_h2]:scroll-mt-6 [&_h3]:scroll-mt-6 flex-1 min-w-0 max-w-3xl mx-auto px-8 pt-16 pb-[40vh]">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
@@ -286,7 +286,7 @@ export function DocsPage() {
                   </h3>
                 ),
                 a: (p) => <a target="_blank" rel="noreferrer" {...p} />,
-                // 不加 u-scroll：overscroll-contain 会把竖向滚轮困在块内，页面滚不动
+                // Do not add u-scroll: overscroll-contain would trap the vertical wheel inside the block and the page would not scroll
                 table: (p) => (
                   <div className="overflow-x-auto">
                     <table {...p} />
@@ -298,7 +298,7 @@ export function DocsPage() {
             </ReactMarkdown>
           </article>
 
-          {/* 右侧目录：sticky 钉住，与正文标题同一水平线起头 */}
+          {/* Right-hand table of contents: sticky, starting on the same horizontal line as the body headings */}
           {toc.length > 0 && (
             <aside className="hidden lg:block w-64 shrink-0 sticky top-0 pt-16 pr-8">
               <nav className="space-y-1">

@@ -1,9 +1,9 @@
-/* 个人访问令牌页（docs/decisions/0014，0016 的 A2）。
-   令牌属于人、以人的身份行事：有效权限 = 角色 ∩ scope，`kb_ids` 只收窄不授权。
-   服务端三个端点早就在（发放 / 列表 / 撤销），缺的只是这一页——没有它，
-   MCP 对用户就是「有 API、配不了」。
-   明文只在发放那一次的响应里出现，所以这一页的重心是那一刻：把令牌和一段可复制的
-   客户端配置一起端出来，人复制完点「完成」，之后列表里只剩前缀。 */
+/* Personal access token page (docs/decisions/0014, A2 of 0016).
+   Tokens belong to a person and act as that person: effective permissions = role ∩ scope, and `kb_ids` only narrows, never grants.
+   The server's three endpoints already exist (issue / list / revoke); what was missing was this page. Without it,
+   MCP for a user was "there is an API, but no way to configure it".
+   The plaintext appears only once, in the response that issues the token, so the centre of gravity of this page is that moment: the token is shown together with a copyable
+   client config, and once the person has copied it and clicked "Done", the list keeps only the prefix. */
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, KeyRound, Plus } from "lucide-react";
@@ -36,8 +36,8 @@ import { kbOptions } from "./kbGroups";
 
 const EXPIRY_CHOICES = [30, 90, 365, 0] as const;
 
-/** Claude Code / Claude Desktop 一族的 Streamable HTTP 写法。每个库一个端点（0014：
- *  令牌限定到库，端点也按库分），所以片段里要把库选出来 */
+/** The Streamable HTTP form used by the Claude Code / Claude Desktop family. One endpoint per base (0014:
+ *  tokens are scoped to a base, and endpoints are per base too), so the snippet has to select the base */
 function mcpSnippet(kbId: string, kbName: string, token: string): string {
   const slug = kbName
     .toLowerCase()
@@ -61,8 +61,8 @@ function CopyButton({ text, small }: { text: string; small?: boolean }) {
     <Button variant="secondary" size="sm"
       className={buttonLike("ghost", small ? "sm" : "md")}
       onClick={async () => {
-        // 复制成了才换成「已复制」。从前先换字再复制，在 http 打开的页面上什么也没
-        // 复制，按钮也照样说已复制
+        // Only switches to "copied" once the copy has succeeded. Previously the label changed first and then copying was attempted; on a page opened over http nothing was
+        // copied, yet the button still said copied
         if (!(await copyAndSay(text, S.account.copied))) return;
         setDone(true);
         setTimeout(() => setDone(false), 1500);
@@ -74,8 +74,8 @@ function CopyButton({ text, small }: { text: string; small?: boolean }) {
   );
 }
 
-/** 刚发出来的那一枚：明文 + 配置片段，关掉就再也看不到。
-    住在发令牌那个弹窗里——发放的下一秒就是"把它抄走"，中间不该有一次关窗 */
+/** The one just issued: plaintext + config snippet; once closed it can never be seen again.
+    It lives in the dialog that issues the token: the second after issuing is "copy it away", and there should be no window close in between */
 export function IssuedBody({
   token,
   info,
@@ -87,7 +87,7 @@ export function IssuedBody({
   kbs: { id: string; name: string }[];
   preferredKbId?: string;
 }) {
-  // 账户页仍记着上次打开的库；只在令牌允许的库里选，免得默认连到空的 General。
+  // The account page still remembers the base last opened; pick only from the bases the token allows, so it does not default to connecting to an empty General.
   const candidates = info.kb_ids?.length
     ? kbs.filter((k) => info.kb_ids!.includes(k.id))
     : kbs;
@@ -145,7 +145,7 @@ function TokenRow({
   busy: boolean;
   onRevoke: () => void;
 }) {
-  // 撤销不可撤回，但代价只是重发一枚——轻确认（二次点击），不做打字解锁
+  // Revoking cannot be undone, but the cost is only reissuing a token: light confirmation (a second click), no typing to unlock
   const [arm, setArm] = useState(false);
   const revoked = !!t.revoked_at;
   const bases = t.kb_ids?.length
@@ -206,7 +206,7 @@ export function Tokens() {
   const { kb, kbs } = useKb();
   const list = useQuery({ queryKey: ["tokens"], queryFn: api.tokens });
 
-  // 发令牌是个动作，不是这一页的常驻内容：表单住在弹窗里，页面上只有名单
+  // Issuing a token is an action, not this page's permanent content: the form lives in the dialog, and the page only holds the list
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [scope, setScope] = useState<"read" | "write">("read");
@@ -223,7 +223,7 @@ export function Tokens() {
         expires_in_days: days,
       }),
     onSuccess: (res) => {
-      // 同一个窗口换一副内容：发完立刻是"把它抄走"，明文只有这一次
+      // The same window switches content: right after issuing it shows "copy it away", and the plaintext is only shown this once
       setIssued(res);
       setName("");
       setPicked(new Set());
@@ -243,7 +243,7 @@ export function Tokens() {
   }, [kbs]);
 
   if (list.isPending) return <Loading>{S.nav.loading}</Loading>;
-  // 活的在前、按新到旧；撤销过的沉底但仍然列着——撤过这件事本身要看得见
+  // Live ones first, newest to oldest; revoked ones sink to the bottom but stay listed: the fact that something was revoked must itself stay visible
   const rows = [...(list.data?.tokens ?? [])].sort((a, b) => {
     if (!!a.revoked_at !== !!b.revoked_at) return a.revoked_at ? 1 : -1;
     return b.created_at.localeCompare(a.created_at);
@@ -256,7 +256,7 @@ export function Tokens() {
 
   return (
     <div className="px-8 py-6">
-      {/* 与管理页同一副身材：内容居中限宽，行长不随窗口拉长 */}
+      {/* Same build as the admin pages: content centred with a width limit, so line length does not stretch with the window */}
       <div className="mx-auto w-full max-w-4xl">
         <PageHeader
           title={S.account.tokensTitle}
@@ -302,8 +302,8 @@ export function Tokens() {
           </div>
         )}
 
-        {/* 一个窗口两副内容：先是表单，发出来之后是那一枚明文。中间不关窗——
-            关掉就再也看不到它了 */}
+        {/* One window with two contents: first the form, and after issuing, the plaintext token. The window does not close in between:
+            close it and you can never see it again */}
         <Dialog
           open={creating || !!issued}
           onOpenChange={(o) => !o && close()}
@@ -344,10 +344,10 @@ export function Tokens() {
                   onChange={(e) => setName(e.target.value)}
                 />
               </Field>
-              {/* 范围与有效期并排：两个都是一眼扫过去就定下来的小选择，
-                  各占一整行只是把这张表拉长 */}
+              {/* Scope and expiry side by side: both are small choices settled at a glance,
+                  and giving each a full row would only stretch the table */}
               <div className="grid grid-cols-2 gap-4">
-                {/* 二选一，且两个选项都要读得到——单选按钮，不是一排按钮 */}
+                {/* Pick one of two, with both options readable: radio buttons, not a row of buttons */}
                 <Field label={S.account.tokenScope} hint={S.account.scopeHint}>
                   <RadioGroup
                     name="token-scope"
@@ -372,9 +372,9 @@ export function Tokens() {
                   />
                 </Field>
               </div>
-              {/* 库可以很多：搜着选，选中的堆在框上面。芯片墙的高度随库数长，
-                  这个不随。**不再另写一句「不选就是全部」**——控件自己就写着
-                  「All bases」，同一件事说两遍只是把表单拉长 */}
+              {/* There may be many bases: search and select, with the selected ones stacked above the box. The height of a chip wall grows with the number of bases,
+                  this does not. **No separate sentence "not selecting means all"**: the control itself already says "All bases",
+                  and saying the same thing twice only stretches the form */}
               <Field label={S.account.tokenKbs} className="mb-0">
                 <MultiSearchSelect
                   className="w-full"

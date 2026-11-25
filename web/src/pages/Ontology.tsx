@@ -1,7 +1,7 @@
-// 本体编辑器：master-detail 双栏（与 Library 的 SourcesRail 同构）。
-// 左栏 = filter + Classes/Properties 两小节 + 底部 Unmatched 入口；
-// 右侧 = 选中项的详情面板（只展示；建、改、删、连都在弹窗里，见 ontologyDialogs）
-// / 未匹配信号面板 / 概览。
+// Ontology editor: master-detail two columns (same structure as SourcesRail in Library).
+// Left column = filter + two sub-sections, Classes / Properties, plus the Unmatched entry at the bottom;
+// Right side = detail panel for the selected item (display only; create, edit, delete and connect all happen in dialogs, see ontologyDialogs)
+// / Unmatched-signal panel / overview.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -83,49 +83,49 @@ import {
   rowClass,
 } from "../ui";
 
-/** 左栏行高（py-2 + 13px 文字 + space-y 间隙）与底部预留（新建行 + 分页器） */
+/** Left-column row height (py-2 + 13px text + space-y gap) and the reserved space at the bottom (new-row + pager) */
 const RAIL_ROW_H = 34;
 const RAIL_RESERVED = 80;
-/** 上次看的是表还是图。**per 浏览器不 per 库**：这是读法的习惯，
- *  换个知识库不会换读法 */
+/** Whether last time the view was the table or the graph. **Per browser, not per KB**: this is a habit of how one reads the page,
+ *  switching knowledge bases does not change how one reads it */
 const VIEW_KEY = "utopia.ontology.view";
-/** 兜底页行数（首帧未量到高度时用） */
+/** Fallback page row count (used when the height has not been measured on the first frame) */
 const RAIL_PAGE = 14;
-/** 过滤模式两节混排时每节的行数 */
+/** Rows per section when the two sections are mixed together in filter mode */
 
-/** 右侧详情区当前展示什么。
+/** What the right-hand detail area is currently showing.
  *
- *  class / relation / schema / null 这一组共享同一块工作区：模式图常驻做
- *  背景，详情面板停靠在右侧——左栏点一个类名、画布上点一个节点、模式图
- *  自己的搜索框选中一个关系，三条路径落到的是同一个 `sel`，因此也落到同一
- *  块面板，不必再各画一遍。面板只展示；改动在 `Edit` 的弹窗里。
- *  import / refine / misses 仍是独立的整页视图：那三个不是「关于某个类
- *  或关系」的事，跟模式图没有共同的背景可言。 */
+ *  class / relation / schema / null share one workspace: the schema graph is always present as the
+ *  background, and the detail panel docks on the right. Clicking a class name in the left column, clicking a node on the canvas, or selecting a relation with the schema graph's
+ *  own search box: all three paths land on the same `sel`, and therefore on the same
+ *  panel, with no need to draw it separately each time. The panel only displays; edits happen in the `Edit` dialog.
+ *  import / refine / misses are still independent full-page views: those three are not about "some class
+ *  or relation", and have no shared background with the schema graph. */
 type Sel =
   | { kind: "class"; id: string }
   | { kind: "relation"; id: string }
   | { kind: "misses" }
   | { kind: "regressions" }
   | { kind: "uniqueness" }
-  // 业务规则那一页。**focusId 是从模式图上点一条规则边过来的**——那一行高亮，
-  // 不必在一页规则里再找一遍
+  // The business-rules page. **focusId comes from clicking a rule edge on the schema graph**: that row is highlighted,
+  // so there is no need to search again through a page of rules
   | { kind: "rules"; focusId?: string }
   | { kind: "refine" }
   | { kind: "import" }
-  // 模式图无选中：看整张图,不停靠表单
+  // Nothing selected in the schema graph: show the whole graph, with no form docked
   | { kind: "schema" }
   | null;
 
-/** 这次选中会不会在模式图右侧停靠一块面板 */
+/** Whether this selection will dock a panel on the right side of the schema graph */
 const onPanel = (s: Sel) => s?.kind === "class" || s?.kind === "relation";
 
-/** 打开着的编辑弹窗。面板只展示；建、改、删、连都在弹窗里发生 */
+/** The edit dialog that is open. The panel only displays; create, edit, delete and connect all happen in the dialog */
 type Edit =
   | { kind: "class"; existing: EntityTypeView | null; parentId: string | null }
   | {
       kind: "property";
       existing: RelationTypeView | null;
-      // 从一个类出发新建关系时带上它的 id，domain 预填成它
+      // Creating a relation from a class carries that class's id, with domain pre-filled to it
       initialDomain: string | null;
     }
   | { kind: "attribute"; typeId: string | null; existing: RelationTypeView | null }
@@ -139,10 +139,10 @@ export function Ontology() {
   const [sel, setSel] = useState<Sel>(null);
   const [edit, setEdit] = useState<Edit>(null);
   const [railTab, setRailTab] = useState<"classes" | "properties">("classes");
-  /* 主区看图还是看表（#498）。**默认图**，而且**记住上次那一版**——这是
-     "我习惯怎么读这一页"，不是"这个链接指向什么"，所以进 localStorage 不进
-     URL（与知识库切换器同一条判断，见 KbScope）。隐私模式下读写都会抛，
-     catch 掉回落到默认，别让整页挂掉 */
+  /* Whether the main area shows the graph or the table (#498). **Defaults to the graph**, and **remembers the last version**: this is
+     "how I habitually read this page", not "what this link points to", so it goes into localStorage rather than the
+     URL (same judgment as the KB switcher, see KbScope). In private mode reads and writes both throw,
+     so catch them and fall back to the default, rather than letting the whole page crash */
   const [view, setView] = useState<"table" | "diagram">(() => {
     try {
       return localStorage.getItem(VIEW_KEY) === "table" ? "table" : "diagram";
@@ -155,11 +155,11 @@ export function Ontology() {
     try {
       localStorage.setItem(VIEW_KEY, v);
     } catch {
-      // 存不下就只在这一次会话里记着
+      // If it cannot be stored, it is only remembered for this session
     }
     if (!onPanel(sel)) setSel({ kind: "schema" });
   };
-  /** Import / Rules / Refine / Overlaps / Unmatched 那几页把主区整个接管了 */
+  /** Import / Rules / Refine / Overlaps / Unmatched take over the whole main area */
   const inWorkflow =
     sel?.kind === "import" ||
     sel?.kind === "refine" ||
@@ -167,17 +167,17 @@ export function Ontology() {
     sel?.kind === "rules" ||
     sel?.kind === "misses" ||
     sel?.kind === "regressions";
-  // 模式图详情面板停在哪一段。**跨选中保留**：在实例上挨个类看下去，
-  // 是一种真实的读法，每换一个类就被弹回定义页会打断它
+  // Which segment the schema graph's detail panel stopped on. **Kept across selections**: going through classes one by one on instances
+  // is a real way of reading, and being bounced back to the definition page on every class change would interrupt it
   const [panelTab, setPanelTab] = useState<
     "definition" | "relations" | "attributes" | "instances"
   >("definition");
-  /** 正在退场的那次选择：面板演完 `u-dock-out` 再卸载，而不是一下子消失 */
+  /** The selection that is leaving: the panel plays `u-dock-out` before unmounting, rather than vanishing at once */
   const [exitingSel, setExitingSel] = useState<Sel>(null);
-  // **当前选中从 ref 里取，不从闭包里取。** 模式图注册 sigma 事件的 effect
-  // 只依赖 [schema]，`clickStage` 抓住的是那一次渲染的 onSelect；读闭包里的
-  // sel 会把早就过期的那次选中当成"正在退场的东西"，于是点空白处时面板先
-  // 冒出来再消失。图谱页的 `selectedRef` 是同一个理由
+  // **The current selection is read from a ref, not from a closure.** The effect that registers sigma events on the schema graph
+  // depends only on [schema], and `clickStage` captures the onSelect of that one render; reading sel from the closure
+  // would treat a long-expired selection as "the thing that is leaving", so clicking blank space would first make the panel
+  // pop up and then disappear. The `selectedRef` on the graph page is for the same reason
   const selRef = useRef<Sel>(null);
   useEffect(() => {
     selRef.current = sel;
@@ -191,7 +191,7 @@ export function Ontology() {
   }, []);
   const [filter, setFilter] = useState("");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  // 每页行数按列表区实际高度动态算：窗口多高铺多满，不滚动也不留大空
+  // Rows per page are computed dynamically from the actual height of the list area: the taller the window, the fuller it fills, with no scrolling and no large empty gap
   const listRef = useRef<HTMLDivElement>(null);
   const [railRows, setRailRows] = useState(RAIL_PAGE);
   useEffect(() => {
@@ -211,16 +211,16 @@ export function Ontology() {
     queryFn: () => api.ontology(kb!.id),
     enabled: !!kb,
   });
-  // 并存的取值（#341）：单独取，因为它扫的是事实不是本体，而本体页
-  // 每改一个字段都要重取——把这趟扫描搭进去等于每次输入都扫一遍全库
+  // Values that coexist (#341): fetched on their own, because the scan is over facts, not the ontology, and the ontology page
+  // refetches on every field edit; folding this scan into it would mean scanning the whole library on every keystroke
   const uniqueness = useQuery({
     queryKey: ["uniqueness", kb?.id],
     queryFn: () => api.uniquenessCandidates(kb!.id),
     enabled: !!kb,
   });
   const overlaps = uniqueness.data?.candidates ?? [];
-  /* 业务规则：模式图要把它们画成边，规则页要列出来——同一个 query key
-     取一次，两处共用缓存 */
+  /* Business rules: the schema graph has to draw them as edges, and the rules page has to list them: the same query key
+     is fetched once, and both places share the cache */
   const rules = useQuery({
     queryKey: ["rules", kb?.id],
     queryFn: () => api.rules(kb!.id),
@@ -229,17 +229,17 @@ export function Ontology() {
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ["ontology", kb?.id] });
-    // 采纳、拒绝之后「本体还缺什么」的那两个数也变了
+    // After accepting or rejecting, the two numbers for "what the ontology still lacks" also change
     queryClient.invalidateQueries({ queryKey: ["questionReport", kb?.id] });
   };
-  // 错误统一走全局 toast，不再用页面内嵌错误行
+  // Errors go uniformly through the global toast, no longer through an inline error row on the page
   const onError = (e: unknown) => toast.error((e as Error).message);
 
-  // 本体自洽检查是同步的纯计算（Review 页的「Run check」用的是同一个接口），
-  // 不排队、不需要确认——每次本体改动后顺手跑一遍，把新增的矛盾在它们
-  // 发生的当下就说出来，而不是等人某天想起去 Review 才看见。
-  // 干净就不出声：**只在有新东西时才说话**，否则每次保存都弹一条「没事」
-  // 比不弹还烦
+  // The ontology consistency check is a synchronous pure computation (the "Run check" on the Review page uses the same endpoint),
+  // no queueing and no confirmation needed: after each ontology change it runs in passing, so new contradictions are raised
+  // at the moment they arise, rather than waiting for someone to remember to look on the Review page one day.
+  // When it is clean it says nothing: **it only speaks when there is something new**, otherwise every save would pop up an "all good"
+  // which is more annoying than not popping up at all
   const runCheck = useMutation({
     mutationFn: () => api.runConsistencyCheck(kb!.id),
     onSuccess: (r) => {
@@ -251,7 +251,7 @@ export function Ontology() {
         });
       }
     },
-    // 检查本身失败不该盖过「保存成功」——本体的写已经落了盘，静默重试留给下次改动
+    // A failure of the check itself must not cover up "saved successfully": the ontology write has already landed on disk, and silent retry is left to the next change
   });
   const afterOntologyChange = () => {
     refresh();
@@ -261,21 +261,21 @@ export function Ontology() {
   if (!kb) return <Loading>{S.nav.loading}</Loading>;
   if (data.isError) return <Loading>{(data.error as Error).message}</Loading>;
 
-  /* 本体还没到的时候**照样把这一页搭出来**。
-     从前这里一句 `data.isPending` 就把整页换成一行 "Loading"：一个九百多个类
-     的库要等好几秒，这几秒里人看到的是一片空白，连自己有没有点错页都不知道
-     ——而左栏那两组入口（换视图、Import / Rules / Refine…）跟本体取没取回来
-     根本无关，它们本可以立刻就在。
-     现在等的只是内容：左栏清单出骨架（一列缩进的树，形状是已知的），
-     右边那块还不知道会画成图还是表，出转圈。 */
+  /* Even when the ontology has not arrived yet, **still build this page**.
+     Previously a single `data.isPending` check swapped the whole page for one line of "Loading": a library with over nine hundred classes
+     would take several seconds, and during those seconds the person saw a blank area, not even knowing whether they had clicked the wrong page
+     — while the two groups of entries in the left column (switching view, Import / Rules / Refine…) have nothing to do with whether the ontology has been fetched,
+     and they could have been there at once.
+     Now only the content waits: the left-column list shows a skeleton (an indented tree; its shape is known),
+     and the area on the right, not yet knowing whether it will draw a graph or a table, shows a spinner. */
   const loading = data.isPending;
   const ont = data.data;
   const entity_types = ont?.entity_types ?? [];
   const relation_types = ont?.relation_types ?? [];
-  // 属性不进 Properties 列表：它们挂在类下，在类详情区编辑
+  // Properties are not in the Properties list: they hang under classes and are edited in the class detail area
   const relations = relation_types.filter((r) => r.kind !== "attribute");
-  // 面板要演完退场再卸载：一取消选中就 unmount 是瞬间消失（图谱页同一个做法）。
-  // 在两个类之间切换不走这条路——面板留在原地换内容，每点一个节点抖一下反而吵
+  // The panel has to play its exit before unmounting: unmounting the moment the selection is cleared makes it vanish instantly (the graph page does the same)
+  // Switching between two classes does not go this route: the panel stays in place and swaps its content, since shaking on every node click would be noisier
   const panelSel = onPanel(sel) ? sel : exitingSel;
 
   const selectedClass =
@@ -286,7 +286,7 @@ export function Ontology() {
     panelSel?.kind === "relation"
       ? (relation_types.find((r) => r.id === panelSel.id) ?? null)
       : null;
-  // 选中类身上挂着的属性，Attributes 一段用它
+  // The attributes attached to the selected class; the Attributes section uses it
   const classAttributes = selectedClass
     ? relation_types.filter(
         (r) => r.kind === "attribute" && r.domains.includes(selectedClass.id),
@@ -295,29 +295,29 @@ export function Ontology() {
 
   return (
     <div className="h-full flex">
-      {/* 左栏：filter + 两小节 + Unmatched */}
+      {/* Left column: filter + two sections + Unmatched */}
       <aside className={`${RAIL_CLS} flex flex-col`}>
-        {/* 与图谱页的搜索框同一副身材、同一个角落（左上各 12px、中号、232 宽）：
-            两个标签页切来切去，框留在原地 */}
-        {/* 图 / 表：这一页的两种画法。**排在筛选框上面**——它定的是这一页
-            是什么，筛选框是在里面找东西；而且表格那一档筛选框是收起的，
-            切换键排在下面的话位置会跟着跳。
+        {/* The same shape and the same corner as the search box on the graph page (12px in from the top-left, medium size, 232 wide):
+            switching back and forth between the two tabs, the box stays where it is */}
+        {/* Graph / Table: the two ways of drawing this page. **Placed above the filter box**: it decides what this page
+            is, and the filter box is for finding things inside it; also, in the table tier the filter box is collapsed,
+            so if the toggle sat below, its position would jump around.
 
-            **一个键，写的是要去的那一版**：两档并排的话，得先读出哪一档亮着
-            才知道自己在看什么，而主区摆的是表还是图一眼就看得出。
+            **One key, which names the version to go to**: with the two tiers side by side, you would first have to read which one is lit
+            to know what you are looking at, whereas whether the main area shows a table or a graph is obvious at a glance.
 
-            **Import / Rules / Refine / Overlaps / Unmatched 接管主区时，它是
-            回去的路**——那时候写的是你原本在看的那一版，点了就回去。从前这条路
-            是「Schema diagram」那一行，换成切换键之后断过一阵：进了 Import
-            再没有任何一处能回到图或表。
+            **When Import / Rules / Refine / Overlaps / Unmatched take over the main area, this is
+            the way back**: at that point it shows the version you were originally looking at, and clicking it returns you. Previously this path
+            was the "Schema diagram" row, and after it was replaced by the toggle, it was broken for a while: after entering Import
+            there was no way at all back to the graph or the table.
 
-            **自成一组**：与底下钉住那一组同一个做法，外层一条线加 py-2 隔开，
-            行本身不画框——它跟筛选框不是同一类东西，只隔 4px 会读成一串 */}
-        {/* 上面一行是**动作**（换到另一版），下面一行是**位置**（现在看的是哪一版）。
-            一行里塞两件事，就成了「这个键写的到底是我在哪儿、还是我要去哪儿」；
-            分成两行之后，位置那一行还兼着从 Import / Rules 那几页回来的路——
-            它们把主区整个接管，从前没有任何一处能回到图或表。
-            **自成一组**：与底下钉住那一组同一个做法，外层一条线加 py-2 隔开 */}
+            **It forms its own group**: the same approach as the group pinned at the bottom, with a line on the outer edge and py-2 separating it,
+            and the row itself draws no box. It is not the same kind of thing as the filter box, and at only 4px apart it would read as a run of one thing */}
+        {/* The row above is an **action** (switch to the other version), the row below is a **position** (which version is being looked at now).
+            Putting two things in one row makes the key ambiguous: is it saying where I am, or where I am going;
+            once split into two rows, the position row also doubles as the way back from the Import / Rules pages,
+            which take over the main area entirely; previously there was no way at all back to the graph or the table.
+            **It forms its own group**: the same approach as the group pinned at the bottom, with a line on the outer edge and py-2 separating it */}
         <div className="u-rail-list shrink-0 border-b border-line px-2 py-2">
           <Row
             density="nav"
@@ -339,9 +339,9 @@ export function Ontology() {
             {view === "diagram" ? S.ontology.viewDiagram : S.ontology.viewTable}
           </Row>
         </div>
-        {/* 筛选框、两档、清单**只属于图那一档**——表格自己就是清单，而且比这一列
-            强（有列、能排序、带计数）。换档时它们**折起来**而不是瞬间消失：
-            左栏是一直在的，一整段凭空没掉会让人以为跳到了别的页 */}
+        {/* The filter box, the two tiers and the list **belong only to the graph tier**: the table is itself a list, and a stronger one than this column
+            (it has columns, can sort, and carries counts). When switching tiers they **fold up** rather than vanish instantly:
+            the left column is always there, and a whole section disappearing into nothing would make people think they had jumped to another page */}
         <div
           className={cn("u-rail-fold", view === "table" && "is-folded")}
         >
@@ -368,8 +368,8 @@ export function Ontology() {
           ref={listRef}
           className="flex-1 min-h-0 overflow-hidden px-2 pb-2 flex flex-col"
         >
-          {/* 新建行置顶：随当前段建类/建关系 */}
-          {/* 本体还没到就不给建：新类要挑父类，而父类清单此刻是空的 */}
+          {/* New-row pinned to the top: creates a class / relation for the current section */}
+          {/* No creating until the ontology has arrived: a new class has to pick a parent, and the parent list is empty right now */}
           {!loading && !filter.trim() && (
             <Row
               className="mb-1"
@@ -387,10 +387,10 @@ export function Ontology() {
                 : S.ontology.newProperty}
             </Row>
           )}
-          {/* **筛选也认这两档**。从前一有筛选词就两节混排、类与关系一起给，
-              理由是"搜的时候未必知道要找的是哪一种"；代价是标签明明停在
-              Classes 上却不算数，而它就在上面两厘米处。一个选中却被无视的
-              控件，比多点一下糟。想找关系就切过去，那一下是明的 */}
+          {/* **Filtering also respects these two tiers.** Previously, once there was a filter term, both sections were mixed together and classes and relations were offered together,
+              the reasoning being "when searching, you may not know which kind you are looking for"; the cost was that a label that stopped on Classes did not count,
+              even though it was two centimetres above. A control that is selected yet ignored
+              is worse than having to click one more time. Switching over to look for relations is clear, that step is explicit */}
           {loading ? (
             <SkeletonRows />
           ) : railTab === "classes" ? (
@@ -419,9 +419,9 @@ export function Ontology() {
           )}
         </div>
         </div>
-        {/* 底部常驻：关于本体的几个入口——从外部拿一份本体、业务规则、类型消解，
-            以及数据顶回来的两种信号。一条分隔线说明它们是钉住的，行本身与上面
-            列表里的行同一副样子 */}
+        {/* Pinned at the bottom, always present: a few entries about the ontology: taking an ontology from outside, business rules, type resolution,
+            and the two kinds of signal that come back from the data. A dividing line shows that they are pinned; the rows themselves look
+            the same as the rows in the list above */}
         <div className="u-rail-list shrink-0 border-t border-line px-2 py-2">
         <RailItem
           active={sel?.kind === "import"}
@@ -430,8 +430,8 @@ export function Ontology() {
         >
           {S.ontology.importShort}
         </RailItem>
-        {/* 业务规则（0021）：本体说「有这么个类」，规则说「什么样的实体算它」。
-            所以它归在本体这一页，而不是另开一处——判据与词汇是同一份契约 */}
+        {/* Business rules (0021): the ontology says "there is such a class", the rule says "what kind of entity counts as it".
+            So it is filed under this ontology page rather than opened somewhere else: the criteria and the vocabulary are one contract */}
         <RailItem
           active={sel?.kind === "rules"}
           icon={<Scale size={14} />}
@@ -439,9 +439,9 @@ export function Ontology() {
         >
           {S.ontology.rulesShort}
         </RailItem>
-        {/* 类型消解：把「大致对」的类换成更具体的那个。**紧挨着未匹配**——
-            两者都是「本体与数据对不齐」的处置，只是方向相反：那个是本体缺东西，
-            这个是本体有更好的选项没被用上 */}
+        {/* Type resolution: replaces a "roughly right" class with a more specific one. **Sits right next to Unmatched**:
+            both are ways of handling "the ontology and the data do not line up", just in opposite directions: that one is the ontology missing something,
+            while this one is the ontology having a better option that has not been used */}
         <RailItem
           active={sel?.kind === "refine"}
           icon={<Wand2 size={14} />}
@@ -449,9 +449,9 @@ export function Ontology() {
         >
           {S.ontology.refineShort}
         </RailItem>
-        {/* 并存的取值（#341）：**与未匹配同一类**——都是数据在说本体缺了什么。
-            那个说缺一个词，这个说缺一条公理，而缺公理的代价是接任不闭合前任，
-            "六月谁在管"两个人都答 */}
+        {/* Values that coexist (#341): **the same kind as Unmatched** — both are data saying what the ontology is missing.
+            That one says a word is missing; this one says an axiom is missing, and the cost of a missing axiom is that a successor does not close its predecessor,
+            so "who is in charge in June" answers with both people */}
         <RailItem
           active={sel?.kind === "uniqueness"}
           icon={<Split size={14} />}
@@ -467,7 +467,7 @@ export function Ontology() {
         >
           {S.ontology.casesShort}
         </RailItem>
-        {/* 底部常驻：抽取未匹配信号（有存量时带数量徽标） */}
+        {/* Pinned at the bottom, always present: extraction unmatched signals (with a count badge when there is a backlog) */}
         <RailItem
           active={sel?.kind === "misses"}
           icon={<Inbox size={14} />}
@@ -478,18 +478,18 @@ export function Ontology() {
         </div>
       </aside>
 
-      {/* 右侧：详情。class/relation/new-class/new-relation/schema/概览共享
-          同一块工作区——模式图常驻做背景，表单（有的话）停靠右侧，近实底
-          （u-modal-panel），不是浮层玻璃：画布是动的，透出来的内容会跟
-          正在读的表单字段打架。左栏点类名、画布点节点、模式图自带的搜索框
-          选中关系，三条路径落到同一个 sel，也就落到同一份表单——
-          不再各画一遍。import/refine/misses 仍是独立整页视图,那三个
-          不是「关于某个类或关系」的事，没有跟模式图共享背景的道理 */}
-      {/* **转圈只留给接管主区的那几页**（Import / Rules / Refine / Overlaps /
-          Unmatched）：它们整块是表单和列表，本体没到就什么都画不出来。
-          图和表不走这条路——它们各自都有一大半跟本体无关的东西可以先画出来
-          （网格、缩放塔、静态图例；分段控件、过滤框），所以 `loading` 传下去，
-          由它们自己决定哪一块该等 */}
+      {/* Right side: detail. class / relation / new-class / new-relation / schema / overview share
+          one workspace: the schema graph is always present as background, and the form (if any) docks on the right, nearly solid
+          (u-modal-panel), not glass overlay: the canvas moves, and whatever shows through would clash
+          with the form field being read. Clicking a class name in the left column, clicking a node on the canvas, or selecting a relation with the schema graph's own search box:
+          all three paths land on the same sel, and so on the same form —
+          not drawn separately each time. import / refine / misses are still independent full-page views, and those three
+          are not about "some class or relation", so there is no reason for them to share a background with the schema graph */}
+      {/* **The spinner is only left for those pages that take over the main area** (Import / Rules / Refine / Overlaps /
+          Unmatched): they are wholly forms and lists, so nothing can be drawn until the ontology arrives.
+          The graph and the table do not take this route: each of them has much that is unrelated to the ontology that can be drawn first
+          (the grid, the zoom tower, the static legend; the segmented control, the filter box), so `loading` is passed down,
+          and they decide for themselves which part should wait */}
       {loading && inWorkflow ? (
         <div className="flex-1 min-w-0 grid place-items-center">
           <Spinner size={20} label={S.nav.loading} />
@@ -598,9 +598,9 @@ export function Ontology() {
                 ? ({ kind: sel.kind, id: sel.id } as SchemaSelection)
                 : null
             }
-            // 点空白处取消选中走的也是 closePanel：不然点画布关掉的面板没有
-            // 退场动画，而点画布正是最常用的那种关法
-            // 点一条规则边：切到业务规则那一页，并把那一行点亮
+            // Clicking blank space to clear the selection also goes through closePanel: otherwise a panel closed by clicking the canvas gets no
+            // exit animation, and clicking the canvas is the most common way of closing it
+            // Clicking a rule edge: switch to the business-rules page and light up that row
             onSelect={(next) =>
               next
                 ? setSel(
@@ -667,7 +667,7 @@ export function Ontology() {
                 />
               }
             >
-              {/* 四段用 hidden 藏，不卸载：实例列表翻到的第几页，切回来的时候还在 */}
+              {/* The four sections are hidden with `hidden`, not unmounted: the page the instance list was on is still there when switching back */}
               <div className={panelTab === "definition" ? "" : "hidden"}>
                 <ClassDefinition
                   cls={selectedClass}
@@ -743,8 +743,8 @@ export function Ontology() {
         </div>
       )}
 
-      {/* 编辑弹窗：面板只展示，建、改、删、连都在这里发生。建成的立刻选中——
-          能看到、能接着改；删掉的把面板收起来 */}
+      {/* Edit dialog: the panel only displays; create, edit, delete and connect all happen here. A newly created item is selected straight away —
+          so it can be seen and carried on editing; a deleted one collapses the panel */}
       {edit?.kind === "class" && (
         <ClassDialog
           kbId={kb.id}
@@ -814,7 +814,7 @@ export function Ontology() {
           onConnected={(id) => {
             setEdit(null);
             afterOntologyChange();
-            // 连完直接跳到那条关系：域/值域改没改、改对了没有，一眼可见
+            // After connecting, jump straight to that relation: whether the domain/range was changed, and whether it is right, is visible at a glance
             setSel({ kind: "relation", id });
           }}
           onError={onError}
@@ -824,18 +824,18 @@ export function Ontology() {
   );
 }
 
-/* ---------- 停靠面板：模式图右侧的详情外壳 ----------
-   与图谱页的实体面板同一个结构：**标题行固定，只有下面的内容滚**。整列一起滚
-   的话，正在编辑的那个类叫什么、用了多少次、以及关闭键，都会滚出视野。
-   关闭键跟着标题走，不再单开一行——那一行既占掉顶上的高度，又让按钮看着不
-   属于任何一张卡片。
+/* ---------- Docked panel: the detail shell to the right of the schema graph ----------
+   Same structure as the entity panel on the graph page: **the title row is fixed, only the content below scrolls**. If the whole column scrolled together,
+   the name of the class being edited, how many times it is used, and the close button would all scroll out of sight.
+   The close button moves with the title and is no longer a separate row: that row both took up height at the top and made the button look
+   as if it belonged to no card.
 
-   面也跟图谱页一样是 `glass-strong`：**指针一放上去就压实**（120ms 进、260ms
-   出，见 styles.css）。作者原本用近实底，理由是画布在动、透上来的动静会跟正在
-   读的字段打架——那个顾虑成立，而玻璃的 hover 压实正是对它的回答：人在用这块
-   面的时候它就是实的，手移开才透回去，画布的上下文也就没被一块死板挡住。
+   The surface is also `glass-strong`, as on the graph page: **it solidifies as soon as the pointer is on it** (120ms in, 260ms
+   out, see styles.css). The author originally used a near-solid background, because the canvas moves and the motion showing through would clash with
+   the field being read — that worry holds, and the glass hover-solidify is the answer to it: while a person is using this surface it is solid,
+   and only when the hand moves away does it turn see-through again, so the canvas context is not blocked by a rigid slab.
 
-   退场也照图谱页：`u-dock-out` 演完再卸载，而不是一下子消失 */
+   Exit follows the graph page too: `u-dock-out` plays out before unmounting, rather than vanishing at once */
 
 function DockedPanel({
   header,
@@ -846,19 +846,19 @@ function DockedPanel({
   children,
 }: {
   header: React.ReactNode;
-  /** 关闭键左边的动作（编辑）：面板只展示，改动从这里开弹窗 */
+  /** The action to the left of the close button (edit): the panel only displays, and changes open a dialog from here */
   actions?: React.ReactNode;
-  /** 分段控件，跟着标题一起固定在顶上——它要能一直点得到 */
+  /** Segmented control, fixed to the top along with the title — it must stay clickable at all times */
   tabs?: React.ReactNode;
-  /** 正在退场：演动画，期间不再接受点击（u-dock-out 里带了 pointer-events） */
+  /** Exiting: plays the animation, and during that time it no longer accepts clicks (u-dock-out carries pointer-events) */
   exiting?: boolean;
   onClose: () => void;
   children: React.ReactNode;
 }) {
   return (
     <div
-      // 与图谱页的实体面板同一副壳：同宽（w-96）、同一个顶部起点（给顶上那排
-      // 药丸让位），同一个头部解剖。两页并排看是同一件东西
+      // The same shell as the entity panel on the graph page: the same width (w-96), the same top starting point (to make room for the row of
+      // pills on top), the same header anatomy. Viewing the two pages side by side, they are the same thing
       className={`${exiting ? "u-dock-out" : "u-dock-in"} glass-strong absolute top-3 right-3 bottom-3 w-96 z-10 rounded-overlay u-lift-strong flex flex-col`}
     >
       <div className="shrink-0 flex items-start justify-between gap-2 px-4 py-4 border-b border-line">
@@ -878,7 +878,7 @@ function DockedPanel({
   );
 }
 
-/* 面板标题：色点 + 名字 + 第二行的小字。与图谱页实体面板的头一个写法 */
+/* Panel title: colour dot + name + a small line of text in the second row. The same approach as the header of the entity panel on the graph page */
 function PanelHeader({
   color,
   square,
@@ -914,7 +914,7 @@ function PanelHeader({
   );
 }
 
-/* ---------- 实例列表：选中类的实体（服务端分页，点击进图谱） ---------- */
+/* ---------- Instance list: the entities of the selected class (paged by the server; clicking goes to the graph) ---------- */
 
 function InstancesCard({ kbId, type }: { kbId: string; type: EntityTypeView }) {
   const PER = 12;
@@ -926,12 +926,12 @@ function InstancesCard({ kbId, type }: { kbId: string; type: EntityTypeView }) {
   });
   const total = q.data?.total ?? 0;
   const rows = q.data?.entities ?? [];
-  // 这一段自己就是 Instances 那个 tab：没有实例就说一句，不顶同名的标题
+  // This section is itself the Instances tab: when there are no instances it says so in one line, without repeating a title of the same name
   if (!q.isPending && total === 0)
     return <p className="text-small text-ink-2">{S.ontology.schemaNoInstances}</p>;
 
   return (
-    // 平铺在面板里：面板已经是一块面，里面不再套卡片
+    // Laid flat inside the panel: the panel is already a surface, so no cards are nested inside it
     <div>
       <div>
         {rows.map((e) => (
@@ -958,16 +958,16 @@ function InstancesCard({ kbId, type }: { kbId: string; type: EntityTypeView }) {
   );
 }
 
-/* ---------- 关系卡片：这个类作为主语/宾语连着哪些关系 + 用已有关系接一条新的 ---------- */
+/* ---------- Relation card: which relations this class connects to as subject/object + connect a new one using an existing relation ---------- */
 
-/** 「新建关系」（PropertyForm）解决的是本体里还没有这条关系的情况；这张卡片
- *  解决另一半——**这个类身上已经挂着哪些关系**（从它出发的、指向它的），
- *  以及更常见的那种需求：不是每次都要一条新关系，而是把这个类接到一条
- *  已经存在的关系上（`works_at` 已经连着 Person→Organization，
- *  再建一个 Contractor 时多半是把 Contractor 也加进 works_at 的 domain，
- *  不是另建一条 works_at_2）。后一半直接改写已有关系的 domains/ranges，
- *  走的是 PropertyForm 保存时同一个 updateRelationType，只是把「打开表单、
- *  找到多选框、加一个类」压缩成一步。 */
+/** "New relation" (PropertyForm) handles the case where the relation is not yet in the ontology; this card
+ *  handles the other half — **which relations this class already has attached** (those leaving it, those pointing at it),
+ *  and the more common need: most of the time you do not need a new relation, but want to connect this class to a
+ *  relation that already exists (`works_at` already connects Person→Organization,
+ *  and when creating a Contractor, the usual move is to add Contractor to works_at's domain,
+ *  not create another works_at_2). The latter directly rewrites the domains/ranges of the existing relation,
+ *  using the same updateRelationType that PropertyForm uses on save, just compressing "open the form,
+ *  find the multi-select, add a class" into one step. */
 function RelationshipsCard({
   cls,
   relations,
@@ -977,22 +977,22 @@ function RelationshipsCard({
   onAddNew,
 }: {
   cls: EntityTypeView;
-  /** kind === "relation" 的那些——attribute 的宾语是字面值，谈不上「连着」 */
+  /** Only those with kind === "relation": an attribute's object is a literal value, so there is no "connected" for it */
   relations: RelationTypeView[];
   allTypes: EntityTypeView[];
   onSelect: (relationId: string) => void;
-  /** 用一个已有的关系连接这个类：开弹窗 */
+  /** Connect this class with an existing relation: opens the dialog */
   onConnect: () => void;
   onAddNew: () => void;
 }) {
   const labelOf = (id: string) =>
     allTypes.find((t) => t.id === id)?.label ?? id;
-  // 自环关系（domain 和 range 都是这个类）两边都算——它确实两个方向都成立
+  // A reflexive relation (domain and range are both this class) counts on both sides: it does hold in both directions
   const outgoing = relations.filter((r) => r.domains.includes(cls.id));
   const incoming = relations.filter((r) => r.ranges.includes(cls.id));
 
-  /** 一组可折叠（#455 的解剖：折叠柄、头、缩进的正文）。缺省展开——
-   *  折起来是为了在长列表里跳过一段，不是为了藏 */
+  /** A collapsible group (the anatomy of #455: fold handle, header, indented body). Expanded by default —
+   *  it is folded to skip over a stretch of a long list, not to hide things */
   const Group = ({
     dir,
     rows,
@@ -1003,8 +1003,8 @@ function RelationshipsCard({
     const [open, setOpen] = useState(true);
     return (
       <div>
-        {/* 头是一行 Row：折叠柄占图标格（16 宽），正文缩进同样的 24，
-            于是下面每一行的方向箭头正好落在组标题的箭头底下 */}
+        {/* The header is one Row: the fold handle takes the icon cell (16 wide), and the body is indented by the same 24,
+            so the direction arrow of each row below sits exactly under the group header's arrow */}
         <Row
           className="-mx-2 mt-1"
           icon={
@@ -1015,8 +1015,8 @@ function RelationshipsCard({
           onClick={() => setOpen((v) => !v)}
         >
           <span className="flex items-center gap-2 text-small font-medium">
-            {/* 与下面每条关系行的箭头**同一尺寸**（12）：同一个记号排成一列，
-                标题这个小 2px 就只会读成没对齐 */}
+            {/* The **same size** as the arrow on each relation row below (12): the same mark laid out in one column,
+                a header that is 2px smaller would only read as misaligned */}
             {dir === "out" ? <ArrowRight size={12} /> : <ArrowLeft size={12} />}
             <span className="truncate">
               {dir === "out" ? S.ontology.schemaOutgoing : S.ontology.schemaIncoming}
@@ -1036,8 +1036,8 @@ function RelationshipsCard({
   };
 
   const RelationRow = ({ r, dir }: { r: RelationTypeView; dir: "out" | "in" }) => (
-    // 悬停要有底色：这一行整条可点，只把文字提亮半级在深底上几乎看不出来。
-    // 底色用左栏那一档（white/[0.05]），右端的类型小字跟着一起提亮
+    // Hover needs a background colour: the whole row is clickable, and only brightening the text by half a step barely shows on a dark background.
+    // The background uses the tier from the left column (white/[0.05]), and the small type-name on the right brightens with it
     <Row
       className="-mx-2"
       icon={
@@ -1060,8 +1060,8 @@ function RelationshipsCard({
   );
 
   return (
-    // 平铺在面板里，与图谱面板的关系分组同一个骨架：带方向箭头的小标题 + 行。
-    // 这一段自己就是 Relations 那个 tab，不再顶一个同名的标题
+    // Laid flat inside the panel, with the same skeleton as the relation groups of the graph panel: small headings with direction arrows + rows.
+    // This section is itself the Relations tab, so it does not put up a heading of the same name
     <div>
       {outgoing.length === 0 && incoming.length === 0 ? (
         <p className="mb-2 text-small text-ink-2">
@@ -1073,8 +1073,8 @@ function RelationshipsCard({
           {incoming.length > 0 && <Group dir="in" rows={incoming} />}
         </div>
       )}
-      {/* 改动开弹窗：连一个已有的关系、或新建一条。面板这一段只展示。
-          两行与上面的关系行同一副身材 */}
+      {/* Changes open a dialog: connect an existing relation, or create a new one. This section of the panel only displays.
+          The two rows have the same shape as the relation rows above */}
       <Row className="-mx-2 mt-2" icon={<Link2 size={14} />} onClick={onConnect}>
         {S.ontology.connectOpen}
       </Row>
@@ -1085,7 +1085,7 @@ function RelationshipsCard({
   );
 }
 
-/* ---------- 属性卡片：选中类的字面值字段（改动开弹窗） ---------- */
+/* ---------- Attribute card: the literal-value fields of the selected class (changes open a dialog) ---------- */
 
 function AttributesCard({
   attributes,
@@ -1129,9 +1129,9 @@ function AttributesCard({
   );
 }
 
-/* ---------- 左栏小节头 ---------- */
+/* ---------- Left-column section header ---------- */
 
-/* ---------- 类层级树（可折叠；filter 时拍平） ---------- */
+/* ---------- Class hierarchy tree (collapsible; flattened when filtering) ---------- */
 
 function ClassTree({
   types,
@@ -1153,7 +1153,7 @@ function ClassTree({
   const rows = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (q) {
-      // filter 模式：拍平命中项（label/key 都参与匹配）
+      // Filter mode: flattened hits (both label and key take part in matching)
       return types
         .filter(
           (t) =>
@@ -1181,7 +1181,7 @@ function ClassTree({
     return out;
   }, [types, filter, collapsed]);
 
-  // 半屏分页：过滤词变化回第一页
+  // Half-screen paging: a change in the filter term returns to page one
   const [page, setPage] = useState(0);
   useEffect(() => setPage(0), [filter]);
   const { rows: paged, safe } = pageSlice(rows, page, pageSize);
@@ -1196,7 +1196,7 @@ function ClassTree({
           onClick={() => onSelect(t.id)}
           icon={
             hasChildren ? (
-              // 折叠柄：有子类才渲染，点击不选中。是 span 不是按钮——按钮里不能再嵌按钮
+              // Fold handle: rendered only when there are subclasses; clicking it does not select. It is a span rather than a button, because a button cannot nest another button inside it
               <span
                 onClick={(e) => {
                   e.stopPropagation();
@@ -1215,12 +1215,12 @@ function ClassTree({
           }
         >
           <span className="flex items-center gap-2">
-            {/* 方形是直角：与圆形拉开区分度（图谱节点同理） */}
+            {/* Squares are right-angled, to set them apart from circles (the same logic applies to graph nodes) */}
             <span
               className={`h-2.5 w-2.5 shrink-0 ${t.shape === "square" ? "scale-90" : "rounded-full"}`}
               style={{ background: t.color }}
             />
-            {/* 不在列表里放逐项用量读数：数量级上来后统计和渲染都是负担，用量看表单 */}
+            {/* No per-item usage readout in the list: once the count grows, both the statistics and the rendering become a burden; usage is checked in the form */}
             <span className="truncate">{t.label}</span>
           </span>
         </Row>
@@ -1235,7 +1235,7 @@ function ClassTree({
   );
 }
 
-/* ---------- 关系列表 ---------- */
+/* ---------- Relation list ---------- */
 
 function PropertyList({
   relations,
@@ -1257,7 +1257,7 @@ function PropertyList({
           r.label.toLowerCase().includes(q) || r.key.toLowerCase().includes(q),
       )
     : relations;
-  // 半屏分页：过滤词变化回第一页
+  // Half-screen paging: a change in the filter term returns to page one
   const [page, setPage] = useState(0);
   useEffect(() => setPage(0), [filter]);
   const { rows: paged, safe } = pageSlice(rows, page, pageSize);
@@ -1268,7 +1268,7 @@ function PropertyList({
           key={r.id}
           active={selectedId === r.id}
           onClick={() => onSelect(r.id)}
-          // 前导只留折叠柄槽：文字起点对齐类行"标识点"的左端
+          // The leading area keeps only the fold-handle slot, so the text starts aligned with the left edge of the "identifier dot" of the class rows
           icon={<span className="block w-3" />}
         >
           <span className="flex items-center gap-2">
@@ -1287,9 +1287,9 @@ function PropertyList({
   );
 }
 
-/* ---------- 定义（只读）：面板展示，改动开弹窗 ---------- */
+/* ---------- Definition (read-only): the panel displays it, changes open a dialog ---------- */
 
-/** 一行「标签 / 值」；值空着就写占位，不留白 */
+/** One row of "label / value"; if the value is empty, write a placeholder rather than leaving it blank */
 function Def({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="border-b border-line py-2 last:border-0">
@@ -1316,7 +1316,7 @@ export function ClassDefinition({
   cls: EntityTypeView;
   allTypes: EntityTypeView[];
   onSelectClass: (id: string) => void;
-  /** 以当前类为父级新建子类：开弹窗 */
+  /** Create a subclass with the current class as parent: opens the dialog */
   onNewSub: () => void;
 }) {
   const nameOf = (id: string) => allTypes.find((t) => t.id === id)?.label ?? id;
@@ -1344,8 +1344,8 @@ export function ClassDefinition({
       <Def label={S.ontology.description}>
         <Description text={cls.description} />
       </Def>
-      {/* 新增入口与列表里的行同一副身材（左栏的「New class」也是这样一行）：
-          图标落在文字的左缘上，不再用带内距的按钮去对 */}
+      {/* The add entry has the same shape as the rows in the list (the "New class" in the left column is also a row like this):
+          the icon sits on the left edge of the text, rather than using a button with inner padding to line up */}
       <Row className="-mx-2 mt-2" icon={<Plus size={14} />} onClick={onNewSub}>
         {S.ontology.newSubClass}
       </Row>
@@ -1372,7 +1372,7 @@ function PropertyDefinition({
         eternal: S.ontology.temporalEternal,
       } as Record<string, string>
     )[rel.temporal] ?? rel.temporal;
-  // 勾了的公理才列：没勾的不是信息
+  // Only the axioms that are ticked are listed: unticked ones carry no information
   const axioms = (
     [
       [rel.functional, S.ontology.functional],
@@ -1393,10 +1393,10 @@ function PropertyDefinition({
       <Def label={S.ontology.rangeLabel}>
         {rel.ranges.length > 0 ? rel.ranges.map(typeName).join(", ") : S.ontology.anyType}
       </Def>
-      {/* 边上的属性（0037）：这条关系的边能带哪些属性，按属性的 label 列 */}
+      {/* Attributes on the edge (0037): which attributes an edge of this relation can carry, listed by the attribute's label */}
       <Def label={S.ontology.qualifiers}>
-        {/* `?? []`：这一格是后加的（0037），**旧版本的后端不发它**。
-            少一格不该让整块面板崩掉——点一条关系就白屏，正是这么来的 */}
+        {/* `?? []`: this cell was added later (0037), and **older versions of the backend do not send it**.
+            Losing one cell should not bring the whole panel down — clicking a relation and getting a blank screen is exactly how that happened */}
         {(rel.qualifiers ?? []).length > 0
           ? (rel.qualifiers ?? []).map(typeName).join(", ")
           : S.ontology.noQualifiers}
@@ -1428,18 +1428,18 @@ function PropertyDefinition({
   );
 }
 
-/* ---------- 未匹配信号 + AI 建议 ---------- */
+/* ---------- Unmatched signals + AI suggestions ---------- */
 
 
-/** 类型消解：把「大致对」的类换成更具体的那个。
+/** Type resolution: replaces a "roughly right" class with a more specific one.
  *
- * **两步走，跟本体导入同一个形状**：先看一遍会发生什么，再决定落不落。这里还多
- * 一层理由——改类不进时间轴，不像事实改写那样在实体历史里自己显形，所以
- * 「先看一眼」是唯一能看见它的时机。
+ * **Two steps, the same shape as ontology import**: first look at what would happen, then decide whether to land it. Here there is one more
+ * layer of reasoning: a change of class does not enter the timeline, and unlike fact rewrites it does not show itself in the entity history, so
+ * "look first" is the only moment at which it can be seen.
  *
- * 跑完分三档，各有各的处置：自动改掉的（可整批撤销）、跨了分类轴留给人的、
- * 裁决说「都不是」的。**最后那一档带着理由**——这一步押在「选择都不是是个
- * 体面答案」上，不记理由，最大的那一档就是不透明的。
+ * After running, it splits into three tiers, each with its own disposition: the ones changed automatically (can be undone in one batch), the ones that cross the classification axis and are left to a person,
+ * and the ones the adjudicator said were "none of these". **The last tier carries its reason**: this step rests on "none of the choices is a
+ * decent answer", and without a recorded reason the biggest tier would be opaque.
  */
 function RefinePanel({
   kbId,
@@ -1507,7 +1507,7 @@ function RefinePanel({
         </Button>
       </div>
 
-      {/* ---- 只算不写的那一步 */}
+      {/* ---- The step that only computes and does not write */}
       {preview && (
         <div className="space-y-2">
           <p className="text-small text-ink-2">
@@ -1531,8 +1531,8 @@ function RefinePanel({
                   {S.review.factsCount(s.fact_count)}
                 </span>
               </div>
-              {/* **把送去检索的那段字显示出来**：找不着的时候，第一个要看的
-                  就是我们拿什么去找的，而不是猜画像还是类描述的问题 */}
+              {/* **Show the text that was sent to retrieval**: when nothing is found, the first thing to check is
+                  what we searched with, rather than guessing whether the problem is the profile or the class description */}
               <p className="mt-1 text-fine text-ink-2 line-clamp-2">
                 {s.profile}
               </p>
@@ -1557,7 +1557,7 @@ function RefinePanel({
         </div>
       )}
 
-      {/* ---- 落库之后的三档 */}
+      {/* ---- The three tiers after it has been written to the library */}
       {outcome && (
         <div className="space-y-3">
           <div className="flex items-center gap-3 flex-wrap">
@@ -1602,8 +1602,8 @@ function RefinePanel({
                       {r.reason}
                     </p>
                   )}
-                  {/* **认可的是这一对类，不是这一个实体。** 认可一次，
-                      之后同一对不再进人工——那正是这一档大部分条目的成因 */}
+                  {/* **What is approved is this pair of classes, not this one entity.** Approved once,
+                      after that the same pair no longer goes to manual review — that is the cause of most entries in this tier */}
                   {r.from_type_id && (
                     <Button
                       variant="primary"
@@ -1641,8 +1641,8 @@ function RefinePanel({
                       {d.coarse ?? S.graph.untyped}
                     </span>
                   </div>
-                  {/* 理由与头一个候选一起给：理由说不通时，看候选就知道是
-                      检索没找着还是裁决没看上 */}
+                  {/* The reason is given together with the first candidate: when the reason does not make sense, looking at the candidates shows whether
+                      retrieval found nothing or the adjudicator did not like any of them */}
                   {d.reason && (
                     <p className="mt-1 text-fine text-ink-2">
                       {d.reason}
@@ -1662,15 +1662,15 @@ function RefinePanel({
     </div>
   );
 }
-/** 一端挂着两个以上开放值的谓词（#341）。
+/** Predicates with more than one open value at one end (#341).
  *
- *  自动闭合靠 `functional` / `inverse_functional`，而本体自己长出来的库里
- *  没人声明过它们——引擎也不替人推断（那会让账本被一条猜出来的公理改写）。
- *  于是接任不闭合前任：两条 `leads` 都开着，问六月谁在管，两个都答。
+ *  Automatic closing relies on `functional` / `inverse_functional`, and in a library the ontology grew by itself
+ *  nobody has declared them — and the engine does not infer them for people either (that would let a guessed axiom rewrite the ledger).
+ *  So a successor does not close its predecessor: two `leads` both stay open, and asking who is in charge in June, both answer.
  *
- *  **这一档不替人做决定，只把证据摆出来。** 谁挂着哪些值、对账会闭合几条、
- *  几条拿不准要进人审——按钮按下去之前都写在脸上，因为闭合一条从 2023 年
- *  开着的区间是对账本的真实改动。 */
+ *  **This tier does not make the decision for people; it only lays out the evidence.** Who holds which values, how many rows the reconciliation would close,
+ *  and how many of those are uncertain and must go to human review — all written on the face of the button before pressing it, because closing one row that has been open since 2023
+ *  is a real change to the ledger. */
 function UniquenessPanel({
   kbId,
   candidates,
@@ -1686,21 +1686,21 @@ function UniquenessPanel({
   onChanged: () => void;
   onError: (e: unknown) => void;
 }) {
-  // 刚做完的那一条留一行结果：面板会重取，卡片随之消失，
-  // 不留话的话人只看到东西没了，不知道闭合了几条
+  // The item just completed leaves one line of result: the panel refetches, and the card disappears with it,
+  // without a note the person only sees the thing gone, and does not know how many were closed
   const [done, setDone] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
 
   const apply = async (c: UniquenessCandidate) => {
     setBusy(c.predicate_id);
     try {
-      // 两步：先补声明（已声明的跳过），再对账。声明是本体的事，
-      // 对账是账本的事——后端的 reconcile 在没有声明时会拒绝执行。
+      // Two steps: first add the declarations (skip those already declared), then reconcile. Declaring is the ontology's business,
+      // reconciling is the ledger's business — the backend's reconcile refuses to run when there is no declaration.
       //
-      // **整条一起发。** 这个端点是整体替换：缺省字段等于清空（后端在
-      // `RelationTypeReq` 上写了为什么——一半覆盖一半保留会让「我把逆去掉了」
-      // 和「我没碰逆」长得一样）。只发一个公理会把另外五条连同 inverse_of
-      // 一起抹掉，而那是本体里最难重建的部分
+      // **Send the whole thing together.** This endpoint is a whole replacement: a missing field equals clearing it (the backend wrote out why
+      // on `RelationTypeReq`: a half overwrite, half preserve would make "I removed the inverse" look the same as
+      // "I did not touch the inverse"). Sending only one axiom would wipe out the other five along with inverse_of,
+      // and that is the hardest part of the ontology to rebuild */
       if (!c.declared) {
         const rel = relations.find((r) => r.id === c.predicate_id);
         if (!rel) throw new Error(c.label);
@@ -1787,8 +1787,8 @@ function UniquenessPanel({
                 {S.ontology.uniquenessEffect(c.would_close, c.would_review)}
               </p>
 
-              {/* 证据：谁挂着哪些值。**这是人做判断的依据**，不是装饰——
-                  看见「张三 leads 凤凰 / 李四 leads 凤凰」才知道该不该声明 */}
+              {/* Evidence: who holds which values. **This is the basis for a person's judgment**, not decoration —
+                  only by seeing "Zhang San leads Phoenix / Li Si leads Phoenix" does one know whether it should be declared */}
               {c.examples.length > 0 && (
                 <div className="mt-2 space-y-1 border-t border-line pt-2">
                   {c.examples.slice(0, 3).map((ex) => (
@@ -1825,7 +1825,7 @@ function UniquenessPanel({
   );
 }
 
-/** 库里现在有几条还没人表态的提案：等代理答完的判据，也是「有没有可看的」 */
+/** How many proposals are still waiting for a person's response in the library: the criterion for waiting until the agent has answered, and also whether there is anything to look at */
 function proposalCount(d: OntologyProposals | null | undefined): number {
   if (!d) return 0;
   return (
@@ -1836,8 +1836,8 @@ function proposalCount(d: OntologyProposals | null | undefined): number {
   );
 }
 
-/** 代理提案多带的几格（0061）：定义、会绑的形状、类别词、服务的问题。
-    Suggest 的一份没有 proposed_by，什么都不画 */
+/** The extra columns an agent proposal carries (0061): the definition, the shapes it would bind, the category words, the questions it serves.
+    A Suggest entry lacks proposed_by, so it draws nothing */
 function AgentMeta({
   p,
 }: {
@@ -1896,7 +1896,7 @@ function AgentMeta({
   );
 }
 
-/** 能力问题（0061 决定 1）：本体该答得上来的问题。人写下即 accepted；退役的留着看 */
+/** Capability question (0061 decision 1): a question the ontology should be able to answer. Written by a person it is accepted; retired ones are kept to look at */
 function QuestionsPanel({
   kbId,
   onError,
@@ -1905,7 +1905,7 @@ function QuestionsPanel({
   onError: (e: unknown) => void;
 }) {
   const qc = useQueryClient();
-  // 叫了代理之后等它提问题：隔几秒看一眼，多出 proposed 的就停
+  // After calling the agent, wait for it to ask questions: look again every few seconds, and stop once a proposed one appears
   const [awaiting, setAwaiting] = useState<{ since: number; had: number } | null>(null);
   const questions = useQuery({
     queryKey: ["questions", kbId],
@@ -2117,19 +2117,19 @@ function MissesPanel({
   onChanged: () => void;
   onError: (e: unknown) => void;
 }) {
-  // 文档说了、本体还放不下的有多少（代理读的那两样）：空着的本体不等于「覆盖了语料」
+  // How much the documents say that the ontology still cannot hold (the two things the agent reads): an empty ontology does not mean "the corpus is covered"
   const uncovered = useQuery({
     queryKey: ["questionReport", kbId],
     queryFn: () => api.questionReport(kbId),
   }).data?.uncovered;
   const [proposals, setProposals] = useState<OntologyProposals | null>(null);
-  // 叫了代理之后等它：任务在后台跑，隔几秒看一眼库里有没有新提案（0061）。
-  // 记的是叫它那一刻提案的条数——多出来了就是它答完了；两分钟没动静就不等了
+  // After calling the agent, wait for it: the task runs in the background, so look at the library every few seconds for new proposals (0061).
+  // What is recorded is the count of proposals at the moment it was called — once there are more, it has finished answering; if there is no movement for two minutes, stop waiting
   const [awaitingAgent, setAwaitingAgent] = useState<{
     since: number;
     had: number;
   } | null>(null);
-  // 还没人表态的提案存在库里（0049）：刷新页面、切走再回来都从这里捞
+  // Proposals not yet responded to are stored in the library (0049): page refresh, or switching away and back, both pull them from here
   const storedProposals = useQuery({
     queryKey: ["storedProposals", kbId],
     queryFn: () => api.storedProposals(kbId),
@@ -2147,7 +2147,7 @@ function MissesPanel({
     }
   }, [awaitingAgent, storedProposals.data]);
   useEffect(() => {
-    // 只在还没有本地结果时回填：刚表过态的那一批不该被库里的旧快照盖回去
+    // Backfill only when there is no local result yet: a batch just responded to should not be overwritten by the old snapshot from the library
     if (proposals === null && storedProposals.data) {
       if (proposalCount(storedProposals.data) > 0) setProposals(storedProposals.data);
     }
@@ -2173,7 +2173,7 @@ function MissesPanel({
           [section]: (prev[section] ?? []).filter((x) => x.key !== key),
         },
     );
-  // 拒绝连理由：改状态不删行，理由下一轮代理读得到（0061）
+  // Rejecting, even with a reason: changing the status does not delete the row, and the reason is something the next round of the agent can read (0061)
   const rejectProposal = useMutation({
     mutationFn: ({
       section,
@@ -2194,12 +2194,12 @@ function MissesPanel({
     const reason = window.prompt(S.ontology.rejectReasonPrompt) ?? "";
     rejectProposal.mutate({ section, key, reason: reason.trim() || undefined });
   };
-  // 采纳走服务端一个端点：建类或属性（或写下人的绑定）、标记提案、排对齐（0061 决定 3）
+  // Adopting goes through one endpoint on the server: create the class or attribute (or write the person's binding), mark the proposal, queue alignment (0061 decision 3)
   const adopt = useMutation({
     mutationFn: ({ section, key }: { section: Section; key: string }) =>
       api.adoptProposal(kbId, section, key),
     onSuccess: (d, v) => {
-      // 复用时有人在代理读过之后另定了的，照人的留着没写：说一声，不然卡片一走像是全写了
+      // When reusing, anything a person decided differently after the agent read it is kept as the person left it and not written: say so, otherwise once the card goes it looks as if everything was written
       if (d.skipped.length > 0) toast.info(S.ontology.adoptKept(d.skipped.length));
       else toast.success(v.section === "map_to" ? S.toast.saved : S.toast.added);
       drop(v.section, v.key);
@@ -2230,7 +2230,7 @@ function MissesPanel({
   );
 
   return (
-    // 整页视图不再套一层卡片：标题是页标题，正文平铺（与 Refine / Rules 同一副样子）
+    // The full-page view no longer wraps content in a card: the title is the page title, and the body is laid flat (the same look as Refine / Rules)
     <div>
       <PageHeader
         title={S.ontology.misses}
@@ -2248,7 +2248,7 @@ function MissesPanel({
         }
       />
 
-      {/* 两个数还没取回来时不说话：先说一句「没有在等的」再改口，比空着更糟 */}
+      {/* While the two numbers have not come back yet, say nothing: saying "nothing waiting" and then correcting it is worse than leaving it empty */}
       {uncovered && (
         <p className="text-body text-ink-2">
           {uncovered.kind_words + uncovered.phrases > 0
@@ -2262,8 +2262,8 @@ function MissesPanel({
             {S.ontology.proposals}
           </h4>
           <div className="space-y-2">
-            {/* 排在最前：它说的是"本体已经有了"，而这正是最该先看见的一句。
-                排在新建后面的话，人一路点下来就把重复建出来了 */}
+            {/* Placed first: it says "the ontology already has it", and that is the sentence most worth seeing first.
+                If it sat after "create new", a person clicking straight down the list would end up creating duplicates */}
             {(proposals.map_to ?? []).map((p) => (
               <div key={`map-${p.key}`} className="flex items-center gap-2 text-body">
                 <Chip tone="success">=</Chip>
@@ -2311,7 +2311,7 @@ function MissesPanel({
             ))}
             {(proposals.attribute_types ?? []).map((p) => (
               <div key={`attr-${p.key}`} className="flex items-center gap-2 text-body">
-                {/* A 而不是 P：字面值那一档跟关系是两回事，界面上分得清 */}
+                {/* A rather than P: the literal-value tier is a different thing from relations, and the interface keeps them apart */}
                 <Chip tone="warn">A</Chip>
                 <span className="font-mono text-ink-2">{p.key}</span>
                 <span className="text-ink">{p.label}</span>
@@ -2334,11 +2334,11 @@ function MissesPanel({
   );
 }
 
-/* ---------- 本体导入：上传 → 预览计划 → 确认落库 ---------- */
-/* 预览与落库共用服务端同一个 plan。这个面板的全部工作是把计划里
-   **会咬人的三件事**放到人点确认之前：函数性关系（错误的唯一性声明会造出
-   成队假冲突）、没有描述的类（description 逐字进抽取提示词，缺了就静默抽差）、
-   key 撞车（报告不解决——自动改名会让下次重导入认不出自己上次建的是哪个）。 */
+/* ---------- Ontology import: upload → preview plan → confirm and write ---------- */
+/* Preview and commit share the same plan from the server. This panel's entire job is to put
+   **three things that can bite** in front of the person before they confirm: functional relations (a wrong uniqueness declaration creates a crowd of
+   false conflicts), classes without a description (description goes verbatim into the extraction prompt, so if it is missing, extraction silently goes wrong), and
+   key collisions (reported, not resolved — an automatic rename would make the next re-import unable to tell which one it created last time). */
 
 function ImportPanel({
   kbId,
@@ -2444,7 +2444,7 @@ function ImportPanel({
             </p>
           ) : (
             <>
-              {/* 三条警告在计数之前：人只会读第一屏 */}
+              {/* The three warnings come before the counts: people only read the first screen */}
               <Warning
                 show={plan.functional_relations > 0}
                 tone="warn"
@@ -2555,19 +2555,19 @@ function ImportPanel({
         </div>
       )}
 
-      {/* 谁在什么时候拿哪个文件动过本体，以及那一次到底进来了什么 */}
+      {/* Who touched the ontology, when, with which file, and what actually came in that time */}
       <ImportHistory kbId={kbId} />
     </div>
   );
 }
 
-/** 导入历史：**服务端每次导入记下的是一整本账**——建了几个类、更新了几个、
- *  几个键被占、逆属性连上了几条、属性跳过了几个、多少三元组、哪些 IRI 没投影
- *  下来。从前这一段只印「文件名 · 大小 · 谁在哪天」，其余全落在地上：
- *  导完之后想知道「到底进来了什么」，界面上没有一个地方说得出。
+/** Import history: **the server records a whole ledger for every import** — how many classes were created, how many updated,
+ *  how many keys were taken, how many inverse properties were linked, how many attributes were skipped, how many triples, and which IRIs were not projected
+ *  down. Previously this section only printed "file name · size · who on which day", and everything else fell on the floor:
+ *  after importing, there was nowhere on the interface that could say "what actually came in".
  *
- *  所以这里是一张表（每行一次导入的账），细账在行末的详情里——那些数只有
- *  出问题时才有人读，不该占着表宽。 */
+ *  So this is a table (one row per import's ledger), with the detailed ledger in the details at the end of the row: those numbers are only read
+ *  when something goes wrong, and they should not take up table width. */
 function ImportHistory({ kbId }: { kbId: string }) {
   const [detail, setDetail] = useState<OntologyImportView | null>(null);
   const history = useQuery({
@@ -2581,8 +2581,8 @@ function ImportHistory({ kbId }: { kbId: string }) {
       <h4 className="mb-2 text-small font-medium text-ink-2">
         {S.ontology.importHistory}
       </h4>
-      {/* 还在取的时候不能说「还没有导入过」——那句话是假的，而且它跟真的
-          没导入过长得一模一样，读的人分不出自己看到的是哪一种 */}
+      {/* While still fetching, it must not say "never imported" — that statement is false, and it looks exactly like
+          the true case of never having imported, so the reader cannot tell which one they are seeing */}
       {history.isLoading ? (
         <p className="text-small text-ink-2">{S.nav.loading}</p>
       ) : !rows.length ? (
@@ -2608,10 +2608,10 @@ function ImportHistory({ kbId }: { kbId: string }) {
                 const s = im.summary ?? {};
                 return (
                   <Tr key={im.id}>
-                    {/* 一格一件事，一行一条导入。**格式与大小各占一列**，不是
-                        叠在文件名底下——叠着把每一行都撑成两行高，而右边还空着
-                        半张表。文件名不用等宽：等宽是给键、id、代码和 URL 的
-                        （DESIGN.md 1），一个文件名在一列 Geist 里只显得突兀 */}
+                    {/* One fact per cell, one import per row. **Format and size each take a column**, rather than
+                        sitting under the file name — stacking would make every row two lines tall while the right side stayed half-empty.
+                        The file name does not need monospace: monospace is for keys, ids, code and URLs
+                        (DESIGN.md 1); a file name in a column of Geist just looks out of place */}
                     <Td>
                       <div className="max-w-64 truncate text-small text-ink" title={im.filename}>
                         {im.filename}
@@ -2657,7 +2657,7 @@ function ImportHistory({ kbId }: { kbId: string }) {
         </div>
       )}
 
-      {/* 细账：只有出了问题才有人读，所以收在这里，而不是摊在表上 */}
+      {/* Detailed ledger: only read when something goes wrong, so it is folded away here rather than laid out on the table */}
       <Dialog
         open={!!detail}
         onOpenChange={(o) => !o && setDetail(null)}
@@ -2679,12 +2679,12 @@ function ImportHistory({ kbId }: { kbId: string }) {
   );
 }
 
-/** `{no_domain: 3, unknown_domain: 1}` → 4。缺就是 0 */
+/** `{no_domain: 3, unknown_domain: 1}` → 4. Missing means 0 */
 function sumCounts(m: Record<string, number> | undefined): number {
   return Object.values(m ?? {}).reduce((a, b) => a + b, 0);
 }
 
-/** 表里一格：建了几个 / 更新了几个 / 占了几个键 / 跳过几个。全零就是一横 */
+/** One cell in the table: how many were created / updated / keys taken / skipped. All zeros show as a dash */
 function Counts({
   created,
   updated,
@@ -2734,8 +2734,8 @@ function ImportDetail({ im }: { im: OntologyImportView }) {
           {stat(L.statSubPropertyLinked, s.sub_property_linked)}
           {stat(L.statAttributesSeen, s.attributes_seen)}
           {stat(L.statAttributesCreated, s.attributes_created)}
-          {/* 跳过的属性**按理由分**：数字只说"少了几个"，理由才说得出下一步
-              该改本体的哪里（域没写、域不在这个库里、值域用不了…） */}
+          {/* Skipped properties **grouped by reason**: a number only says "this many fewer", while the reason says
+              where in the ontology to change next (no domain written, domain not in this library, range unusable…) */}
           {Object.entries(s.attributes_skipped ?? {}).map(([reason, n]) =>
             stat(
               `${L.statAttributesSkipped} · ${S.ontology.skipReason[reason] ?? reason}`,
@@ -2745,7 +2745,7 @@ function ImportDetail({ im }: { im: OntologyImportView }) {
         </div>
       </div>
 
-      {/* 没投影下来的 IRI：引用外部词汇表是常态，可「少连了多少」得说得出来 */}
+      {/* IRIs not projected: referencing external vocabularies is normal, but "how many links were missed" should be stated */}
       {!!s.unprojected?.length && (
         <div>
           <p className="mb-1 text-small font-medium text-ink-2">
@@ -2776,13 +2776,13 @@ function takenCount(p: ImportPlan) {
   ).length;
 }
 
-/** IRI 尾巴才是人认得出的部分，前缀在列表里只占宽度 */
+/** The tail of an IRI is the part people recognise; the prefix only takes up width in the list */
 function shortIri(iri: string) {
   const i = Math.max(iri.lastIndexOf("#"), iri.lastIndexOf("/"));
   return i < 0 ? iri : iri.slice(i + 1);
 }
 
-/** 一条警告：标题给数，正文一句给后果，条目折在 details 里 */
+/** One warning: the title gives the number, one sentence in the body gives the consequence, and the entries fold in details */
 function Warning({
   show,
   tone,
@@ -2826,7 +2826,7 @@ function Warning({
   );
 }
 
-/** 一段的去向计数：新建 / 更新 / 跳过，零的不显示 */
+/** Destination count for a section: created / updated / skipped, zeros not shown */
 function PlanRow({
   label,
   items,

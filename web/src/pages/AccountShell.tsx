@@ -1,5 +1,5 @@
-/* 账户层壳：Profile / Administration 的宿主。
-   与 KB 无关，所以没有 KB 切换器、没有 tab 导航——只有字标、返回、用户菜单。 */
+/* The account-level shell: the host for Profile / Administration.
+   Not related to a KB, so there is no KB switcher and no tab navigation: just the wordmark, back, and the user menu. */
 import { useQuery } from "@tanstack/react-query";
 import { Link, Outlet, useLocation, useNavigate } from "@tanstack/react-router";
 import { usePageTitle } from "../useTitle";
@@ -28,7 +28,7 @@ export function AccountShell() {
   const adminTab = (loc.search as { tab?: string }).tab ?? "models";
   const me = useQuery({ queryKey: ["me"], queryFn: fetchMe });
   const health = useQuery({ queryKey: ["health"], queryFn: api.health });
-  // 标题：`Utopia | Persona`——账户区整体一个名字，不逐页细分
+  // Title: `Utopia | Persona`, one name for the whole account area, not subdivided per page
   usePageTitle(S.app.name, S.account.titleTag);
 
   if (me.isPending) {
@@ -51,8 +51,8 @@ export function AccountShell() {
 
   return (
     <div className="h-screen flex flex-col overflow-hidden u-arrive">
-      {/* 顶栏与 Docs 页同构：分区字标（点击回城）+ 返回 + GitHub·版本 + 用户 */}
-      {/* px-8 与 App 顶栏同一个内距：右上那一组换页时不该动 */}
+      {/* The top bar matches the Docs page: section wordmark (click to go back to the city) + back + GitHub·version + user */}
+      {/* px-8 is the same inner padding as the App top bar: the group on the right must not move when the page changes */}
       <header className="glass-strong relative z-40 border-x-0 border-t-0 h-12 shrink-0 flex items-center px-2">
         <SectionMark className="pl-3" text={S.account.brand} title={S.docs.backTitle} />
         <HeaderActions
@@ -63,9 +63,9 @@ export function AccountShell() {
       </header>
 
       <div className="flex-1 min-h-0 flex">
-        {/* 账户导航栏（仅两项，管理员多一项） */}
+        {/* Account navigation bar (only two items; admins get one more) */}
         <aside className={`${RAIL_CLS} u-rail-list px-2 py-3`}>
-          {/* exact：/account 是 /account/kbs 的前缀，默认前缀匹配会双亮 */}
+          {/* exact: /account is a prefix of /account/kbs, so default prefix matching would light up both */}
           <Link
             to="/account"
             activeOptions={{ exact: true }}
@@ -85,8 +85,8 @@ export function AccountShell() {
           </Link>
           {me.data.is_admin && (
             <>
-              {/* 在管理页时父行不再反白：下面已经有一条亮着，两条一起亮反而
-                  说不清人在哪儿 */}
+              {/* On the admin page the parent row is no longer highlighted: another row below is already lit, and two lit at once
+                  would make it unclear where the person is */}
               <Link
                 to="/admin"
                 className={rail}

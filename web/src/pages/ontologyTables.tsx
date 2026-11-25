@@ -1,23 +1,23 @@
-// 本体读成三张表（#498）。
+// The ontology read as three tables (#498).
 //
-// 从前这一页一次只讲一个类：左栏一列名字，画布一张图，右边一块面板讲你点中的
-// 那一个。凡是横跨本体的问题都没有地方问——哪些属性声明了唯一、导入了九百个类
-// 之后哪些一个实例都没有、哪些关系连 domain 都没写（于是抽取拿不到签名）、
-// 这个库到底有哪些属性。最后一个尤其：属性只出现在某个类的面板里，一次一个类，
-// 「这个库有哪些属性」在界面上没有任何地方回答得了。
+// Previously this page only spoke about one class at a time: a column of names on the left, a graph on the canvas, and a panel on the right describing the one you clicked.
+// Questions that span the whole ontology had nowhere to be asked: which properties are declared unique, after importing nine hundred classes
+// which have not a single instance, which relations have no domain written at all (so extraction cannot get their signature),
+// and which properties this library actually has. The last one especially: properties only appear in one class's panel, one class at a time,
+// so "which properties does this library have" was not answered anywhere in the interface.
 //
-// 这个月别的同类页面都已经是表了——令牌、数据源、成员、部署用户、业务规则
-// （#482 里那句「一列卡片跟我们刚重做的任何东西都不像」）。本体是最后一个，
-// 也是列数最多的一个。
+// The other kinds of page of the same sort this month have all become tables already: tokens, data sources, members, deployment users, business rules
+// (the phrase "a column of cards looks nothing like anything we just rebuilt" from #482). The ontology is the last one,
+// and also the one with the most columns.
 //
-// **不列 key**：它是机器身份（`accepted_answer`），不是人要读的东西。三张表
-// 是拿来横着看这个库的——哪些类没实例、哪些属性没 domain——而 key 在每一行
-// 里都只是把名字重说一遍。要看它的时候（对词表、写规则）在右侧详情里，
-// 那儿一次只讲一个，读得完整。
+// **Keys are not listed**: they are machine identities (`accepted_answer`), not things a person reads. The three tables
+// are for looking across the library — which classes have no instances, which properties have no domain — and the key in every row
+// would only restate the name. When you need to see it (when working against a vocabulary, or writing rules), it is in the right-hand detail,
+// where one thing at a time is shown, so it reads completely.
 //
-// **层级怎么办**：`subClassOf` 是本体的骨架，拍平就丢了。所以默认按层级排、
-// 名字列带缩进；按别的列排序就拍平，而父类那一列一直在，拍平不丢信息，只是
-// 换了一种读法。文件管理器就是这么做的。
+// **What about the hierarchy**: `subClassOf` is the skeleton of the ontology, and flattening it loses it. So by default the rows sort by hierarchy,
+// with the name column indented; sorting by another column flattens it, while the parent column stays there, so flattening loses no information, it only
+// changes the way of reading. That is what file managers do.
 
 import { useMemo, useState } from "react";
 import { Search, Plus } from "lucide-react";
@@ -47,38 +47,38 @@ import {
 
 export type TableTab = "classes" | "properties" | "attributes";
 
-/** 一页画多少行。
+/** How many rows to draw per page.
  *
- * 三张表分别是 916 / 1102 / 599 行，从前一次全画进 DOM——**滚动条那一下就能
- * 感觉到**，而且真正在看的从来只有屏幕里那十几行。左栏的类树早就是分页的
- * （每页 14），这里只是把同一件事补上；50 比 14 大，是因为整幅宽度的表一屏
- * 本来就装得下更多，翻页翻得太勤也烦。
+ * The three tables have 916 / 1102 / 599 rows respectively. Previously all of them were drawn into the DOM at once — **the scrollbar could feel it**,
+ * and what anyone was really looking at was always only the dozen or so rows on screen. The class tree in the left column was already paged
+ * (14 per page); this just brings the same approach here. 50 is larger than 14 because a full-width table has room on one screen for more,
+ * and paging too often would be annoying anyway.
  *
- * 类那张表分的是**已经拍平的树**，所以一页仍是树序里连续的一段，父子关系
- * 不会被切散到两页去（与左栏同一个做法）。 */
+ * The class table pages over the **already flattened tree**, so each page is still a contiguous stretch in tree order, and parent/child relations
+ * are not split across two pages (the same approach as the left column). */
 const TABLE_PAGE = 50;
 
-/** 这一行挂在谁下面。**没有主父类就退回第一个父类**：`primary_parent` 只在
- *  人手动指定时才写，而导入的包一个都没有——schema.org 那 916 个类里是 0 个。
- *  只认它的话，任何导入来的本体在树里都是平的一长条，层级完全看不见。
+/** Which parent this row hangs under. **With no primary parent, fall back to the first parent**: `primary_parent` is only written when
+ *  a person sets it by hand, and imported packs have none at all — zero of schema.org's 916 classes have it.
+ *  Relying only on it would make every imported ontology a single flat strip in the tree, with the hierarchy entirely invisible.
  *
- *  **一个类可以有多个父类**（`parents` 是个数组；schema.org 这 916 个里有 48 个
- *  是这样，FOAF 的 Person 同时是 Agent 与 SpatialThing）。一行只能挂在一处，
- *  所以缩进选的是其中之一——那一列把全部父类都列出来，行上再标一个记号说
- *  「还有别的」，缩进就不至于冒充成唯一的真相 */
+ *  **A class can have several parents** (`parents` is an array; 48 of schema.org's 916 are like this,
+ *  and FOAF's Person is both an Agent and a SpatialThing). A row can only hang in one place,
+ *  so the indentation picks one of them: the column lists all the parents, and the row marks one with a symbol saying
+ *  "there are others", so that the indentation does not pass itself off as the only truth */
 export function treeParent(t: EntityTypeView): string | null {
   return t.primary_parent ?? t.parents[0] ?? null;
 }
 
-/** 名字列的缩进：一层 12px。与左栏那棵树同一个做法 */
+/** The indent of the name column: 12px per level. Same approach as the tree in the left column */
 const INDENT = 12;
 
-/* ---------- 排序 ---------- */
+/* ---------- Sorting ---------- */
 
 type Sort = { col: string; dir: "asc" | "desc" } | null;
 
-/** 可排序的表头。**排序把层级拍平**（见文件头）——所以名字列不排序，它就是
- *  层级本身；点别的列才进入「平铺」那种读法 */
+/** Sortable column header. **Sorting flattens the hierarchy** (see the file header) — so the name column is not sortable, since it is
+ *  the hierarchy itself; clicking other columns is what enters the "flat" way of reading */
 function SortTh({
   col,
   sort,
@@ -124,9 +124,9 @@ function sorted<T>(rows: T[], sort: Sort, key: (r: T) => string | number) {
   return sort.dir === "asc" ? out : out.reverse();
 }
 
-/* ---------- 类 ---------- */
+/* ---------- Classes ---------- */
 
-/** 按 primary_parent 排成层级序，带每行的深度。过滤或排序时拍平 */
+/** Arranged into hierarchy order by primary_parent, with each row's depth. Flattened when filtering or sorting */
 function classRows(
   types: EntityTypeView[],
   flat: boolean,
@@ -142,15 +142,15 @@ function classRows(
   const seen = new Set<string>();
   const walk = (parent: string | null, depth: number) => {
     for (const t of children.get(parent) ?? []) {
-      if (seen.has(t.id)) continue; // 父类互指成环也走不死
+      if (seen.has(t.id)) continue; // Even parents that point at each other in a cycle cannot make this loop forever
       seen.add(t.id);
       out.push({ t, depth });
       walk(t.id, depth + 1);
     }
   };
   walk(null, 0);
-  // 父类不在这份清单里的（被过滤掉了）挂不上树，补在末尾——不能因为排不进
-  // 层级就不显示
+  // A parent that is not in this list (it was filtered out) cannot be attached to the tree, so it is appended at the end — it must not be left out of the display
+  // just because it cannot be placed in the hierarchy
   for (const t of types) if (!seen.has(t.id)) out.push({ t, depth: 0 });
   return out;
 }
@@ -187,7 +187,7 @@ function ClassesTable({
   const hit = (t: EntityTypeView) =>
     !q || t.label.toLowerCase().includes(q) || t.key.toLowerCase().includes(q);
   const shown = types.filter(hit);
-  // 过滤中或排序中都拍平：两种情况下层级都不再是这份清单的次序
+  // Flattened whenever filtering or sorting: in both cases the hierarchy is no longer the order of this list
   const rows = classRows(sorted(shown, sort, (t) =>
     sort?.col === "usage" ? t.usage
     : sort?.col === "attrs" ? (attrCount.get(t.id) ?? 0)
@@ -236,8 +236,8 @@ function ClassesTable({
                   style={{ background: t.color }}
                 />
                 <span className="truncate">{t.label}</span>
-                {/* 多父类：缩进只挂得住一处，这个记号说还有几处，父类那一列
-                    把它们都列着 */}
+                {/* Multiple parents: indentation can only hang in one place; this mark says how many others there are, and the parent column
+                    lists them all */}
                 {t.parents.length > 1 && (
                   <span
                     className={chipLike("neutral", "shrink-0 px-2 text-fine")}
@@ -281,8 +281,8 @@ function ClassesTable({
         ))}
       </TBody>
       </Table>
-      {/* 翻页器跟在表后面，不做固定底栏：这一块本来就是滚动区，
-          再钉一条栏会把最后一行压掉半截 */}
+      {/* The pager follows after the table; it is not a fixed bottom bar, since this block is already the scroll area,
+          and pinning a bar would cut off half of the last row */}
       <Pager
         total={rows.length}
         pageSize={TABLE_PAGE}
@@ -293,10 +293,10 @@ function ClassesTable({
   );
 }
 
-/* ---------- 关系 ---------- */
+/* ---------- Relations ---------- */
 
-/** 公理做成几个字母的芯片而不是六个勾：一行里六个复选框读不出「这条关系
- *  保证了什么」，几个字母能顺着一列扫下去 */
+/** Axioms are shown as a few letter chips rather than six ticks: six checkboxes in one row cannot convey "what this relation
+ *  guarantees", whereas a few letters can be scanned down a column */
 function Axioms({ r }: { r: RelationTypeView }) {
   const on: [boolean, string, string][] = [
     [r.functional, "F", S.ontology.functional],
@@ -409,8 +409,8 @@ function PropertiesTable({
         ))}
       </TBody>
       </Table>
-      {/* 翻页器跟在表后面，不做固定底栏：这一块本来就是滚动区，
-          再钉一条栏会把最后一行压掉半截 */}
+      {/* The pager follows after the table; it is not a fixed bottom bar, since this block is already the scroll area,
+          and pinning a bar would cut off half of the last row */}
       <Pager
         total={rows.length}
         pageSize={TABLE_PAGE}
@@ -421,10 +421,10 @@ function PropertiesTable({
   );
 }
 
-/* ---------- 属性 ---------- */
+/* ---------- Properties ---------- */
 
-/** 属性单开一张表，是这三张里最能说明问题的一张：从前属性只在某个类的面板里
- *  露面，一次一个类，「这个库有哪些属性」在界面上没有任何地方回答得了 */
+/** Properties get a table of their own, the most telling of the three: previously properties only surfaced in one class's panel,
+ *  one class at a time, so "which properties this library has" was not answered anywhere in the interface */
 function AttributesTable({
   attributes,
   types,
@@ -494,8 +494,8 @@ function AttributesTable({
         ))}
       </TBody>
       </Table>
-      {/* 翻页器跟在表后面，不做固定底栏：这一块本来就是滚动区，
-          再钉一条栏会把最后一行压掉半截 */}
+      {/* The pager follows after the table; it is not a fixed bottom bar, since this block is already the scroll area,
+          and pinning a bar would cut off half of the last row */}
       <Pager
         total={rows.length}
         pageSize={TABLE_PAGE}
@@ -506,7 +506,7 @@ function AttributesTable({
   );
 }
 
-/* ---------- 三张表 ---------- */
+/* ---------- The three tables ---------- */
 
 export function OntologyTables({
   entityTypes,
@@ -527,22 +527,22 @@ export function OntologyTables({
   onOpenProperty: (r: RelationTypeView) => void;
   onOpenAttribute: (a: RelationTypeView) => void;
   onSeeInstances: (t: EntityTypeView) => void;
-  /** 建顶层类。左栏那一行「新建类」只在图那一档展开，表格得自己有这条路 */
+  /** Create a top-level class. The "New class" row in the left column only expands in the graph tier, so the table needs its own route */
   onCreateClass: () => void;
-  /** 建不带 domain 的关系，同上 */
+  /** Create a relation without a domain, likewise */
   onCreateProperty: () => void;
-  /** 属性必须挂在类上：从这里新建时，弹窗自己问挂在哪个类 */
+  /** A property must hang on a class: when created from here, the dialog itself asks which class it hangs on */
   onCreateAttribute: () => void;
-  /** 当前选中的那个类或属性。表里要标出来——**点一行开的是右边的面板，
-   *  行本身不留痕的话，翻两页之后就不知道正在看的是哪一个了**。
-   *  只收这两档：页面那个 `Sel` 还含 import / rules / schema 几种，
-   *  它们跟表里的行没有对应关系，收窄了比整个传下来诚实 */
+  /** The currently selected class or property. The table must mark it — **clicking a row opens the panel on the right,
+   *  but if the row itself leaves no trace, after paging two pages you no longer know which one you are looking at**.
+   *  Only these two tiers are collected: the page's `Sel` also includes import / rules / schema and a few others,
+   *  which have no correspondence to the rows in the table, so narrowing is more honest than passing the whole thing down */
   selected:
     | { kind: "class"; id: string }
     | { kind: "relation"; id: string }
     | null;
-  /** 本体还没到。控件照常渲染、表身出骨架，**计数与行数一律不报**——
-   *  这时候它们只会是 0，而 0 是个结论，不是「还不知道」 */
+  /** The ontology has not arrived yet. Controls render as usual and the table body shows a skeleton, **counts and row numbers are never reported** —
+   *  at this point they would only be 0, and 0 would be a conclusion, not "not known yet" */
   loading?: boolean;
 }) {
   const [tab, setTab] = useState<TableTab>("classes");
@@ -557,8 +557,8 @@ export function OntologyTables({
 
   return (
     <div className="flex h-full min-w-0 flex-col">
-      {/* 操作表里内容的控件在表**外面**（规矩 6）：过滤清空之后表会变成空状态，
-          而把过滤框放进去就等于把唯一能改回来的东西一起藏了 */}
+      {/* Controls that act on the table's contents sit **outside** the table (rule 6): once a filter clears, the table turns into an empty state,
+          and putting the filter box inside would hide the only thing that can change it back as well */}
       <div className="flex shrink-0 items-center gap-4 px-8 pt-6 pb-3">
         <Segmented<TableTab>
           value={tab}
@@ -577,9 +577,9 @@ export function OntologyTables({
           )}
         />
         <Input
-          // 从前这里是一个 `/`，照惯例它是"按斜杠聚焦"的提示——**可这一页没绑
-          // 那个键**（只有文档页绑了），提示了一个不存在的功能。而左栏那个
-          // 一模一样的过滤框用的是放大镜，同一页两个图标也说不通
+          // Previously this was a `/`, which by convention is a "press slash to focus" hint — **but this page does not bind
+          // that key (only the docs page does), so it hinted at a feature that does not exist. And the left-column filter box
+          // uses a magnifier, which is the same on this page — two icons would make no sense
           icon={<Search size={12} />}
           className="w-58"
           placeholder={S.ontology.filter}
@@ -597,13 +597,13 @@ export function OntologyTables({
                     : counts.attributes,
               )}
         </GroupLabel>
-        {/* 新建跟着当前这一档走（图那一档里的同一件事在左栏第一行）。属性要挂在
-            类上：从这里打开时弹窗会问挂在哪个类，从某个类的面板打开时就是那个类 */}
+        {/* Creating follows the current tier (the same thing in the graph tier is the first row of the left column). A property has to hang on
+            a class: when opened from here the dialog asks which class it hangs on; when opened from a class's panel it is that class */}
         <Button
           variant="primary"
           size="sm"
           icon={<Plus size={12} />}
-          // 本体还没到不给建：新类要挑父类，而父类清单此刻是空的
+          // No creating until the ontology has arrived: a new class has to pick a parent, and the parent list is empty right now
           disabled={loading}
           onClick={
             tab === "classes"
@@ -621,8 +621,8 @@ export function OntologyTables({
         </Button>
       </div>
       <div className="u-scroll min-h-0 flex-1 overflow-y-auto px-8 pb-6">
-        {/* 表身出骨架，**表头不画**：列名是什么此刻还没定（三张表的列不一样），
-            画一排灰条冒充列名是在编。分段控件、过滤框、滚动区都已经在了 */}
+        {/* The table body shows a skeleton, but **the header is not drawn**: what the columns are is not yet decided (the three tables have different columns),
+            and drawing a row of grey bars to pass as column names would be making things up. The segmented control, filter box and scroll area are already there */}
         {loading && <SkeletonTableRows rows={10} />}
         {!loading && tab === "classes" && (
           <ClassesTable

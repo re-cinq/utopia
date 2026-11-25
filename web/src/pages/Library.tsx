@@ -58,7 +58,7 @@ import { GoogleDrivePanel } from "./GoogleDrivePanel";
 const PAGE_SIZE = 15;
 
 
-/** 调度器产出的值：interval 与 cron 互斥。 */
+/** The value the scheduler produces: interval and cron are mutually exclusive. */
 interface ScheduleValue {
   sync_interval_minutes: number | null;
   sync_cron: string | null;
@@ -68,7 +68,7 @@ type RssContentMode = "feed" | "full_new_items";
 
 const pad2 = (n: number | string) => String(n).padStart(2, "0");
 
-/** 同步日程的人话展示（advanced 自定义表达式按原样显示）。 */
+/** Human-readable display of the sync schedule (an advanced custom expression is shown as is). */
 function scheduleLabel(s: SourceView): string {
   if (s.sync_cron) {
     const daily = s.sync_cron.match(/^(\d{1,2}) (\d{1,2}) \* \* \*$/);
@@ -83,7 +83,7 @@ function scheduleLabel(s: SourceView): string {
 
 type ScheduleMode = "manual" | "interval" | "daily" | "weekly" | "advanced";
 
-/** 已存日程 → 选择器初始状态（编辑模式回显；识别不了的 cron 落到 Advanced）。 */
+/** Saved schedule → the picker's initial state (echoed in edit mode; a cron it cannot recognize falls back to Advanced). */
 const CRON_WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 
 export function scheduleToPickerState(initial?: ScheduleValue) {
@@ -125,13 +125,13 @@ export function scheduleToPickerState(initial?: ScheduleValue) {
   return base;
 }
 
-/** 可视化同步日程选择器：Manual / Interval / Daily / Weekly 构建，Advanced 才暴露 cron。 */
+/** Visual sync-schedule picker: built from Manual / Interval / Daily / Weekly; only Advanced exposes cron. */
 export function SchedulePicker({
   onChange,
   initial,
 }: {
   onChange: (v: ScheduleValue) => void;
-  /** 编辑模式的既有日程；新建缺省从 Manual 起步 */
+  /** The existing schedule in edit mode; a new one starts from Manual by default */
   initial?: ScheduleValue;
 }) {
   type Mode = ScheduleMode;
@@ -149,7 +149,7 @@ export function SchedulePicker({
   ) => {
     const t = v.time ?? time;
     const [hh, mm] = t.split(":").map(Number);
-    // 时间格式未成形时（手输中途）不更新日程，保留上一个有效值
+    // While the time format is not yet formed (mid-typing), do not update the schedule; keep the last valid value
     if ((m === "daily" || m === "weekly") && !/^([01]?\d|2[0-3]):[0-5]\d$/.test(t)) return;
     switch (m) {
       case "manual":
@@ -215,7 +215,7 @@ export function SchedulePicker({
               emit("interval", { every: n });
             }}
           />
-          {/* 两个选项不配下拉：分段切换，与上方模式条同配方 */}
+          {/* Two options do not get a dropdown: a segmented switch, using the same recipe as the mode bar above */}
           <Segmented
             size="sm"
             value={unit}
@@ -256,7 +256,7 @@ export function SchedulePicker({
           )}
           <div className="flex items-center gap-2 text-body text-ink-2">
             {S.library.schedule.at}
-            {/* 24h 纯文本输入：原生 time 控件块头大且跟随系统语言（"上午 09:00"） */}
+            {/* 24h plain-text input: the native time control has a large block header and follows the system language (e.g. "AM 09:00") */}
             <Input
               size="sm"
               className={cn(
@@ -277,7 +277,7 @@ export function SchedulePicker({
 
       {mode === "advanced" && (
         <div>
-          {/* 表达式用 mono，placeholder 回默认字体（u-placeholder-sans） */}
+          {/* The expression uses mono; the placeholder falls back to the default font (u-placeholder-sans) */}
           <Input className="w-full font-mono u-placeholder-sans"
             placeholder={S.library.schedule.cronPlaceholder}
             value={cron}
@@ -304,47 +304,47 @@ export function Library() {
   const { kb } = useKb();
   const queryClient = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
-  // 从文档查看页的来源栏跳回时带 ?src= 定位到对应文件夹
+  // Coming back from the source bar on the document viewer page carries ?src= to locate the matching folder
   const { src } = useSearch({ from: "/app/kb/$kbId/library" });
   const [dragging, setDragging] = useState(false);
   const [selection, setSelection] = useState<LibrarySelection>(src ?? "all");
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(false);
-  // api 来源密钥弹窗（随时可查看/轮换）
+  // API source key dialog (can be viewed or rotated at any time)
   const [tokenReveal, setTokenReveal] = useState<{ sourceId: string; kind: string } | null>(null);
   const [cleaning, setCleaning] = useState(false);
   const [reExtracting, setReExtracting] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
-  // 失败详情弹窗：{文件名, 哪条管道, 原文}
+  // Failure detail dialog: {file name, which pipeline, original text}
   const [errorView, setErrorView] = useState<{
     file: string;
     kind: string;
     text: string;
   } | null>(null);
-  // 丢弃详情弹窗：这篇文档抽出来却没落地的事实
+  // Discarded-detail dialog: the facts this document extracted but that never landed
   const [dropsView, setDropsView] = useState<{ file: string; rows: ExtractionDrop[] } | null>(
     null,
   );
   const [showHistory, setShowHistory] = useState(false);
   const [page, setPage] = useState(0);
   const [filter, setFilter] = useState("");
-  // 按抽取状态筛。**空 = 不筛**——五篇失败混在二十七篇里，从前只能一页页看
+  // Filter by extraction status. **Empty = no filter**: five failed items mixed into twenty-seven would previously have had to be read page by page
   const [graphFilter, setGraphFilter] = useState("");
 
 
-  // 切换文件夹回到第一页、清空过滤、退出历史视图
+  // Switching folder returns to page one, clears the filter, and exits the history view
   useEffect(() => {
     setPage(0);
     setFilter("");
     setShowHistory(false);
   }, [selection]);
-  // 过滤词变化回到第一页
+  // A change in the filter term returns to page one
   useEffect(() => setPage(0), [filter]);
 
-  // 状态变化经 SSE 事件流推送（useKbEvents 挂在 Shell），无需轮询
+  // Status changes are pushed through the SSE event stream (useKbEvents is mounted in Shell), so no polling is needed
   const docs = useQuery({
-    // **服务端筛选与分页**：作用域、名字、抽取状态、页码都进 queryKey，
-    // 换任何一个都重新取一页。从前是一次取回整库、客户端切片
+    // **Server-side filtering and paging**: scope, name, extraction status and page number all go into the queryKey,
+    // so changing any one of them refetches a page. Previously the whole library was fetched at once and sliced on the client
     queryKey: ["documents", kb?.id, selection, filter, graphFilter, page],
     queryFn: () =>
       api.documents(kb!.id, {
@@ -368,7 +368,7 @@ export function Library() {
     queryFn: () => api.sources(kb!.id),
     enabled: !!kb,
   });
-  // 整库一次取回后按文档分组：抽取丢弃的行数很小，好过每行发一个请求
+  // After fetching the whole library once, group by document: the discarded rows from extraction are few, better than one request per row
   const drops = useQuery({
     queryKey: ["extraction-drops", kb?.id],
     queryFn: () => api.extractionDrops(kb!.id),
@@ -388,12 +388,12 @@ export function Library() {
     queryClient.invalidateQueries({ queryKey: ["documents", kb?.id] });
     queryClient.invalidateQueries({ queryKey: ["docCount", kb?.id] });
     queryClient.invalidateQueries({ queryKey: ["sources", kb?.id] });
-    // 重抽会重写这篇文档的丢弃信号，跟着文档一起失效
+    // Re-extraction rewrites this document's discard signals, so they are invalidated together with the document
     queryClient.invalidateQueries({ queryKey: ["extraction-drops", kb?.id] });
   };
 
-  // 一键重试这个作用域里全部失败的。**逐篇入队在服务端做**——排队还带着
-  // 别的动作（解雇在跑的任务、清增量标记），绕过去会留下半截状态
+  // One-click retry of everything that failed in this scope. **Enqueuing item by item is done on the server**: queuing carries
+  // other actions (cancelling a running task, clearing incremental markers); going around it would leave half-finished state
   const retryFailed = useMutation({
     mutationFn: () =>
       api.retryFailedDocs(
@@ -412,7 +412,7 @@ export function Library() {
   });
 
   const upload = useMutation({
-    // 选中 folder 来源时，上传直接归入该文件夹
+    // When a folder source is selected, uploads go straight into that folder
     mutationFn: (files: FileList | File[]) => {
       const folder = sources.data?.sources.find(
         (s) => s.id === selection && s.kind === "folder",
@@ -421,7 +421,7 @@ export function Library() {
     },
     onSuccess: invalidate,
   });
-  // 删除是墓碑（#268）：提示里给一个「撤销」，点了原路复活
+  // Deletion is a tombstone (#268): the prompt offers an "Undo", and clicking it brings everything back the same way
   const restore = useMutation({
     mutationFn: (id: string) => api.restoreDocument(id),
     onSuccess: () => {
@@ -440,7 +440,7 @@ export function Library() {
       invalidate();
     },
   });
-  // 真删（#268 下半）：打字级确认，库管理员，回不来
+  // Hard delete (#268, second half): a typed confirmation; for a knowledge base admin; cannot be undone
   const [purging, setPurging] = useState<Doc | null>(null);
   const purge = useMutation({
     mutationFn: (id: string) => api.purgeDocument(id),
@@ -456,7 +456,7 @@ export function Library() {
     mutationFn: (id: string) => api.reprocessDocument(id),
     onSuccess: invalidate,
   });
-  // 本库角色：门控"重建图谱"入口（KB admin 起步，与 API 端一致）
+  // The role in this KB: gates the "rebuild graph" entry (starts at KB admin, consistent with the API side)
   const kbDetail = useQuery({
     queryKey: ["kbOne", kb?.id],
     queryFn: () => api.kbDetail(kb!.id),
@@ -503,8 +503,8 @@ export function Library() {
     },
   });
 
-  // 只有手动语义的目的地可上传：All/Uploads/folder。拉取型来源（url/rss/api/custom）
-  // 由同步填充，手动塞文件会在下次同步时变成"来源里不存在"的孤儿
+  // Only manual-semantics destinations accept uploads: All / Uploads / folder. Pull-type sources (url/rss/api/custom)
+  // are filled by sync; manually stuffing files in would make them orphans "not in the source" at the next sync
   const canUpload =
     selection === "all" ||
     selection === "uploads" ||
@@ -520,20 +520,20 @@ export function Library() {
     [kb, upload, canUpload],
   );
 
-  // 整库可抽的篇数。**重建是库级动作**，不该显示当前来源的数字
+  // How many documents can be extracted across the whole library. **Rebuilding is a library-level action**, so it should not show the current source's number
   const kbStats = useQuery({
     queryKey: ["docCount", kb?.id],
     queryFn: () => api.documents(kb!.id, { limit: 1, offset: 0 }),
     enabled: !!kb,
   });
 
-  // **最后一个 hook 之后才能提前返回。** 这一行从前排在 kbStats 前面：整页
-  // 刷新或直接打开链接时第一次渲染 kb 还没到，提前返回跳过了后面的 hook，
-  // 下一次渲染多出一个 hook，React 直接抛 "Rendered more hooks"。站内导航
-  // 时 kb 已在缓存里，所以只有深链和刷新会撞上
+  // **Early return can only come after the last hook.** This line used to sit before kbStats: on a full page
+  // refresh or a direct open of the link, kb had not arrived at the first render, the early return skipped the hooks below,
+  // and the next render had one more hook, so React threw "Rendered more hooks". Navigating within the site
+  // kb is already in the cache, so only deep links and refreshes hit it
   if (!kb) return <Loading>{S.nav.loading}</Loading>;
 
-  // 服务端已经切好了这一页：筛选、作用域、页码都在请求里
+  // The server has already cut this page: filter, scope and page number are all in the request
   const pagedDocs = docs.data?.docs ?? [];
   const totalDocs = docs.data?.total ?? 0;
   const kbReady = kbStats.data?.ready ?? 0;
@@ -551,7 +551,7 @@ export function Library() {
         onAdd={() => setAdding(true)}
       />
 
-      {/* 文档区（scrollbar-gutter 常驻：视图切换时滚动条出没不再引起水平抖动） */}
+      {/* Document area (scrollbar-gutter is permanent: when switching views the scrollbar appearing or vanishing no longer causes horizontal jitter) */}
       <div
         className="flex-1 min-w-0 overflow-y-auto u-scroll px-8 py-6 [scrollbar-gutter:stable]"
         onDragOver={(e) => {
@@ -561,7 +561,7 @@ export function Library() {
         onDragLeave={() => setDragging(false)}
         onDrop={onDrop}
       >
-        {/* 工作页铺满栏右的整个宽度：与 Review/Ontology/设置页同规，切页不跳 */}
+        {/* The work page fills the whole width to the right of the column: same rule as the Review / Ontology / settings pages, so switching pages does not jump */}
         <div>
           <PageHeader
             title={
@@ -574,10 +574,10 @@ export function Library() {
             }
             actions={
               <>
-              {/* 历史视图下过滤框只藏不撤（invisible 保留占位），标题行高度不塌、不抖 */}
+              {/* In the history view the filter box is only hidden, not removed (invisible keeps the placeholder); the title row's height neither collapses nor jitters */}
               <div className={`relative ${showHistory ? "invisible" : ""}`}>
-                {/* 中号带放大镜，与图谱、本体、成员那几页的筛选条同一副身材。
-                    从前这里是小号，挨着看就比别处矮一档 */}
+                {/* A medium size with a magnifier, the same shape as the filter bars on the graph, ontology and members pages.
+                    Previously it was small here, so next to the others it looked one tier shorter */}
                 <Search
                   size={13}
                   className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-2 pointer-events-none"
@@ -596,9 +596,9 @@ export function Library() {
                   </IconButton>
                 )}
               </div>
-              {/* 按抽取状态筛。**选项写死成那五个**，不按库里实际有的填——
-                  它是一组固定的管道状态，而「这个库现在没有失败的」正是用户
-                  想通过筛一下确认的事 */}
+              {/* Filter by extraction status. **The options are hard-coded to those five**, not filled from what the library actually has —
+                  it is a fixed set of pipeline states, and "nothing is failing in this library right now" is exactly
+                  what a user wants to confirm by filtering */}
               {selection !== "deleted" && (
                 <Dropdown
                   size="sm"
@@ -618,8 +618,8 @@ export function Library() {
                   ]}
                 />
               )}
-              {/* 一键重试。**只在真有失败时出现**——没有失败的库不该看到一个
-                  点了什么都不会发生的按钮。数字写在按钮上，点之前就知道会动几篇 */}
+              {/* One-click retry. **Shown only when there really are failures**: a library with no failures should not show a
+                  button that does nothing when clicked. The number is written on the button, so you know how many will be touched before clicking */}
               {(docs.data?.failed ?? 0) > 0 && canUpload && (
                 <Button variant="secondary" size="sm" className="flex items-center gap-2 shrink-0"
                   onClick={() => retryFailed.mutate()}
@@ -629,9 +629,9 @@ export function Library() {
                   {S.library.retryFailed(docs.data!.failed)}
                 </Button>
               )}
-              {/* 全库重建：清算语义，仅 KB admin；放在 All documents 视图。
-                  **按钮本身是普通色**：它只是打开确认框，危险色留给确认框里那个
-                  真正动手的按钮——工具栏上常驻一块红，看久了就不红了 */}
+              {/* Rebuild the whole library: liquidation semantics, KB admin only; placed in the All documents view.
+                  **The button itself is in the ordinary colour**: it only opens the confirmation dialog, and the danger colour is kept for the
+                  button in the dialog that actually acts; a permanent red block on the toolbar stops looking red after a while */}
               {selection === "all" && canRebuild && (
                 <Button
                   variant="secondary"
@@ -678,10 +678,10 @@ export function Library() {
             />
           )}
 
-          {/* 抽取进度。**数来自服务端**，按来源作用域算——从前是数当前页里的，
-              翻一页进度条就跳。分子分母都只走 `graph_status`：从前分子是
-              `status='ready'`（摄入完成），一篇「摄入已完成、图谱还在抽」的文档
-              被两个维度各数一次，两篇文档能显示成 2 / 4 */}
+          {/* Extraction progress. **The numbers come from the server**, computed by the source scope — previously they counted the current page,
+              so the progress bar jumped when paging. Both numerator and denominator go only by `graph_status`: previously the numerator was
+              `status='ready'` (ingestion complete), so a document whose "ingestion is complete, graph still being extracted" was
+              counted once in each dimension, and two documents could show as 2 / 4 */}
           {(() => {
             const pending = docs.data?.extracting ?? 0;
             if (pending === 0) return null;
@@ -718,8 +718,8 @@ export function Library() {
             <RunsPanel kbId={kb.id} sourceId={selectedSource.id} />
           ) : (
           <>
-          {/* 这块是拖放区，不是可点对象：真反馈是 dragging 时的 u-highlight。
-              常态下指针经过时亮一下边框，等于对一个不接受点击的槽做交互暗示 */}
+          {/* This block is a drop zone, not a clickable object: the real feedback is u-highlight while dragging.
+              In the normal state, a border lighting up under the pointer would be an interaction hint for a slot that does not accept clicks */}
           <div className={`glass rounded-panel ${dragging ? "u-highlight" : ""}`}>
             {selection === "deleted" ? (
               <DeletedTable
@@ -741,8 +741,8 @@ export function Library() {
                     <th className="px-4 py-3 font-medium">{S.library.colGraph}</th>
                     <th className="px-4 py-3 font-medium">{S.library.colChunks}</th>
                     <th className="px-4 py-3 font-medium">{S.library.colSize}</th>
-                    {/* 动作两列都不带表头：列名说的是「这一格是什么」，
-                        而这两格是「能做什么」，标题是多出来的一行噪声 */}
+                    {/* Neither action column has a header: the column names say "what this cell is",
+                        and these two cells are "what can be done", so a title would be an extra row of noise */}
                     <th className="px-4 py-3"></th>
                     <th className="px-4 py-3"></th>
                   </tr>
@@ -804,9 +804,9 @@ export function Library() {
           onDone={(id, pushKind) => {
             setAdding(false);
             if (id) setSelection(id);
-            // Google Drive 建好直接打开设置：连接账号、选文件夹都在那里
+            // Google Drive opens its settings straight after creation: connecting the account and choosing folders are both done there
             if (id && pushKind === "google_drive") setEditing(true);
-            // 推送来源建好直接打开密钥弹窗（onboarding：端点 + 密钥一步拿全）
+            // A push source opens its key dialog straight after creation (onboarding: endpoint + key, both collected in one step)
             else if (id && pushKind) setTokenReveal({ sourceId: id, kind: pushKind });
             invalidate();
           }}
@@ -845,7 +845,7 @@ export function Library() {
           onCancel={() => setCleaning(false)}
         />
       )}
-      {/* 来源重抽：轻确认（不毁数据，只是费时费钱），无需打字解锁 */}
+      {/* Re-extracting a source: a light confirmation (it destroys no data, it just costs time and money), no typed unlock needed */}
       {reExtracting && selectedSource && (
         <DangerConfirm
           title={S.library.reExtractTitle}
@@ -875,7 +875,7 @@ export function Library() {
           onClose={() => setDropsView(null)}
         />
       )}
-      {/* 真删：打字级确认（内容没了，回不来） */}
+      {/* Hard delete: a typed confirmation (the content is gone and cannot come back) */}
       {purging && (
         <DangerConfirm
           title={S.library.purgeTitle}
@@ -888,7 +888,7 @@ export function Library() {
           onCancel={() => setPurging(null)}
         />
       )}
-      {/* 全库重建：打字级确认（清空图层不可逆） */}
+      {/* Rebuild the whole library: a typed confirmation (clearing the graph layer is irreversible) */}
       {rebuilding && (
         <DangerConfirm
           title={S.library.rebuildTitle}
@@ -908,7 +908,7 @@ export function Library() {
   );
 }
 
-/** 选中来源的状态条：同步状态 / 上次同步 / History 切换 / Sync now / 设置。 */
+/** The status bar for the selected source: sync status / last sync / History toggle / Sync now / settings. */
 function SourceBar({
   kbId,
   source,
@@ -929,15 +929,15 @@ function SourceBar({
   onSync: () => void;
   onEdit: () => void;
   onCleanup: () => void;
-  /** 缺省 = 无编辑权限，不渲染重抽入口 */
+  /** Default = no edit permission, so the re-extract entry is not rendered */
   onReExtract?: () => void;
   onToken: () => void;
 }) {
   const isPull = SYNCING_KINDS.has(source.kind);
-  // 推送类来源：api 推文档，statements 推陈述（0054）；界面上同一套状态、令牌与指南
+  // Push-type sources: api pushes documents, statements pushes statements (0054); the same status, token and guide on the UI
   const isApi = source.kind === "api" || source.kind === "statements";
   const busy = source.last_sync_status === "running" || source.last_sync_status === "queued";
-  // 历史数据的 config 可能是 jsonb null（缺省 Value::Null 落库所致）——防御性兜底
+  // The config of historical data may be a jsonb null (caused by a default Value::Null being stored): defensive fallback
   const cfg = source.config ?? {};
   const configSummary =
     cfg.feed_url ??
@@ -946,15 +946,15 @@ function SourceBar({
     (cfg.urls ? `${cfg.urls.length} URLs` : "");
   const rssMode: RssContentMode =
     cfg.content_mode === "full_new_items" ? "full_new_items" : "feed";
-  // 补全进度只在这一档开着时才有话说
+  // Completion progress only has something to say while this tier is on
   const hydration =
     source.rss_full_content?.state === "disabled" ? null : source.rss_full_content;
 
   return (
     <div className="glass rounded-panel mb-3">
       <div className="px-4 py-3 flex items-center gap-3 text-small">
-        {/* api 与拉取型同一状态语汇：点 + 状态 + 时刻 + 产出/错误；
-            端点是一次性集成信息，放 Token 弹窗，不占常驻条 */}
+        {/* api uses the same status vocabulary as the pull-type sources: dot + status + time + output/error;
+            the endpoint is one-off integration info, so it goes in the Token dialog and does not take up the permanent bar */}
         {(isPull || isApi) && (
           <>
             <span
@@ -991,12 +991,12 @@ function SourceBar({
                         ? S.library.rssModeFullShort
                         : S.library.rssModeFeedShort}
                     </span>
-                    {/* **这一档开没开由服务端的 `state` 说，不由前端重推。**
-                        从前这里是 `rssMode === "full_new_items"`——把服务端那条
-                        CASE 在前端又算了一遍，同一条规矩两份。
-                        块对任何 RSS 来源都在（0033 决定 2），所以看的是 state：
-                        `disabled` 的来源没有补全队列，那五个 0 不是「队列空着」，
-                        是「这里没有队列」，不该显示。 */}
+                    {/* **Whether this tier is on is said by the server's `state`, not re-derived by the frontend.**
+                        Previously this was `rssMode === "full_new_items"`, so the server's CASE was recomputed on the frontend,
+                        so the same rule existed in two copies.
+                        The block is present for every RSS source (0033 decision 2), so what is checked is the state:
+                        a `disabled` source has no completion queue, and those five zeros are not "the queue is empty";
+                        they mean "there is no queue here", so they should not be shown. */}
                     {hydration && (
                       <span className="text-ink-2 shrink-0 u-num">
                         {S.library.rssHydrationCounts(hydration)}
@@ -1014,7 +1014,7 @@ function SourceBar({
           </span>
         )}
         <div className="ml-auto flex items-center gap-2 shrink-0">
-          {/* 集成型来源（custom 拉取 / api 推送）：接口文档随手可达 */}
+          {/* Integration-type sources (custom pull / api push): the interface docs are within easy reach */}
           {(source.kind === "custom" || isApi) && (
             <Link
               to="/docs/$slug"
@@ -1033,9 +1033,9 @@ function SourceBar({
               {S.library.cleanupMissing(source.missing_count)}
             </Button>
           )}
-          {/* History 对拉取型与 api 推送型都开放：推送失败（格式错等）也记 run */}
+          {/* History is open for both pull-type and api push-type: a failed push (bad format, etc.) is also recorded as a run */}
           {(isPull || isApi) && (
-            /* 激活态用反色（与弹窗类型 tab、图标选中同一语汇），一眼可辨 */
+            /* The active state uses inverted colours (the same vocabulary as the dialog type tabs and the selected icon), recognizable at a glance */
             <Button variant="secondary" size="sm"
               onClick={onToggleHistory}
               className={buttonLike(historyOpen ? "primary" : "ghost", "sm")}
@@ -1061,8 +1061,8 @@ function SourceBar({
               {S.library.viewToken}
             </Button>
           )}
-          {/* 全量重抽本来源：所有类型都给（有文档就能重抽）——除了说了不抽取的
-              那种（schema 文档）：后端会拒，按钮就不该出现 */}
+          {/* Full re-extraction of this source: offered for every type (as long as there are documents to re-extract), except the kind that says it is not extracted
+              (schema documents): the backend would reject it, so the button should not appear */}
           {onReExtract && source.doc_count > 0 && source.config?.extract !== false && (
             <Button variant="secondary" size="sm" className="flex items-center gap-2"
               onClick={onReExtract}
@@ -1083,8 +1083,8 @@ function SourceBar({
   );
 }
 
-/** 失败详情：完整原文，可复制。tooltip 装不下也拷不走，所以要弹窗。 */
-/** 抽取丢弃详情：抽出来了、被挡掉了，这里说清楚挡在哪、丢了多少。 */
+/** Failure detail: the full original text, copyable. A tooltip cannot hold it or let it be copied, so a dialog is needed. */
+/** Extraction discard detail: extracted, but blocked; here it says clearly what blocked it and how much was lost. */
 function DropsModal({
   file,
   rows,
@@ -1180,7 +1180,7 @@ function ErrorModal({
   );
 }
 
-/** api 来源密钥：随时可查（Editor 专用端点），内置轮换。 */
+/** API source key: viewable at any time (an Editor-only endpoint), with rotation built in. */
 function TokenModal({
   kbId,
   sourceId,
@@ -1274,7 +1274,7 @@ function TokenModal({
   );
 }
 
-/** History 视图：占据文件列表位置的同步运行记录（再点 History 切回）。 */
+/** History view: the sync-run records that take the place of the file list (click History again to switch back). */
 function RunsPanel({ kbId, sourceId }: { kbId: string; sourceId: string }) {
   const runs = useQuery({
     queryKey: ["sourceRuns", kbId, sourceId],
@@ -1328,15 +1328,15 @@ function RunsPanel({ kbId, sourceId }: { kbId: string; sourceId: string }) {
   );
 }
 
-/** 新建来源弹窗：类型 → 名称/图标 → 类型专属配置 → 同步周期。 */
+/** New-source dialog: type → name/icon → type-specific config → sync cycle. */
 function SourceModal({
   kbId,
   onDone,
 }: {
   kbId: string;
-  /** isApi=true 时父级紧接着打开密钥弹窗 */
-  /** 第二个参数：建的是推送来源时它的 kind（`api` / `statements`）、或 `google_drive`
-   *  （建好还得连账号、选文件夹），别的不给 */
+  /** When isApi=true, the parent opens the key dialog right after */
+  /** The second argument: when creating a push source, its kind (`api` / `statements`), or `google_drive`
+   *  (it still needs an account connected and a folder chosen after creation); nothing else is given */
   onDone: (id?: string, pushKind?: string) => void;
 }) {
   const [kind, setKind] = useState<CreatableSourceKind>("folder");
@@ -1365,8 +1365,8 @@ function SourceModal({
   const [davPass, setDavPass] = useState("");
   const [notionToken, setNotionToken] = useState("");
   const [notionQuery, setNotionQuery] = useState("");
-  // PR 在 GitHub 的模型里也是工单。默认不收——问「工单」要的是工单；
-  // 但有些仓库的决策记录实际写在 PR 描述里，所以给个开关
+  // A PR is also an issue in GitHub's model. Not collected by default: asking for "issues" means issues;
+  // but some repos actually record decisions in PR descriptions, so a toggle is provided
   const [includePrs, setIncludePrs] = useState(false);
   const [includeGlobs, setIncludeGlobs] = useState("");
   const [excludeGlobs, setExcludeGlobs] = useState("");
@@ -1374,7 +1374,7 @@ function SourceModal({
     sync_interval_minutes: null,
     sync_cron: null,
   });
-  // folder = 纯容器、api = 推送型：都没有同步日程
+  // folder = a pure container, api = push type: neither has a sync schedule
   const syncing =
     kind === "url" ||
     kind === "rss" ||
@@ -1390,7 +1390,7 @@ function SourceModal({
     kind === "webdav" ||
     kind === "notion" ||
     kind === "google_drive";
-  // 部署没配 OAuth 客户端时建出来也连不上，不让建
+  // If the deployment has no OAuth client configured, creation still cannot connect, so do not allow it
   const driveStatus = useQuery({
     queryKey: ["google-drive-status"],
     queryFn: api.googleDriveStatus,
@@ -1440,7 +1440,7 @@ function SourceModal({
                     ? {
                         bucket: s3Bucket.trim(),
                         ...(s3Prefix.trim() ? { prefix: s3Prefix.trim() } : {}),
-                        // 端点留空 = 公有云 S3；填了就是自建，后端据此走 path-style
+                        // An empty endpoint = public-cloud S3; if filled, it is self-hosted, and the backend uses path-style accordingly
                         ...(s3Endpoint.trim() ? { endpoint: s3Endpoint.trim() } : {}),
                         ...(s3Region.trim() ? { region: s3Region.trim() } : {}),
                         ...(s3Key.trim() ? { access_key_id: s3Key.trim() } : {}),
@@ -1482,9 +1482,9 @@ function SourceModal({
         kind,
         name: name.trim(),
         config,
-        // 内置类型图标固定，只有 custom 允许自选
+        // Built-in type icons are fixed; only custom allows choosing one
         icon: kind === "custom" ? icon : null,
-        // folder/api 无同步语义：日程强制留空
+        // folder/api have no sync semantics: the schedule is forced to be empty
         ...(syncing ? schedule : { sync_interval_minutes: null, sync_cron: null }),
       });
     },
@@ -1513,8 +1513,8 @@ function SourceModal({
             ? s3Bucket.trim()
             : hasSyncFields(kind, { repo, jiraUrl, jiraProject, token: authHeader }));
 
-  // 注意用 div 而非 label：label 会把 :hover/click 转发给内部第一个可标记控件
-  //（button 也算），导致图标网格/日程选择器悬停时第一个按钮常亮
+  // Note: use div rather than label, because label forwards :hover/click to the first markable control inside
+  //(a button counts too), so while hovering the icon grid or schedule picker, the first button would stay lit
   const field = (label: string, node: React.ReactNode) => (
     <div className="mb-3">
       <div className="mb-1 text-fine font-medium text-ink-2">{label}</div>
@@ -1545,9 +1545,9 @@ function SourceModal({
       }
     >
       <div>
-          {/* 类型：十二种，一个下拉装下——排成按钮要占四行，还没等填名字弹窗
-              已经满了。图标只在选项的标签里：触发器显示的就是选中那项的标签，
-              再给触发器一个 icon 就画两遍 */}
+          {/* Type: twelve kinds, held in one dropdown — laid out as buttons they would take four rows, and the dialog would be full
+              before the name is even typed. The icon only appears in the option label: the trigger shows the label of the selected item,
+              so giving the trigger an icon as well would draw it twice */}
           {field(
             S.library.sourceType,
             <Dropdown
@@ -1568,7 +1568,7 @@ function SourceModal({
               })}
             />,
           )}
-          {/* 类型自解释：一行说明；接口细节移入内置文档，弹窗只留链接 */}
+          {/* The type explains itself: one line of description; interface details move into the built-in docs, and the dialog keeps only a link */}
           <p className="mb-4 text-fine leading-relaxed text-ink-2">
             {S.library.sourceKindHints[kind]}
             {kind === "custom" && (
@@ -1595,7 +1595,7 @@ function SourceModal({
             />,
           )}
 
-          {/* 内置类型图标固定；只有 custom 开放图标选择 */}
+          {/* Built-in type icons are fixed; only custom opens icon selection */}
           {kind === "custom" &&
             field(
               S.library.iconLabel,
@@ -1911,7 +1911,7 @@ function SourceModal({
   );
 }
 
-/** 来源设置弹窗：改名/图标（仅 custom）/摄取配置/日程；类型不可改；底部 danger zone。 */
+/** Source settings dialog: rename / icon (custom only) / ingestion config / schedule; the type cannot be changed; danger zone at the bottom. */
 function SourceEditModal({
   kbId,
   source,
@@ -1934,7 +1934,7 @@ function SourceEditModal({
   );
   const [endpoint, setEndpoint] = useState(cfg.endpoint ?? "");
   const [authHeader, setAuthHeader] = useState("");
-  // GitLab 的项目路径存在 `project`（与 Jira 的项目 key 同名不同义），表单里同用这一格
+  // GitLab's project path is stored in `project` (same name as Jira's project key but a different meaning), and this form shares the one field
   const [repo, setRepo] = useState((kind.startsWith("gitlab_") ? cfg.project : cfg.repo) ?? "");
   const [includePrs, setIncludePrs] = useState(
     Boolean(kind === "gitlab_issues" ? cfg.include_merge_requests : cfg.include_pull_requests),
@@ -1951,14 +1951,14 @@ function SourceEditModal({
   const syncing = SYNCING_KINDS.has(kind);
   const KindIcon = KIND_ICON[kind as keyof typeof KIND_ICON] ?? Upload;
 
-  // 摄取配置是否有改动——有则展示"旧文档去留"说明
+  // Whether the ingestion config has changed — if so, show the "what happens to old documents" explanation
   const ingestChanged =
     (kind === "url" && urls.trim() !== (cfg.urls ?? []).join("\n").trim()) ||
     (kind === "rss" &&
       (feedUrl.trim() !== (cfg.feed_url ?? "") ||
         rssContentMode !== (cfg.content_mode === "full_new_items" ? "full_new_items" : "feed"))) ||
     (kind === "custom" && endpoint.trim() !== (cfg.endpoint ?? "")) ||
-    // 换仓库或改收不收 PR，两者都会换掉这个来源里文档的集合
+    // Changing the repo or toggling whether PRs are collected both replace the set of documents in this source
     (kind === "github_issues" &&
       (repo.trim() !== (cfg.repo ?? "") ||
         includePrs !== Boolean(cfg.include_pull_requests))) ||
@@ -1980,13 +1980,13 @@ function SourceEditModal({
             : kind === "custom"
               ? {
                   endpoint: endpoint.trim(),
-                  // 留空 = 后端保留库里原值（凭据只进不出）
+                  // Empty = the backend keeps the value already in the library (credentials go in but never come out)
                   ...(authHeader.trim() ? { auth_header: authHeader.trim() } : {}),
                 }
               : kind === "github_issues"
                 ? {
                     repo: repo.trim(),
-                    // 留空 = 后端保留库里原值（凭据只进不出）
+                    // Empty = the backend keeps the value already in the library (credentials go in but never come out)
                     ...(authHeader.trim() ? { auth_header: authHeader.trim() } : {}),
                     include_pull_requests: includePrs,
                   }
@@ -1994,7 +1994,7 @@ function SourceEditModal({
                   ? {
                       project: repo.trim(),
                       ...(authHeader.trim() ? { auth_header: authHeader.trim() } : {}),
-                      // 留空 = 后端保留库里原值（凭据只进不出）
+                      // Empty = the backend keeps the value already in the library (credentials go in but never come out)
                       include_merge_requests: includePrs,
                     }
                 : kind === "github_repo" || kind === "gitlab_repo"
@@ -2024,10 +2024,10 @@ function SourceEditModal({
         ? feedUrl.trim()
         : kind === "custom"
           ? endpoint.trim()
-          : // Jira 的配置这里改不了：挡住它只会让人连名字都改不成
+          : // Jira's configuration cannot be changed here: blocking it would only leave people unable to even change the name
             kind === "jira_issues" || hasSyncFields(kind, { repo }));
 
-  // div 而非 label：label 会把 :hover/click 转发给第一个可标记控件
+  // div rather than label: label forwards :hover/click to the first markable control
   const field = (label: string, node: React.ReactNode) => (
     <div className="mb-3">
       <div className="mb-1 text-fine font-medium text-ink-2">{label}</div>
@@ -2058,7 +2058,7 @@ function SourceEditModal({
       }
     >
       <div>
-          {/* 类型只读：换类型 = 换身份，应新建来源 */}
+          {/* The type is read-only: changing the type means changing the identity, so a new source should be created */}
           <div className="mb-4 flex items-center gap-2 text-small text-ink-2">
             <KindIcon size={13} className="text-ink-2" />
             {S.library.sourceKinds[kind as keyof typeof S.library.sourceKinds] ?? kind}
@@ -2232,14 +2232,14 @@ function SourceEditModal({
             <p className="text-small text-danger mb-2">{(save.error as Error).message}</p>
           )}
 
-          {/* Danger zone：删除来源（文档保留，落回 Uploads） */}
+          {/* Danger zone: delete the source (documents are kept and fall back to Uploads) */}
           <div className="mt-4 pt-3 border-t border-line">
             <div className="mb-1 text-fine font-medium text-ink-2">
               {S.library.dangerZone}
             </div>
             <div className="flex items-center justify-between gap-3">
               <span className="text-fine text-ink-2">{S.library.deleteSourceHint}</span>
-              {/* 同一个道理：这里只打开确认框，红色在确认框里 */}
+              {/* The same principle: this only opens the confirmation dialog; the red colour is inside the dialog */}
               <Button variant="secondary" size="sm" className="shrink-0"
                 onClick={() => setConfirmingDelete(true)}
               >
@@ -2249,7 +2249,7 @@ function SourceEditModal({
           </div>
       </div>
 
-      {/* 危险确认叠在设置弹窗之上：Radix 的层叠只让最上面那层响应 Esc 与遮罩 */}
+      {/* The danger confirmation is layered over the settings dialog: Radix's stacking only makes the topmost layer respond to Esc and the overlay */}
       {confirmingDelete && (
         <DangerConfirm
           title={S.library.deleteSourceTitle}
@@ -2265,7 +2265,7 @@ function SourceEditModal({
   );
 }
 
-/** 「已删除」视图（#268）：墓碑在这里等着被恢复或清除。清除只有库管理员能按 */
+/** The "Deleted" view (#268): tombstones wait here to be restored or purged. Only a library admin can press purge */
 function DeletedTable({
   docs,
   sources,
@@ -2333,13 +2333,13 @@ function DocRow({
   onShowDrops,
 }: {
   doc: Doc;
-  /** undefined = 不渲染来源列；null = Uploads（source_id 为空） */
+  /** undefined = do not render the source column; null = Uploads (source_id is empty) */
   source?: SourceView | null;
   onDelete: () => void;
   onExtract: () => void;
   onReprocess: () => void;
   onShowError: (kind: string, text: string) => void;
-  /** 这篇文档抽出来却没落地的事实；undefined = 一条都没有 */
+  /** Facts this document extracted but that never landed; undefined = none at all */
   drops?: ExtractionDrop[];
   onShowDrops: (rows: ExtractionDrop[]) => void;
 }) {
@@ -2372,7 +2372,7 @@ function DocRow({
         </td>
       )}
       <td className="px-4 py-3">
-        {/* 失败可点开看原文：tooltip 会截断、也没法复制 */}
+        {/* A failure can be clicked open to see the original text: a tooltip would truncate it and it could not be copied */}
         <StatusCell
           danger={doc.status === "failed"}
           onClick={
@@ -2403,12 +2403,12 @@ function DocRow({
         >
           {graphText}
         </StatusCell>
-        {/* 抽出来却没落地的事实。抽取成功不代表全须全尾，所以它与 graph_status
-            并列而不是替代它——"done" 和 "3 dropped" 同时为真。
-            **不给警示色**：漏掉的事实不是故障，是窄本体本来就会做的事；
-            琥珀挨着红色，会让人以为一行里坏了两件事。它只是个值得点开看看的数 */}
+        {/* Facts extracted but never landed. A successful extraction does not mean everything is whole, so this sits alongside graph_status
+            rather than replacing it: "done" and "3 dropped" are both true at once.
+            **No warning colour**: a missed fact is not a fault, it is what a narrow ontology is designed to do;
+            amber next to red would make a person think two things were broken in one row. It is only a number worth opening to look at */}
         {dropTotal > 0 && drops && (
-          /* 带下划线但不提亮：它是可以点开看的，可它不该比旁边的状态更响 */
+          /* Underlined but not brightened: it can be opened to look at, but it should not be louder than the status next to it */
           <LinkButton
             underline
             className="ml-3 text-ink-2"
@@ -2420,23 +2420,23 @@ function DocRow({
       </td>
       <td className="px-4 py-3 text-ink-2">{doc.chunk_count || "—"}</td>
       <td className="px-4 py-3 text-ink-2">{formatSize(doc.size_bytes)}</td>
-      {/* 动作自成一列。徽章说的是这一行现在是什么状态，动作说的是能拿它怎么办；
-          两件事挤在一格里，读的人得先分辨哪个字是可点的。
-          这一格至多一个动作：重跑解析要 status=failed，重抽要 status=ready，
-          两者互斥——所以不必再排一次谁在前 */}
-      {/* **一个图标，不是三种字。** 这一列上下几十行，从前写着「重新抽取」
-          「抽取」「重新解析」——三种长度不一的文字排成一竖列，读的人得逐行认
-          哪个字是可点的，而它们说的是同一件事：把这份文档再跑一遍。字挪进
-          tooltip：那里说得准，而这一列只需要说「这里有个再跑一遍的按钮」 */}
+      {/* The actions get a column of their own. The badge says what state the row is in now; the actions say what can be done with it;
+          if both were squeezed into one cell, the reader would first have to work out which word is clickable.
+          This cell has at most one action: re-running parsing needs status=failed, re-extraction needs status=ready,
+          and the two are mutually exclusive, so there is no need to order which comes first */}
+      {/* **One icon, not three kinds of words.** This column runs for dozens of rows; it used to read "re-extract",
+          "extract", "re-parse" — three texts of different lengths stacked in a column, and the reader had to recognize line by line
+          which word was clickable, while they all say the same thing: run this document through again. The words moved into the
+          tooltip, where they are stated precisely, and this column only needs to say "there is a run-again button here" */}
       <td className="px-4 py-3">
         {doc.status === "failed" ? (
-          /* 解析管道失败：重跑 解析→索引→嵌入（解析器升级/瞬时故障重试） */
+          /* Parse pipeline failed: re-run parse → index → embed (for parser upgrades / transient failure retries) */
           <IconButton label={S.library.reprocess} size="sm" onClick={onReprocess}>
             <RefreshCw size={12} />
           </IconButton>
         ) : doc.status === "ready" &&
           ["none", "failed", "done"].includes(doc.graph_status) ? (
-          /* done 也可重抽：本体（描述/新类）调整后强制全量重抽正是常规操作 */
+          /* done can also be re-extracted: after an ontology adjustment (descriptions / new classes), a forced full re-extraction is routine */
           <IconButton
             label={doc.graph_status === "done" ? S.library.reExtract : S.library.extract}
             size="sm"

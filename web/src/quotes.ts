@@ -1,16 +1,16 @@
-// 原文里被引到的那几句（#968 的后续）。
+// The sentences quoted from the source text (a follow-up to #968).
 //
-// 图谱工具给一条事实印的号打开的是它第一条有效证据的那一块；来源条目的 `quotes` 是块里
-// 说出这条（或这几条）事实的那几句。预览浮窗和文档页据此把它们标出来，号打开的就是那句话。
+// The number printed on a fact by the graph tool opens the chunk of its first valid evidence; the `quotes` on a source entry are the sentences in the chunk
+// that state this fact (or these facts). The preview popover and the document page use it to mark them; the number opens the exact sentence.
 //
-// 每一句只找第一次出现；找不到的（引文与原文对不上）不标；重叠或相接的并成一段。
-// 空白按「一处或多处空白」对：引文里的一个空格对得上原文里的换行。
+// Each sentence only matches its first occurrence; ones not found (the quote does not match the source) are not marked; overlapping or adjacent ones are merged into one segment.
+// Whitespace matches "one or more whitespace characters": a single space in the quote matches a line break in the source.
 
 export type QuotePiece = { text: string; quoted: boolean };
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** 一句引文在原文里第一次出现的位置，`[起, 止)`；对不上是 null */
+/** The position of a quoted sentence's first occurrence in the source, `[start, end)`; null if it does not match */
 function locate(text: string, quote: string): [number, number] | null {
   const words = quote.trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return null;
@@ -18,7 +18,7 @@ function locate(text: string, quote: string): [number, number] | null {
   return m ? [m.index, m.index + m[0].length] : null;
 }
 
-/** 把原文切成「普通」与「被引」两种片段，按原来的顺序 */
+/** Split the source into "plain" and "quoted" segments, in their original order */
 export function quotePieces(text: string, quotes: readonly string[] | undefined): QuotePiece[] {
   const spans = (quotes ?? [])
     .map((q) => locate(text, q))
@@ -41,24 +41,24 @@ export function quotePieces(text: string, quotes: readonly string[] | undefined)
   return out;
 }
 
-/** 落款行上那一条的摘要：有被引的句子就是第一句，否则是这一块的开头 */
+/** Summary of the item on the footer line: if there is a quoted sentence, it is the first sentence; otherwise the start of this chunk */
 export function sourceLead(source: { excerpt: string; quotes?: string[] }): string {
   return source.quotes?.[0] ?? source.excerpt;
 }
 
-/** 进地址栏的那一句最长多少字。地址会留在浏览器历史和代理的访问日志里，刷新时整条重发：
- *  一个汉字编码后约九个字节，几百字就顶到常见的 8k 请求头上限。超长的一句不带——
- *  截断了在原文里找不到，标不出来，不如不标 */
+/** The longest number of characters for a sentence that goes into the address bar. The address stays in the browser history and in the proxy's access log, and on refresh the whole thing is sent again:
+ *  one Chinese character is about nine bytes once encoded, so a few hundred characters reach the common 8k request header limit. An over-long sentence is not carried at all:
+ *  truncated, it cannot be found in the source and so cannot be marked, which is no better than not marking it */
 export const QUOTE_PARAM_MAX = 300;
 
-/** 能进地址栏的一句：空白的、超长的都等于没给 */
+/** A sentence that can go into the address bar: one that is blank or over-long counts as not given */
 export function quoteParam(quote: unknown): string | undefined {
   return typeof quote === "string" && quote.trim() && quote.length <= QUOTE_PARAM_MAX
     ? quote
     : undefined;
 }
 
-/** 文档页的查询参数：引用跳转到哪一块，块里标出哪一句 */
+/** Query parameters for the document page: which chunk a citation jumps to, and which sentence to mark within the chunk */
 export function docSearch(search: Record<string, unknown>): { chunk?: string; quote?: string } {
   return {
     chunk: typeof search.chunk === "string" ? search.chunk : undefined,

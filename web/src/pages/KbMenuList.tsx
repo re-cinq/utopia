@@ -1,14 +1,14 @@
-/* 库菜单的那一列：顶栏切换器与提问框的作用域芯片共用。名字带 `/` 的库收进
-   一个组（`re-cinq ›`），指针停上去或点一下，右边弹出组里的库（#1249）。
+/* The knowledge-base column of the menu, shared by the top-bar switcher and the scope chip of the ask box. Knowledge bases whose name contains `/` are grouped
+   into one group (`re-cinq ›`): hovering over it or clicking it pops out the knowledge bases in the group to the right (#1249).
 
-   子菜单走 Popover 的 Portal，挂在 body 上——所以它**不在**宿主菜单的 DOM 里。
-   宿主若是自己判「点在外面就关」，要放过带 `data-kb-submenu` 的元素，否则
-   mousedown 先把整个菜单关掉，点击落空。
+   The submenu goes through the Popover's Portal and is mounted on body, so it is **not** in the DOM of the host menu.
+   If the host decides for itself that "a click outside closes it", it must let through elements carrying `data-kb-submenu`; otherwise
+   mousedown closes the whole menu first, and the click falls through.
 
-   键盘：组那一行上 Enter / 空格 / → 打开并把焦点送进第一项，↑↓ 在子菜单里走，
-   Esc / ← 关上并把焦点还给那一行（kbMenuKeys）。没用 DropdownMenuSub：它只能
-   长在 DropdownMenu 里，而两个宿主一个是带查找框的 Popover（菜单的 typeahead
-   与焦点管理会跟查找框抢键），一个是手写的 div。 */
+   Keyboard: on the group row, Enter / space / → opens it and sends focus to the first item; ↑↓ move within the submenu;
+   Esc / ← closes it and returns focus to that row (kbMenuKeys). DropdownMenuSub is not used: it can only live inside DropdownMenu,
+   whereas one host is a Popover with a search box (the menu's typeahead and focus management would fight the search box for keys),
+   and the other is a hand-written div. */
 import { useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from "react";
 import { Check, ChevronRight } from "lucide-react";
 import type { Kb } from "../api";
@@ -18,12 +18,12 @@ import { kbGroups, type KbGroupItem } from "./kbGroups";
 import { groupRowKey, submenuKey } from "./kbMenuKeys";
 
 const ROW = "gap-3 px-4 py-2 text-body";
-/** 指针从组那一行移到子菜单要经过一道缝，关得太快就够不着 */
+/** The pointer has to cross a gap when moving from the group row to the submenu; closing too fast makes it unreachable */
 const CLOSE_DELAY_MS = 150;
 
 const NARROW = "(max-width: 639px)";
 
-/** 屏幕窄到放不下侧边子菜单（手机竖屏） */
+/** The screen is too narrow to fit a side submenu (portrait phone) */
 function useNarrow() {
   return useSyncExternalStore(
     (changed) => {
@@ -44,7 +44,7 @@ export function KbMenuList({
   kbs: Kb[];
   currentId: string | undefined;
   onPick: (id: string) => void;
-  /** 搜索时传 false：按全名平铺，`re-cinq/lo` 照样搜得到 */
+  /** When searching, pass false: flatten by full name, so `re-cinq/lo` is still found */
   grouped?: boolean;
 }) {
   if (!grouped)
@@ -83,10 +83,10 @@ function KbRow({
   indent?: number;
 }) {
   return (
-    /* 对勾走 `trailing` 槽。**塞进 children 的 svg 会掉到第二行**：
-       Row 把 children 整个包进一个 `flex-1 truncate` 的 span，
-       那个 span 不是 flex 容器，preflight 又把 svg 设成块级，
-       于是勾自己占一行、整行跟着变高 */
+    /* The tick goes in the `trailing` slot. **An svg stuffed into children drops onto a second line**:
+       Row wraps the whole of children in a `flex-1 truncate` span,
+       and that span is not a flex container, while preflight sets svg to block level,
+       so the tick takes up a line of its own and the whole row grows taller */
     <Row
       density="menu"
       className={ROW}
@@ -116,7 +116,7 @@ function KbGroupRow({
   const closing = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const anchor = useRef<HTMLDivElement>(null);
   const submenu = useRef<HTMLDivElement>(null);
-  /** 键盘打开的才把焦点送进子菜单；指针停上去的不抢（顶栏的查找框还在打字） */
+  /** Only moves focus into the submenu when opened by keyboard; a pointer hover does not steal it (the search box in the top bar is still being typed in) */
   const focusInside = useRef(false);
   const show = (withFocus: boolean) => {
     clearTimeout(closing.current);
@@ -127,15 +127,15 @@ function KbGroupRow({
     clearTimeout(closing.current);
     closing.current = setTimeout(() => setOpen(false), CLOSE_DELAY_MS);
   };
-  /* 只有鼠标按悬停开合。触屏的一点会先模拟一次 enter 再来 click——
-     若 click 是开关，就刚开就关 */
+  /* Only the mouse opens and closes it on hover. A touch tap first simulates an enter and then a click:
+     if click toggled, it would open and close straight away */
   const byMouse = (run: () => void) => (e: { pointerType: string }) => {
     if (e.pointerType === "mouse") run();
   };
   const onRowKey = (e: KeyboardEvent) => {
     if (groupRowKey(e.key) !== "open") return;
     e.preventDefault();
-    // 指针已经把它打开了：onOpenAutoFocus 不会再来，焦点自己送进去
+    // The pointer has already opened it: onOpenAutoFocus will not come again, so focus moves in by itself
     if (open) submenu.current?.querySelector("button")?.focus();
     else show(true);
   };
@@ -148,7 +148,7 @@ function KbGroupRow({
     const action = submenuKey(e.key);
     if (action === undefined) return;
     e.preventDefault();
-    // 别让提问框那个宿主的 Esc（挂在 document 上）把整个菜单也关了
+    // Do not let the Esc of the ask-box host (attached to document) close the whole menu as well
     e.stopPropagation();
     if (action === "close") {
       setOpen(false);
@@ -169,8 +169,8 @@ function KbGroupRow({
       />
     </span>
   );
-  /* 窄屏（手机）上菜单几乎占满宽度，右边左边都放不下子菜单——Radix 只好把它
-     推到屏幕外。这里改成就地展开：组下面缩进一档列出它的库 */
+  /* On a narrow screen (phone) the menu takes almost the full width, so the submenu fits neither to the left nor to the right: Radix ends up
+     pushing it off-screen. Here it is changed to expand in place: the knowledge bases are listed indented one level under the group */
   if (narrow)
     return (
       <>
@@ -230,12 +230,12 @@ function KbGroupRow({
         onOpenAutoFocus={(e) => {
           if (!focusInside.current) e.preventDefault();
         }}
-        // 焦点在子菜单里时 Esc 交给 onSubmenuKey（它还要把焦点还给那一行）；
-        // 焦点还在搜索框里时照常关掉
+        // When focus is in the submenu, Esc is handed to onSubmenuKey (which also returns focus to that row);
+        // when focus is still in the search box, it closes as usual
         onEscapeKeyDown={(e) => {
           if (submenu.current?.contains(document.activeElement)) e.preventDefault();
         }}
-        // 按在组那一行上不算外面：否则按下就关、松开的 click 又开，闪一下
+        // A press on the group row does not count as outside: otherwise press closes it and the click on release reopens it, a flicker
         onInteractOutside={(e) => {
           if (anchor.current?.contains(e.target as Node)) e.preventDefault();
         }}

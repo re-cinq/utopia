@@ -1,14 +1,14 @@
-// `fmtInterval` 实体侧栏里把一条事实的有效区间画成 "yyyy-mm-dd ~ now" /
-// "ended, date unknown" / 单点的纯函数——2024 那条 PR（#669 之前）已经在
-// 区分 "endedUnknown" 与 "ongoing"；现在把 "event"（一个时刻）补上：
-// 之前显示 "2024-03-15 ~ 2024-03-15"（写端把 from/to 折成同一个时刻后
-// UI 还把它当区间画），现在按 from 单独返回。
+// `fmtInterval` // in the entity sidebar draws a fact's validity interval as 'yyyy-mm-dd ~ now' /
+// "ended, date unknown" / a single-point pure function. The 2024 PR (before #669) had already
+// distinguishes "endedUnknown" from "ongoing"; now the "event" (a single moment) is added:
+// previously it showed "2024-03-15 ~ 2024-03-15" (the write side folds from/to into the same moment,
+// and the UI still drew it as an interval); now it returns from alone.
 
 import { describe, expect, it, vi } from "vitest";
 
-// 与 classHierarchy.test.ts 同：Graph.tsx 顶层 import 了 sigma，sigma 启动时
-// 试着拿 WebGL2RenderingContext，vitest 默认跑在 jsdom 上没这个全局，模块
-// 求值期就抛。Polyfill 即可，不必真渲染
+// Same as classHierarchy.test.ts: Graph.tsx imports sigma at the top level, and sigma at startup
+// tries to grab WebGL2RenderingContext, which vitest's default jsdom does not provide, so the module
+// throws during evaluation. A polyfill is enough; no need to render for real
 vi.hoisted(() => {
   for (const name of ["WebGLRenderingContext", "WebGL2RenderingContext"]) {
     Object.defineProperty(globalThis, name, {
@@ -148,20 +148,20 @@ describe("fmtInterval", () => {
   });
 });
 
-// 递归证明树（0030）的形状：服务端 proof() 返回的 ProofStep 现在带
-// premises: ProofStep[]，前端把它压平成 WalkedRow[] 喂给渲染组件。
-// 这里断言三件事：
-//   1. 深度单调 + 跨过 has_premises 边界才 +1（叶子的 premises 为空就停）
-//   2. 三层嵌套的 9-节点树产出 9 行，深度序列为 [0,1,2,3,2,3,1,2,3]，
-//      即 DFS 前序：父 → 第一个子 → 第一个孙 → … → 第一个叶 → 兄弟 →
-//   3. 叶子行的 has_premises=false；不是叶子的行它必为 true
+// The shape of the recursive proof tree (0030): the ProofStep the server's proof() returns now carries
+// premises: ProofStep[], and the frontend flattens it into WalkedRow[] for the rendering component.
+// Three things are asserted here:
+//   1. //   1. Depth is monotone, and only goes +1 across a has_premises boundary (a leaf's premises are empty, so it stops)
+//   2. //   2. A three-level nested tree of 9 nodes yields 9 rows, depth sequence [0,1,2,3,2,3,1,2,3],
+//      i.e. DFS pre-order: parent → first child → first grandchild → … → first leaf → sibling →
+//   3. //   3. Leaf rows have has_premises=false; a row that is not a leaf must be true
 //       A
 //      / \
 //     B   C
 //    / \   \
 //   D   E   F
 //   |   |   |
-//   G   H   I   ← 叶子（premises 为空，walker 不下钻）
+//   G   H   I   ← leaf (premises empty, walker does not descend)
 
 function step(
   id: string,
@@ -211,13 +211,13 @@ describe("walkProofSteps", () => {
     expect(rows.map((r) => r.depth)).toEqual([
       0, 1, 2, 3, 2, 3, 1, 2, 3,
     ]);
-    // 深度从不超过 4（一个 `premises` 边只 +1）；从不低于 0；
-    // 同一行 `premises` 内的 depth 差只可能是 +1（刚下钻）或非正（爬回祖先或平移到同层）
+    // Depth never exceeds 4 (a `premises` edge adds only +1); never below 0;
+    // within one row, the depth difference across `premises` can only be +1 (just descended) or non-positive (climbed back to an ancestor or stayed on the same level)
     for (const r of rows) {
       expect(r.depth).toBeGreaterThanOrEqual(0);
       expect(r.depth).toBeLessThanOrEqual(3);
     }
-    // 进入 premises 时 +1，退出时不强制 -1（可以一次回到祖先）
+    // Entering premises adds +1; exiting does not force -1 (it may return to an ancestor in one step)
     for (let i = 1; i < rows.length; i++) {
       const diff = rows[i].depth - rows[i - 1].depth;
       expect(diff).toBeLessThanOrEqual(1);
@@ -244,9 +244,9 @@ describe("walkProofSteps", () => {
   });
 });
 
-// 缩进封顶：`cn` 是纯拼接、仓库里没有 tailwind-merge，所以同时发出 `ml-4`
-// 与 `ml-0` 时谁生效由样式表顺序决定——那样的封顶形同虚设。这里钉住的是
-// 「深到一定层数就不再发缩进类」，而不是「再发一个类把它盖掉」
+// Indentation cap: `cn` is pure concatenation and the repo has no tailwind-merge, so when both `ml-4`
+// and `ml-0` are emitted, stylesheet order decides which applies, which makes such a cap a sham. What is pinned here is
+// 'past a certain depth, no indent class is emitted', not 'emit another class to override it'
 describe("proofIndentClass", () => {
   it("封顶以内：带缩进、内边距与那条竖线", () => {
     for (let depth = 0; depth < PROOF_INDENT_CAP; depth++) {
@@ -276,7 +276,7 @@ describe("proofIndentClass", () => {
       ]) {
         expect(parts.includes(a) && parts.includes(b)).toBe(false);
       }
-      // 同一个属性组里也不该出现两个取值
+      // Two values should not appear in the same attribute group either
       const margins = parts.filter((c) => /^ml-/.test(c));
       expect(margins.length).toBeLessThanOrEqual(1);
     }

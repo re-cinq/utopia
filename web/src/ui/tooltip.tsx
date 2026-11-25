@@ -1,5 +1,5 @@
-/* 提示：Radix Tooltip。给没有可见文字的东西用（图标按钮、截断的名字、一个数）；
-   有可见标签的按钮不需要它。原生 title 要等一秒、样式随系统，这个不。 */
+/* Tooltip: Radix Tooltip. For things with no visible text (icon buttons, truncated names, a number);
+   buttons with a visible label do not need it. The native title waits a second and its style follows the system; this one does not. */
 import { Tooltip as RadixTooltip } from "radix-ui";
 import type { ReactNode } from "react";
 
@@ -10,7 +10,7 @@ export function Tooltip({
 }: {
   content: ReactNode;
   side?: "top" | "bottom" | "left" | "right";
-  /** 触发元素；必须能接收 ref 与事件（Button / IconButton / 原生元素都行） */
+  /** The trigger element; it must accept a ref and events (Button / IconButton / native elements all work) */
   children: ReactNode;
 }) {
   return (

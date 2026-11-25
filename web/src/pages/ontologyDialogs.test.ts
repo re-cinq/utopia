@@ -5,19 +5,19 @@ import { describe, expect, it, vi } from "vitest";
 import type { RelationTypeView } from "../api";
 import { PropertyDialog } from "./ontologyDialogs";
 
-// Radix 的 Portal 在服务端渲染里什么都不出，弹窗的壳换成直接出正文
+// Radix's Portal renders nothing in server-side rendering, so the dialog shell is replaced with the body rendered directly
 vi.mock("../ui", async (original) => ({
   ...(await original<typeof import("../ui")>()),
   FormDialog: ({ children }: { children: ReactNode }) => children,
 }));
 
-// 只填弹窗用得上的字段，没填的它按缺省处理（`existing?.x ?? …`）
+// Only fills in the fields the dialog uses; the unfilled ones take their defaults (`existing?.x ?? …`)
 const def = (id: string, kind: RelationTypeView["kind"], label: string) =>
   ({ id, key: id, label, kind, usage: 0 }) as RelationTypeView;
 
 describe("PropertyDialog", () => {
   it("offers the knowledge base's attributes as edge attributes", () => {
-    // 已选的显示成标签，标签的名字从候选里取：候选里没有这个属性，标签就出不来
+    // Selected items are shown as tags; the tag name is taken from the candidates: if the attribute is not among the candidates, the tag cannot appear
     const relation = { ...def("moves_to", "relation", "Moves to"), qualifiers: ["reason"] };
     const html = renderToStaticMarkup(createElement(QueryClientProvider, {
       client: new QueryClient(),

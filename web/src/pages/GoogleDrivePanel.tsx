@@ -1,11 +1,11 @@
-/* Google Drive 来源的连接与选文件夹（0074），住在来源设置弹窗里。
+/* Connecting and choosing folders for a Google Drive source (0074), which lives in the source settings dialog.
  *
- * 连接走弹窗而不是整页跳转：设置弹窗里的东西（改了一半的名字、日程）不会丢。
- * 回调页不带脚本，不 postMessage 回来——这边在弹窗开着的时候轮询来源列表，
- * 看见 `connected_at` 变了就关掉它。人自己关了弹窗，轮询也就停了。
+ * Connecting uses a popup rather than a full-page redirect: things in the settings dialog (a half-edited name, the schedule) are not lost.
+ * The callback page has no script and does not postMessage back: while the popup is open, this side polls the source list,
+ * and when it sees `connected_at` change it closes the popup. If the person closes the popup themselves, the polling stops too.
  *
- * 浏览器从头到尾拿不到 Google 的令牌：文件夹列表是服务器以连接者的身份去取的。
- * 读的是连接者自己的 Drive，所以浏览与选文件夹只给他本人；库里别的编辑者只看得见选了什么。 */
+ * The browser never gets a Google token at any point: the folder list is fetched by the server, as the connecting user.
+ * It reads the connecting user's own Drive, so browsing and choosing folders is only for that person; other editors of the knowledge base only see what was chosen. */
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Folder, X } from "lucide-react";
@@ -18,7 +18,7 @@ import { driveFolderAccountKey, reconcileDriveFolderDraft } from "./googleDriveF
 
 type Entry = { id: string; name: string };
 
-/** 服务器给的两个固定入口按 id 换成界面语言；其余是 Drive 里的真名 */
+/** The two fixed entry points from the server are translated into the UI language by id; the rest are real names from Drive */
 function label(e: Entry): string {
   if (e.id === "root") return S.library.googleDrive.myDrive;
   if (e.id === "shared:with-me") return S.library.googleDrive.sharedWithMe;
@@ -38,14 +38,14 @@ export function GoogleDrivePanel({ kbId, source }: { kbId: string; source: Sourc
   const currentDraft = reconcileDriveFolderDraft(accountKey, draft, saved);
   if (currentDraft !== draft) setDraft(currentDraft);
   const selected = currentDraft?.folders ?? saved;
-  // 浏览路径：空 = 第一层（我的云端硬盘、与我共享、共享云端硬盘）
+  // Browse path: empty = top level (My Drive, Shared with me, Shared drives)
   const connectionKey = JSON.stringify([accountKey, connectedAt]);
   const [browse, setBrowse] = useState({ connectionKey, path: [] as Entry[] });
   const path = browse.connectionKey === connectionKey ? browse.path : [];
   if (browse.connectionKey !== connectionKey) setBrowse({ connectionKey, path: [] });
   const setPath = (path: Entry[]) => setBrowse({ connectionKey, path });
   const [waiting, setWaiting] = useState(false);
-  // 断开会丢掉连接者的令牌与文件夹：先问一句，说清断开的是谁的 Drive
+  // Disconnecting drops the connecting user's token and folder: ask first, and say whose Drive is being disconnected
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
   const popup = useRef<Window | null>(null);
   const startedFrom = useRef<string | null>(null);
@@ -62,7 +62,7 @@ export function GoogleDrivePanel({ kbId, source }: { kbId: string; source: Sourc
     retry: false,
   });
 
-  // 弹窗开着时轮询：连上了（connected_at 变了）就关弹窗；人关了弹窗就停
+  // Poll while the popup is open: once connected (connected_at changed) close the popup; if the person closed it, stop
   useEffect(() => {
     if (!waiting) return;
     const timer = window.setInterval(() => {
@@ -85,7 +85,7 @@ export function GoogleDrivePanel({ kbId, source }: { kbId: string; source: Sourc
 
   const connect = useMutation({
     mutationFn: async () => {
-      // 先同步地开一个空弹窗，再填地址：等请求回来再 window.open 会被拦
+      // Open an empty popup synchronously first, then fill in the address: calling window.open after the request returns gets blocked
       const w = window.open("", "utopia-google-drive", "width=520,height=680");
       try {
         const { url } = await api.googleDriveConnect(kbId, source.id);
@@ -161,7 +161,7 @@ export function GoogleDrivePanel({ kbId, source }: { kbId: string; source: Sourc
               {G.disconnect}
             </Button>
           )}
-          {/* 别人连着的只能先断开再连：重连会换掉他的 Drive，服务器也会拒绝 */}
+          {/* Someone else's connection can only be replaced by disconnecting first: reconnecting would swap out their Drive, and the server rejects it too */}
           {(!connectedAt || mine) && (
             <Button
               variant={connectedAt ? "secondary" : "primary"}
@@ -212,7 +212,7 @@ export function GoogleDrivePanel({ kbId, source }: { kbId: string; source: Sourc
           <div className="mb-1 text-fine font-medium text-ink-2">{G.folders}</div>
           <p className="mb-2 text-fine leading-relaxed text-ink-2">{G.foldersHint}</p>
 
-          {/* 面包屑：点哪一级回哪一级 */}
+          {/* Breadcrumb: clicking a level goes back to that level */}
           <div className="mb-1 flex flex-wrap items-center gap-1 text-fine text-ink-2">
             <LinkButton onClick={() => setPath([])}>{G.top}</LinkButton>
             {path.map((p, i) => (
@@ -237,7 +237,7 @@ export function GoogleDrivePanel({ kbId, source }: { kbId: string; source: Sourc
                   key={f.id}
                   className="flex items-center justify-between gap-2 border-b border-line px-2 py-1 last:border-b-0"
                 >
-                  {/* 「与我共享」只是一个列表，不是一个能同步的文件夹 */}
+                  {/* "Shared with me" is just a list, not a folder that can be synced */}
                   {f.id === "shared:with-me" ? (
                     <span className="flex items-center gap-2 text-small">
                       <Folder size={13} className="text-ink-2" />
@@ -266,7 +266,7 @@ export function GoogleDrivePanel({ kbId, source }: { kbId: string; source: Sourc
             <p className="mb-2 text-fine text-ink-2">{G.noneSelected}</p>
           ) : (
             <div className="mb-2 flex flex-wrap gap-1">
-              {/* 点一下就从选中里拿掉 */}
+              {/* One click removes it from the selection */}
               {selected.map((f) => (
                 <Chip key={f.id} title={G.remove} onClick={() => toggle(f)}>
                   {f.name}

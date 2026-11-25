@@ -1,5 +1,5 @@
-/* 惩戒页（Punishment pages）：500 服务器失联 / 404 迷失之城。
-   复用登录页场景做背景——报错也保持门面体面（自托管场景里这页常是运维第一现场）。 */
+/* Error pages: 500 server unreachable / 404 lost city.
+   Reuses the login page's scene as the background, so errors keep the front presentable (in self-hosted setups this page is often the operator's first point of contact). */
 import { Home, RefreshCw } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { S } from "../i18n";

@@ -14,15 +14,15 @@ export function Search() {
   const kbId = useKbId();
   const { kb } = useKb();
   const navigate = useNavigate();
-  /* 已提交的查询词以 URL 为唯一事实来源（同 review 的 queue、doc 的 chunk）：
-     刷新、返回、分享链接都从地址栏重建，结果由 useQuery 自动重取 */
+  /* The submitted query is the single source of truth in the URL (as with the review queue and the doc chunks):
+     refresh, back and shared links all rebuild from the address bar, and results are refetched automatically by useQuery */
   const { q: query } = useSearch({ from: "/app/kb/$kbId/search" });
-  // 打字是本地事，不打扰地址栏；前进/后退到别的 q 时输入框跟着走
+  // Typing is local and does not disturb the address bar; moving forward or back to another q makes the input follow
   const [input, setInput] = useState(query ?? "");
   useEffect(() => setInput(query ?? ""), [query]);
 
   const me = useQuery({ queryKey: ["me"], queryFn: fetchMe });
-  // 搜之前就该说清楚库里有没有东西可搜（#313）
+  // Before searching, it should be clear whether there is anything in the base to search (#313)
   const readiness = useReadiness(kbId);
   const step = nextStep(readiness.data, {
     kbId,
@@ -30,8 +30,8 @@ export function Search() {
     canUpload: kb?.my_role !== "viewer",
   });
 
-  /* 提交 = 换地址，不是换 state：地址栏才是已提交查询词的唯一事实源。
-     打字不写 URL，提交才写；空提交不动 */
+  /* Submit = change the address, not the state: the address bar is the only source of the submitted query.
+     Typing does not write the URL; only submitting does, and an empty submit does nothing */
   const submit = () => {
     const q = input.trim();
     if (!q) return;
@@ -58,8 +58,8 @@ export function Search() {
           </Button>
         </div>
 
-        {/* 一次都还没搜、而库里本来就没东西：与其等他敲一个词再回"没有结果"，
-            不如现在就说下一步（#313） */}
+        {/* Nothing has been searched yet and the base is empty anyway: rather than wait for a word to be typed and then say "no results",
+            say the next step now (#313) */}
         {!query && step && (
           <div className="py-8 grid place-items-center">
             <NextStep {...step} />
@@ -98,7 +98,7 @@ function SearchResults({ kbId, query }: { kbId: string; query: string }) {
         <p className="text-body text-ink-2">{S.search.noResults}</p>
       )}
 
-      {/* 一个面板装多行（DESIGN.md 6）：悬停归行，槽不响应指针 */}
+      {/* A panel holds several rows (DESIGN.md 6): hover belongs to the row, and the slot does not respond to the pointer */}
       <div className="glass rounded-panel divide-y divide-line">
         {(results.data?.results ?? []).map((r) => (
           <Link

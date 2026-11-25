@@ -36,7 +36,7 @@ const loginRoute = createRoute({
   component: Login,
 });
 
-// 公共法务页：登录前可达
+// Public legal pages: reachable before login
 const privacyRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/privacy",
@@ -59,14 +59,14 @@ const indexRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/",
   beforeLoad: () => {
-    // 首页 = 图谱：产品的差异化门面
+    // Home page = the graph: the product's differentiating front door
     throw redirect({ to: "/graph" });
   },
 });
 
-/* 知识库作用域。**库是容器不是筛选条件**——底下这些页面全都属于某一个库，
-   路径表达包含关系，路由器也就替我们兜住了「忘了带库」这类错误：
-   `/kb/$kbId/search` 没有 id 根本构造不出来。理由详见 pages/KbScope.tsx */
+/* Knowledge base scope. **The KB is a container, not a filter**: all the pages below belong to one KB,
+   the path expresses the containment, and the router therefore catches errors like "forgot to include the KB" for us:
+   `/kb/$kbId/search` cannot even be constructed without an id. The reasoning is in pages/KbScope.tsx */
 const kbRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/kb/$kbId",
@@ -79,8 +79,8 @@ const chatRoute = createRoute({
   component: Chat,
 });
 
-// 会话即路由：/chat/$conversationId 只承载 URL（刷新/分享回到同一会话），
-// 渲染仍由父级 Chat 负责——父级在 /chat ↔ /chat/$id 间保持挂载，流式不断
+// The session is the route: /chat/$conversationId carries only the URL (refresh and share return to the same conversation),
+// while rendering is still the job of the parent Chat: the parent stays mounted between /chat and /chat/$id, so streaming is not interrupted
 const chatConversationRoute = createRoute({
   getParentRoute: () => chatRoute,
   path: "$conversationId",
@@ -91,8 +91,8 @@ const searchRoute = createRoute({
   getParentRoute: () => kbRoute,
   path: "search",
   component: Search,
-  // 搜索词是「你在看什么」，不是「你怎么看」——刷新、返回、分享都靠它重建
-  // （同 doc 的 chunk、review 的 queue）。分页留在本地，同图谱的档位
+  // The search term is "what you are looking at", not "how you look at it": refresh, back and share all rebuild from it
+  // (the same chunk for a doc, the same queue for review). Paging stays local, like the tier of the graph
   validateSearch: (search: Record<string, unknown>): { q?: string } => ({
     q: typeof search.q === "string" ? search.q : undefined,
   }),
@@ -101,13 +101,13 @@ const searchRoute = createRoute({
 const graphRoute = createRoute({
   getParentRoute: () => kbRoute,
   path: "graph",
-  /* 图谱页的可分享状态。**三个都是"你在看什么"，不是"你怎么看"**——
-     所以档位（画多少个）刻意不进 URL：那是本地观感，换台机器不该跟着走。
+  /* The shareable state of the graph page. **All three are "what you are looking at", not "how you are looking at it"**
+     so the tier (how many to draw) is deliberately not in the URL: it is a local viewing preference, and a different machine should not follow it.
 
-     - entity：选中了谁
-     - focus：是否处在某个实体的邻域（与"在全图里选中"是两个画面）
-     - at：时间轴停在哪一刻。**这条最不能少**——这产品的卖点就是
-       "看某个时刻的世界"，不带时刻的链接把最有意思的那部分丢了 */
+     - entity: which one is selected
+     - focus: whether it is in an entity's neighbourhood (a different picture from "selected in the whole graph")
+     - at: where the timeline is stopped. **This one matters most**: the product's selling point is
+       "seeing the world at a moment in time", and a link without the moment loses the most interesting part */
   validateSearch: (
     search: Record<string, unknown>,
   ): { entity?: string; focus?: string; at?: string } => ({
@@ -167,7 +167,7 @@ const mappingsRoute = createRoute({
 const reviewRoute = createRoute({
   getParentRoute: () => kbRoute,
   path: "review",
-  // 从实体面板的争议 chip 跳过来：落到对应那一档，并点亮那一张卡（0017 §3）
+  // Jumped to from the dispute chip on the entity panel: lands on the matching tier and lights up that card (0017 §3)
   validateSearch: (
     search: Record<string, unknown>,
   ): { queue?: string; item?: string } => ({
@@ -177,7 +177,7 @@ const reviewRoute = createRoute({
   component: Review,
 });
 
-// 内置文档：公开路由（登录前可读；私有部署离线可用）
+// Built-in docs: public route (readable before login; available offline on private deployments)
 const docsIndexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/docs",
@@ -192,7 +192,7 @@ const docsRoute = createRoute({
   component: DocsPage,
 });
 
-// 账户层（Profile / Administration）：与 KB 无关，用无 tab 导航的独立壳
+// Account layer (Profile / Administration): unrelated to KBs, uses a separate shell with no tab navigation
 const accountShellRoute = createRoute({
   getParentRoute: () => rootRoute,
   id: "account",
@@ -208,14 +208,14 @@ const accountRoute = createRoute({
 const myKbsRoute = createRoute({
   getParentRoute: () => accountShellRoute,
   path: "/account/kbs",
-  // 建库的入口在别处（顶栏的库切换器最后一行），带着这个参数落地就直接开表单
+  // The entry for creating a KB lives elsewhere (the last line of the top-bar KB switcher); with this parameter, landing opens the form directly
   validateSearch: (search: Record<string, unknown>): { create?: true } => ({
     create: search.create === true || search.create === "true" ? true : undefined,
   }),
   component: MyKbs,
 });
 
-// 个人令牌（0014）：给 agent 的钥匙属于人，所以在账户层，不在库里
+// Personal tokens (0014): the key for agents belongs to a person, so it sits in the account layer, not inside a KB
 const tokensRoute = createRoute({
   getParentRoute: () => accountShellRoute,
   path: "/account/tokens",
@@ -225,7 +225,7 @@ const tokensRoute = createRoute({
 const adminRoute = createRoute({
   getParentRoute: () => accountShellRoute,
   path: "/admin",
-  // 深链指定页签（如 KB 数据节的"注册新连接"直达 Data sources）
+  // A deep link names the tab to open (e.g. "register a new connection" in the KB data section goes straight to Data sources)
   validateSearch: (
     search: Record<string, unknown>,
   ): { tab?: "models" | "members" | "datasources" | "sso" | "deployment" } => ({
@@ -241,7 +241,7 @@ const adminRoute = createRoute({
   component: Settings,
 });
 
-// 旧路径兼容：/settings → /admin
+// Old path compatibility: /settings → /admin
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
@@ -256,11 +256,11 @@ const kbSettingsRoute = createRoute({
   component: KbSettings,
 });
 
-/* 旧路径兼容：`/graph` 这类不带库的地址仍然可用，解析出该去哪个库再跳。
-   **不做成 beforeLoad 重定向**——那时候库列表还没取回来，localStorage 里
-   也可能什么都没有（新设备、清过缓存），只能等 useKb 解析出来 */
-/* **逐条写出来，不用工厂函数**：工厂里的 path 是 string，类型系统认不出
-   字面量，别处 `redirect({ to: "/graph" })` 就通不过。啰嗦换类型安全 */
+/* Old path compatibility: addresses without a KB, such as `/graph`, still work: work out which KB to go to, then jump there.
+   **Not made into a beforeLoad redirect**: at that point the KB list has not been fetched, and localStorage
+   may also hold nothing (a new device, or the cache was cleared), so it must wait for useKb to resolve it */
+/* **Written out one by one, no factory function**: a factory's path is a string, which the type system cannot tell apart
+   from a literal, so `redirect({ to: "/graph" })` elsewhere would fail to type-check. The verbosity buys type safety */
 const legacyGraphRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/graph",
@@ -338,7 +338,7 @@ const routeTree = rootRoute.addChildren([
 
 export const router = createRouter({
   routeTree,
-  // 迷失之城：未知路径的惩戒页
+  // The lost city: the punishment page for unknown paths
   defaultNotFoundComponent: NotFound,
 });
 

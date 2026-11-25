@@ -1,6 +1,6 @@
 type MemberAccess = { role: string; is_admin: boolean };
 
-/** 弹窗保存时真正要发出去的改动：没变的字段不发 */
+/** The changes that are actually sent when the dialog saves: fields that did not change are not sent */
 export function memberChanges(member: MemberAccess, draft: MemberAccess): Partial<MemberAccess> {
   return {
     ...(draft.role !== member.role && { role: draft.role }),

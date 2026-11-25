@@ -10,7 +10,7 @@ import { UserMenu } from "./pages/UserMenu";
 import { convMarks } from "./unread";
 import { kbStore, wsStore } from "./wsStore";
 
-// 不挂载界面，直接调登录页、用户菜单和 `me` 取数里真实的代码；QueryClient 和聊天的几个 store 都是真的。
+// Does not mount the UI: calls the real code of the login page, the user menu and the `me` fetch directly; the QueryClient and a few chat stores are real.
 const hooks = vi.hoisted(() => ({
   client: undefined as unknown,
   mutation: undefined as { onSuccess: (data: { user: { id: string } }) => void } | undefined,
@@ -44,12 +44,12 @@ class MemoryStorage {
   removeItem(key: string) { this.values.delete(key); }
 }
 
-/** 元素树里按可见文字找到那个菜单项的回调 */
+/** Callback that finds the menu item by its visible text in the element tree */
 function action(tree: ReactNode, label: string): () => unknown {
   for (const child of Children.toArray(tree)) {
     if (!isValidElement<{ children?: ReactNode; onSelect?: () => unknown }>(child)) continue;
     if (Children.toArray(child.props.children).includes(label) && child.props.onSelect) return child.props.onSelect;
-    try { return action(child.props.children, label); } catch { /* 下一个兄弟 */ }
+    try { return action(child.props.children, label); } catch { /* Next sibling */ }
   }
   throw new Error(`Missing action: ${label}`);
 }
@@ -57,7 +57,7 @@ function action(tree: ReactNode, label: string): () => unknown {
 let client: QueryClient;
 const handles: LiveHandle[] = [];
 
-/** 上一个人经由真实的 `me` 取数认领了这个标签页，然后留下：所选的库、草稿、上次会话、一场写完未读的回答、一场还在写的 */
+/** A previous person claimed this tab through the real `me` fetch, then left: the selected KB, the draft, the last session, an answer written but unread, and one still being written */
 async function seedPreviousAccount() {
   vi.spyOn(api, "me").mockResolvedValue({ id: "previous-user" } as User);
   client.setQueryData(["me"], await fetchMe());
@@ -140,7 +140,7 @@ describe("a tab keeps a person's chat state only for that person", () => {
 
   it("drops a tab's draft on reload after another account signed in in another tab", async () => {
     await seedPreviousAccount();
-    // 另一个标签页里 B 登录：共用的那份已经归了 B
+    // In another tab, B logs in: the shared state has already been taken over by B
     localStorage.setItem("utopia.account", "next-user");
     kbStore.set("next-users-kb");
     vi.spyOn(api, "me").mockResolvedValue({ id: "next-user" } as User);

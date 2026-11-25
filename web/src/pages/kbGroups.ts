@@ -5,10 +5,10 @@ export type KbEntry =
   | { kind: "kb"; kb: Kb }
   | { kind: "group"; name: string; items: KbGroupItem[] };
 
-/** 名字带 `/` 的库按第一个 `/` 之前的部分归组（`re-cinq/lore` → 组 `re-cinq`、
- *  标签 `lore`）。两边去掉空白后都得有字，且同组至少两个库才成组——`/foo`、
- *  `foo/`、只此一家的 `CI/CD` 照旧是一行全名。组落在它第一个成员原来的位置，
- *  其余库的顺序不动 */
+/** A library whose name contains `/` is grouped by the part before the first `/` (`re-cinq/lore` → group `re-cinq`,
+ *  label `lore`). Both sides must have text after trimming whitespace, and a group needs at least two libraries to form: `/foo`,
+ *  `foo/`, and the sole `CI/CD` remain full-name rows as before. A group sits where its first member originally was,
+ *  and the order of the other libraries does not change */
 export function kbGroups(kbs: Kb[]): KbEntry[] {
   const groups = new Map<string, KbGroupItem[]>();
   const owners = kbs.map((kb) => {
@@ -35,8 +35,8 @@ function ownerAndLabel(name: string) {
   return slash >= 0 && owner && label ? { owner, label } : undefined;
 }
 
-/** 给多选下拉用的选项：同组的挨在一起，`label` 留全名（搜索与已选的芯片都用它），
- *  `short` 是组名下面那一行显示的名字 */
+/** Options for the multi-select dropdown: members of the same group sit together, `label` keeps the full name (search and the selected chips use it),
+ *  and `short` is the name shown on the row below the group name */
 export function kbOptions(kbs: Kb[]) {
   return kbGroups(kbs).flatMap((entry) =>
     entry.kind === "kb"

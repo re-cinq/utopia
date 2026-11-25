@@ -1,8 +1,8 @@
-// 界面语言：**看的人自己定**，不经过后端（见 docs/decisions/0004）。
-// 和暗色模式同类——并发上限那种设置描述的是部署，界面语言描述的是读者。
+// UI language: **the viewer chooses it**; it does not go through the backend (see docs/decisions/0004).
+// Same kind as dark mode: a deployment setting such as the concurrency cap describes the deployment, while the UI language describes the reader.
 //
-// locale 只在这一个文件里解析。其余 600 多处只消费 `S`，谁都不去读来源。
-// 将来要不要跟随浏览器、要不要每用户覆盖，改的是这里，不是那 600 处。
+// The locale is resolved only in this one file. The other 600+ places only consume `S`, and nobody reads the source.
+// If we later decide whether to follow the browser or allow per-user overrides, the change happens here, not in those 600 places.
 import { en, type Strings } from "./en";
 import { zh } from "./zh";
 
@@ -11,7 +11,7 @@ export type { Strings };
 export const LANGS = ["en", "zh"] as const;
 export type Lang = (typeof LANGS)[number];
 
-/** 语言自己的名字，永远不翻译——在切换器里，"中文"对看不懂英文的人才是路标 */
+/** A language's own name is never translated: in the switcher, "中文" is the signpost for people who cannot read English. */
 export const LANG_NAMES: Record<Lang, string> = { en: "English", zh: "中文" };
 
 const BUNDLES: Record<Lang, Strings> = { en, zh };
@@ -23,33 +23,33 @@ function detect(): Lang {
     if (saved && (LANGS as readonly string[]).includes(saved))
       return saved as Lang;
   } catch {
-    // 隐私模式下 localStorage 会抛——回落到英文，别让首屏挂掉
+    // In private mode localStorage throws, so fall back to English and keep the first screen from hanging
   }
-  // **不跟随浏览器语言**。中文包还在跟着英文包后面追，猜错语言的代价是
-  // 一个中文用户看到半成品，而不是看到完整的英文。等 zh 追平了再把
-  // navigator.language 那一句加回来——那是一行代码的事。
-  // 人自己选过的仍然作数（上面那段），切换器照常在用户菜单里
+  // **Does not follow the browser language.** The Chinese pack still trails the English one, and guessing the wrong language costs
+  // a Chinese user an unfinished half-translation instead of the complete English. Once zh has caught up, put back
+  // the navigator.language line; that is a one-line change.
+  // A choice the person made themselves still counts (the paragraph above), and the switcher stays in the user menu as usual
   return "en";
 }
 
 export const lang: Lang = detect();
 
-/** 当前语言包。模块加载时定一次——所以模块级常量（`const X = S.a.b`）也是对的 */
+/** The current language pack. It is fixed once when the module loads, so module-level constants (`const X = S.a.b`) are also correct */
 export const S: Strings = BUNDLES[lang];
 
 /**
- * 切语言走整页重载，不是重挂载。
+ * Switching language does a full page reload, not a remount.
  *
- * 635 处引用里已经有一处在模块顶层求值（`Members.tsx` 的 ROLE_OPTIONS），
- * 而这种写法今后还会有人写。重挂载会让它们停在旧语言且**不报错**；
- * 重载让整个模块图重新求值，代价只是一次刷新——切语言一年也没几次。
+ * 635 references already include one evaluated at module top level (ROLE_OPTIONS in `Members.tsx`),
+ * and this pattern will be written again in future. A remount would leave them on the old language, and **silently** so;
+ * a reload re-evaluates the whole module graph, at the cost of one refresh. Switching language happens only a few times a year.
  */
 export function setLang(next: Lang) {
   if (next === lang) return;
   try {
     localStorage.setItem(KEY, next);
   } catch {
-    // 存不下就只对本次会话生效，好过什么都不发生
+    // If it cannot be stored, it only applies to this session, which is better than doing nothing
   }
   location.reload();
 }

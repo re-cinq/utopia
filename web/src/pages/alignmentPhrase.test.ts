@@ -53,7 +53,7 @@ describe("what a single date marks", () => {
     expect(
       phraseStart(item({ votes: { first: null, second: { property: "leads", direction: "reverse" } } })),
     ).toEqual({ property: "leads", direction: "reverse", marks: null });
-    // 绑上了、只差 marks 的：按现在的绑定预选属性与方向，读法仍留给人选
+    // Bound, with only the marks left: pre-select the attribute and direction from the current binding; the reading is still left for the person to choose
     expect(
       phraseStart(
         item({

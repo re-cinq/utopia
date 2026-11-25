@@ -1,11 +1,11 @@
-/* 实体类型的数据色（规矩 4：彩色只属于数据）。从 ui/index.tsx 搬到这里（0038），
- * 因为 style-guard 现在不许页面和组件里出现色值本身，而这一份**是数据**，且要与
- * `crates/utopia-store/src/palette.rs` 逐字一致。浅色版暂时沿用同一套：换一套浅底
- * 专用的数据色得连服务端那份一起换，另开一刀。 */
+/* Data colours for entity types (rule 4: colour belongs only to data). Moved here from ui/index.tsx (0038),
+ * because style-guard now forbids colour values themselves in pages and components, while this set **is data** and must match
+ * `crates/utopia-store/src/palette.rs` exactly. The light version temporarily reuses the same set: a data palette designed for a light background
+ * has to change on the server side too, which is a separate cut. */
 
-/* ---------- ColorPicker（精选色板 + hex 兜底；实体色刻意不开放全色域） ----------
-   **改这里就得改 `crates/utopia-store/src/palette.rs`**：手动挑的色与自动按 key
-   取的色必须来自同一组，否则一张图里会出现两套配色。那边有测试盯着，改漏了会红。 */
+/* ---------- ColorPicker (curated palette with a hex fallback; entity colours deliberately do not open the full gamut) ----------
+   **Changing this means changing `crates/utopia-store/src/palette.rs`**: colours picked by hand and colours chosen automatically by key
+   must come from the same set, otherwise two palettes would appear in one graph. There is a test on the other side that goes red if this is missed. */
 export const ENTITY_PALETTE = [
   "#7fd0ff",
   "#5fa8ff",
@@ -26,14 +26,14 @@ export const ENTITY_PALETTE = [
 ];
 
 /**
- * 类的 key → 颜色。**必须与 `crates/utopia-store/src/palette.rs` 的
- * `color_for_key` 逐位一致**：新建类时前端先按 key 挑一个显示出来，
- * 用户不改就这么存下去；而导入/消解那条路是后端算的。两边算得不一样，
- * 同一个 key 就会因为「谁建的」而拿到不同颜色。
+ * Class key → colour. **Must match `color_for_key` in `crates/utopia-store/src/palette.rs` bit for bit**:
+ * when a class is created, the frontend first picks a colour from the key and shows it; if the user does not change it, that is what gets stored.
+ * The import and resolution path is computed by the backend; if the two compute differently,
+ * the same key would get different colours depending on "who created it".
  *
- * FNV-1a + 雪崩混合。用 BigInt 是因为 JS 的位运算是 32 位的，
- * 而这里要的是 64 位乘法——用 Number 做会静默丢高位，
- * 算出来跟 Rust 对不上，且不会有任何报错。
+ * FNV-1a with avalanche mixing. BigInt is used because JS bitwise operations are 32-bit,
+ * and this needs 64-bit multiplication: using Number would silently drop the high bits,
+ * and the result would disagree with Rust, with no error.
  */
 export function colorForKey(key: string): string {
   let h = 0xcbf29ce484222325n;

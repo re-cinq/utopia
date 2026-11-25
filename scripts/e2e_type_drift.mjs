@@ -1,16 +1,16 @@
 #!/usr/bin/env node
-// 端到端：实体消解的类型漂移处理。
+// End-to-end: type-drift handling for entity resolution.
 //
-// 场景：同一团队名被三份文档抽成三种类型——organization / project / team（白名单外，
-// 降级 concept 兜底）。期望：漂移对进审核队列 → mock 裁决全部 "same" → 链式合并收敛为
-// 一个实体（类型调和后非 concept），leads 时间线连贯（前任在新任起点自动闭合）。
+// Scenario: the same team name is extracted from three documents as three types: organization / project / team (not on the whitelist,
+// so it falls back to concept). Expected: the drift pairs enter the review queue → the mock verdicts are all "same" → chained merging converges to
+// one entity (not concept after type reconciliation), and the leads timeline stays coherent (the predecessor is closed automatically at the successor's start).
 //
-// 本脚本内嵌 mock LLM（OpenAI 兼容 /chat/completions：按分块标记回放抽取结果，
-// 按提示词特征识别裁决请求并全判 same）。无 embedding 配置 → 走"无上下文可比"的
-// 宁分勿合 + 审核对路径。
+// This script embeds a mock LLM (OpenAI-compatible /chat/completions: replays extraction results by chunk marker,
+// recognizes verdict requests by prompt features and judges all of them "same"). With no embedding config, it takes the "no context to compare" path:
+// prefer splitting over merging, plus the review-pair path.
 //
-// 前置：utopia-server 已启动并连到一个干净的库。编排见 scripts/e2e_type_drift.sh。
-// 环境变量：E2E_BASE（默认 http://127.0.0.1:8317）、E2E_MOCK_PORT（默认 9317）。
+// Prerequisite: utopia-server is running and connected to a clean database. Orchestration is in scripts/e2e_type_drift.sh.
+// Environment variables: E2E_BASE (default http://127.0.0.1:8317), E2E_MOCK_PORT (default 9317).
 
 import http from "node:http";
 
@@ -54,8 +54,8 @@ const EXTRACTIONS = {
       },
     ],
   },
-  // "team" 不在内置本体白名单 → 抽取端降级 concept（record_miss + 兜底），
-  // 正是类型漂移的第三条腿
+  // "team" is not on the built-in ontology whitelist → the extractor downgrades it to concept (record_miss + fallback),
+  // which is exactly the third leg of type drift
   "E2E-DOC3": {
     entities: [
       { name: "Orion platform team", type: "team" },
@@ -153,7 +153,7 @@ function check(cond, label) {
 
 async function pushDocAndWait(kbId, filename, content) {
   await api("POST", `/kbs/${kbId}/ingest`, { filename, content });
-  // 逐篇等抽取完成：消解按落库顺序看见前一篇的实体，漂移路径确定性触发
+  // Wait for each extraction to finish before the next: resolution sees the previous document's entities in insert order, so the drift path triggers deterministically
   await poll(`${filename} graph done`, 120000, async () => {
     const documents = await api("GET", `/kbs/${kbId}/documents`);
     const d = documents.find((d) => d.filename === filename);
@@ -188,7 +188,7 @@ async function main() {
   await pushDocAndWait(kbId, "orion-wiki.md",
     "[E2E-DOC3] Wiki. The Orion platform team is part of Utopia Labs.");
 
-  // 攒批裁决在后台链式合并：等审核队列清空且同名实体收敛为一个
+  // Batched verdicts chain-merge in the background: wait until the review queue is empty and same-named entities have converged into one
   const survivor = await poll("adjudication converges to one entity", 90000, async () => {
     const review = await api("GET", `/kbs/${kbId}/review`);
     const { entities } = await api("GET", `/kbs/${kbId}/entities?q=Orion`);
@@ -222,7 +222,7 @@ async function main() {
   check(!!partOf && partOf.other_name === "Utopia Labs",
     "concept-side fact (part_of Utopia Labs) survived the merge onto the survivor");
 
-  // 可回滚：撤销最近一次合并 → 被并方复活、类型恢复快照、同名组重新出现
+  // Reversible: undo the most recent merge → the merged-away entity comes back, the type snapshot is restored, and the same-name group reappears
   await api("POST", `/kbs/${kbId}/merges/${review.merges[0].id}/revert`);
   const after = await api("GET", `/kbs/${kbId}/entities?q=Orion`);
   check(after.entities.length === 2,

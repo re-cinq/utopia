@@ -1,11 +1,11 @@
-/* 主题：暗 / 浅 / 跟系统。**默认暗**——那是这个界面的本色；浅色是给白天对着
- * 它看八小时的人的。存在浏览器里（`utopia.theme`），不经过后端：看的人自己定，
- * 与语言同一个道理（0004）。
+/* Theme: dark / light / follow system. **Dark by default**: that is this interface's own color; light is for people looking at it
+ * eight hours a day. Stored in the browser (`utopia.theme`), not sent to the backend: the viewer decides for themselves,
+ * the same reasoning as language (0004).
  *
- * 落在 `<html data-theme="dark|light">` 上，且**只落这两个值**：「system」在这里
- * 就解成两者之一，CSS 只认 data-theme，不另写一套 prefers-color-scheme 的块——
- * 同一套令牌写两遍迟早分叉。首帧前 index.html 里有一段同样的逻辑，为的是
- * 刷新时不闪一下暗底。 */
+ * It lands on `<html data-theme="dark|light">`, and **only these two values**: 'system' is resolved here
+ * to one of the two; CSS only recognizes data-theme, and no separate prefers-color-scheme block is written,
+ * the same tokens written twice would diverge sooner or later. index.html has the same logic before the first frame, for the purpose of
+ * avoiding a flash of the dark background on refresh. */
 
 export type Theme = "system" | "light" | "dark";
 export type Resolved = "light" | "dark";
@@ -42,10 +42,10 @@ export function resolvedTheme(): Resolved {
 
 function apply(r: Resolved) {
   document.documentElement.dataset.theme = r;
-  /* shadcn 的暗色变体认的是 `.dark` 这个类（`@custom-variant dark`），
-     我们自己的令牌与画布认的是 `data-theme`。**两个都落**：这样从 shadcn
-     registry 里拿来的组件不用改一个字就跟着主题走，而 `data-theme` 那一套
-     （画布读令牌、首帧前那段脚本）原样不动 */
+  /* shadcn dark-variant recognizes the `.dark` class (`@custom-variant dark`),
+     our own tokens and canvas recognize `data-theme`. **Both are set**: so components taken from the shadcn
+     registry components follow the theme without edits, while the `data-theme` set
+     (the canvas reads tokens, and the script before the first frame) is left untouched */
   document.documentElement.classList.toggle("dark", r === "dark");
   for (const fn of listeners) fn(r);
 }
@@ -54,18 +54,18 @@ export function setTheme(t: Theme) {
   try {
     localStorage.setItem(KEY, t);
   } catch {
-    /* 隐私模式：不存，这一次会话内仍生效 */
+    /* Private mode: nothing is stored; it still applies for this session */
   }
   apply(resolve(t));
 }
 
-/** 主题落定后要重画的东西（画布读的是算出来的令牌，CSS 不会替它刷新）在这里挂 */
+/** Things that must be redrawn once the theme settles (the canvas reads computed tokens, and CSS does not refresh them for it) are hooked here */
 export function onThemeChange(fn: (t: Resolved) => void): () => void {
   listeners.add(fn);
   return () => listeners.delete(fn);
 }
 
-/** 启动时调一次：把存的选择落到 <html>，并跟着系统偏好变（只在选了 system 时） */
+/** Called once at startup: applies the stored choice to <html>, and follows system preference changes (only when system is selected) */
 export function initTheme() {
   apply(resolvedTheme());
   if (typeof matchMedia !== "function") return;

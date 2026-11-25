@@ -4,7 +4,7 @@ import { en } from "./i18n/en";
 import { zh } from "./i18n/zh";
 import { stepDetail, stepLabel } from "./steps";
 
-// UTC 与本地读出来不是同一天、同一钟点的时区：世界时间与记录时间用错了读法就看得出来
+// UTC is not the same day and wall-clock time as reading locally: mixing world time and record time shows it.
 beforeAll(() => {
   process.env.TZ = "America/New_York";
 });
@@ -53,7 +53,7 @@ describe("stepDetail", () => {
     [{ kind: "tool", status: "invalid", param: "query", missing: true }, "missing query", "缺少 query"],
     [{ kind: "document", status: "invalid", param: "document_id" }, "invalid document_id", "document_id 无效"],
   ])("words %j in both languages", (fields, english, chinese) => {
-    // detail 故意给一句别的：有 status 的步骤不该读它
+    // detail deliberately gives a different sentence: a step with a status must not read it
     const s = step({ detail: "server words", ...fields });
     expect(stepDetail(s, en)).toBe(english);
     expect(stepDetail(s, zh)).toBe(chinese);
@@ -79,7 +79,7 @@ describe("stepDetail", () => {
   });
 
   it("reads the world moment as a calendar day and the record moment in local time", () => {
-    // 这条测试靠的就是时区：没设上的话下面的断言什么也证明不了
+    // This test depends on the timezone: without it set, the assertions below prove nothing
     expect(new Date("2024-08-01T00:00:00Z").getDate()).toBe(31);
     const facts = step({
       kind: "facts",
@@ -89,12 +89,12 @@ describe("stepDetail", () => {
       valid_at: "2024-08-01T00:00:00Z",
       before: "2026-09-12T06:03:00Z",
     });
-    // 世界时间是 8 月 1 日，不是纽约的 7 月 31 日晚上；记录时刻是纽约的 02:03
+    // World time is August 1, not the evening of July 31 in New York; the record moment is 02:03 in New York
     expect(stepDetail(facts, en)).toBe("12 facts at 2024-08-01, as recorded before 2026-09-12 02:03");
     expect(stepDetail(facts, zh)).toBe("2024-08-01 时的 12 条事实，按 2026-09-12 02:03 之前的记录");
     const asOf = step({ kind: "facts", status: "ok", count: 1, as_of: "2026-09-12T06:03:00Z" });
     expect(stepDetail(asOf, en)).toBe("1 fact, as recorded by 2026-09-12 02:03");
-    // 带钟点的世界时间写到钟点，仍按 UTC
+    // World time with a clock time is written to the clock time, still read as UTC
     const clocked = step({ kind: "facts", status: "ok", count: 2, valid_at: "2024-08-01T14:30:00Z" });
     expect(stepDetail(clocked, en)).toBe("2 facts at 2024-08-01T14:30Z");
   });

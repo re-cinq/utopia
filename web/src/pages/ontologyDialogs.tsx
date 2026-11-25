@@ -1,8 +1,8 @@
-// 本体的编辑弹窗：类、关系、属性，以及「用一个已有的关系连接这个类」。
+// Edit dialogs for the ontology: classes, relations, attributes, and "connect this class with an existing relation".
 //
-// 右侧面板只展示，改动开一扇窗——从前三张表单嵌在面板里，改到一半的字段
-// 跟正在读的定义挤在同一列，保存与删除也挨在一起。字段一个没变，搬的是壳：
-// 表单里的每一项照旧，只是有了自己的标题、自己的页脚和 Esc。
+// The right-hand panel only displays; edits open a window. Previously three forms were embedded in the panel, and a half-edited field
+// jostled in the same column as the definition being read, and saving and deleting sat right next to each other. No field changed: only the shell moved:
+// every item in the form is as before, it just has its own title, its own footer and Esc.
 import { useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api, type EntityTypeView, type RelationTypeView } from "../api";
@@ -22,7 +22,7 @@ import {
   Textarea,
 } from "../ui";
 
-/** 父类下拉的候选：树序 + 缩进（层级可见），排除自己与全部后代（防成环）。 */
+/** Candidates for the parent-class dropdown: tree order + indentation (levels visible), excluding itself and all descendants (to prevent cycles). */
 export function parentOptions(
   allTypes: EntityTypeView[],
   selfId: string | undefined,
@@ -30,7 +30,7 @@ export function parentOptions(
   const excluded = new Set<string>();
   if (selfId) {
     excluded.add(selfId);
-    // 收后代：反复扫描直到收敛（类的数量级很小，O(n²) 无所谓）
+    // Collect descendants: scan repeatedly until it converges (the number of classes is small, so O(n²) does not matter)
     let grew = true;
     while (grew) {
       grew = false;
@@ -65,7 +65,7 @@ const toggleIn = (
   id: string,
 ) => set((v) => (v.includes(id) ? v.filter((x) => x !== id) : [...v, id]));
 
-/* ---------- 类 ---------- */
+/* ---------- Classes ---------- */
 
 export function ClassDialog({
   kbId,
@@ -79,19 +79,19 @@ export function ClassDialog({
 }: {
   kbId: string;
   existing: EntityTypeView | null;
-  /** 新建时的父类（从左栏或定义页的「新建子类」进来时预填）；多父下它是主父 */
+  /** Parent class when creating: pre-filled when entering from the left column or the "new subclass" on the definition page; with multiple parents this is the main parent */
   parentId: string | null;
   allTypes: EntityTypeView[];
   onClose: () => void;
-  /** 创建成功时携带新 id，编辑成功时为 undefined */
+  /** Carries the new id when creation succeeds; undefined when editing succeeds */
   onSaved: (createdId?: string) => void;
   onDeleted: () => void;
   onError: (e: unknown) => void;
 }) {
   const [key, setKey] = useState(existing?.key ?? "");
   const [label, setLabel] = useState(existing?.label ?? "");
-  // 新建时颜色跟着 key 走（与后端 color_for_key 同一个规则），不是一个固定默认值。
-  // 用户当然可以改；但**不改的话，手动建的类和导入建的类配色体系一致**
+  // When creating, the colour follows the key (the same rule as the backend color_for_key), not a fixed default.
+  // The user of course may change it; but **if they do not, a manually created class and an imported one share a consistent colour scheme**
   const [color, setColor] = useState(
     existing?.color ?? colorForKey(existing?.key ?? ""),
   );
@@ -103,8 +103,8 @@ export function ClassDialog({
     existing?.parents ?? (parentId ? [parentId] : []),
   );
   const [description, setDescription] = useState(existing?.description ?? "");
-  // 互斥：声明「不可能同时是」。一致性检查据此报不可满足的类（0002）——
-  // 一个类继承了两个互斥的祖先，就永远不可能有实例，而它不报错，只是永远空着
+  // Mutually exclusive: declares "cannot be both at once". The consistency check reports unsatisfiable classes from this (0002)
+  // a class that inherits two mutually exclusive ancestors can never have an instance, and it reports no error, it just stays empty forever
   const [disjoint, setDisjoint] = useState<string[]>(existing?.disjoint ?? []);
   const options = useMemo(
     () => parentOptions(allTypes, existing?.id),
@@ -170,7 +170,7 @@ export function ClassDialog({
           : undefined
       }
     >
-      {/* key 是纯技术标识：已存在时不展示，只在创建时输入 */}
+      {/* The key is a pure technical identifier: it is not shown once it exists, and is only typed in at creation */}
       {!existing && (
         <Field
           label={
@@ -185,7 +185,7 @@ export function ClassDialog({
             value={key}
             onChange={(e) => {
               setKey(e.target.value);
-              // 用户没自己挑过色，就让颜色跟着 key 走——与后端同一个规则
+              // If the user has not picked a colour themselves, let the colour follow the key: the same rule as the backend
               if (!colorTouched) setColor(colorForKey(e.target.value));
             }}
             className="w-full"
@@ -211,7 +211,7 @@ export function ClassDialog({
             }}
             shape={shape}
           />
-          {/* 形状：与图谱节点渲染一一对应（circle=四层圆 / square=四层方） */}
+          {/* Shape: maps one-to-one to the node rendering in the graph (circle = four-layer circle / square = four-layer square) */}
           <Segmented
             size="sm"
             value={shape}
@@ -219,8 +219,8 @@ export function ClassDialog({
             options={(["circle", "square"] as const).map((sh) => ({
               value: sh,
               title: sh,
-              // 图标占一行正文的高（h-4）：Segmented 的高度由内容撑，
-              // 光秃秃的 12px 图标会让它比旁边 32 高的色井矮一截
+              // The icon occupies the height of one line of body text (h-4): the height of Segmented is set by its content,
+              // and a bare 12px icon would make it shorter than the 32-high colour well beside it
               label: (
                 <span className="flex h-4 items-center">
                   <span
@@ -234,8 +234,8 @@ export function ClassDialog({
           />
         </div>
       </Field>
-      {/* 多父：subClassOf 可以有多条。左栏按树画，一个类只能出现一次——
-          所以第一个当主父。界面说明这条，不另加一个"选主父"的控件 */}
+      {/* Multiple parents: subClassOf can have several entries. The left column draws the tree, and a class can appear only once,
+          so the first one is the main parent. The interface explains this, without adding a separate "pick main parent" control */}
       <Field
         label={S.ontology.parent}
         hint={parents.length > 1 ? S.ontology.primaryParentHint : undefined}
@@ -248,10 +248,10 @@ export function ClassDialog({
           emptyHint={S.ontology.noParent}
         />
       </Field>
-      {/* 互斥：**声明「不可能同时是」**。紧挨着父类，因为两者是同一件事的
-          两面——父类说「也是」，互斥说「不可能同时是」，而一致性检查正是
-          在这两者打架时报出「这个类永远不可能有实例」。跟自己的父类互斥当场说，
-          比让人跑一遍一致性检查再发现要快 */}
+      {/* Mutually exclusive: **declares "cannot be both at once"**. Placed right next to the parent class, because the two are
+          two sides of the same thing: the parent says "also is", the mutual exclusion says "cannot be both at once", and the consistency check
+          reports "this class can never have an instance" exactly when the two clash. Saying on the spot that a class is exclusive with its own parent
+          is faster than making a person run the consistency check and discover it */}
       <Field
         label={S.ontology.disjoint}
         hint={S.ontology.disjointHint}
@@ -269,7 +269,7 @@ export function ClassDialog({
           emptyHint={S.ontology.noDisjoint}
         />
       </Field>
-      {/* 语义指引：整段注入抽取 prompt，直接影响抽取归类质量 */}
+      {/* Semantic guidance: the whole block is injected into the extraction prompt and directly affects the quality of extraction classification */}
       <Field
         label={S.ontology.description}
         hint={S.ontology.descriptionHint}
@@ -285,7 +285,7 @@ export function ClassDialog({
   );
 }
 
-/* ---------- 关系 ---------- */
+/* ---------- Relations ---------- */
 
 export function PropertyDialog({
   kbId,
@@ -302,14 +302,14 @@ export function PropertyDialog({
   kbId: string;
   existing: RelationTypeView | null;
   allTypes: EntityTypeView[];
-  /** 本库的关系（不含属性）。逆与子属性的下拉从这里取——**属性不在其中**，
-   *  它的宾语是字面值，反过来无从谈起 */
+  /** The relations of this KB (no attributes). The dropdowns for inverse and sub-property take from here: **attributes are not among them**,
+   *  because their object is a literal value, and the reverse makes no sense */
   allRelations: RelationTypeView[];
-  /** 本库的属性定义，「边上的属性」的候选。单独传进来：从前这个下拉在
-   *  allRelations 里筛 kind=attribute，而那里恰恰没有属性，于是永远是空的（#1519） */
+  /** The attribute definitions of this KB, candidates for "attributes on the edge". Passed in separately: previously this dropdown filtered
+   *  kind=attribute from allRelations, where attributes are precisely absent, so it was always empty (#1519) */
   allAttributes: RelationTypeView[];
-  /** 从一个类出发新建关系时，domain 预填成那个类——**只影响初始值**，
-   *  不是约束：下面照旧是个可编辑的 MultiSearchSelect，填错了随手改 */
+  /** When creating a relation from a class, domain is pre-filled with that class — **it only affects the initial value**,
+   *  it is not a constraint: below it is still an editable MultiSearchSelect, so a wrong entry can be changed on the spot */
   initialDomain: string | null;
   onClose: () => void;
   onSaved: (createdId?: string) => void;
@@ -323,15 +323,15 @@ export function PropertyDialog({
   const [inverseFunctional, setInverseFunctional] = useState(
     existing?.inverse_functional ?? false,
   );
-  // 其余四条 OWL 公理。**推理机的判据全在这里**——从前只能靠导入 OWL 带进来，
-  // 在界面上手工建本体的人永远开不了那台机器（0002）
+  // The other four OWL axioms. **All of the reasoner's criteria are here**. Previously they could only come in by importing OWL,
+  // so a person building an ontology by hand in the interface could never switch that machine on (0002)
   const [transitive, setTransitive] = useState(existing?.is_transitive ?? false);
   const [symmetric, setSymmetric] = useState(existing?.is_symmetric ?? false);
   const [asymmetric, setAsymmetric] = useState(existing?.is_asymmetric ?? false);
   const [irreflexive, setIrreflexive] = useState(
     existing?.is_irreflexive ?? false,
   );
-  // 同一族的后两条，形状不同：指向另一个关系。空串 = 没声明
+  // The last two of the same family have a different shape: they point at another relation. Empty string = not declared
   const [inverseOf, setInverseOf] = useState(existing?.inverse_of ?? "");
   const [subPropertyOf, setSubPropertyOf] = useState(
     existing?.sub_property_of ?? "",
@@ -341,14 +341,14 @@ export function PropertyDialog({
     existing?.domains ?? (initialDomain ? [initialDomain] : []),
   );
   const [ranges, setRanges] = useState<string[]>(existing?.ranges ?? []);
-  // 边上的属性（0037）：这条关系的边能带哪些属性，选的是本库里 kind=attribute 的定义
+  // Attributes on the edge (0037): which attributes an edge of this relation can carry; the choice is the kind=attribute definitions in this KB
   const [qualifiers, setQualifiers] = useState<string[]>(existing?.qualifiers ?? []);
-  // 显示标签，不显示 key。**进提示词的 key 由服务端从库里取**，与界面显示什么无关
+  // Show the display label, not the key. **The key that goes into the prompt is taken from the library by the server**, unrelated to what the interface shows
   const typeOpts = useMemo(() => parentOptions(allTypes, undefined), [allTypes]);
-  // 两个下拉的选项：本库的其它关系。**自己不进列表**，两条都是：子属性指向自己
-  // 数据库直接拒（那是个环）；逆指向自己等于 symmetric，那个复选框就在上面。
-  // 唯一的例外是**当前值就是自己**：OWL 导入进来的可以长这样，从列表里漏掉它
-  // 就会让下拉显示空白，而空白一保存就把已声明的抹了
+  // The options of the two dropdowns: the other relations of this KB. **It is not in its own list**, for both: a sub-property pointing at itself
+  // is refused by the database directly (that would be a cycle); an inverse pointing at itself amounts to symmetric, and the checkbox for that is above.
+  // The only exception is **when the current value is itself**: an OWL import can produce this, and leaving it out of the list
+  // would make the dropdown show blank, and a blank saved would wipe out what was declared
   const linkOptions = (current: string) => [
     { value: "", label: S.ontology.noLink },
     ...(existing && current === existing.id
@@ -358,7 +358,7 @@ export function PropertyDialog({
       .filter((r) => r.id !== existing?.id)
       .map((r) => ({ value: r.id, label: r.label, hint: r.key })),
   ];
-  /** 下拉里选中那条的显示名。找不到就回落到 id——宁可难看，不要空着 */
+  /** The display name of the entry selected in the dropdown. If it is not found, fall back to the id: ugly is better than blank */
   const nameOf = (id: string) =>
     allRelations.find((r) => r.id === id)?.label ?? id;
 
@@ -373,8 +373,8 @@ export function PropertyDialog({
         is_symmetric: symmetric,
         is_asymmetric: asymmetric,
         is_irreflexive: irreflexive,
-        // 空串要变成 null 再送——服务端收 `Option<Uuid>`，
-        // `""` 解不成 UUID，会是一个 422 而不是「清空」
+        // An empty string has to become null before it is sent: the server accepts `Option<Uuid>`,
+        // and `""` does not parse as a UUID, giving a 422 rather than "cleared"
         inverse_of: inverseOf || null,
         sub_property_of: subPropertyOf || null,
         description,
@@ -452,7 +452,7 @@ export function PropertyDialog({
           className="w-full"
         />
       </Field>
-      {/* 类型签名。界面显示标签，而进提示词的是 key —— 那一步在服务端（0004） */}
+      {/* The type signature. The interface shows labels, but what goes into the prompt is the key — that step happens on the server (0004) */}
       <Field label={S.ontology.signature} hint={S.ontology.signatureHint}>
         <div className="grid gap-2 sm:grid-cols-2">
           <div className="min-w-0">
@@ -476,8 +476,8 @@ export function PropertyDialog({
             />
           </div>
           <div className="min-w-0">
-            {/* 边上的属性（0037）：选项是本库的属性定义，不是类。
-                关系不能把自己声明成自己的属性，列表里也不列自己 */}
+            {/* Attributes on the edge (0037): the options are the attribute definitions of this KB, not classes.
+                A relation cannot declare itself as its own attribute, so it is not listed in the list either */}
             <div className="mb-1 text-small text-ink-2">{S.ontology.qualifiers}</div>
             <MultiSearchSelect
               values={qualifiers}
@@ -503,9 +503,9 @@ export function PropertyDialog({
           ]}
         />
       </Field>
-      {/* 六条公理并成一组。**它们本来就是同一族**——推理机（0002）拿它们当判据。
-          每一条底下写清「勾了会发生什么」：这些开关不是描述，是会改变系统行为的
-          声明。对称与反对称同时勾是自相矛盾的（只对空关系成立），当场说一句 */}
+      {/* The six axioms are grouped together. **They are in fact one family**: the reasoner (0002) uses them as criteria.
+          Under each one, write clearly "what happens if ticked": these switches are not descriptions, they are declarations that change system behaviour.
+          Ticking symmetric and asymmetric together is self-contradictory (only true for an empty relation), so say so on the spot */}
       <Field
         label={S.ontology.axioms}
         hint={S.ontology.axiomsHint}
@@ -542,9 +542,9 @@ export function PropertyDialog({
           ))}
         </div>
       </Field>
-      {/* 同一组的后两条，只是形状不同：它们指向**另一个关系**，所以是下拉不是复选框。
-          选了之后当场把话说全——**这两条推出来的事实主宾未必同向**，逆要对调，
-          子属性不对调，只看名字分不出来，写出来就分得出 */}
+      {/* The last two of the same group differ only in shape: they point at **another relation**, so they are dropdowns rather than checkboxes.
+          Once one is chosen, say the whole thing on the spot — **the facts inferred by these two do not necessarily run the same direction**: the inverse has to swap subject and object,
+          whereas the sub-property does not swap; this cannot be told from the name alone, but once written out it can */}
       <div className="grid gap-2 sm:grid-cols-2">
         <Field label={S.ontology.inverseOf} hint={S.ontology.inverseOfHint}>
           <SearchSelect
@@ -596,7 +596,7 @@ export function PropertyDialog({
   );
 }
 
-/* ---------- 属性（一个类的字面值字段） ---------- */
+/* ---------- Attributes (literal-value fields of a class) ---------- */
 
 export function AttributeDialog({
   kbId,
@@ -609,7 +609,7 @@ export function AttributeDialog({
   onError,
 }: {
   kbId: string;
-  /** null = 不是从某个类打开的（本体表格的属性页）：弹窗里自己选挂在哪个类 */
+  /** null = not opened from a class (the attribute page of the ontology table): the dialog itself chooses which class it hangs on */
   typeId: string | null;
   allTypes: EntityTypeView[];
   existing: RelationTypeView | null;
@@ -622,7 +622,7 @@ export function AttributeDialog({
   const [label, setLabel] = useState(existing?.label ?? "");
   const [datatype, setDatatype] = useState(existing?.datatype ?? "text");
   const [unit, setUnit] = useState(existing?.unit ?? "");
-  // 单值 = functional：新值经时态引擎闭合旧值（属性历史的来源）。多数属性如此，默认开
+  // Single-valued = functional: a new value closes the old one through the temporal engine (the source of attribute history). Most attributes are like this, default on
   const [single, setSingle] = useState(existing?.functional ?? true);
   const [description, setDescription] = useState(existing?.description ?? "");
   const [host, setHost] = useState(typeId ?? "");
@@ -776,7 +776,7 @@ export function AttributeDialog({
   );
 }
 
-/* ---------- 用一个已有的关系连接这个类 ---------- */
+/* ---------- Connect this class with an existing relation ---------- */
 
 export function ConnectDialog({
   kbId,
@@ -788,10 +788,10 @@ export function ConnectDialog({
 }: {
   kbId: string;
   cls: EntityTypeView;
-  /** kind === "relation" 的那些 */
+  /** Those with kind === "relation" */
   relations: RelationTypeView[];
   onClose: () => void;
-  /** 连完带着那条关系的 id：调用方跳过去，域/值域改没改一眼可见 */
+  /** After connecting, carries the id of that relation: the caller jumps there, and whether the domain/range was changed is visible at a glance */
   onConnected: (relationId: string) => void;
   onError: (e: unknown) => void;
 }) {
@@ -801,8 +801,8 @@ export function ConnectDialog({
     mutationFn: () => {
       const rel = relations.find((r) => r.id === relationId);
       if (!rel) return Promise.reject(new Error("relation not found"));
-      // 只加不减：已经连着的那一侧原样保留，另一侧才可能被追加。
-      // Set 去重——挑到已经连过的关系时这是个无害的空操作
+      // Only add, never remove: the side already connected is kept as is, and only the other side may be appended.
+      // Set de-duplicates — picking a relation that is already connected is a harmless no-op
       const domains =
         side === "domain" ? [...new Set([...rel.domains, cls.id])] : rel.domains;
       const ranges =

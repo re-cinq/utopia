@@ -1,6 +1,6 @@
-/* 对话里的复制（#936）：一段回答一个，每个代码块一个。
-   控件是外壳里的 IconButton；复制本身走 copyText，局域网里用 http 打开的部署上
-   剪贴板 API 不存在，它会退回老办法，两样都不成就说出来。 */
+/* Copy in the conversation (#936): one per answer, and one per code block.
+   The control is an IconButton in the shell; the copy itself goes through copyText. On deployments opened over http on the LAN,
+   the clipboard API does not exist, so it falls back to the old method, and if neither works it says so. */
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { Check, Copy } from "lucide-react";
 import { copyText } from "../clipboard";
@@ -8,7 +8,7 @@ import { S } from "../i18n";
 import { toast } from "../toast";
 import { IconButton } from "../ui";
 
-/** 复制按钮。`text` 在按下时才取：代码块的字要从渲染好的 DOM 里读 */
+/** Copy button. `text` is only read on press: the text of a code block has to come from the rendered DOM */
 export function CopyButton({ label, text }: { label: string; text: () => string }) {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
@@ -30,8 +30,8 @@ export function CopyButton({ label, text }: { label: string; text: () => string 
   );
 }
 
-/** 回答里的代码块，右上角一个复制。复制的是代码本身：`<pre>` 里的字，
- *  高亮拆出来的那些 span 不影响它；围栏内容末尾那个换行不带走 */
+/** A code block in an answer gets a copy button at the top right. It copies the code itself: the text inside `<pre>`,
+ *  the spans split out by syntax highlighting do not affect it; the trailing newline of the fenced content is not carried over */
 export function CodeBlock(props: ComponentProps<"pre">) {
   const pre = useRef<HTMLPreElement>(null);
   return (

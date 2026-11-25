@@ -2,9 +2,9 @@ import type { AlignmentItem, AlignmentMarks, RelationTypeView } from "../api";
 
 type PhraseItem = Extract<AlignmentItem, { kind: "phrase" }>;
 
-/** 一条短语签名打开时预选什么。绑上了、只差 marks 的按现在的绑定；否则按第一票、第二票。
- *  单个日期标什么**不预选**：升级后成批进来的绑定若预选一个读法，一次点击就替人写下了它
- *  （#975 评审）。状态属性下人得自己选一个，才能绑 */
+/** What is preselected when a phrase signature opens. If it is already bound and only the marks are left, follow the current binding; otherwise follow the first vote, then the second vote.
+ *  Which mark a single date carries is **not preselected**: if bindings that came in in bulk after the upgrade preselected a reading, one click would write it for the person
+ *  (#975 review). Under a state attribute the person must choose one themselves before binding */
 export function phraseStart(item: PhraseItem): {
   property: string;
   direction: "forward" | "reverse";
@@ -19,7 +19,7 @@ export function phraseStart(item: PhraseItem): {
   };
 }
 
-/** 选中的属性是状态时才问单个日期标什么：事件与恒常没有这一问，服务端也不收 */
+/** Only ask which mark a single date carries when the selected attribute is a state: events and constants have no such question, and the server does not accept it either */
 export function asksMarks(properties: RelationTypeView[], key: string): boolean {
   return properties.find((p) => p.key === key)?.temporal === "state";
 }

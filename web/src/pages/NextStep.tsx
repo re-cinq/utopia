@@ -1,11 +1,11 @@
-/* 空状态里的「下一步」（#313）。
+/* The "next step" in an empty state (#313).
 
-   四个页面此前各自假设「已经就绪」：图谱页无条件让人去配模型，哪怕文档正在
-   抽取；对话页照常显示问候语，哪怕模型根本没配——用户问出第一句才撞墙。
-   这里把「这个库走到哪一步」收成一个判断，四个页面共用。
+   The four pages each used to assume they were "already ready": the graph page unconditionally sent people to configure a model, even while documents were being
+   extracted; the chat page showed its greeting as usual even when no model was configured at all, so the user hit the wall only after asking the first question.
+   This gathers "how far this base has got" into one judgement, shared by the four pages.
 
-   **写法：状态一句话，动作在按钮上。** 不解释原理——原理属于文档，而盯着
-   空页面的人要的是下一步点哪儿。 */
+   **Approach: the state in one sentence, the action on the button.** No explanation of the mechanics: those belong in the docs, and a person staring at an
+   empty page wants to know where to click next. */
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { api, type Readiness } from "../api";
@@ -16,12 +16,12 @@ export function useReadiness(kbId: string | undefined) {
     queryKey: ["readiness", kbId],
     queryFn: () => api.readiness(kbId!),
     enabled: !!kbId,
-    // 上传、抽取都会改它，但没必要盯着轮询：页面切回来时重取就够
+    // Uploads and extraction both change it, but there is no need to poll: refetching when the page is switched back to is enough
     staleTime: 10_000,
   });
 }
 
-/** 一句话 + 至多一个动作。动作缺省时只剩那句话（权限不够的人不该看到按钮）。 */
+/** One sentence plus at most one action. Without an action only the sentence remains (someone without permission should not see a button). */
 export function NextStep({
   line,
   action,
@@ -34,7 +34,7 @@ export function NextStep({
       {line}
       {action && (
         <Link
-          // 路由表是字面量联合类型，这里的目标是运行时算出来的
+          // The route table is a literal union type; the target here is computed at runtime
           to={action.to as never}
           params={action.params as never}
           search={(action.search ?? {}) as never}
@@ -47,13 +47,13 @@ export function NextStep({
   );
 }
 
-/** 这个库的下一步是什么。`canUpload` 交给调用方——它知道自己的角色。 */
+/** The next step for this base. `canUpload` is handed in by the caller, since it knows its own role. */
 export function nextStep(
   r: Readiness | undefined,
   opts: { kbId: string; isAdmin: boolean; canUpload: boolean },
 ): { line: string; action?: { label: string; to: string; params?: Record<string, string>; search?: Record<string, unknown> } } | null {
   if (!r) return null;
-  // 顺序即优先级：没有模型，上传了也抽不出东西；没有文档，谈不上处理中
+  // Order is priority: without a model, uploading does not yield anything extractable; without documents, there is nothing being processed
   if (!r.has_chat_model) {
     return opts.isAdmin
       ? {
@@ -88,7 +88,7 @@ export function nextStep(
       },
     };
   }
-  // 处理完了却一个失败都没修，值得说一句——否则「什么都没抽出来」会被当成产品坏了
+  // Processing finished but not one failure was fixed: worth saying so, otherwise "nothing was extracted" would be taken as the product being broken
   if (r.failed > 0 && r.entities === 0) {
     return {
       line: S.steps.someFailed(r.failed),

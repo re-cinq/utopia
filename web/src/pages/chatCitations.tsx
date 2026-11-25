@@ -1,5 +1,5 @@
-/* 对话里的引用：正文角标、落款行、预览浮窗的接线。
-   样子在 ui/citation.tsx，这里只管「哪个号是哪条来源」和「去原文是哪条路」。 */
+/* Citations in chat: the superscripts in the body, the footnote line, and the wiring for the preview popup.
+   The look lives in ui/citation.tsx; this file only handles 'which number is which source' and 'what is the route to the original text'. */
 import { createContext, useContext } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
@@ -14,23 +14,23 @@ import { quoteParam, sourceLead } from "../quotes";
 import { CiteChip, CiteMark, CiteRow, PreviewCard, QuotedText } from "../ui/citation";
 import { CodeBlock } from "./chatCopy";
 
-/** 这一轮回答的来源。
+/** The sources for this turn's answer.
  *
- *  **走 context 而不是 prop**：`Segment` 按文本记忆化（一条长答案每来一个词元都要
- *  重渲染，收了尾的段落不该再解析一遍），而来源是一条条到的。把它当 prop 传下去，
- *  每来一条来源所有段落就全部失效；context 只让角标自己重画。 */
+ *  **Uses context rather than a prop**: `Segment` is memoized by text (during a long answer, every token re-renders it,
+ *  and a finished paragraph should not be parsed again), while sources arrive one at a time. Passing it down as a prop would
+ *  invalidate all paragraphs each time a source arrives; with context, only the superscripts redraw themselves. */
 const SourcesCtx = createContext<Source[]>([]);
 export const SourcesProvider = SourcesCtx.Provider;
 
-/** 给 react-markdown 的 `components`。**必须是模块级常量**：每次渲染现造一个
- *  对象，react-markdown 认为配置变了，`Segment` 的记忆化就白做了 */
+/** The `components` for react-markdown. **Must be a module-level constant**: building one on each render makes
+ *  a new object, react-markdown then thinks the config changed, and `Segment`'s memoization becomes pointless */
 export const chatMarkdown: Components = {
-  // `node` 是 react-markdown 递进来的 hast 节点，不是 DOM 属性——落到 <a> 上
-  // React 会在控制台里抱怨一次
+  // `node` is the hast node react-markdown passes down, not a DOM attribute: if it lands on an <a>,
+  // React complains once in the console
   a: ({ node: _node, href, children, ...rest }) => {
-    /* remend 把流式中还没收尾的 `[2` 补成一个链接（`streamdown:incomplete-link`），
-       于是一个正在打出来的引用会先闪成一个蓝色的「2」再变成角标。它本来就不是
-       链接，按原样的文字画 */
+    /* remend completes a `[2` still open mid-stream into a link (`streamdown:incomplete-link`),
+       so a citation being typed flashes first as a blue "2" before turning into a superscript. It is not a link to begin with,
+       so draw it as plain text as-is */
     if (href?.startsWith("streamdown:")) return <>{children}</>;
     const ns = citeHref(href);
     if (!ns) {
@@ -40,7 +40,7 @@ export const chatMarkdown: Components = {
         </a>
       );
     }
-    // `[1, 2]` 是两条来源：画成两个各自可点的角标，别让人点一个号跳出两段原文
+    // `[1, 2]` is two sources: drawn as two superscripts, each clickable; do not let one number open two passages of original text
     return (
       <>
         {ns.map((n) => (
@@ -49,19 +49,19 @@ export const chatMarkdown: Components = {
       </>
     );
   },
-  // 代码块带一个复制（#936）：人从回答里抄走的，最常见的就是 SQL
+  // Code blocks get a copy button (#936): what people most often copy out of an answer is SQL
   pre: ({ node: _node, ...rest }) => <CodeBlock {...rest} />,
 };
 
 function InlineCite({ n }: { n: number }) {
   const sources = useContext(SourcesCtx);
   const s = sources.find((x) => x.n === n);
-  // 流式中来源比正文晚到：先画成静的，那条到了自己就变成可点的
+  // Mid-stream, sources arrive later than the body: draw them static first; when one arrives, it turns clickable on its own
   if (!s) return <CiteMark n={n} />;
   return <CiteChip n={n} preview={<SourcePreview s={s} />} />;
 }
 
-/** 落款：只列正文引到的那几条（见 citedSources），一个面板装一组 */
+/** Footnotes: list only the entries the body cites (see citedSources), one panel holds one group */
 export function SourceList({ sources }: { sources: Source[] }) {
   return (
     <div className="mt-2 glass rounded-panel divide-y divide-line">
@@ -85,16 +85,16 @@ export function SourceList({ sources }: { sources: Source[] }) {
   );
 }
 
-/** 引言节的 heading 就是文章名，避免 "X › X" */
+/** The heading of the intro section is the article's name, to avoid "X › X" */
 function charterTitle(s: Source): string {
   return s.heading && s.heading !== s.filename
     ? `${s.filename} › ${s.heading}`
     : s.filename;
 }
 
-/** 预览：先给检索回来的那段摘录（160 字，立刻有东西看），
- *  整块原文随文档详情到了再换上——同一把 react-query 钥匙，
- *  所以点完「打开原文」那一页是现成的 */
+/** Preview: first show the excerpt returned by the search (160 characters, so there is something to see at once),
+ *  and the full text is swapped in once the document details arrive: the same react-query key,
+ *  so the page you reach after clicking 'Open original' is ready-made */
 function SourcePreview({ s }: { s: Source }) {
   const kbId = useKbId();
   const doc = useQuery({

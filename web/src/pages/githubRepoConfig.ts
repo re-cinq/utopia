@@ -1,14 +1,14 @@
 import type { SourceView } from "../api";
 
-/** 逗号分隔的 glob 拆成列表。留空给 undefined：JSON 里不出现这个键，后端按默认规则筛 */
+/** Splits a comma-separated glob into a list. Leave it empty to give undefined: the key does not appear in the JSON, and the backend filters by its default rules */
 export const globList = (value: string) => {
   const list = value.split(",").map((g) => g.trim()).filter(Boolean);
   return list.length ? list : undefined;
 };
 
-/** 编辑 github_repo / gitlab_repo 来源时提交的配置。保存是整份替换，所以表单里不露面的键
- *  （比如 `max_file_bytes`）从库里那份原样带回去；令牌留空就不发，后端保留原值。
- *  GitLab 把项目路径存在 `project`，GitHub 存在 `repo` */
+/** The config submitted when editing a github_repo / gitlab_repo source. Saving replaces the whole thing, so keys not shown in the form
+ *  (such as `max_file_bytes`) are carried back unchanged from the stored copy; leaving the token empty sends none, and the backend keeps the original value.
+ *  GitLab stores the project path in `project`, GitHub stores it in `repo` */
 export function githubRepoConfig(
   saved: NonNullable<SourceView["config"]>,
   form: { repo: string; authHeader: string; include: string; exclude: string },

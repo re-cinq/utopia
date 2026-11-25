@@ -1,6 +1,6 @@
-/* 对话框：Radix Dialog 打底（焦点困住、Esc、遮罩点击、aria 全在里面），
-   皮是 styles.css 的 u-modal-*。近实底而不是玻璃：确认框要人读一句话然后做一个
-   不可逆的决定，下层正文透上来是干扰（见 .u-modal-panel 上的说明）。 */
+/* Dialog: built on Radix Dialog (focus trapping, Esc, backdrop click and aria are all inside it),
+   the skin is styles.css's u-modal-*. Nearly solid rather than glass: a confirmation asks a person to read one sentence and make an
+   irreversible decision, and body text showing through from below is a distraction (see the note on .u-modal-panel). */
 import { Dialog as RadixDialog } from "radix-ui";
 import { X } from "lucide-react";
 import { useState } from "react";
@@ -20,13 +20,13 @@ export function Dialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   title: ReactNode;
-  /** 标题下的一句说明；也是读屏器念的 description */
+  /** A line of explanation under the title; also the description the screen reader reads out */
   description?: ReactNode;
-  /** 右上角关闭按钮的无障碍名称——页面从 S 里取，组件不认识语言 */
+  /** Accessible name of the close button at the top right: the page takes it from S, and the component does not know the language */
   closeLabel: string;
   width?: "sm" | "md" | "lg";
   children?: ReactNode;
-  /** 右下角的按钮区。危险确认用 DangerConfirm，不在这里拼 */
+  /** The button area at the bottom right. For dangerous confirmations use DangerConfirm; do not assemble them here */
   footer?: ReactNode;
 }) {
   const w = { sm: "w-96", md: "w-[32rem]", lg: "w-[44rem]" }[width];
@@ -50,7 +50,7 @@ export function Dialog({
                     {description}
                   </RadixDialog.Description>
                 ) : (
-                  // Radix 没有 description 会在控制台警告；空的也要有一个
+                  // Radix warns in the console when there is no description; an empty one still needs to be present
                   <RadixDialog.Description className="sr-only">
                     {typeof title === "string" ? title : ""}
                   </RadixDialog.Description>
@@ -73,9 +73,9 @@ export function Dialog({
   );
 }
 
-/* ---------- DangerConfirm（危险操作确认：可要求输入指定文本解锁） ----------
-   和从前一样的接口，皮换成 Dialog。**总是挂载着**（open 恒真）：调用方用
-   条件渲染控制它出现，这跟 Dialog 的 open 属性一样有效，而且旧代码不用改。 */
+/* ---------- DangerConfirm (confirmation of dangerous operations: may require typing specified text to unlock) ----------
+   Same interface as before, with the skin swapped to Dialog. **Always mounted** (open is always true): callers use
+   conditional rendering to control its appearance, which is as effective as the open prop of Dialog, and old code does not need to change. */
 export function DangerConfirm({
   title,
   hint,
@@ -89,14 +89,14 @@ export function DangerConfirm({
 }: {
   title: string;
   hint: string;
-  /** 要求逐字输入的解锁文本（如资源名称）；缺省则直接可确认 */
+  /** The unlock text that must be typed exactly (such as a resource name); if omitted, it can be confirmed directly */
   requireText?: string;
   confirmLabel: string;
   cancelLabel: string;
   busy?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
-  /** 解锁框之下的补充控件（合并弹窗里的理由框）；缺省没有 */
+  /** Supplementary control under the unlock box (the reason box in the merge dialog); absent by default */
   children?: ReactNode;
 }) {
   const [text, setText] = useState("");
@@ -141,11 +141,11 @@ export function DangerConfirm({
   );
 }
 
-/* ---------- FormDialog（编辑弹窗） ----------
-   类、属性、关系、实体、事实区间的改动都在这一个壳里：面板只展示，改动开一扇窗。
-   正文包在 <form> 里——输入框里按 Enter 就是保存；页脚在表单之外，取消与删除
-   不会被当成提交。与 DangerConfirm 一样**总是挂载着**（open 恒真）：调用方条件渲染。
-   删除放在左下角、次要样式：它和保存不是一对，隔开才不会顺手点到 */
+/* ---------- FormDialog (edit dialog) ----------
+   Changes to classes, attributes, relations, entities and fact intervals all live in this one shell: the panel only displays, and edits open a window.
+   The body is wrapped in a <form>: pressing Enter in an input saves; the footer is outside the form, so cancel and delete
+   are not taken as submit. Like DangerConfirm, it is **always mounted** (open is always true): callers render it conditionally.
+   Delete sits at the bottom left in a secondary style: it is not a pair with save, and separating them keeps it from being clicked by accident */
 type DangerAction = {
   label: string;
   disabled?: boolean;
@@ -173,14 +173,14 @@ export function FormDialog({
   width?: "sm" | "md" | "lg";
   saveLabel: string;
   cancelLabel: string;
-  /** 没填够就点不动保存 */
+  /** Save cannot be clicked until everything is filled in */
   canSave?: boolean;
   busy?: boolean;
   onSave: () => void;
   onCancel: () => void;
-  /** 左下角的破坏性动作；缺省没有。**可以给一个，也可以给几个**——
-   *  一个成员既能停用又能移出，两件事影响面不同，不该挤成一个按钮，
-   *  也不该把其中一个赶到弹窗正文里去装成一个字段。 */
+  /** Destructive actions at the bottom left; absent by default. **One or several can be given**:
+   *  a member can both be deactivated and be removed; the two have different scopes of effect, so they should not be squeezed into one button,
+   *  nor should one of them be pushed into the dialog body disguised as a field. */
   danger?: DangerAction | DangerAction[];
   children: ReactNode;
 }) {

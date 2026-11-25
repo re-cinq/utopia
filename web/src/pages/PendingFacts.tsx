@@ -1,9 +1,9 @@
 import { Button, CARD_ACTIONS, Status } from "../ui";
-/* 等人点头的事实（docs/decisions/0015）。
-   一句 remember 抽出的三元组先进待确认队列，不上图；人在这里点头它才进账本。
-   **原句在上，三元组在下**：只列三元组等于要人凭空判断它对不对——
-   实测里 `Acme --?--> 深圳` 那条，人一看原句就知道该拒。
-   两处共用同一行组件：Review 页的「待确认」一档，与 Chat 里跟在 remember 步骤后面的那张卡。 */
+/* Facts awaiting a person's nod (docs/decisions/0015).
+   A triple extracted by a remember step first goes into the pending-confirmation queue and does not reach the graph; it is only booked into the ledger once a person nods here.
+   **Source sentence on top, triple below**: listing only the triple would force the person to judge its correctness out of thin air;
+   in testing, the `Acme --?--> 深圳` entry was one a person would reject at once on reading the source sentence.
+   Two places share the same row component: the "pending" tier on the Review page, and the card that follows a remember step in Chat. */
 import { fmtObjectValue } from "../objectValue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type PendingFactItem } from "../api";
@@ -14,8 +14,8 @@ function ym(iso: string | null): string | null {
   return iso ? iso.slice(0, 7) : null;
 }
 
-/** 记忆落库时正文前面带着 `[YYYY-MM-DD HH:MM] `（`memory::append_episode` 加的时间戳）。
- *  卡片上要的是那句话本身，时间戳是索引用的，剥掉 */
+/** When a memory is stored, the body is prefixed with `[YYYY-MM-DD HH:MM] ` (the timestamp added by `memory::append_episode`).
+ *  The card wants the sentence itself; the timestamp is for indexing, so strip it */
 function sentence(quote: string): string {
   return quote.replace(/^\[\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2})?\]\s*/, "");
 }
@@ -25,9 +25,9 @@ function objectText(f: PendingFactItem): string {
   return fmtObjectValue(f.object_value as Record<string, unknown> | null) ?? "?";
 }
 
-/** 点头是写图的动作，Editor 起步——与服务端 `require_kb(Role::Editor)` 同一口径。
- *  Viewer 看得见提议、看不见按钮：按钮亮着却点不动，等于让人猜自己有没有权限。
- *  查询键与 Library 页共用（`kbOne`），不多打一次接口 */
+/** Nodding is a graph-writing action, so the minimum is Editor, the same bar as the server's `require_kb(Role::Editor)`.
+ *  A Viewer can see the proposal but not the buttons: a button that lights up but cannot be pressed would make people guess whether they have permission.
+ *  The query key is shared with the Library page (`kbOne`), so it does not cost an extra request */
 export function useCanDecide(kbId: string | undefined): boolean {
   const kbDetail = useQuery({
     queryKey: ["kbOne", kbId],
@@ -52,7 +52,7 @@ export function PendingFactRow({
 }) {
   const from = ym(fact.valid_from);
   const to = ym(fact.valid_to);
-  // 开放陈述（0044）带的是照抄的时间词，不是算出来的区间：有词就显示词
+  // Open statements (0044) carry the time words copied verbatim, not an interval computed from them: if there is a word, show the word
   const timeWords = (fact.time_words ?? []).map((t) => t.text).join(" · ");
   const range = timeWords
     ? timeWords
@@ -62,7 +62,7 @@ export function PendingFactRow({
   const qualifiers = fact.qualifiers ?? [];
   return (
     <div className="glass rounded-panel p-4">
-      {/* 原句先出。它是人自己说的，判断的依据就是它 */}
+      {/* The source sentence comes first. It is what the person said, and it is the basis of the judgement */}
       <p className="text-small text-ink-2 italic">“{sentence(fact.quote)}”</p>
       <div className="mt-3 flex items-center gap-2 flex-wrap">
         <span className="text-body font-medium text-ink">{fact.subject_name}</span>
@@ -71,12 +71,12 @@ export function PendingFactRow({
           {fact.predicate_label ? (
             <span>{fact.predicate_label}</span>
           ) : fact.phrase ? (
-            /* 开放陈述：文档自己的话，斜体标明它是原话而不是词表里的词（0044） */
+            /* Open statement: the document's own words; italics mark it as a verbatim quote rather than a word from the vocabulary (0044) */
             <span className="italic text-ink-2" title={S.review.pendingOwnWords}>
               {fact.phrase}
             </span>
           ) : (
-            /* 本体里没有这个关系：显示原话，斜体标明它不是词表里的词（0010） */
+            /* The relation is not in the ontology: show the verbatim wording, in italics to mark that it is not a vocabulary term (0010) */
             <span
               className="italic text-ink-2"
               title={S.review.pendingNoPredicate}
@@ -95,7 +95,7 @@ export function PendingFactRow({
         )}
       </div>
       {qualifiers.length > 0 && (
-        /* 限定按文档的角色词挂着（0044）：金额、对象、比较基准 */
+        /* Qualifiers hang off the document's role words (0044): amount, object, comparison basis */
         <div className="mt-2 flex flex-wrap gap-1">
           {qualifiers.map((q) => (
             <span key={q.role} className="rounded-full bg-surface-2 px-2 py-1 text-fine text-ink-2">
@@ -104,7 +104,7 @@ export function PendingFactRow({
           ))}
         </div>
       )}
-      {/* 与审阅页其余六种卡同一副页脚（CARD_ACTIONS）：动作在左，「谁说的」推到右边 */}
+      {/* The same footer as the other six kinds of card on the review page (CARD_ACTIONS): actions on the left, "who said it" pushed to the right */}
       <div className={CARD_ACTIONS}>
         {canDecide && (
           <>
@@ -137,9 +137,9 @@ export function PendingFactRow({
   );
 }
 
-/** 跟在 remember 步骤后面的确认卡。
- *  抽取是异步的，卡片在任务完成时才长出来（SSE `pending` 事件让查询失效重取）；
- *  回放旧会话时同样按 chunk 取——还有没点头的就照样显示，都处理完了就不占地方。 */
+/** The confirmation card that follows a remember step.
+ *  Extraction is asynchronous: the card grows only when the task completes (the SSE `pending` event invalidates the query and refetches);
+ *  replaying an old session also fetches by chunk, so any still awaiting a nod are shown, and once all are handled they take up no space. */
 export function NodCard({ kbId, chunkId }: { kbId: string; chunkId: string }) {
   const queryClient = useQueryClient();
   const canDecide = useCanDecide(kbId);

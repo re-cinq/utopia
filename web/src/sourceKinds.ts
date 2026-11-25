@@ -1,12 +1,12 @@
 /**
- * 来源的种类——**前端这一份清单只在这里写一次**。
+ * The kinds of source: **this frontend list is written only here, once**.
  *
- * 后端的那一份是 `crates/utopia-core` 里的 `SourceKind` 枚举，创建时的校验与同步时的
- * 分派都从它出；`utopia-store` 的测试会读这个文件，把两边对一遍——任何一边多一种
- * 少一种，`cargo test` 就红。此前两边各自手写，五种连接器加了同步分支、进了界面，
- * 却没进创建的白名单：选得到、建不出来（#247）。
+ * The backend copy is the `SourceKind` enum in `crates/utopia-core`; validation at creation and dispatch during sync both come from it.
+ * The `utopia-store` tests read this file and check the two sides against each other: if either side has one kind more or one fewer,
+ * `cargo test` goes red. Previously each side was hand-written: five connectors added a sync branch and appeared in the UI,
+ * but did not make it into the creation allowlist: they could be picked but not created (#247).
  *
- * 顺序就是建来源对话框里的顺序。
+ * The order is the order in the add-source dialog.
  */
 export const CREATABLE_SOURCE_KINDS = [
   "folder",
@@ -30,12 +30,12 @@ export const CREATABLE_SOURCE_KINDS = [
 
 export type CreatableSourceKind = (typeof CREATABLE_SOURCE_KINDS)[number];
 
-/** 库里还会有两种人建不出来的：每个库自带的 `memory`，与老数据的 `upload` */
+/** Two kinds that cannot be created by a person can still exist in the library: `memory`, which each knowledge base has built in, and `upload`, from old data */
 export type SourceKind = CreatableSourceKind | "memory" | "upload";
 
 /**
- * GitHub、GitLab、Jira 来源同步缺不得的几项填了没有。缺了照样建得出来、存得下，之后每一轮同步
- * 都只会报错。仓库要是 `owner/name`：粘一整条 GitHub 链接进来，后端同样每轮拒收
+ * The few fields that GitHub, GitLab and Jira source sync cannot do without: if they are left empty, creation still succeeds and it is stored, but every sync afterwards
+ *  only reports an error. If the repo is `owner/name`, paste a whole GitHub link in and the backend likewise rejects it on every round.
  */
 export function hasSyncFields(
   kind: string,
@@ -44,10 +44,10 @@ export function hasSyncFields(
   if (kind === "github_issues" || kind === "github_repo") {
     return /^[^/\s]+\/[^/\s]+$/.test(f.repo?.trim() ?? "");
   }
-  // GitLab 的项目路径可以有好几层子组：group/sub/name
+  // A GitLab project path can have several levels of subgroups: group/sub/name
   if (kind === "gitlab_repo" || kind === "gitlab_issues") {
     if (!/^[^/\s]+(\/[^/\s]+)+$/.test(f.repo?.trim() ?? "")) return false;
-    // gitlab_issues 的备注与事件没有令牌就是 401，新建时令牌必填。编辑时不传这一项：留空是保留库里的原值
+    // gitlab_issues notes and events return 401 without a token, so the token is required at creation. Not sent on edit: leaving it empty keeps the value already in the library
     return kind === "gitlab_repo" || f.token === undefined || f.token.trim() !== "";
   }
   if (kind === "jira_issues") return Boolean(f.jiraUrl?.trim() && f.jiraProject?.trim());

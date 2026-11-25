@@ -178,7 +178,7 @@ describe("application chat terminal outcomes", () => {
     await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
     expect(h.onDone).toHaveBeenCalledExactlyOnceWith(false); expect(h.onError).not.toHaveBeenCalled();
   });
-  // 这一问存下的 id 随 conversation 帧一起到：答到一半失败时，页面凭它重答（#936）
+  // The id saved for this question arrives with the conversation frame: when the answer fails halfway, the page uses it to answer again (#936)
   it("hands the stored id of the question to the page with the conversation", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
       'event: conversation\ndata: {"id":"c1","message_id":"m1"}\n\nevent: done\ndata: {}\n\n',

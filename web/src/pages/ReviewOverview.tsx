@@ -1,14 +1,14 @@
-// 审核台的落地页（#377）：一个审核者进来时的三个问题——有多少在等、等了多久、
-// 队列在消还是在涨。数据全来自 GET /review/summary，这里只画，不算：七档的数
-// 与左栏是同一套口径（服务端共用 WHERE），页面上不再各自数一遍。
+// The landing page of the review desk (#377): the three questions a reviewer has on arrival: how many are waiting, how long they have waited,
+// whether the queue is shrinking or growing. All data comes from GET /review/summary; here it is only drawn, not computed. The seven tiers' counts
+// use the same rules as the left column (shared WHERE on the server), so the page no longer counts them separately.
 import type { ReviewSummary } from "../api";
 import { S } from "../i18n";
 import { Chip, GroupLabel, LinkButton } from "../ui";
 
-/** 总览里能点进去的七档 */
+/** The seven tiers you can click into from the overview */
 export type WaitingQueue = keyof ReviewSummary["waiting"];
 
-/** 七档队列在总览里的顺序与左栏一致 */
+/** The order of the seven queue tiers in the overview matches the left column */
 const WAITING: { key: WaitingQueue; label: string }[] = [
   { key: "pending", label: S.review.railPending },
   { key: "duplicates", label: S.review.railDuplicates },
@@ -20,7 +20,7 @@ const WAITING: { key: WaitingQueue; label: string }[] = [
   { key: "alignment", label: S.review.railAlignment },
 ];
 
-/** 从某个时刻到现在整几天；不满一天算 0 */
+/** Whole days from a moment until now; less than a full day counts as 0 */
 function daysSince(iso: string): number {
   return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000));
 }
@@ -29,8 +29,8 @@ function SectionHead({ children }: { children: string }) {
   return <GroupLabel className="mb-3">{children}</GroupLabel>;
 }
 
-/** 一格统计：大数在上，说明在下。卡片本身不是控件——想进那一档，点下面的
- *  句子；数字只是数字 */
+/** One stat cell: big number on top, explanation below. The card itself is not a control: to enter that tier, click the
+ *  sentence below; the number is only a number */
 function Stat({
   value,
   label,
@@ -56,16 +56,16 @@ function Stat({
   );
 }
 
-/** 近 14 天每天一根柱。**等距、含零**：服务端已把没有决定的天补成 0，这里
- *  不再插值。高度按这 14 天里的最大值归一，最矮留 2px 当基线，免得全零
- *  时什么都看不见 */
+/** One bar per day over the past 14 days. **Equidistant, zeros included**: the server has already padded days with no decisions as 0, so here
+ *  there is no more interpolation. Height is normalized to the maximum of these 14 days; the shortest keeps a 2px baseline so that an all-zero
+ *  case still shows something */
 function DailyBars({ days }: { days: ReviewSummary["decided"]["daily"] }) {
   const max = Math.max(1, ...days.map((d) => d.count));
   return (
     <div>
-      {/* 一天一格、格里居中一根柱，**柱子本身有上限宽**。从前是 `flex-1`
-          直接铺满：这张卡横着能有一千多像素，十四根柱子就成了十四块板，
-          有数的那天看着像一堵墙而不是一根柱 */}
+      {/* One cell per day with a bar centered in it, **the bar itself has a maximum width**. It used to be `flex-1`,
+          filling the cell: this card can be over a thousand pixels wide, and fourteen bars became fourteen boards,
+          so a day with data looked like a wall rather than a bar */}
       <div className="flex h-16 items-end gap-1">
         {days.map((d) => (
           <div key={d.day} className="flex h-full flex-1 items-end justify-center">
@@ -95,9 +95,9 @@ export function ReviewOverview({
   onSettings,
 }: {
   summary: ReviewSummary;
-  /** 这个库的治理开关（0025）：关着时 Agent 那一段说明去哪里打开 */
+  /** The governance switch for this library (0025): when off, the Agent section's explanation says where to turn it on */
   governance: boolean;
-  /** 点某一档的「去处理」：落到左栏那一档 */
+  /** The 'handle it' link on a tier: lands on that tier in the left column */
   onPick: (queue: WaitingQueue | "agent") => void;
   onSettings: () => void;
 }) {
@@ -108,7 +108,7 @@ export function ReviewOverview({
 
   return (
     <div className="space-y-8">
-      {/* 等着办的 */}
+      {/* Waiting to be handled */}
       <section>
         <SectionHead>{S.review.overviewWaiting}</SectionHead>
         {waitingTotal === 0 ? (
@@ -133,7 +133,7 @@ export function ReviewOverview({
         )}
       </section>
 
-      {/* 办过的 */}
+      {/* Already handled */}
       <section>
         <SectionHead>{S.review.overviewDecided}</SectionHead>
         <div className="grid grid-cols-2 gap-3">
@@ -186,8 +186,8 @@ export function ReviewOverview({
         )}
       </section>
 
-      {/* agent 做过的（0025）：开着的建议、自动裁了还站着的、人接受 / 改判 / 撤回的。
-          开关关着且什么都没做过时只说一句去哪里打开，不摆四个零 */}
+      {/* agent {/* Done by the agent (0025): open suggestions, auto-decided ones still standing, and those a person accepted / overturned / withdrew.
+          When the switch is off and nothing has happened, say only one sentence about where to turn it on, rather than showing four zeros */}
       <section>
         <SectionHead>{S.review.overviewAgent}</SectionHead>
         {!governance && (
@@ -196,7 +196,7 @@ export function ReviewOverview({
             <LinkButton onClick={onSettings}>{S.review.overviewAgentSettings}</LinkButton>
           </p>
         )}
-        {/* 此刻在跑：一颗脉动的点加还剩几对；没跑但有积压：几对等它 */}
+        {/* Running now: a pulsing dot plus how many pairs are left; not running but backlogged: how many pairs are waiting for it */}
         {agent.running ? (
           <p className="mb-3 flex items-center text-small text-ink-2">
             <span className="mr-2 inline-block h-2 w-2 rounded-full bg-warn animate-pulse" />
@@ -235,7 +235,7 @@ export function ReviewOverview({
         )}
       </section>
 
-      {/* 库的成色 */}
+      {/* The library's health */}
       <section>
         <SectionHead>{S.review.overviewHealth}</SectionHead>
         <p className="mb-3 text-small text-ink-2">{S.review.overviewFacts(health.facts)}</p>

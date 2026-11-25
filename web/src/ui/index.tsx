@@ -1,7 +1,7 @@
-/* Utopia UI 组件库 — 页面只用这里的组件与 styles.css 语义类，不写颜色字面量。
-   规矩在 web/DESIGN.md，守卫在 scripts/style-guard.mjs：字号五档、间距六档、
-   圆角四档、颜色只认令牌、状态（hover/focus/disabled/动效）只在这里定。
-   Dialog / DangerConfirm / Tooltip / Table / Field 各在自己的文件里，从这里再导出。 */
+/* Utopia UI component library — pages use only the components here and the styles.css semantic classes; they write no color literals.
+   The rules live in web/DESIGN.md, the guard in scripts/style-guard.mjs: five font-size steps, six spacing steps,
+   four radius steps, colors recognize only tokens, and states (hover/focus/disabled/motion) are defined only here.
+   Dialog / DangerConfirm / Tooltip / Table / Field each live in their own file and are re-exported from here. */
 import { forwardRef, useEffect, useRef, useState,
   useId,} from "react";
 import type {
@@ -59,8 +59,8 @@ import {
 } from "@/components/ui/radio-group";
 import { Input as ShadInput } from "@/components/ui/input";
 import { Textarea as ShadTextarea } from "@/components/ui/textarea";
-// 表格原件在 ./table 里，下面 re-export；`SkeletonTableRows` 自己也要用，
-// 所以这里另取一份别名，避免与 re-export 的同名标识撞车
+// The original table lives in ./table and is re-exported below; `SkeletonTableRows` is also used here by itself,
+// so a separate alias is taken here, to avoid colliding with the same-named identifier that is re-exported
 import {
   Table as SkelTable,
   TBody as SkelTBody,
@@ -68,12 +68,12 @@ import {
   Tr as SkelTr,
 } from "./table";
 
-/** 应用内左栏统一底座：宽度 + 玻璃面（各页在此之上加 flex/padding）。
-    以最宽的 Ontology（w-64）为基准——rail 装的是名字，宽一档少截断。 */
+/** The shared base for the in-app left column: width + glass surface (each page adds flex/padding on top).
+    Based on the widest, Ontology (w-64): the rail holds names, so one step wider truncates less. */
 export const RAIL_CLS = "w-64 shrink-0 glass-strong border-y-0 border-l-0";
 
-/** 品牌字标：Marcellus 衬线，逐字母从左到右淡入；hover 浮出 ↗，点击去官网。
-    箭头/偏移全部用 em，跟随使用处的字号缩放（登录大标题与顶栏共用）。 */
+/** Brand wordmark: Marcellus serif, fading in letter by letter from left to right; hover floats up ↗, click goes to the website.
+    The arrow and offsets all use em, scaling with the font size where they are used (shared by the login headline and the top bar). */
 export function Wordmark({ className }: { className?: string }) {
   return (
     <a
@@ -103,24 +103,24 @@ export function cn(...parts: (string | false | null | undefined)[]): string {
 }
 
 /* ---------- Button ----------
-   **壳在这里，样子在 shadcn**（`@/components/ui/button`，radix base / nova preset）。
-   这一层留着的理由只有一个：整个应用按这四个名字调按钮——primary 是一屏最多一个的
-   实心，secondary 是描边的默认次要动作，ghost 是行内与工具条，danger 是不可逆的那一下。
-   名字说的是**这一下有多重**，shadcn 那边说的是长什么样，两件事分开，
-   换皮肤不必回头改三十二个页面。 */
+   **The shell lives here; the look comes from shadcn** (`@/components/ui/button`, radix base / nova preset).
+   The reason this layer is kept is only one: the whole app tunes buttons by these four names: primary is the one solid button at most per screen,
+   secondary is the outlined default secondary action, ghost is for inline and toolbars, danger is the irreversible one.
+   the names say **how heavy this action is**, while shadcn says what it looks like; the two are kept apart,
+   so changing the skin does not mean revisiting thirty-two pages. */
 export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 type ButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "color"> & {
   variant?: ButtonVariant;
   size?: "sm" | "md";
-  /** 文字左侧的图标（lucide）。shadcn 那边已经给 svg 定了尺寸与 shrink-0 */
+  /** Icon to the left of the text (lucide). shadcn already sets the svg size and shrink-0 */
   icon?: ReactNode;
-  /** 正在提交：禁用并告诉读屏器 */
+  /** Submitting: disabled, and screen readers are told */
   busy?: boolean;
 };
 
 const VARIANT = {
   primary: "default",
-  // 我们的 secondary 是**描边**的，shadcn 的 secondary 是实心灰，对应的是 outline
+  // Our secondary is **outlined**; shadcn's secondary is a solid gray, which corresponds to outline
   secondary: "outline",
   ghost: "ghost",
   danger: "destructive",
@@ -157,8 +157,8 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   );
 });
 
-/* 只有图标的按钮：正方形；`label` 同时是 aria-label 与 title——
-   没有可见文字的按钮必须有一个名字，这是无障碍的底线 */
+/* Icon-only button: square; `label` is both the aria-label and the title —
+   a button with no visible text must have a name; this is the accessibility baseline */
 export const IconButton = forwardRef<
   HTMLButtonElement,
   Omit<ButtonHTMLAttributes<HTMLButtonElement>, "color"> & {
@@ -184,9 +184,9 @@ export const IconButton = forwardRef<
   );
 });
 
-/** 长得像按钮的**链接**（路由 Link、外链）。给 className 用，不包组件——
- *  `<Link className={buttonLike("ghost")}>`；从前这里写的是 `u-btn u-btn-ghost`
- *  加一串手调的内距，那串内距正是尺寸档存在的理由 */
+/** A **link** that looks like a button (router Link, external link). Used for className, not wrapped in a component:
+ *  `<Link className={buttonLike("ghost")}>`; previously this was written as `u-btn u-btn-ghost`
+ *  hand-tuned padding added on top; that padding is exactly why the size tiers exist */
 export function buttonLike(
   variant: ButtonVariant = "ghost",
   size: "sm" | "md" = "md",
@@ -198,36 +198,36 @@ export function buttonLike(
 }
 
 /* ---------- Input / Textarea ----------
-   同 Button：壳在这里，皮在 shadcn。这一层留的是两件 shadcn 不管的事——
-   **图标槽**（左栏那道带放大镜的筛选框，图标要与下面每一行的图标落在同一条
-   竖线上）和 **bare**（装在别的面里的输入，自己不带皮：切换器顶上的查找、
-   对话的输入区）。尺寸仍按我们的两档说话，映到 shadcn 的高度上。 */
+   Same as Button: the shell is here, the skin is in shadcn. This layer keeps two things that shadcn does not handle:
+   **icon slot** (the magnifier filter box in the left column; its icon must line up with the icons of every row below, on the same
+   vertical line) and **bare** (an input placed inside another surface, with no skin of its own: the find box at the top of the switcher,
+   the chat input area). Sizes still follow our two tiers, mapped onto shadcn's heights. */
 type InputSize = { size?: "sm" | "md" };
 
-/** 没有自己的皮的那一档：去边框、去底、去焦点环，交给外面那块面 */
+/** The tier with no skin of its own: no border, no background, no focus ring; left to the surface around it */
 const BARE =
   "border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:border-0 px-0 dark:bg-transparent";
 
-/** 一个"框"的皮：边、圆角、实底、焦点环，与 `Input` 完全同一副。
- *  下拉、搜索选择器这些**自己画触发器**的控件用它——从前它们蹭的是手写的
- *  `.input-dark`，那个类随按钮/输入框迁移删掉了，于是触发器一夜之间没了皮
- *  （"怎么有没背景的框"）。皮只此一份，谁要谁引。 */
+/** The skin of a "box": border, radius, solid background, focus ring, exactly the same as `Input`.
+ *  Controls that draw their own trigger, such as dropdowns and search selectors, use it — previously they borrowed a hand-written
+ *  `.input-dark`, that class was removed along with the button/input migration, so the triggers lost their skin overnight
+ *  ("why is this box without a background?"). There is only one skin; whoever needs it imports it. */
 export const FIELD_SHELL =
   "flex items-center rounded-control border border-input bg-background text-body text-ink transition-colors outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50";
 
-/** 有皮的那一档**要有实底**。shadcn 默认 `bg-transparent`：在一张卡片里那是对的，
- *  可这套界面的输入框有浮在图谱画布上的（搜索实体、筛选），透明的框底下是网格和
- *  连线，字压在线上，看着就是一团乱。取页面底色——在卡片上它比卡片深一点，
- *  在画布上它是一块实地，两处都读得出"这是一个可以写字的格子"。 */
+/** The tier with a skin **must have a solid background**. shadcn's default is `bg-transparent`: inside a card that is right,
+ *  but this interface's inputs also float over the graph canvas (entity search, filters), where the grid and lines show through a transparent box,
+ *  and the text sits on the lines and looks like a mess. Use the page background: on a card it is a bit darker than the card,
+ *  and on the canvas it is a solid patch; both places read as "a cell you can type in". */
 const FILLED = "bg-background dark:bg-background";
 
 export const Input = forwardRef<
   HTMLInputElement,
   Omit<InputHTMLAttributes<HTMLInputElement>, "size"> &
     InputSize & {
-      /** 左侧的语义图标（筛选框的放大镜）。给了它，className 落在外层容器上 */
+      /** The semantic icon on the left (the filter box's magnifier). When given, className lands on the outer container */
       icon?: ReactNode;
-      /** 没有自己的皮：装在别的面里（切换器面板顶上那道查找） */
+      /** No skin of its own: placed inside another surface (the find box at the top of the switcher panel) */
       bare?: boolean;
     }
 >(function Input({ className, size = "md", icon, bare, ...props }, ref) {
@@ -235,14 +235,14 @@ export const Input = forwardRef<
     <ShadInput
       ref={ref}
       className={cn(
-        /* bare 的输入框**连控件的高度也不要**。`bare` 说的是「它是面板的一段，
-           不是面板里摆的一个控件」，可它还顶着 h-8 + py-1：32 高的盒子里装一行
-           20 的字，剩下那 12px 不是对半分的，字就往下坐了一点，看着是上面的留白
-           比下面大。高度交还给行高，竖向留白交还给外面那块面（告警面板、库切换器
-           都是 py-3），上下就真的一样了。
-           textarea 那一档不动：它的高度本来就是 rows 给的，不是控件档位。 */
+        /* bare input box **does not even want the control height**. `bare` says "it is a part of the panel,
+           not a control placed in the panel", but it still carries h-8 + py-1: a 32px-tall box holding a line of
+           20            20px text, and the remaining 12px is not split in half, so the text sits a bit lower and the space above looks
+           bigger than below. Height goes back to the line height, and vertical spacing goes back to the surrounding surface (alert panel, library switcher
+           all use py-3), so top and bottom really match.
+           textarea that tier is left alone: its height is already given by rows, not a control tier. */
         bare ? cn(BARE, "h-auto py-0") : cn(FILLED, size === "sm" ? "h-7" : "h-8"),
-        // 图标槽：中号图标离左内缘 12px、文字从 34px 起；小号窄一档（8 / 28）
+        // Icon slot: a medium icon sits 12px from the left inner edge, text starts at 34px; the small size is one step narrower (8 / 28)
         icon ? (size === "sm" ? "pl-7" : "pl-[34px]") : null,
         icon ? "w-full" : className,
       )}
@@ -251,12 +251,12 @@ export const Input = forwardRef<
   );
   if (!icon) return control;
   return (
-    /* **外层要跟控件同一个圆角**：带图标时 `className` 落在这一层（宽度、
-       投影都写在调用处），而投影是按这个盒子的形状画的——盒子没有圆角，
-       投影就是方的，里面那个圆角的输入框浮在一块方影子上，四个角看着发虚 */
+    /* **The outer layer must have the same corner radius as the control: with an icon, `className` lands on this layer (width,
+       shadows are written at the call site), and the shadow is drawn to this box's shape: a box without rounded corners,
+       gives a square shadow, and a rounded input inside floats on a square shadow, its four corners looking blurry */
     <div className={cn("relative rounded-control", className)}>
-      {/* 图标离盒左缘 12——与 nav 行的内距同一个数，于是左栏里输入框的放大镜
-          与下面每一行的图标落在同一条竖线上（盒 8 / 图标 20 / 文字 42） */}
+      {/* The icon is 12 from the box's left edge, the same number as the nav row's padding, so the magnifier in the left column's input
+          lines up on the same vertical line as the icons of every row below (box 8 / icon 20 / text 42) */}
       <span
         className={cn(
           "pointer-events-none absolute top-1/2 -translate-y-1/2 text-ink-2",
@@ -274,7 +274,7 @@ export const Textarea = forwardRef<
   HTMLTextAreaElement,
   TextareaHTMLAttributes<HTMLTextAreaElement> &
     InputSize & {
-      /** 没有自己的皮：装在别的面里（对话输入框那种） */
+      /** No skin of its own: placed in another surface (like the chat input) */
       bare?: boolean;
     }
 >(function Textarea({ className, size = "md", bare, ...props }, ref) {
@@ -291,18 +291,18 @@ export const Textarea = forwardRef<
   );
 });
 
-/* 原生 select：弹层无法主题化，所以只给"两三个选项、不值得一个 Dropdown"的地方用 */
-/* `NativeSelect` 去了：页面里一个都不剩。原生 select 的弹层是操作系统画的，
-   主题化不了——同一页上两种下拉，一种是我们的面，一种是系统的灰框。留着一个
-   没人用的组件，只会让它某天又溜回来。小而有界的枚举用 `Dropdown`，
-   成百上千的（本体的类、部署里的人）用 `SearchSelect`。 */
+/* Native select: the popup cannot be themed, so it is used only where there are "two or three options, not worth a Dropdown" */
+/* `NativeSelect` was removed: none are left on any page. A native select's popup is drawn by the OS,
+   cannot be themed: two kinds of dropdown on one page, one our surface and one the system's gray box. Keeping one
+   unused component would only let it sneak back someday. Small bounded enumerations use `Dropdown`,
+   hundreds or thousands of items (ontology classes, people in a deployment) use `SearchSelect`. */
 
-/* ---------- Dropdown（小而有界的枚举） ----------
-   **壳在这里，弹层是 shadcn 的 DropdownMenu**。从前这里连同 SearchSelect 各自
-   实现过一遍「点外面关掉、Esc 关掉、方向键选、焦点回到触发器」，三处弹层三套
-   行为，还各自缺一点：手搓的入口连 `aria-haspopup` 都没有。
-   接口一个字没改（value / options / onChange / icon / menuLabel / footer），
-   页面照旧。 */
+/* ---------- Dropdown (small, bounded enumerations) ----------
+   **The shell is here; the popup is shadcn's DropdownMenu**. Previously this and SearchSelect each
+   implemented "close on outside click, close on Esc, arrow keys to choose, focus returns to the trigger": three popups, three sets of
+   behavior, each missing something: the hand-rolled entry did not even have `aria-haspopup`.
+   The interface is unchanged by a single letter (value / options / onChange / icon / menuLabel / footer),
+   and the pages are as before. */
 export interface DropdownOption {
   value: string;
   label: ReactNode;
@@ -325,11 +325,11 @@ export function Dropdown({
   placeholder?: string;
   className?: string;
   size?: "sm" | "md";
-  /** 触发器左侧的语义图标（说明"这一级是什么"） */
+  /** The semantic icon on the left of the trigger (says "what this level is") */
   icon?: ReactNode;
-  /** 弹层顶部的小标题（同时作为触发器 title 提示） */
+  /** The small heading at the top of the popup (also the trigger's title hint) */
   menuLabel?: string;
-  /** 弹层底部固定操作区（点击后弹层关闭） */
+  /** Fixed action area at the bottom of the popup (the popup closes after a click) */
   footer?: ReactNode;
 }) {
   const current = options.find((o) => o.value === value);
@@ -341,9 +341,9 @@ export function Dropdown({
           title={menuLabel}
           className={cn(
             FIELD_SHELL,
-            /* **调用方给了宽度就不塞 `w-full`**：这里的 `cn` 只是把类拼起来，
-               不做 Tailwind 的冲突消解，两个 `w-` 同时在场时谁赢看生成顺序，
-               不看写的顺序——`className="w-40"` 曾经完全不起作用 */
+            /* **If the caller gives a width, do not add `w-full`**: the `cn` here only joins the classes,
+               does no Tailwind conflict resolution: when two `w-` classes are both present, which wins depends on the generated order,
+               not the order written: `className="w-40"` once had no effect at all */
             className?.includes("w-") ? null : "w-full",
             "justify-between gap-2 text-left",
             size === "sm" ? "h-7 px-2.5 text-small" : "h-8 px-3 text-body",
@@ -379,17 +379,17 @@ export function Dropdown({
   );
 }
 
-/* ---------- SearchSelect（可搜索选择器：无界对象列表专用——成员、父类、数据源…）
-   触发器同 Dropdown，弹层是 shadcn 的 Popover + Command：搜、键盘上下、
-   回车选中、空结果的那一行，全由 Command 管。 */
+/* ---------- SearchSelect (searchable selector: only for unbounded object lists — members, parent classes, data sources…)
+   The trigger is the same as Dropdown; the popup is shadcn's Popover + Command: search, keyboard up/down,
+   Enter to select, and the empty-result row, are all managed by Command. */
 export interface SearchSelectOption {
   value: string;
   label: string;
-  /** 跟在名字后面的一小行（邮箱、类型、路径），也参与搜索 */
+  /** A small line after the name (email, type, path); it also takes part in search */
   hint?: string;
-  /** 树形缩进的层级（父类选择器用它） */
+  /** Tree indentation level (the parent-class selector uses it) */
   indent?: number;
-  /** 同组的选项不在搜索时排在一个组名下面，显示 `short`；搜索时照旧显示 `label` */
+  /** Options of the same group are not listed under a group name while searching; they show `short`, while search still shows `label` */
   group?: string;
   short?: string;
 }
@@ -408,7 +408,7 @@ export function SearchSelect({
   placeholder?: string;
   className?: string;
   size?: "sm" | "md";
-  /** 只影响弹层高度，保留是为了调用处不改 */
+  /** Affects only the popup height; kept so that call sites do not change */
   maxVisible?: number;
 }) {
   const [open, setOpen] = useState(false);
@@ -422,9 +422,9 @@ export function SearchSelect({
           aria-expanded={open}
           className={cn(
             FIELD_SHELL,
-            /* **调用方给了宽度就不塞 `w-full`**：这里的 `cn` 只是把类拼起来，
-               不做 Tailwind 的冲突消解，两个 `w-` 同时在场时谁赢看生成顺序，
-               不看写的顺序——`className="w-40"` 曾经完全不起作用 */
+            /* **If the caller gives a width, do not add `w-full`**: the `cn` here only joins the classes,
+               does no Tailwind conflict resolution: when two `w-` classes are both present, which wins depends on the generated order,
+               not the order written: `className="w-40"` once had no effect at all */
             className?.includes("w-") ? null : "w-full",
             "justify-between gap-2 text-left",
             size === "sm" ? "h-7 px-2.5 text-small" : "h-8 px-3 text-body",
@@ -466,18 +466,18 @@ export function SearchSelect({
   );
 }
 
-/* ---------- MultiSearchSelect（多选版 SearchSelect） ---------- */
+/* ---------- MultiSearchSelect (multi-select version of SearchSelect) ---------- */
 
 /**
- * 多选 + 搜索。与 [`SearchSelect`] 同一套语汇与键盘操作，三处不同：
+ * Multi-select + search. The same vocabulary and keyboard operation as [`SearchSelect`]; three differences:
  *
- * - **已选的显示在输入框上方**，各带一个移除按钮。不显示在下拉里的原因是
- *   下拉一关就看不见了，而"我到底选了哪些"是随时要看的
- * - **选完不关**：多选多半要连点几个，每次都重新聚焦是折磨
- * - 已选项在列表里带勾，再点一次是取消
+ * - **Selected items show above the input, each with a remove button. The reason they are not shown in the dropdown is
+ *   the dropdown closes and they vanish, while "what exactly have I chosen" is something to check at any time
+ * - **Stays open after selecting**: multi-select usually means clicking several in a row, and refocusing every time is torture
+ * -  * - Selected items carry a check in the list; clicking again deselects
  *
- * 选项多到几百个时（大本体就是这个量级）它仍然可用——这正是它取代芯片墙的理由：
- * 芯片墙的高度随类数线性增长，搜索框不随。
+ * It stays usable when options number in the hundreds (a large ontology is about this size): this is exactly why it replaced the chip wall:
+ * the chip wall's height grows linearly with the number of classes, while the search box does not.
  */
 export function MultiSearchSelect({
   values,
@@ -492,7 +492,7 @@ export function MultiSearchSelect({
   options: SearchSelectOption[];
   onToggle: (v: string) => void;
   placeholder?: string;
-  /** 一个都没选时显示的话。多选留空往往是有意义的（"不限"），不是没填 */
+  /** The text shown when nothing is selected. Leaving a multi-select empty often means something ("no limit"), not that it was not filled in */
   emptyHint?: string;
   className?: string;
   maxVisible?: number;
@@ -544,8 +544,8 @@ export function MultiSearchSelect({
       {picked.length === 0 && emptyHint && (
         <p className="mb-1 text-fine text-ink-2">{emptyHint}</p>
       )}
-      {/* 图标只对输入框定位。从前它相对整个组件居中，而组件里输入框上面
-          还有一行已选项或空态提示，"一半高"就落到了输入框的上方（#288） */}
+      {/* The icon is positioned relative to the input only. Previously it was centered on the whole component, and with the input above it
+          there is a row of selected items or an empty-state hint, so "half height" landed above the input (#288) */}
       <div className="relative">
         <SearchIcon
           size={11}
@@ -579,7 +579,7 @@ export function MultiSearchSelect({
               e.preventDefault();
               toggle(visible[active].value);
             } else if (e.key === "Backspace" && !query && picked.length) {
-              // 空输入时退格删掉最后一个 —— 与各家 token 输入框一致
+              // Backspace on empty input removes the last one, consistent with other token inputs
               onToggle(picked[picked.length - 1].value);
             }
           }}
@@ -658,7 +658,7 @@ export function ColorPicker({
 }: {
   value: string;
   onChange: (v: string) => void;
-  /** 给定时，色井渲染"形状 + 颜色"而不是整块填充（方形是直角，与图谱节点一致） */
+  /** When given, the color well renders "shape + color" instead of a full fill (a square has right angles, consistent with graph nodes) */
   shape?: "circle" | "square";
 }) {
   const [open, setOpen] = useState(false);
@@ -683,7 +683,7 @@ export function ColorPicker({
 
   return (
     <div ref={rootRef} className="relative inline-block">
-      {/* 触发器：当前颜色色块（Figma 式 color well）；带 shape 时渲染形状 + 颜色 */}
+      {/* Trigger: the current color block (Figma-style color well); with shape it renders shape + color */}
       {shape ? (
         <button
           type="button"
@@ -706,7 +706,7 @@ export function ColorPicker({
         />
       )}
       {open && (
-        // 显式宽度：绝对定位的收缩宽度会被 inline-block 触发器的容器块钳死
+        // Explicit width: the shrink width of absolute positioning would be pinned by the container block of the inline-block trigger
         <div className="u-menu-glass u-pop-in u-pop-in-tl absolute z-50 left-0 top-full mt-2 w-56 rounded-overlay p-3 u-lift-strong">
           <div className="grid grid-cols-8 gap-1.5 mb-2.5">
             {ENTITY_PALETTE.map((c) => (
@@ -743,23 +743,23 @@ export function ColorPicker({
   );
 }
 
-/* ---------- Pager（列表分页条：不足一页时自动隐藏） ---------- */
+/* ---------- Pager (list pagination bar: automatically hidden when there is less than one page) ---------- */
 export function Pager({
   total,
   pageSize,
   page,
   onPage,
   always,
-  /** 覆盖默认的上边距。默认 `mt-3` 适合跟在列表后面；
-      放进一个已经有内边距的底栏时传 `""` 去掉它 */
+  /** Overrides the default top margin. The default `mt-3` suits following a list;
+      pass `""` to remove it when placed in a footer bar that already has padding */
   className = "mt-3",
 }: {
   total: number;
   pageSize: number;
   page: number;
   onPage: (p: number) => void;
-  /** 只有一页也照样显示。给的是**固定底栏**用：那条栏本来就在那儿，
-      分页器一藏，它就成了一道没有内容的空边 */
+  /** Shown even with only one page. This is for the **fixed footer**: that bar is always there,
+      and if the pager is hidden, it becomes an empty edge with no content */
   always?: boolean;
   className?: string;
 }) {
@@ -793,7 +793,7 @@ export function Pager({
   );
 }
 
-/** 分页切片辅助：返回当前页数据与安全页号。 */
+/** Pagination slice helper: returns the current page's data and a safe page number. */
 export function pageSlice<T>(
   items: T[],
   page: number,
@@ -804,7 +804,7 @@ export function pageSlice<T>(
   return { rows: items.slice(safe * pageSize, (safe + 1) * pageSize), safe };
 }
 
-/* ---------- Panel（玻璃面板） ---------- */
+/* ---------- Panel (glass panel) ---------- */
 export function Panel({
   strong = false,
   className,
@@ -823,18 +823,18 @@ export function Panel({
   );
 }
 
-/* ---------- SettingsCard（一个保存单位） ----------
-   设置页里的一张卡：标题、一句说明、字段，底下一条横栏——左边是约束或代价，
-   右边是这张卡自己的保存。**边框圈的是这个按钮管到哪儿**：改了名字点保存，
-   不该把下面四个开关一起送上去（DESIGN.md 6）。
-   保存用 secondary：一屏最多一个 primary（规矩 5），而设置页上每张卡都有一个。 */
+/* ---------- SettingsCard (one save unit) ----------
+   A card in the settings page: title, one line of explanation, fields, and a horizontal bar below: on the left the constraint or cost,
+   on the right this card's own save. **The border marks what this button covers**: rename, press save,
+   and the four toggles below should not be sent along (DESIGN.md 6).
+   Save uses secondary: at most one primary per screen (rule 5), yet every card on the settings page has one. */
 export function SettingsCard({
   title,
-  /** 标题下的一句：这个设置是什么 */
+  /** A line under the title: what this setting is */
   hint,
-  /** 底栏左边的一句：约束、代价、什么时候生效 */
+  /** A line on the left of the footer: constraint, cost, when it takes effect */
   note,
-  /** 底栏右边：通常是这张卡的保存按钮 */
+  /** On the right of the footer: usually this card's save button */
   action,
   className,
   children,
@@ -854,8 +854,8 @@ export function SettingsCard({
         {children && <div className="mt-4">{children}</div>}
       </div>
       {(note || action) && (
-        /* 底栏只靠一条线与上面分开，不另铺一层面：surface 的三档是静止/悬停/选中，
-           拿悬停那档当静止的底会让这条栏看起来一直被指着 */
+        /* The footer is separated from the above only by a line, with no extra surface layer: the three surface states are rest / hover / selected,
+           using the hover state as the resting background would make this bar look like it is always being pointed at */
         <div className="flex items-center justify-between gap-4 border-t border-line px-6 py-3">
           <div className="min-w-0 flex-1 text-small leading-relaxed text-ink-2">{note}</div>
           <div className="flex shrink-0 items-center gap-3">{action}</div>
@@ -865,13 +865,13 @@ export function SettingsCard({
   );
 }
 
-/* ---------- StatusCell（表里的一格状态） ----------
-   **顺利就是普通文字，出事才有颜色。** 一列里每行都挂着一个彩色胶囊时，
-   颜色不再指示任何东西——十二个「Ready」和一个「Failed」长得一样重，
-   眼睛得逐行读才找得到坏的那一行。所以状态词就是次要色的一句话，
-   失败在前面加一个红色的叹号：**红的是那个符号，不是整句话**，
-   一列扫下来只有几个红点跳出来。
-   给了 onClick 就是可点的（点开看报错原文）。 */
+/* ---------- StatusCell (a status cell in a table) ----------
+   **Success is plain text; color appears only when something goes wrong.** When every row in a column carries a colored pill,
+   color no longer indicates anything: twelve "Ready" and one "Failed" look equally heavy,
+   and the eye has to read row by row to find the bad one. So the status word is a sentence in the secondary color,
+   with a red exclamation mark in front of failures: **the red is the symbol, not the whole sentence**,
+   so scanning down a column only a few red dots stand out.
+   Given an onClick, it is clickable (opens the original error text). */
 export function StatusCell({
   danger,
   onClick,
@@ -909,14 +909,14 @@ export function StatusCell({
   );
 }
 
-/* ---------- Status（一个状态） ----------
-   **颜色只上那个点，字不上色。**从前状态是一枚填色的胶囊（绿底绿字的
-   "Confirmed"、琥珀底琥珀字的 "Pending"），一列表格里十几个填色块，
-   眼睛先看见的是一片颜色，而不是那一列在说什么。点只占它该占的那一点地方，
-   颜色仍然分得出成没成、等不等人，字回到正文的灰。
+/* ---------- Status (one status) ----------
+   **Color goes only on the dot; the text is not colored.** Previously a status was a filled pill (green background with green text
+   "Confirmed", amber background with amber text for "Pending"): a dozen filled blocks in one table column,
+   the eye first sees a field of color, not what that column is saying. A dot takes only the small space it should take,
+   the colors still tell apart done from not done, and waiting on someone or not, while the text returns to the body gray.
 
-   `Chip` 留给**不是状态**的东西：计数、库名、公理名、"派生"这类标记——
-   它们是贴在内容上的标签，本来就该有个盒子把自己圈出来。 */
+   `Chip` is kept for things that are **not statuses**: counts, library names, axiom names, markers like "derived" —
+   they are labels stuck on content and should have a box to frame themselves. */
 export function Status({
   tone = "neutral",
   pulse,
@@ -925,7 +925,7 @@ export function Status({
   children,
 }: {
   tone?: ChipTone;
-  /** 这件事**正在进行**：点跟着呼吸。给「agent 正在裁这一对」这种活状态用 */
+  /** This thing is **in progress**: the dot breathes. Used for live states like "the agent is adjudicating this pair" */
   pulse?: boolean;
   className?: string;
   title?: string;
@@ -958,7 +958,7 @@ const STATUS_DOT: Record<ChipTone, string> = {
   contest: "bg-contest",
 };
 
-/* ---------- Chip（状态胶囊） ---------- */
+/* ---------- Chip (status pill) ---------- */
 export type ChipTone =
   "neutral" | "info" | "success" | "warn" | "danger" | "violet" | "contest";
 
@@ -972,20 +972,20 @@ export function Chip({
   tone?: ChipTone;
   className?: string;
   title?: string;
-  /** 给了就是一个按钮（点开看失败原文那种） */
+  /** Given, it is a button (like the one that opens the original failure text) */
   onClick?: () => void;
   children: ReactNode;
 }) {
-  /* 形状走 shadcn 的 Badge，**颜色仍是我们的语义色**：Badge 只有
-     default / secondary / destructive 这几档，而 chip 在这套语汇里说的是
-     状态——ready、3 dropped、contested、derived 各有各的色，它们是令牌，
-     不是变体。所以底用 outline 的骨架，色按 tone 贴上去。 */
+  /* The shape follows shadcn's Badge, **the color is still our semantic color**: Badge only has
+     default / secondary / destructive tiers, while in this vocabulary a chip says
+     a status — ready, 3 dropped, contested, derived each have their own color; they are tokens,
+     not variants. So the base uses outline's skeleton, and the color is applied by tone. */
   const cls = cn(
     badgeVariants({ variant: "outline" }),
-    /* **方角，不是药丸**：shadcn 的 badge 底子是 `rounded-4xl`，一位数的计数
-       会缩成一个圆点。这套语汇里 chip 说的是状态（Ready、3 dropped、
-       contested），是一块牌子不是一颗豆子，走 cell 那一档（规矩 3）。
-       几何（高 20、内距 8、字号 xs）仍照 shadcn 的来 */
+    /* **Square corners, not a pill**: shadcn's badge base is `rounded-4xl`, and a single-digit count
+       shrinks to a dot. In this vocabulary a chip says a status (Ready, 3 dropped,
+       contested), a label plate, not a bean, so it uses the cell tier (rule 3).
+       the geometry (height 20, padding 8, font size xs) still comes from shadcn */
     "rounded-cell border-transparent",
     CHIP_TONE[tone],
     onClick && "cursor-pointer",
@@ -1005,8 +1005,8 @@ export function Chip({
   );
 }
 
-/** chip 的样子，给不能是组件的地方用：行内那个 `role="link"` 的 span
- *  （外面已经是一条可点的行，按钮里不能再套按钮） */
+/** chip look, for places that cannot be a component: the inline span with `role="link"`
+ *  (the outside is already a clickable row, and a button cannot be nested inside a button) */
 export function chipLike(tone: ChipTone = "neutral", className?: string): string {
   return cn(
     badgeVariants({ variant: "outline" }),
@@ -1026,7 +1026,7 @@ const CHIP_TONE: Record<ChipTone, string> = {
   violet: "bg-violet/12 text-violet",
 };
 
-/* ---------- LinkButton（长得像一句话的动作：表格行末的"重抽""删除"） ---------- */
+/* ---------- LinkButton (an action that looks like a sentence: "re-extract" and "delete" at the end of a table row) ---------- */
 export function LinkButton({
   tone = "default",
   underline,
@@ -1035,7 +1035,7 @@ export function LinkButton({
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & {
   tone?: "default" | "danger";
-  /** 带下划线（u-link 那种） */
+  /** With an underline (like u-link) */
   underline?: boolean;
 }) {
   return (
@@ -1052,7 +1052,7 @@ export function LinkButton({
   );
 }
 
-/* ---------- ChoiceCard（勾选框藏起来的可选卡片：本体包那种并排的几张） ---------- */
+/* ---------- ChoiceCard (selectable cards with the checkbox hidden: the several side-by-side cards like the ontology packs) ---------- */
 export function ChoiceCard({
   checked,
   onChange,
@@ -1062,7 +1062,7 @@ export function ChoiceCard({
 }: {
   checked: boolean;
   onChange: () => void;
-  /** 读屏器念的名字 */
+  /** The name screen readers read out */
   label: string;
   className?: string;
   children: ReactNode;
@@ -1092,17 +1092,17 @@ export function PageTitle({
   return <h2 className={cn("u-title text-title", className)}>{children}</h2>;
 }
 
-/** 一张卡片底下那排动作的形状。**只此一份**：审阅页有七种卡（重复对、待确认的
- *  事实、时态冲突、过期断言、本体缺陷、公理冲突、人提的事实），从前它们三种站法
- *  都有——三张靠右下、三张靠左下、两张干脆挂在某一行的右端。一个人从一张卡走到
- *  下一张，每次都要重新找「裁决在哪」。
+/** The shape of the row of actions under a card. **There is only one**: the review page has seven kinds of card (duplicate pairs, facts awaiting confirmation,
+ *  temporal conflicts, stale assertions, ontology defects, axiom conflicts, facts a person raised); previously they were placed three different ways:
+ *  three at the bottom right, three at the bottom left, and two hung at the right end of a row. A person moving from one card to
+ *  the next had to find "where is the decision" again every time.
  *
- *  规矩两条：**动作在卡片左下**，与卡片里每一行文字同一条左边线，一列卡下来
- *  按钮落在同一条竖线上，指针几乎不用横向移动；**会换行**，因为有的卡有五六个
- *  选项，靠右排一旦折行，左缘就参差不齐。
+ *  Two rules: **actions sit at the bottom left of the card**, on the same left edge as each line of text in the card, so down a column of cards
+ *  the buttons fall on one vertical line and the pointer barely moves sideways; **they wrap**, because some cards have five or six
+ *  options, and right-aligned lists would go ragged at the left edge once they wrap.
  *
- *  还有一条不在这个类里、但同样是规矩：**危险的那一个永远排在最后**。左对齐之后
- *  最左边是指针最先够到的位置，那里不该是「拒绝」。 */
+ *  There is one more rule, not in this class but just as firm: **the dangerous one always goes last**. After left alignment,
+ *  the far left is where the pointer reaches first, and it should not be "reject". */
 export const CARD_ACTIONS = "mt-3 flex flex-wrap items-center gap-2";
 
 /* ---------- EmptyState ---------- */
@@ -1130,11 +1130,11 @@ export function Loading({ children }: { children: ReactNode }) {
   return <div className="p-8 text-body text-ink-2">{children}</div>;
 }
 
-/** 一条骨架。**形状已知的东西用它**：一行标题、一枚色点、一列树。
+/** A skeleton bar. **Use it for things whose shape is known**: a title row, a color dot, a column of tree.
  *
- * 尺寸由调用方给（高度用字号那几档的高度，宽度用 `style`——条的长短是照
- * 真内容的长短分布随手定的，一列等宽看着像进度条不像清单）。圆角固定 cell：
- * 它顶替的是一格内容，不是一块面。 */
+ * The caller gives the size (height from the font-size tiers, width via `style`; the bar's length is set to follow
+ * the real content's length distribution, not arbitrarily fixed, since equal widths in a column look like a progress bar rather than a list). The corner radius is fixed to cell:
+ * it stands in for one cell of content, not a surface. */
 export function Skeleton({
   className,
   style,
@@ -1147,25 +1147,25 @@ export function Skeleton({
   );
 }
 
-/** 一列还没到的行。左栏、列表，任何「将来是一行一行」的地方都用它。
+/** Rows of a column that have not arrived yet. The left column, lists: any place that will be rows one by one uses it.
  *
- * 每行只有一条通栏的灰条：**不画图标位、不画右端、不模拟缩进**。那些都是此刻
- * 还不知道的东西，画出来就是编的——多一个灰方块，读者会当它是复选框或色点；
- * 假装一层缩进，等来的树要是形状不同，那一下比不缩进更晃。骨架能诚实说出口的
- * 只有两件事：**将来这里是一行一行的，每行多高**。
+ * Each row is just one full-width gray bar: **no icon slot, no right end, no simulated indentation**. Those are all things
+ * not yet known, and drawing them would be making things up: an extra gray square, and readers would take it for a checkbox or color dot;
+ * faking one level of indentation, and if the tree that arrives has a different shape, that jolt is worse than no indentation. What a skeleton can honestly say
+ * is only two things: **here it will be rows one by one, and how tall each row is**.
  *
- * 行本身就是真的那个 `Row`，所以行高、内边距、圆角跟真列表逐像素一致，内容
- * 落下来时一行不跳。`density` 要跟宿主列表给的那一档一样。
+ * The row itself is the real `Row`, so row height, padding and corner radius match the real list pixel for pixel, and the content
+ * does not jump a row when it lands. `density` must match the tier the host list gives.
  *
- * （放在这里而不是 `Row` 后面，是为了让三个等待用的原件挨着；函数声明会提升，
- * 引用后面的 `Row` 没问题。） */
+ * (It sits here rather than after `Row` so that the three waiting primitives sit together; function declarations are hoisted,
+ * so referencing `Row` later is fine.) */
 export function SkeletonRows({
   rows = 8,
   density = "list",
   className,
 }: {
-  /** 画几行。**够说明"这里将来是一列"就行**，不必铺满：右边那个转圈已经
-   *  说了正在加载，一列灰条从头排到底只是一堵条纹墙。 */
+  /** How many rows to draw. **Enough to show "this will be a column here"**; no need to fill the space: the spinner on the right already
+   *  says it is loading; a column of gray bars running all the way down is just a striped wall. */
   rows?: number;
   density?: RowDensity;
   className?: string;
@@ -1173,9 +1173,9 @@ export function SkeletonRows({
   return (
     <div className={cn("u-rail-list", className)} aria-hidden>
       {Array.from({ length: rows }, (_, i) => (
-        /* 灰条**直接当行的内容**，不再套一层"撑满行高"的壳。套了之后一行 30px
-           里只有 10px 是条，上下各空 10px，一列看着比真列表松得多。现在一行
-           就是 4 + 16 + 4：条厚得像一行字，行距也回到该有的样子 */
+        /* The gray bar **is directly the row's content**, with no extra shell that "fills the row height". Wrapped like that, a 30px row
+           has only 10px of bar and 10px empty above and below, so a column looks much looser than the real list. Now a row
+           is 4 + 16 + 4: the bar is as thick as a line of text, and the line spacing is back to what it should be */
         <Row key={i} density={density} flush disabled>
           <Skeleton className="h-4 w-full" />
         </Row>
@@ -1184,14 +1184,14 @@ export function SkeletonRows({
   );
 }
 
-/** 画布中间的等待记号。**盖在已经画好的东西上，不是替掉它们**——网格、缩放塔、
- *  静态图例都跟数据无关，先画出来，这一层只说中间那块还在路上。
+/** The waiting mark in the middle of the canvas. **It sits over what has already been drawn; it does not replace it**: the grid, the zoom tower,
+ *  and the static legends are all independent of data and drawn first; this layer only says the middle part is still on its way.
  *
- * 比行内的转圈大一档（28）：它要在一整屏画布的正中被一眼看到，而不是挤在
- * 一行字旁边。`pointer-events-none` 让底下的控件照常能点——等的时候缩放、
- * 归位这些事本来就做得了。
+ * One step bigger than the inline spinner (28): it must be seen at a glance in the exact middle of a whole screen of canvas, not squeezed
+ * next to a line of text. `pointer-events-none` lets the controls underneath still be clicked: zooming and
+ * resetting the view are still possible while waiting.
  *
- * 宿主要有 `relative`（两张画布都是 `h-full relative`）。 */
+ * The host must have `relative` (both canvases are `h-full relative`). */
 export function CanvasLoading({ size = 28 }: { size?: number }) {
   return (
     <div className="absolute inset-0 grid place-items-center pointer-events-none">
@@ -1200,14 +1200,14 @@ export function CanvasLoading({ size = 28 }: { size?: number }) {
   );
 }
 
-/** 表格版的骨架行。
+/** The table version of a skeleton row.
  *
- * 与 `SkeletonRows` 同一条道理，只是行的形状换成表的：用**真的 `Tr` / `Td`**
- * 搭，行高就由构造保证（8 + 22 + 8 = 38），不靠写死一个数。
+ * Same reasoning as `SkeletonRows`, only the row's shape is a table's: it is built from **the real `Tr` / `Td`**,
+ * so the row height is guaranteed by construction (8 + 22 + 8 = 38), not by a hard-coded number.
  *
- * 这一条是踩出来的：表格的骨架一度直接用了左栏那一档的行（24px），比真表行
- * 矮了三分之一，一列排下来又矮又密，一眼就看得出不是那张表将来的样子。
- * 骨架说的是"等的是什么形状"，形状说错了就不如不说。 */
+ * This one was learned the hard way: the table skeleton once used the left column's row tier (24px), which is
+ * a third shorter than real table rows; a column of them looked short and dense, and it was obvious at a glance that it was not what that table would look like.
+ * A skeleton says "what shape is being waited for"; if the shape is wrong, it is better to say nothing. */
 export function SkeletonTableRows({ rows = 8 }: { rows?: number }) {
   return (
     <SkelTable>
@@ -1215,8 +1215,8 @@ export function SkeletonTableRows({ rows = 8 }: { rows?: number }) {
         {Array.from({ length: rows }, (_, i) => (
           <SkelTr key={i}>
             <SkelTd>
-              {/* 这一层撑的是一个行高（见 styles.css 的 .u-skel-line）：
-                  真单元格里是一行字，少了它整表矮一截 */}
+              {/* This layer holds one row height (see .u-skel-line in styles.css):
+                  a real cell holds a line of text; without it the whole table is shorter */}
               <span className="u-skel-line">
                 <Skeleton className="h-4 w-full" />
               </span>
@@ -1228,15 +1228,15 @@ export function SkeletonTableRows({ rows = 8 }: { rows?: number }) {
   );
 }
 
-/** 转圈。**形状未知的东西用它**：一整块区域还不知道会画成图、表还是空。
- *  形状已知的地方别用它——那里 `Skeleton` 能多说一句"等的是什么"。 */
+/** A spinner. **Use it for things whose shape is unknown**: a whole region that does not yet know whether it will draw a chart, a table or be empty.
+ *  Do not use it where the shape is known: there `Skeleton` can say one more thing about "what is being waited for". */
 export function Spinner({
   size = 16,
   label,
   className,
 }: {
   size?: number;
-  /** 读屏用；不给就整个当装饰藏起来 */
+  /** For screen readers; if not given, the whole thing is hidden as decoration */
   label?: string;
   className?: string;
 }) {
@@ -1255,7 +1255,7 @@ export function ErrorText({ children }: { children: ReactNode }) {
   return <p className="text-body text-danger">{children}</p>;
 }
 
-/* ---------- GithubMark（lucide 无品牌图标，官方 mark 内联） ---------- */
+/* ---------- GithubMark (lucide has no brand icons, so the official mark is inlined) ---------- */
 export function GithubMark({ size = 16 }: { size?: number }) {
   return (
     <svg
@@ -1270,10 +1270,10 @@ export function GithubMark({ size = 16 }: { size?: number }) {
   );
 }
 
-/* ---------- PageHeader（栏右内容区的页级标题） ----------
-   display 字号（规矩 1：页标题，也只有页标题）+ 一句副标题 + 右端的动作。
-   每一页都从这里拿标题，字号、副标题的颜色、到正文的距离就不会各写各的。
-   className 给了就替掉默认的 mb-6（外层已经用 space-y 排的地方传 mb-2 之类）。 */
+/* ---------- PageHeader (page-level title for the right content area) ----------
+   display font size (rule 1: page titles, and only page titles) + one line of subtitle + actions at the right end.
+   Every page takes its title from here, so font size, subtitle color and distance to the body are not each written their own way.
+   className when given, replaces the default mb-6 (where the outer layer already spaces with space-y, pass mb-2 or the like). */
 export function PageHeader({
   title,
   sub,
@@ -1287,9 +1287,9 @@ export function PageHeader({
 }) {
   return (
     <div className={cn(className ?? "mb-6")}>
-      {/* 动作跟**标题那一行**走，不跟「标题 + 副标题」这一整块走：整块居中的话，
-          有副标题时按钮就浮在两行中间，看着既不属于标题也不属于说明。
-          items-baseline：按钮上的字与标题坐在同一条基线上 */}
+      {/* Actions follow **the title row**, not the whole "title + subtitle" block: if the whole block were centered,
+          with a subtitle the button would float between two lines, looking as if it belonged to neither title nor explanation.
+          items-baseline: the text on the button sits on the same baseline as the title */}
       <div className="flex items-baseline justify-between gap-4">
         <h1 className="u-title min-w-0 text-display break-words">{title}</h1>
         {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
@@ -1299,7 +1299,7 @@ export function PageHeader({
   );
 }
 
-/* ---------- SectionMark（分区字标：Docs/账户层等，逐字母入场，点击回应用） ---------- */
+/* ---------- SectionMark (section wordmark: Docs / account layer etc., letters enter one by one, clicking returns to the app) ---------- */
 import { Link as RouterLink } from "@tanstack/react-router";
 export function SectionMark({
   text,
@@ -1323,7 +1323,7 @@ export function SectionMark({
           className="u-letter"
           style={{ animationDelay: `${80 + i * 45}ms` }}
         >
-          {/* inline-flex 会折叠纯空格 span——换不折叠空格 */}
+          {/* inline-flex collapses spans of pure spaces — use a space that does not collapse */}
           {ch === " " ? " " : ch}
         </span>
       ))}
@@ -1331,9 +1331,9 @@ export function SectionMark({
   );
 }
 
-/* 时刻按看的人的时区显示。**只给时刻用**：recorded_at、created_at、上传时间这类
-   "何时发生"的值。文档里写的日历日期（"2019 年 5 月"）没有时区，另走 ISO 切片，
-   转成本地会让 UTC-5 的读者看到前一天。EntityHistory 里的判据同一条 */
+/* Instants are shown in the viewer's timezone. **Only for instants**: values like recorded_at, created_at, upload time,
+   "when it happened" values. Calendar dates written in a document ("May 2019") have no timezone, so they take an ISO slice,
+   converting to local would make a UTC-5 reader see the previous day. The same test in EntityHistory applies */
 export function localDate(iso: string): string {
   const d = new Date(iso);
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -1347,28 +1347,28 @@ export function localDateTime(iso: string): string {
   return `${localDate(iso)} ${hh}:${mm}`;
 }
 
-/* ---------- Row（可点的一行：左栏导航项、类树、关系/属性列表） ----------
-   一行整条可点，指针停上变面、选中反白。列表里的行与左栏导航项是同一个东西，
-   只差密度：nav 高一点、带图标；list 矮一点、可缩进。 */
-/** 一行的类：Row 自己用；页面里必须是 <Link> 的行（跳去图谱的实例行）也用它 */
+/* ---------- Row (a clickable row: left-column nav items, class tree, relation/attribute lists) ----------
+   The whole row is clickable; the pointer hovering changes the surface, and selection inverts. Rows in lists and left-column nav items are the same thing,
+   differing only in density: nav is a bit taller and has an icon; list is shorter and can be indented. */
+/** The class of a row: Row uses it itself; rows on a page that must be a <Link> (instance rows that jump to the graph) also use it */
 export type RowDensity = "nav" | "list" | "menu";
-/** 行的语义色：danger = 会删东西的那一行；warn = 通往危险区的入口——只是去往，
- *  还没动手，用警示色而不是危险色 */
+/** The semantic color of a row: danger = a row that deletes things; warn = an entry leading to the danger zone — it only leads there,
+ *  nothing has been done yet, so it uses the warning color rather than the danger color */
 export type RowTone = "danger" | "warn";
 export function rowClass(
   active?: boolean,
   density: RowDensity = "list",
   tone?: RowTone,
-  /** 二级：左栏里挂在某一项下面的那几条。文字缩到父行标签的位置
-      （内距 12 + 图标 14 + 间距 8 = 34），底色仍然铺满整行——
-      缩的是字，不是那一格 */
+  /** Secondary: the items under a parent item in the left column. The text shrinks to the position of the parent row's label
+      (padding 12 + icon 14 + gap 8 = 34), while the background still fills the whole row —
+      it is the text that shrinks, not the cell */
   sub?: boolean,
 ): string {
   return cn(
     "group flex w-full items-center gap-2 text-left transition-colors duration-fast",
     density === "menu" ? "rounded-none" : "rounded-cell",
     sub && "pl-[34px]",
-    // 左栏导航项 32 高（py 6）：36 在一列十几条里显得松
+    // Left-column nav items are 32 high (py 6): 36 looks loose in a column of a dozen items
     density === "nav"
       ? "px-3 py-1.5 text-body font-medium"
       : density === "menu"
@@ -1383,11 +1383,11 @@ export function rowClass(
           : "text-ink-2 hover:bg-surface-2 hover:text-ink",
   );
 }
-/** 行右端小字：小一档、淡一档，整行被指着时跟着提亮 */
+/** Small text at the row's right end: one step smaller and dimmer; it brightens along when the whole row is pointed at */
 export const ROW_TRAILING = "ml-auto shrink-0 text-fine text-ink-2 group-hover:text-ink";
-/** 紧跟在标签后面的值——与 `ROW_TRAILING` 同一副颜色，但**不推到右边**。
- *  一左一右适合"名字 …… 数量"这种两栏读法；「谓词 宾语」是一句话，中间隔一
- *  整行空白就读不成句子了 */
+/** A value that follows right after the label: same color as `ROW_TRAILING`, but **not pushed to the right**.
+ *  One on the left and one on the right suits two-column reading like "name …… count"; "predicate object" is a sentence, and separating them with one
+ *  whole row of blank space would make it unreadable as a sentence */
 export const ROW_VALUE =
   "min-w-0 flex-1 truncate text-fine text-ink-2 group-hover:text-ink";
 
@@ -1406,17 +1406,17 @@ export function Row({
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & {
   active?: boolean;
-  /** 危险的那一行（菜单里的删除）；= tone="danger" */
+  /** A dangerous row (delete in a menu); = tone="danger" */
   danger?: boolean;
   tone?: RowTone;
-  /** nav = 左栏导航项；list = 列表行；menu = 弹出菜单里的一项（顶满、不圆角） */
+  /** nav = left-column nav item; list = list row; menu = an item in a popup menu (full-width, no rounded corners) */
   density?: RowDensity;
-  /** 树形缩进的层级 */
+  /** Tree indentation level */
   indent?: number;
   icon?: ReactNode;
-  /** 收掉图标那一格：整组行都没有图标时，那一格没有对齐对象，只是把标题往右推 */
+  /** Drops the icon cell: when no row in the group has an icon, that cell aligns to nothing and only pushes the title right */
   flush?: boolean;
-  /** 右端的东西：计数、类型小字 */
+  /** Things at the right end: counts, small type labels */
   trailing?: ReactNode;
 }) {
   return (
@@ -1427,8 +1427,8 @@ export function Row({
       className={cn(rowClass(active, density, danger ? "danger" : tone), className)}
       {...props}
     >
-      {/* 图标跟文字同色：选中变白、警示变橙都一起来。导航项没图标也留出
-          图标那一格，一列里有图标的和没图标的文字对齐——除非整组都没有（flush） */}
+      {/* The icon matches the text color: when selected it turns white, when warning it turns orange, together. Nav items with no icon still reserve
+          the icon cell, so text lines up in a column whether or not it has an icon, unless the whole group has none (flush) */}
       {icon ? (
         <span className="shrink-0">{icon}</span>
       ) : density === "nav" && !flush ? (
@@ -1440,22 +1440,22 @@ export function Row({
   );
 }
 
-/* 左栏的一条入口：Library 的来源、Review 的队列、Ontology 底部钉住的那几个
-   都是它。**与列表里的行同一副样子**（Row density="nav"，圆角、缩进）——
-   钉在底部的靠外面那条分隔线说明「这几个是常驻的」，不靠把行本身画成方的。
-   计数给了就显示，0 也显示（灰一档）：队列清空了是个有意义的事实。 */
-/** 一条会话此刻站在哪儿，画在左栏行的图标格里（14 宽，与别处的图标同一格，
- *  所以标题仍落在同一条竖线上，见 rowClass 的说明）。
+/* An entry in the left column: Library's sources, Review's queues, and the ones pinned at the bottom of Ontology
+   are all this. **Same look as rows in lists** (Row density="nav", rounded, indented) —
+   the separator line on the outer side of the bottom pins shows "these are always present", without making the row itself square.
+   A count is shown when given, and 0 is shown too (one gray step dimmer): an empty queue is a meaningful fact. */
+/** Where a conversation stands right now, drawn in the icon cell of a left-column row (14 wide, the same cell as icons elsewhere,
+ *  so the title still lands on the same vertical line; see the note on rowClass).
  *
- *  三档：`rest` 6px 细线空心圆——它本身也是个记号，说明这一列每一行都是一场对话；
- *  `live` 三个点在跳；`unread` 同一个圆填成实心蓝，写完了而你还没回来看。
- *  **形状一档不变**，只有里外与颜色在变：换状态不换形状，余光里才认得出是
- *  同一样东西。小到只起项目符号的作用，不跟标题抢眼（从前 12 的方块太重） */
+ *  Three tiers: `rest` is a 6px thin-line hollow circle — it is itself a marker, saying every row in this column is a conversation;
+ *  `live` three dots jumping; `unread` is the same circle filled solid blue: it finished and you have not come back to look.
+ *  **The shape never changes**, only the inside and the color do: changing state does not change shape, so it is recognized at a glance as
+ *  the same thing. Small enough to act only as a bullet, not competing with the title (earlier 12-square blocks were too heavy) */
 export function ConvMark({ state }: { state: "rest" | "live" | "unread" }) {
   return (
-    // `flex` 不是 `inline-flex`：Row 把图标包在一个 span 里，inline 的盒会坐在
-    // 那一行字的基线上、底下还垫着行高，于是整个记号偏下（三个点里没有字，
-    // 基线就是底边，偏得最明显）。块级的盒没有行框，交给 Row 的 items-center 居中
+    // `flex` not `inline-flex`: Row wraps the icon in a span, and an inline box would sit
+    // on the baseline of the line of text, with line height underneath, so the whole mark sits low (the three dots have no text,
+    // so the baseline is the bottom edge and the offset is most visible). A block box has no line box, so Row's items-center centers it
     <span
       className="flex h-3.5 w-3.5 shrink-0 items-center justify-center"
       aria-hidden
@@ -1491,9 +1491,9 @@ export function RailItem({
   active?: boolean;
   icon?: ReactNode;
   count?: number;
-  /** 右侧的状态点（同步中/失败那种），给背景色的类名 */
+  /** The status dot on the right (syncing / failed kinds), a class name for the background color */
   dot?: string;
-  /** 这一条不在本页办——加个去向记号，免得点下去以为页面没反应 */
+  /** This entry is not handled on this page: add a destination marker, so that clicking does not look like the page did nothing */
   external?: boolean;
 }) {
   return (
@@ -1502,7 +1502,7 @@ export function RailItem({
       active={active}
       icon={icon}
       className={className}
-      // 计数只在有东西时出现，写成一枚 chip；0 不写——一栏灰零只是噪音
+      // Count appears only when there is something, as a chip; 0 is not written, a column of gray zeros is only noise
       trailing={
         count !== undefined && count > 0 ? (
           <span className={chipLike("neutral", "u-num")}>{count}</span>
@@ -1519,10 +1519,10 @@ export function RailItem({
   );
 }
 
-/** 菜单里的一行「标签 + 可改的值」。**整行是触发器，弹层落在值那一头**——
- *  这一行读起来是「语言：English」，要改的是冒号后面那一格，弹层就该出现在
- *  那一格上，像填空。摊在下面会把菜单越拉越长，甩到右边又会盖住旁边的面板。
- *  行的节奏与菜单里其余的行一致（px-4 py-2，正文号，图标间距 3）。 */
+/** A row in a menu: "label + editable value". **The whole row is the trigger; the popup lands on the value end**,
+ *  this row reads like "Language: English", and what is changed is the cell after the colon, so the popup should appear
+ *  on that cell, like a fill-in-the-blank. Spreading it below would make the menu longer and longer; throwing it to the right would cover the panel beside it.
+ *  The row rhythm matches the other rows in the menu (px-4 py-2, body size, icon gap 3). */
 const MENU_ROW = "gap-3 rounded-none px-4 py-2 text-body";
 
 export function MenuSelect({
@@ -1536,9 +1536,9 @@ export function MenuSelect({
   label: string;
   value: string;
   onChange: (v: string) => void;
-  /** 选项自己的图标是**可选的**：主题那三档各有公认的符号（月亮 / 太阳 /
-   *  一块屏），图标一眼就把三个选项分开了。语言没有这种符号——国旗不是语言，
-   *  说中文的不止一个地方——那一档就只有字，对勾负责说选中的是哪个。 */
+  /** An option's own icon is **optional**: the three theme tiers each have a widely recognized symbol (moon / sun /
+   *  a screen), and icons separate the three options at a glance. Languages have no such symbol: a flag is not a language,
+   *  since Chinese is spoken in more than one place, that tier is text only, and the check mark says which one is selected. */
   options: { value: string; label: string; icon?: ReactNode }[];
 }) {
   return (
@@ -1546,7 +1546,7 @@ export function MenuSelect({
       <SelectTrigger
         className={cn(
           MENU_ROW,
-          // 行的样子归菜单：去掉 Select 自带的框与底，留下"一行"
+          // Row appearance belongs to the menu: remove Select's own frame and background, leaving "a row"
           "h-auto w-full border-0 bg-transparent shadow-none focus-visible:ring-0 dark:bg-transparent",
           "justify-start text-ink",
         )}
@@ -1557,22 +1557,22 @@ export function MenuSelect({
           {options.find((o) => o.value === value)?.label ?? value}
         </span>
       </SelectTrigger>
-      {/* **popper 定位，不是 item-aligned。**Select 缺省是把"选中的那一项"盖在
-          触发器上（一个原生 select 的样子）；在这张菜单里它算出来的位置是
-          (0, 900)——视口外的左下角，于是弹层开了却看不见（`data-state=open`、
-          内容也挂上了，就是不在屏幕上）。item-aligned 那套要量触发器，而触发器
-          在一层 portal 里；popper 走 floating-ui，逐帧跟着触发器，也才认 align。 */}
+      {/* **popper positioning, not item-aligned.** By default Select lays the "selected item" over
+          the trigger (the look of a native select); in this menu the position it computes is
+          (0, 900)——the bottom-left corner outside the viewport, so the popup opens but is not visible (`data-state=open`,
+          the content is attached too, it is just not on screen). The item-aligned approach measures the trigger, and the trigger
+          sits inside a portal layer; popper uses floating-ui, following the trigger frame by frame, and only then honors align. */}
       <SelectContent
         position="popper"
         side="bottom"
         align="end"
         sideOffset={4}
-        /* **弹层按内容宽，不按触发器宽。**触发器是整行，而 shadcn 的 viewport 在
-           popper 模式下写死 `min-w-(--radix-select-trigger-width)`，于是弹层跟着
-           撑满整条菜单，看着像菜单自己长出来两行。它该落在值那一格上，像一个填空。
-           改的是 `--radix-popper-anchor-width` 而不是 `--radix-select-trigger-width`：
-           后者是 Radix 写在内容元素**内联样式**上的（`var(--radix-popper-anchor-width)`），
-           class 压不过内联，只能改它引的那一格。 */
+        /* **The popup is sized to content, not to the trigger width.** The trigger is the whole row, while shadcn's viewport in
+           popper mode is hard-coded to `min-w-(--radix-select-trigger-width)`, so the popup follows
+           fill the whole menu, looking as if the menu grew two rows by itself. It should land on the value cell, like a fill-in-the-blank.
+           What is changed is `--radix-popper-anchor-width` rather than `--radix-select-trigger-width`:
+           the latter is written by Radix into the content element's **inline style** (`var(--radix-popper-anchor-width)`),
+           class a class cannot override inline styles, so it can only change the cell it refers to. */
         className="[--radix-popper-anchor-width:auto]"
       >
         {options.map((o) => (
@@ -1586,9 +1586,9 @@ export function MenuSelect({
   );
 }
 
-/* ---------- Segmented（分段切换） ----------
-   两三个互斥的视图或取值。fill = 每格等宽撑满（左栏的类/属性切换）；
-   否则按内容宽（连接方向、形状那种小开关）。 */
+/* ---------- Segmented (segmented toggle) ----------
+   Two or three mutually exclusive views or values. fill = each cell is equal width and fills (the class/attribute toggle in the left column);
+   otherwise sized to content (small toggles like connection direction and shape). */
 export function Segmented<T extends string>({
   value,
   options,
@@ -1661,8 +1661,8 @@ export function Checkbox({
   hint?: ReactNode;
   className?: string;
   checked?: boolean;
-  /** **收的是布尔，不是事件**：底下已经不是原生 input 了（Radix 的按钮 +
-   *  一个隐藏的输入），事件对象里的 `target.checked` 在这里没有意义 */
+  /** **It takes a boolean, not an event**: underneath it is no longer a native input (Radix's button +
+   *  a hidden input), so `target.checked` on the event object has no meaning here */
   onChange?: (checked: boolean) => void;
   disabled?: boolean;
   id?: string;
@@ -1686,7 +1686,7 @@ export function Checkbox({
   );
 }
 
-/* ---------- Disclosure（折叠小节：一行可点的摘要 + 展开的内容） ---------- */
+/* ---------- Disclosure (collapsible section: a clickable summary row + expanded content) ---------- */
 export function Disclosure({
   summary,
   defaultOpen,
@@ -1708,9 +1708,9 @@ export function Disclosure({
   );
 }
 
-/* ---------- ToolTower（画布上的竖排工具塔） ----------
-   图标常驻，名字在整组 hover / 键盘走到时一起展开（styles.css 的 u-tower）。
-   一组是一个语义单元：派生 / 布局 / 相机。 */
+/* ---------- ToolTower (vertical tool tower on the canvas) ----------
+   Icons stay visible; the names expand together when the whole group is hovered or reached by keyboard (u-tower in styles.css).
+   A group is one semantic unit: derive / layout / camera. */
 export function ToolTower({
   className,
   children,
@@ -1734,7 +1734,7 @@ export const ToolButton = forwardRef<
   HTMLButtonElement,
   ButtonHTMLAttributes<HTMLButtonElement> & {
     active?: boolean;
-    /** 展开时显示的名字，也是 title 与无障碍名称 */
+    /** The name shown when expanded; also the title and accessible name */
     label: string;
     icon: ReactNode;
   }
@@ -1758,10 +1758,10 @@ export function ToolDivider() {
   return <div className="mx-2 h-px bg-line-strong" />;
 }
 
-/* ---------- GroupLabel（一组内容的小标题） ----------
-   小号、中等字重、句首大写。**不用大写字母拉字距**——那种小节标题看着像
-   另一套字体系统，用户明确不要。停靠面板里的分段、抽取栏、总览的三段、
-   左栏的分组都是它；右边可带计数，左边可带一个小图标（图谱面板里的方向箭头）。 */
+/* ---------- GroupLabel (small heading for a group of content) ----------
+   Small size, medium weight, sentence case. **Do not use all caps with letter spacing**: such section headings look like
+   a different type system, which users explicitly do not want. The sections in the docked panel, the extraction bar, the three sections of the overview,
+   and the groups in the left column are all this. A count can sit on the right, a small icon on the left (the direction arrow in the graph panel). */
 export function GroupLabel({
   icon,
   count,
@@ -1771,7 +1771,7 @@ export function GroupLabel({
 }: {
   icon?: ReactNode;
   count?: ReactNode;
-  /** contest：被挡住的那一组，用争议色 */
+  /** contest: a group that is blocked, uses the dispute color */
   tone?: "default" | "contest";
   className?: string;
   children: ReactNode;
@@ -1791,12 +1791,12 @@ export function GroupLabel({
   );
 }
 
-/* ---------- Pill（玻璃药丸：图例、"+N 个类"这类浮在画布上的小开关） ---------- */
+/* ---------- Pill (glass pill: legend, and small toggles floating on the canvas such as "+N classes") ---------- */
 export const Pill = forwardRef<
   HTMLButtonElement,
   ButtonHTMLAttributes<HTMLButtonElement> & {
     active?: boolean;
-    /** 被关掉的那种：压到三成五 */
+    /** The off state: dimmed to 35% */
     dim?: boolean;
   }
 >(function Pill({ active, dim, className, type = "button", ...props }, ref) {
@@ -1811,12 +1811,12 @@ export const Pill = forwardRef<
 });
 
 /* ---------- Radio ---------- */
-/* ---------- RadioGroup（一组互斥的选项） ----------
-   **一组是一个组件，不是一堆各自为政的 Radio**：方向键在组内移动、焦点只落
-   在选中的那一个上、读屏器把它们念成一组——这些是"组"的性质，Radix 的
-   RadioGroup 管着；从前每个 Radio 都是一个裸的 input，靠同名 `name` 凑成一组，
-   键盘那部分只能听浏览器的默认行为。
-   `children` 是选中之后跟在标签后面的东西（比如一个日期框）。 */
+/* ---------- RadioGroup (a group of mutually exclusive options) ----------
+   **A group is one component, not a pile of independent Radios**: arrow keys move within the group, focus lands only
+   on the selected one, and screen readers read them as one group; these are properties of a "group" that Radix's
+   RadioGroup handles; previously each Radio was a bare input, grouped by a shared `name`,
+   and the keyboard part could only rely on the browser's default behavior.
+   `children` is what follows the label once selected (such as a date box). */
 export function RadioGroup<T extends string>({
   value,
   onChange,
@@ -1850,11 +1850,11 @@ export function RadioGroup<T extends string>({
   );
 }
 
-/* ---------- ExpandCard（可展开的一条：事实、派生、年表条目） ----------
-   折叠行只有一副样子：左边固定一格 chevron（开了转 90°），右边是头——一行
-   或两行文字——展开的内容缩进到文字底下（pl-7 = 内距 8 + chevron 12 + 间距 8）。
-   头是一整条可点的按钮，里面可以有 role="link" 的 span（去看另一端），
-   但不能有按钮——按钮里不能嵌按钮。 */
+/* ---------- ExpandCard (an expandable item: facts, derived items, timeline entries) ----------
+   The collapsed row has only one look: a fixed chevron cell on the left (rotates 90° when open), and the header on the right: one line
+   or two lines of text. Expanded content is indented under the text (pl-7 = padding 8 + chevron 12 + gap 8).
+   the header is a whole clickable button; inside it there can be a span with role="link" (to look at the other end),
+   but it cannot contain a button, since a button cannot nest inside a button. */
 export function ExpandCard({
   open,
   onToggle,
@@ -1866,7 +1866,7 @@ export function ExpandCard({
 }: {
   open: boolean;
   onToggle: () => void;
-  /** 陈旧的那种：整条压淡 */
+  /** The stale kind: the whole item dimmed */
   dim?: boolean;
   title?: string;
   className?: string;
@@ -1894,22 +1894,22 @@ export function ExpandCard({
   );
 }
 
-/** 面板内一行的悬停。**只给状态，不给布局**——每种列表的行高与内边距不同，
-    而悬停是同一件事。面板本身不响应指针（DESIGN.md 6），悬停归行所有。 */
+/** Hover for a row inside a panel. **Gives state only, not layout**: each kind of list has its own row height and padding,
+    but hover is the same thing. The panel itself does not respond to the pointer (DESIGN.md 6); hover belongs to the row. */
 export const ROW_HOVER = "transition-colors duration-fast hover:bg-surface-2";
 
-/** 复合行的外壳：一行里有两个按钮时不能是 Row（按钮里不能嵌按钮），
-    外层 div 用它拿到 hover 与 group */
+/** The shell of a compound row: when a row has two buttons it cannot be a Row (buttons cannot nest inside buttons),
+    the outer div uses it to get hover and group */
 export const HOVER_ROW =
   "group flex items-center gap-2 rounded-cell px-2 py-1 transition-colors duration-fast hover:bg-surface-2";
-/** 指针停在所在行（.group）上才现身的东西；加 is-on 常显 */
+/** Things that appear only when the pointer is on the row (.group); add is-on to keep them shown */
 export const REVEAL = "u-reveal";
-/** 行里一个能单独指、单独点的词（事实行的谓词、宾语）。整行的底色说「指着这条」，
- *  这个词的下划线说「指着它自己那一件」——两层要分得开，所以不用底色 */
+/** A word in a row that can be pointed at and clicked on its own (the predicate and object of a fact row). The row's background color says "this one is pointed at",
+ *  and this word's underline says "this particular item is pointed at"; the two layers must be kept apart, so no background color is used */
 export const POINT_WORD =
   "cursor-pointer rounded-cell underline-offset-4 hover:text-ink hover:underline";
 
-/* 各在自己文件里的组件，从这里一并导出，页面只认 "../ui" 一个入口 */
+/* Components that each live in their own file are exported together from here; pages only recognize the one entry point "../ui" */
 export { Dialog, DangerConfirm, FormDialog } from "./dialog";
 export { Tooltip } from "./tooltip";
 export { Table, THead, TBody, Tr, Th, Td } from "./table";

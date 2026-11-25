@@ -1,6 +1,6 @@
-// 图谱页的编辑弹窗：实体（名字、类型）与一条事实的有效区间。
-// 实体面板只展示；从前改名的两格嵌在面板头下面、改区间的表单嵌在事实行里，
-// 现在各开一扇窗。字段与提交逻辑原样搬过来。
+// Edit dialogs for the graph page: an entity (name, type) and the validity interval of a fact.
+// The entity panel only displays; previously the two rename fields were embedded under the panel header and the interval form inside the fact row,
+// now each opens its own window. The fields and the submit logic are moved over as they were.
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type EntityFact, type GraphNode } from "../api";
@@ -9,7 +9,7 @@ import { toast } from "../toast";
 import { fmtTime, parseDateInput } from "../time";
 import { Field, FormDialog, Input, RadioGroup, SearchSelect } from "../ui";
 
-/* ---------- 实体：抽取给的是初判，判错此前只能整库重抽 ---------- */
+/* ---------- Entity: extraction gives a first guess, and if it is wrong the only option used to be re-extracting the whole library ---------- */
 
 export function EntityDialog({
   kbId,
@@ -27,14 +27,14 @@ export function EntityDialog({
   const qc = useQueryClient();
   const [name, setName] = useState(entity.name);
   const [typeId, setTypeId] = useState("");
-  // 类型下拉要的是全量本体，不是当前视图里出现过的那几个
+  // The type dropdown needs the full ontology, not just the few that appear in the current view
   const ontology = useQuery({
     queryKey: ["ontology", kbId],
     queryFn: () => api.ontology(kbId),
   });
   const types = ontology.data?.entity_types ?? [];
   const currentId = types.find((t) => t.key === entity.type_key)?.id ?? "";
-  // 本体是异步来的：它到齐时把类型下拉对到当前类型上
+  // The ontology arrives asynchronously: when it is all here, match the type dropdown to the current type
   useEffect(() => {
     if (!typeId && currentId) setTypeId(currentId);
   }, [typeId, currentId]);
@@ -49,7 +49,7 @@ export function EntityDialog({
     },
     onSuccess: (r) => {
       toast.success(S.graph.editSaved);
-      // 改了类型/名字，图谱节点与本体计数都要跟着动
+      // After changing the type or name, the graph node and the ontology counts must move with it
       qc.invalidateQueries({ queryKey: ["entity", kbId, entityId] });
       qc.invalidateQueries({ queryKey: ["graph", kbId] });
       qc.invalidateQueries({ queryKey: ["ontology", kbId] });
@@ -80,8 +80,8 @@ export function EntityDialog({
           onChange={(e) => setName(e.target.value)}
         />
       </Field>
-      {/* 类可能上千个（schema.org 一装就是 1010 个）：这一格要能打字过滤，
-          所以是 SearchSelect 而不是下拉——下拉是给小而有界的枚举的 */}
+      {/* There can be thousands of classes (installing schema.org gives 1010): this field must allow typing to filter,
+          so it is a SearchSelect rather than a dropdown: a dropdown is for small, bounded enumerations */}
       <Field label={S.graph.editType} className="mb-0">
         <SearchSelect
           className="w-full"
@@ -94,11 +94,11 @@ export function EntityDialog({
   );
 }
 
-/* ---------- 一条事实的有效区间（302） ----------
-   两端一起提交而不是逐端改：区间的两端互相定义，「清空结束端」与「这次不动
-   结束端」得能分辨。结束端的三个选项与账本里的三种写法一一对应，所以这里
-   没有「留空即至今」这种隐含约定——那正是 valid_to IS NULL 一度承载两个意思
-   的老毛病。 */
+/* ---------- The validity interval of a fact (302) ----------
+   Both ends are submitted together rather than edited one at a time: the two ends define each other, and "clear the end" has to be distinguishable from "leave the end alone this time".
+   The three end options correspond one-to-one with the three ways of writing it in the ledger, so there is
+   no implicit convention here where blank means "current until now": that is exactly what let valid_to IS NULL once carry two meanings
+   the old problem. */
 
 export function FactTimeDialog({
   kbId,
@@ -145,8 +145,8 @@ export function FactTimeDialog({
       });
     },
     onSuccess: (r) => {
-      // 对账的后果要说出来：改了起点可能顺手闭合了继任者的开放区间，
-      // 也可能撞出一条需要人裁的冲突。不说的话图会自己变而没人知道为什么
+      // The consequences of reconciliation must be stated: changing the start may incidentally close a successor's open interval,
+      // or it may create a conflict that a person has to rule on. If this is not said, the graph changes by itself and nobody knows why
       if (r.conflicts) toast.success(S.graph.timeSavedConflicts(r.conflicts));
       else if (r.closed) toast.success(S.graph.timeSavedClosed(r.closed));
       else toast.success(S.graph.timeSaved);

@@ -1,8 +1,8 @@
-// 方形节点的四层渲染 program —— 与圆形 createNodeBorderProgram 完全同构：
-// 状态环(0.1) → 钢灰描边(0.07) → 深色壳(0.3) → 微彩核心(fill)。
-// 圆形用欧氏距离 length()，方形改用切比雪夫距离 max(|x|,|y|)，
-// 几何沿用 @sigma/node-square：6 顶点四边形、角点 ±45°/±135°、sqrt8 缩放
-//（半边长取圆形半径的 0.9：边长等于直径时方块看着比圆大；状态环随之等比缩）。
+// Four-layer render programme for square nodes, structurally identical to the circular createNodeBorderProgram:
+// state ring (0.1) → steel-grey outline (0.07) → dark shell (0.3) → faintly coloured core (fill).
+// The circular version uses Euclidean length(); the square uses Chebyshev distance max(|x|,|y|),
+// and the geometry follows @sigma/node-square: a six-vertex quad, corners at ±45°/±135°, sqrt8 scaling,
+//(half-side is 0.9 of the circle radius: at equal side to diameter the square looks bigger than the circle; the state ring scales proportionally).
 
 import { NodeProgram } from "sigma/rendering";
 import type { ProgramInfo } from "sigma/rendering";

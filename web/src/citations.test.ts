@@ -34,7 +34,7 @@ describe("splitCitations", () => {
   });
 
   it("starts each call from the beginning", () => {
-    // 共用一个 g 正则会让第二段从上一次的 lastIndex 接着找，`[1]` 就丢了
+    // Sharing one g regex makes the second segment resume from the previous lastIndex, so `[1]` gets lost
     expect(splitCitations("x[1]")).toEqual([{ text: "x" }, { cite: [1] }]);
     expect(splitCitations("x[1]")).toEqual([{ text: "x" }, { cite: [1] }]);
   });

@@ -37,7 +37,7 @@ describe("citedSources", () => {
   });
 });
 
-/** 正文渲染出来的角标：与 Chat 页同一组插件 */
+/** The superscripts rendered in the body: same plugin set as the Chat page */
 function marks(text: string): number[] {
   const html = renderToStaticMarkup(
     createElement(Markdown, { remarkPlugins: [remarkGfm], rehypePlugins: [rehypeCitations] }, text),

@@ -1,7 +1,7 @@
-/* 知识库设置：左栏分节（General / Members / Danger zone），为未来设置项立骨架
-   （抽取设置、保留策略、库级令牌…）。访问控制由 API 端执行（库 admin 起步）。
-   分节互斥渲染也根治了下拉弹层被后续玻璃卡（backdrop-filter 自成 stacking
-   context）遮蔽的层级 bug。 */
+/* Library settings: left-column sections (General / Members / Danger zone), building the skeleton for future settings items
+   (extraction settings, retention policy, library-level tokens...). Access control is enforced by the API (library admin to start).
+   Rendering the sections mutually exclusive also fixes the stacking bug where dropdown popovers were covered by later glass cards (backdrop-filter forms its own stacking
+   context). */
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, useNavigate } from "@tanstack/react-router";
@@ -52,14 +52,14 @@ const KB_ROLES = [
 ];
 
 /**
- * 这个库能授予哪些角色。
+ * The roles this library can grant.
  *
- * **open 库没有 viewer 可授**：`access::kb_role` 对 open 库直接给部署内每个人
- * Viewer，所以写一行 `role=viewer` 什么都没多给——一条空操作的记录，
- * 还占着成员名单一行让人以为它起了作用。列在这里的意义只剩"给写权限"。
+ * **open  * **An open library has no viewer to grant**: `access::kb_role` gives every person in the deployment Viewer directly on an open library,
+ * Viewer * so writing a row with `role=viewer` adds nothing: a no-op record that
+ * still takes up a row in the member list and makes people think it did something. Listing it here only makes sense for granting write access.
  *
- * 历史数据里可能存着 open 库的 viewer 行，但那些行在名单里已经不显示了
- *（见 `listed`），所以这里不必为"当前值不在选项里"兜底。
+ * Historical data may hold viewer rows for open libraries, but those rows are already hidden in the list
+ *(see `listed`), so there is no need to fall back for 'current value not among the options' here.
  */
 function rolesFor(isOpen: boolean) {
   return isOpen ? KB_ROLES.filter((r) => r.value !== "viewer") : KB_ROLES;
@@ -67,9 +67,9 @@ function rolesFor(isOpen: boolean) {
 
 type Section = "general" | "members" | "activity" | "danger";
 
-/** 一张设置卡的保存：**只送自己那几项**。PATCH 本来就是部分更新，把整张表
-    一起送过去，等于用改名字的那一下覆盖别人刚改的开关。四张卡各自一个
-    mutation，于是"在存""存好了"也各是各的。 */
+/** Saving one settings card: **send only its own fields**. PATCH is already a partial update; sending the whole form
+    along would let a rename overwrite someone else's just-changed toggle. Each of the four cards has its own
+    mutation, so 'saving' and 'saved' are also per card. */
 function useKbPatch(kbId: string, onError: (m: string | null) => void) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -86,11 +86,11 @@ function useKbPatch(kbId: string, onError: (m: string | null) => void) {
 export function KbSettings() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  /* 库 id 来自路径。**从前是 `?kb=`**——那是这套路由改造之前唯一
-     带着库走的地方，现在整片都在 /kb/$kbId 之下，它就不必自成一格了 */
+  /* The library id comes from the path. **It used to be `?kb=`**: that was the only place the library traveled before this routing refactor;
+     now the whole area sits under /kb/$kbId, so it no longer needs its own slot */
   const { kbId } = useParams({ from: "/app/kb/$kbId/settings" });
 
-  // 失败任务数与重排（#216）。查询键带库 id，重排后失效重取
+  // Failed task count and re-queue (#216). The query key carries the library id; after re-queuing, invalidate and refetch
   const failedJobs = useQuery({
     queryKey: ["jobs", "failed", kbId],
     queryFn: () => api.failedJobs(kbId!),
@@ -114,18 +114,18 @@ export function KbSettings() {
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
   const [visibility, setVisibility] = useState<"open" | "restricted">("open");
-  // **默认关**，与上面那个相反：推理往账本里写事实，而声明可能是错的
+  // **Off by default**, the opposite of the one above: inference writes facts into the ledger, and the declaration may be wrong
   const [materialize, setMaterialize] = useState(false);
-  // 类型消解自动跑（0016 C2）：只自动落地子树内精化的那一档
+  // Automatic type resolution (0016 C2): only the tier refined within the subtree is applied automatically
   const [autoResolve, setAutoResolve] = useState(false);
-  // 治理（0025）：**缺省关**——它会合并实体，还没在哪个库上量过；打开就开始，关掉就停
+  // Governance (0025): **off by default**. It merges entities and has not been measured on any library yet; turning it on starts it, turning it off stops it
   const [governance, setGovernance] = useState(false);
   const [inferMins, setInferMins] = useState(60);
   const [ontoLang, setOntoLang] = useState<"en" | "zh">("en");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 每张卡只跟随自己的服务端字段；保存别的卡触发重取时，保留这张卡的草稿。
+  // Each card follows only its own server fields; when saving another card triggers a refetch, keep this card's draft.
   useEffect(() => {
     if (kb.data) {
       setName(kb.data.name);
@@ -160,7 +160,7 @@ export function KbSettings() {
     }
   }, [kbId, kb.data?.ontology_lang]);
 
-  // 四张卡，四个保存：改名字那一下不该把下面的开关一起送上去
+  // Four cards, four saves: renaming should not send the toggles below along with it
   const saveIdentity = useKbPatch(kbId!, setError);
   const saveVisibility = useKbPatch(kbId!, setError);
   const saveAutomation = useKbPatch(kbId!, setError);
@@ -185,8 +185,8 @@ export function KbSettings() {
 
   const lbl = "block text-small font-medium text-ink-2 mb-1";
 
-  /* 每张卡自己的"改过没有"：按钮亮不亮说的是这张卡里的东西动没动，
-     所以拿本地状态跟服务端最新的那份逐项比，而不是记一个全局的脏位 */
+  /* Each card's own 'changed or not': whether the button lights up says whether something in this card moved,
+     so compare local state item by item against the latest server copy, rather than keeping one global dirty flag */
   const identityDirty =
     name.trim() !== kb.data.name ||
     desc.trim() !== (kb.data.description ?? "");
@@ -208,8 +208,8 @@ export function KbSettings() {
     { key: "general", label: S.kbset.general, Icon: Settings2 },
     { key: "members", label: S.kbset.members, Icon: Users },
     { key: "activity", label: S.kbset.activity, Icon: HistoryIcon },
-    // 默认库不可删除：danger 节整个不出现。入口只把图标染成警示色，文字与别的
-    // 节一样：这一条只是去往危险区，真正删库的那个按钮才是危险色
+    // The default library cannot be deleted, so the danger section does not appear at all. The entry only tints the icon with the warning color; the text matches
+    // the other sections: this one just leads to the danger zone, and only the button that actually deletes the library uses the danger color
     ...(isDefault
       ? []
       : [
@@ -224,7 +224,7 @@ export function KbSettings() {
 
   return (
     <div className="h-full flex">
-      {/* 分节导航：未来的抽取设置/保留策略/令牌等在此扩展 */}
+      {/* Section navigation: future extraction settings / retention policy / tokens etc. extend here */}
       <aside className={`${RAIL_CLS} u-rail-list px-2 py-3`}>
         {sections.map(({ key, label, Icon, tone }) => (
           <Row
@@ -240,15 +240,15 @@ export function KbSettings() {
       </aside>
 
       <main className="flex-1 min-w-0 overflow-y-auto u-scroll px-8 py-6">
-        {/* 设置是读一列字段，不是铺一张桌子：内容居中限宽，行长不随窗口拉长 */}
+        {/* Settings are a column of fields, not a single table: content centered with a width limit, line length does not stretch with the window */}
         <div className="mx-auto w-full max-w-4xl">
-          {/* 不缀库名：顶栏切换器已标明当前库 */}
+          {/* No library name suffix: the top bar switcher already shows the current library */}
           <PageHeader title={S.kbset.title} />
 
           {section === "general" && (
-            /* Vercel 设置页那种排法：一张卡是一个保存单位。从前这一节是一张
-               长表加末尾一个保存——改个名字要连着四个开关一起送上去，而
-               "存好了"也说不清存的是哪一件 */
+            /* Vercel's settings page layout: one card is one save unit. Previously this section was one
+               long table with a single save at the end: changing a name meant sending four toggles along with it, and
+               "'saved' did not say which thing was saved */
             <div className="space-y-4">
               <SettingsCard
                 title={S.kbset.cardIdentity}
@@ -263,8 +263,8 @@ export function KbSettings() {
                       onClick={() =>
                         saveIdentity.mutate({
                           name: name.trim(),
-                          // 空串才是"清空描述"：null 在服务端是 COALESCE 的
-                          // "这项不改"，把描述删干净会悄悄地什么都没发生
+                          // An empty string is what 'clear the description' means: null is COALESCE on the server, meaning 'leave this unchanged',
+                          // "// so deleting the description entirely would quietly do nothing
                           description: desc.trim(),
                         })
                       }
@@ -292,8 +292,8 @@ export function KbSettings() {
                 </div>
               </SettingsCard>
 
-              {/* 默认库的可见性是锁死的：卡还在（这个库确实有可见性这件事），
-                  但底栏没有保存——没有可改的东西就不摆一个按钮 */}
+              {/* The default library's visibility is locked: the card stays (this library does have a visibility setting),
+                  but the footer has no save: no button when there is nothing to change */}
               <SettingsCard
                 title={S.settings.kbs.visibility}
                 hint={isDefault ? S.kbset.defaultOpenNote : S.kbset.cardVisibilityNote}
@@ -360,15 +360,15 @@ export function KbSettings() {
                 }
               >
                 <div className="space-y-3">
-                  {/* 物化推理：**默认关**。它动的是账本——按公理往图里写事实，而声明可能是错的 */}
+                  {/* Materialized inference: **off by default**. It acts on the ledger: it writes facts into the graph from axioms, and the declarations may be wrong */}
                   <Checkbox
                     checked={materialize}
                     onChange={(v) => setMaterialize(v)}
                     label={S.kbset.materialize}
                     hint={S.kbset.materializeNote}
                   />
-                  {/* 重推间隔。**只在开着的时候露出来**——关着时它不影响任何事，
-                      摆在那里只会让人以为设了就会推 */}
+                  {/* Re-inference interval. **Shown only when turned on**: when off it affects nothing,
+                      so showing it would only make people think setting it would trigger inference */}
                   {materialize && (
                     <div className="pl-6 flex flex-wrap items-center gap-2">
                       <label className="text-small text-ink-2">
@@ -391,16 +391,16 @@ export function KbSettings() {
                       )}
                     </div>
                   )}
-                  {/* 类型消解自动跑：抽完排一轮，只自动改子树内精化的那一档，跨轴的仍留给人 */}
+                  {/* Automatic type resolution: after extraction, queue a pass; it only auto-applies the tier refined within a subtree, cross-axis ones still go to a person */}
                   <Checkbox
                     checked={autoResolve}
                     onChange={(v) => setAutoResolve(v)}
                     label={S.kbset.autoResolveTypes}
                     hint={S.kbset.autoResolveTypesNote}
                   />
-                  {/* 治理（0025）：agent 按先进先出过等人的重复对，先读台账里人的先例再裁。
-                      说明里要讲清三件事：读的是这个库的人的决定、合并要有先例撑着、
-                      关掉队列就停 */}
+                  {/* Governance (0025): the agent works through queued people-waiting duplicate pairs first-in-first-out, reading people's precedents in the ledger before deciding.
+                      The description must make three things clear: it reads this library's people's decisions, a merge needs precedent behind it,
+                      and turning off the queue stops it */}
                   <Checkbox
                     checked={governance}
                     onChange={(v) => setGovernance(v)}
@@ -410,8 +410,8 @@ export function KbSettings() {
                 </div>
               </SettingsCard>
 
-              {/* 语料语言。**不是界面语言**——类描述逐字进抽取提示词，
-                  读者是正在读这些文档的模型，所以它跟文档走不跟读者走 */}
+              {/* Corpus language. **Not the interface language**: class descriptions go verbatim into the extraction prompt,
+                  and the reader is the model reading these documents, so it follows the documents, not the reader */}
               <SettingsCard
                 title={S.kbset.ontologyLang}
                 hint={S.kbset.ontologyLangNote}
@@ -441,8 +441,8 @@ export function KbSettings() {
                 />
               </SettingsCard>
 
-              {/* 失败的任务（#216）：有才露出来。这张卡没有"保存"——它不是设置，
-                  是一个动作：把这个库里全部 failed 放回队列 */}
+              {/* Failed tasks (#216): shown only when there are some. This card has no 'save': it is not a setting,
+                  it is an action: put all failed items in this library back into the queue */}
               {failedJobs.data && failedJobs.data.failed > 0 && (
                 <SettingsCard
                   title={S.kbset.cardJobs}
@@ -521,7 +521,7 @@ export function KbSettings() {
   );
 }
 
-/** detail 里挑一个人类可读的名字（按 action 语义各异，逐键兜底） */
+/** Pick a human-readable name from detail (varies by action semantics; falls back key by key) */
 function auditDetailName(e: AuditEvent): string {
   const d = e.detail;
   const cand = [d.label, d.name, d.filename, d.key, d.role];
@@ -531,8 +531,8 @@ function auditDetailName(e: AuditEvent): string {
 
 const AUDIT_PAGE = 50;
 
-/** 两个日期框说的是读者日历上的几天：起始那天零点起、截止那天过完为止。服务端的区间
- *  含起点不含终点、按时刻比，所以截止日要送下一天的零点，零点也按本地时区换成时刻 */
+/** The two date boxes mean days on the reader's calendar: the start day from midnight, the end day through to its end.
+ *  The server's range includes the start and excludes the end, comparing by instant, so the end date must send midnight of the next day, with midnight also converted to an instant in the local timezone */
 export function auditBounds(since: string, until: string) {
   const midnight = (day: string, later: number) => {
     const [y, m, d] = day.split("-").map(Number);
@@ -545,8 +545,8 @@ export function auditBounds(since: string, until: string) {
 }
 
 export function KbActivity({ kbId }: { kbId: string }) {
-  // 筛选按真实查法来：查一类动作、查一个人、查一段时间。
-  // 动作前缀匹配——`entity.` 就能把 retyped / renamed 一族一起捞出来
+  // Filters follow real query patterns: query one action class, one person, one time range.
+  // Action prefix matching: `entity.` pulls retyped / renamed together as one family
   const [action, setAction] = useState("");
   const [since, setSince] = useState("");
   const [until, setUntil] = useState("");
@@ -563,7 +563,7 @@ export function KbActivity({ kbId }: { kbId: string }) {
     placeholderData: (prev) => prev,
   });
   const result = audit.isSuccess && !audit.isPlaceholderData ? audit.data : undefined;
-  // 下拉按这个库实际发生过的动作填，不是硬编码清单
+  // The dropdown is filled with the actions this library has actually had, not a hard-coded list
   const actions = audit.data?.actions ?? (action ? [action] : []);
   const filtered = !!(action || since || until);
 
@@ -574,8 +574,8 @@ export function KbActivity({ kbId }: { kbId: string }) {
 
   return (
     <div className="space-y-3">
-      {/* 筛这份台账的控件在卡外面（DESIGN.md 6）：它们不是台账的内容，
-          而且筛空了的时候那张卡要能变成空态，不能把改筛选的唯一办法一起带走 */}
+      {/* The controls that filter this ledger sit outside the card (DESIGN.md 6): they are not contents of the ledger,
+          and when a filter empties everything the card must be able to turn into an empty state, not take the only way to change the filter along with it */}
       <div className="flex flex-wrap items-center gap-2">
         <Dropdown
           size="sm"
@@ -587,8 +587,8 @@ export function KbActivity({ kbId }: { kbId: string }) {
             ...actions.map((a) => ({ value: a, label: a })),
           ]}
         />
-        {/* 日期框**要自己说宽度**：`Input` 不给宽度时是 w-full，一行里放两个，
-            每个都占满，于是各自换行——同一行的下拉给了 w-48 才没事。 */}
+        {/* Date boxes **must state their own width**: `Input` without a width is w-full; two in a row would each take the full width,
+            so each wraps on its own; the dropdown in the same row needs w-48 to avoid that. */}
         <Input size="sm" className="u-num w-36"
           type="date"
           value={since}
@@ -694,7 +694,7 @@ function KbMembers({ kbId, isOpen }: { kbId: string; isOpen: boolean }) {
   const [role, setRole] = useState("all");
   const [editingRole, setEditingRole] = useState<string | null>(null);
   const [addUserId, setAddUserId] = useState("");
-  // open 库连 viewer 这个选项都没有，默认值得跟着走
+  // open // Open library: not even the viewer option exists, so the default must follow
   const [addRole, setAddRole] = useState(isOpen ? "editor" : "viewer");
 
   const invalidate = () =>
@@ -713,12 +713,12 @@ function KbMembers({ kbId, isOpen }: { kbId: string; isOpen: boolean }) {
     onSuccess: invalidate,
   });
 
-  // open 库里 `role=viewer` 的一行**等价于没有这一行**：读权限本来人人都有，
-  // 那条记录什么都没授予。所以名单里只留真正拿到写权限的人。
+  // On an open library, a `role=viewer` row is **equivalent to having no row**: read access is already available to everyone,
+  // and the record grants nothing. So the list keeps only people who actually have write access.
   //
-  // **不算进 memberIds 是配套的一半**，不能只藏不放：留在里面的话，
-  // 那个人会从添加选择器里消失，于是再也授不了 editor——
-  // 一条本该无意义的记录反而把人锁住了
+  // **Leaving them out of memberIds is half of the pairing**: they must not just be hidden. If they stayed in,
+  // that person would disappear from the add-picker, and could then never be granted editor,
+  // a record that should be meaningless would instead lock the person out
   const listed = (members.data?.members ?? []).filter(
     (m) => !isOpen || m.role !== "viewer",
   );
@@ -742,9 +742,9 @@ function KbMembers({ kbId, isOpen }: { kbId: string; isOpen: boolean }) {
         {isOpen ? S.kbset.membersHintOpen : S.kbset.membersHintRestricted}
       </p>
 
-      {/* 筛名单的东西与加人的按钮都在表格**外面**（DESIGN.md 6）：它们不是名单
-          的内容，而且筛空了的时候那张表要能变成空态，不能把改筛选和加人的
-          唯一入口一起带走。这一排与部署那边的用户管理一模一样 */}
+      {/* The filter for the list and the add-person button both sit **outside** the table (DESIGN.md 6): they are not contents of the list,
+          and when a filter empties everything the table must be able to become an empty state, not take the only way to change the filter and add people along with it.
+          This row is exactly like user management on the deployment side */}
       <div className="flex flex-wrap items-center gap-2">
         <Input
           icon={<Search size={13} />}
@@ -770,7 +770,7 @@ function KbMembers({ kbId, isOpen }: { kbId: string; isOpen: boolean }) {
         </div>
       </div>
 
-      {/* 一张表，每一列宽度定死：角色和动作都在自己那一列，不随名字长短漂移 */}
+      {/* One table, each column's width fixed: role and action each sit in their own column, not drifting with name length */}
       <div className="glass overflow-hidden rounded-panel">
         <Table>
           <THead>
@@ -788,8 +788,8 @@ function KbMembers({ kbId, isOpen }: { kbId: string; isOpen: boolean }) {
                   <div className="truncate text-small text-ink-2">{m.email}</div>
                 </Td>
                 <Td>
-                  {/* 静态文字，点一下才变成下拉：一列下拉框会把一张只读的名单
-                      看成一张待填的表，而改角色是偶尔为之 */}
+                  {/* Static text, becomes a dropdown only on click: a column of dropdowns would make a read-only list look like a table to be filled,
+                      while changing roles is occasional */}
                   {editingRole === m.user_id ? (
                     <Dropdown
                       size="sm"
@@ -816,7 +816,7 @@ function KbMembers({ kbId, isOpen }: { kbId: string; isOpen: boolean }) {
             ))}
           </TBody>
         </Table>
-        {/* 一个人都没有，与「筛没了」是两回事：前者该去加人，后者该改筛选 */}
+        {/* No people at all is different from 'filtered away': the former should go add people, the latter should change the filter */}
         {shown.length === 0 && (
           <p className="px-4 py-6 text-body text-ink-2">
             {listed.length === 0
@@ -828,8 +828,8 @@ function KbMembers({ kbId, isOpen }: { kbId: string; isOpen: boolean }) {
         )}
       </div>
 
-    {/* 把一个已有账号加进这个库。**picker 在弹窗里也仍然常驻**：没人可加时
-        它自己会说（SearchSelect 有 noMatches 空态），控件消失读作"坏了" */}
+    {/* Add an existing account to this library. **The picker also stays resident in the dialog**: when no one can be added,
+        it says so itself (SearchSelect has a noMatches empty state); the control disappearing would read as 'broken' */}
     <Dialog
       open={adding}
       onOpenChange={setAdding}

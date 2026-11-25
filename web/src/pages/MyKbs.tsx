@@ -1,7 +1,7 @@
-/* 账户层"我的知识库"：可访问的库 + 我的角色 + 加入信息 + 概览统计，**以及建库**。
-   从前建库的入口在 Administration 里，而那一节只有系统管理员看得见——可建库要的
-   是工作区 Admin+，于是一个工作区管理员在界面上根本没有建库的门。两处列的又是
-   同一份数据（都读 `my-kbs`），所以并成这一页。 */
+/* Account-level "My knowledge libraries": accessible libraries + my role + join info + overview stats, **and creating libraries**.
+   Previously the create entry was inside Administration, and that section is visible only to system administrators; creating a library needs
+   workspace Admin+, so a workspace admin had no way to create a library in the interface at all. Both places listed the same data
+   (both read `my-kbs`), so they are merged into this page. */
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
@@ -44,7 +44,7 @@ export function MyKbs() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { workspace, setKb } = useKb();
-  // 库切换器最后一行带 ?create=true 过来：落地就开表单
+  // The library switcher's last row arrives with ?create=true: open the form on landing
   const { create: deepLink } = useSearch({ from: "/account/account/kbs" });
   const [creating, setCreating] = useState(!!deepLink);
   const [filter, setFilter] = useState("");
@@ -55,8 +55,8 @@ export function MyKbs() {
     enabled: !!workspace,
   });
   const me = useQuery({ queryKey: ["me"], queryFn: fetchMe });
-  /* 能不能建库：系统管理员，或者在这个工作区里是 Admin+（api/kbs.rs 的 create
-     就是这么判的）。**editor 不能**——它管的是库里的内容，不是有几个库 */
+  /* Who can create libraries: a system administrator, or Admin+ in this workspace (that is how api/kbs.rs create judges it).
+     **Editors cannot**: they manage the contents of a library, not how many libraries exist */
   const wsRole = useQuery({
     queryKey: ["workspaceRole", workspace?.id],
     queryFn: () => api.workspaceRole(workspace!.id),
@@ -76,7 +76,7 @@ export function MyKbs() {
       r.kb.name.toLowerCase().includes(q) ||
       (r.kb.description ?? "").toLowerCase().includes(q),
   );
-  // 不筛选时按 `owner/` 归组：组名占一行，下面是短名（#1249）；筛选时按全名平铺
+  // Without a filter, group by `owner/`: the group name takes one line, the short name below it (#1249); with a filter, list full names flat
   const rowById = new Map(rows.map((r) => [r.kb.id, r]));
   const lines: ({ heading: string } | { row: (typeof rows)[number]; label: string })[] = q
     ? rows.map((row) => ({ row, label: row.kb.name }))
@@ -95,7 +95,7 @@ export function MyKbs() {
 
   return (
     <div className="px-8 py-6">
-      {/* 与管理页同一副身材：内容居中限宽，行长不随窗口拉长 */}
+      {/* Same layout as the admin page: content centered with a width limit, line length does not stretch with the window */}
       <div className="mx-auto w-full max-w-4xl">
         <PageHeader
           title={S.account.kbsTitle}
@@ -109,11 +109,11 @@ export function MyKbs() {
           }
         />
 
-        {/* 筛这份名单的东西在面板外面（DESIGN.md 6） */}
+        {/* What filters this list sits outside the panel (DESIGN.md 6) */}
         <div className="mb-4">
           <Input
             icon={<Search size={13} />}
-            /* 筛选条上的搜索框全站一个宽度：w-64（成员、规则、数据口径都是它） */
+            /* The search box on the filter bar has one width across the site: w-64 (members, rules and data scope all use it) */
             className="w-64"
             placeholder={S.account.kbsFilter}
             value={filter}
@@ -121,13 +121,13 @@ export function MyKbs() {
           />
         </div>
 
-        {/* **一张表，不是一列卡片。**这一页是一份记录清单——每个库的字段都一样，
-            人来这儿是横着比：谁的文档多、我在哪个库是 admin、哪个是受限的。
-            从前把这些堆成「名字 + 三枚胶囊」再加一行点号串起来的小字，同一个事实
-            在不同行落在不同的横向位置，比不了；而且全站别的清单（成员、令牌、
-            文库、规则、本体）早就是 Table / Th / Td，只有这一页是手写的。
-            身份那一列**是一个词，不是一枚填色胶囊**：它在自己那一列里，
-            列头已经说了这是什么，不需要再染一次色。 */}
+        {/* **A table, not a column of cards.** This page is a list of records: each library has the same fields,
+            people come here to compare across: which has more documents, where I am admin, which is restricted.
+            Previously these were piled into 'name + three pills' with a line of small text joined by dots; the same fact
+            landed at different horizontal positions on different rows and could not be compared; and every other list on the site
+            (members, tokens, library, rules, ontology) already used Table / Th / Td, and only this page was hand-written.
+            The identity column **is one word, not a filled pill**: it sits in its own column,
+            and the column header already says what it is, so there is no need to color it again. */}
         <div className="glass rounded-panel overflow-hidden">
           <Table>
             <THead>
@@ -164,8 +164,8 @@ export function MyKbs() {
                         <span className="truncate text-body text-ink" title={row.kb.name}>
                           {label}
                         </span>
-                        {/* 这两个是**库自己的性质**，不是一列数据：缺省库只有一个，
-                            受限的也少，单开一列会空掉大半，所以贴在名字旁边 */}
+                        {/* These two are **properties of the library itself**, not a column of data: there is only one default library,
+                            and few are restricted, so a column would sit mostly empty; pinned next to the name instead */}
                         {row.kb.is_default && (
                           <Chip tone="neutral">{S.settings.kbs.defaultChip}</Chip>
                         )}
@@ -190,8 +190,8 @@ export function MyKbs() {
                       {row.member_count}
                     </Td>
                     <Td className="text-small text-ink-2">{joinInfo(row)}</Td>
-                    {/* 设置在前、打开在后：不是每一行都有设置（要 admin），把总是在的
-                        那个放右端，一列按钮的右缘才不会一行一个样 */}
+                    {/* Settings first, open after: not every row has settings (admin required), so the one that is always present goes on the right end,
+                        so the right edge of the button column is consistent row to row */}
                     <Td className="text-right">
                       <div className="flex items-center justify-end gap-2">
                         {canManage && (
@@ -231,7 +231,7 @@ export function MyKbs() {
               setCreating(false);
               queryClient.invalidateQueries({ queryKey: ["myKbs", workspace.id] });
               queryClient.invalidateQueries({ queryKey: ["kbs", workspace.id] });
-              // 建完直达库设置：下一步几乎总是邀人/配置
+              // After creating, go straight to library settings: the next step is almost always inviting people or configuring
               if (id) {
                 setKb(id);
                 navigate({ to: "/kb/$kbId/settings", params: { kbId: id } });
@@ -244,9 +244,9 @@ export function MyKbs() {
   );
 }
 
-/** 新建知识库弹窗：缺省 restricted，不污染全员切换器。
-    **建库不是系统管理员专属**——工作区 Admin 起就能建（见 api/kbs.rs 的
-    create），所以它住在人人都会来的这一页，不在 Administration 里 */
+/** New knowledge library dialog: restricted by default, so it does not pollute the all-member switcher.
+    **Creating a library is not exclusive to system administrators**: a workspace Admin can create one (see create in api/kbs.rs),
+    createso it lives on this page that everyone visits, not in Administration */
 function NewKbModal({
   workspaceId,
   onDone,
@@ -257,11 +257,11 @@ function NewKbModal({
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
   const [restricted, setRestricted] = useState(true);
-  // 默认一个包都不勾（#580）。从前预勾 schema.org，理由是"要一个已经能认出人、
-  // 组织、产品的起点"；量过之后本体从文档里长出来的是库自己的十几个类，而 915 个
-  // 类的包让每块抽取提示词从 2k 涨到 18k tokens。要包的人在这里勾
+  // Nothing is ticked by default (#580). It used to pre-tick schema.org, on the reasoning that it is 'a starting point that already recognizes people,
+  // organizations and products'; but after measuring, the ontology that grows out of the documents is the library's own dozen-odd classes, and a package
+  // of 915 classes raised each extraction prompt from 2k to 18k tokens. Those who want a package tick it here
   const [packs, setPacks] = useState<string[]>([]);
-  // 场景包（0073）：按业务场景预置的类、属性和能力问题，排在标准包之后装
+  // Scenario packs (0073): classes, attributes and competency questions preset for business scenarios, installed after the standard packs
   const [scenarios, setScenarios] = useState<string[]>([]);
 
   const available = useQuery({
@@ -273,8 +273,8 @@ function NewKbModal({
     queryFn: api.scenarioPacks,
   });
 
-  // 勾选顺序即安装顺序：第一个包的类会认领同名的种子类，
-  // 后面的撞名才查得到对齐表。所以取消再勾会排到末尾——这是对的
+  // Tick order is install order: the first package's classes claim same-named seed classes,
+  // and later name collisions are only found via the alignment table. So unticking and re-ticking moves it to the end: that is correct
   const toggle = (id: string) =>
     setPacks((prev) =>
       prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id],
@@ -334,8 +334,8 @@ function NewKbModal({
           label={S.settings.kbs.visRestricted}
         />
 
-        {/* 包是可选的，而且**多半只装一个**：五张卡片铺开占了这张弹窗一多半，
-            换成搜着选——说明与规模挪进下拉里的次要文案，选中的堆在框上面 */}
+        {/* Packs are optional, and **usually only one is installed**: five spread-out cards take up most of this dialog,
+            so search-and-select instead; the secondary text for descriptions and scale moves into the dropdown, with the selected ones stacked above the box */}
         <Field label={S.settings.kbs.packsLabel} hint={S.settings.kbs.packsHint}>
           <MultiSearchSelect
             className="w-full"

@@ -1,16 +1,16 @@
 #!/usr/bin/env node
-/* 星标曲线：累计星标随日期变化的那一条线，别的都不画。
+/* Star curve: only the cumulative star count over time, nothing else is drawn.
  *
- * 为什么自己画。用过 `lowlighter/metrics`，它把「累计总数」和「每天新增」
- * 两张图**绑在同一个开关上**（`plugin_stargazers_charts`），模板里没有
- * 只留其一的办法。而想要的就是传统的那一条累计线。
+ * Why draw it ourselves. We used `lowlighter/metrics`, which puts the 'cumulative total' and 'new per day' charts
+ * two charts **tied to the same switch** (`plugin_stargazers_charts`), and the template offers no way
+ * to keep just one. What we want is the traditional cumulative line.
  *
- * 自己画还顺手去掉了一件事：那是个跑在 `contents: write` 之下的第三方
- * action。现在这个权限底下跑的是这份脚本。
+ * Drawing it ourselves also drops one more thing: it was a third-party action running under `contents: write`.
+ * action. Now this script is what runs under that permission.
  *
- * **GitHub 在 2026-06-30 把星标时间线限制成只有仓库的管理员/协作者可读**，
- * 所以必须带一个够权限的 token——匿名调用现在拿不到，star-history.com
- * 那类站点从此只回一张占位图。
+ * **GitHub **On 2026-06-30 GitHub restricted the star timeline to repo admins and collaborators only**,
+ * so a token with enough permission is required: anonymous calls now get nothing, and star-history.com
+ * such sites now return only a placeholder image.
  */
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -21,17 +21,17 @@ const out = process.env.OUT ?? "assets/star-history.svg";
 if (!owner || !repo) throw new Error("REPO must be set as owner/name");
 if (!token) throw new Error("GITHUB_TOKEN must be set");
 
-/** 每页 100，游标翻到底。1868 颗星 = 19 页，不值得为它上并发。
+/** 100 per page, follow the cursor to the end. 1868 stars = 19 pages, not worth running them concurrently.
  *
- * **走 GraphQL，不走 REST。** REST 的 `/repos/{o}/{r}/stargazers` 用同一个
- * token 会回 404：那个接口要求 token 带仓库级 scope，而这个只有 `read:org`；
- * GitHub 对无权访问的资源回 404 而不是 403，免得泄露它存不存在。
- * GraphQL 的 `stargazers` 连接认这个 token——CI 上验过。
- * 改这里，好过为了一个接口去放宽凭据。 */
+ * **Uses GraphQL, not REST.** REST's `/repos/{o}/{r}/stargazers` with the same
+ * token returns 404: that endpoint requires a token with repo-level scope, while this one only has `read:org`;
+ * GitHub returns 404 instead of 403 for resources you cannot access, so it does not reveal whether they exist.
+ * GraphQL's `stargazers` connection accepts this token, verified on CI.
+ * Fix it here rather than loosening credentials for a single endpoint. */
 async function stargazerDates() {
-  /* `viewerPermission` 与 `totalCount` 不是装饰。**受限数据 GitHub 回的是
-     空集合，不是报错**——只看 `edges` 的话，「没权限」和「真的零颗星」
-     长得一模一样。把这两个一起取回来，失败时说得出是哪一种 */
+  /* `viewerPermission` and `totalCount` are not decoration. **For restricted data GitHub returns an
+     empty collection, not an error**. If you only look at `edges`, 'no permission' and 'really zero stars'
+     look exactly alike. Fetch both together so a failure can tell which case it was. */
   const query = `query($owner:String!,$name:String!,$cursor:String){
     repository(owner:$owner,name:$name){
       stargazerCount
@@ -59,8 +59,8 @@ async function stargazerDates() {
       throw new Error(`graphql page ${page}: ${res.status} ${await res.text()}`);
     }
     const body = await res.json();
-    // **GraphQL 出错也回 200**，所以必须自己看 `errors`——否则要等到下面
-    // 读出 undefined 才发现，而那时错误原文已经丢了
+    // **GraphQL returns 200 even on errors**, so we must check `errors` ourselves, otherwise we wait until
+    // reading undefined below to notice it, by which point the original error text is lost
     if (body.errors) {
       throw new Error(`graphql page ${page}: ${JSON.stringify(body.errors)}`);
     }
@@ -82,8 +82,8 @@ async function stargazerDates() {
 
 const dates = (await stargazerDates()).sort((a, b) => a - b);
 if (dates.length === 0) {
-  // 上面那行日志已经说了 repo 报多少颗星、连接报多少、token 是什么权限。
-  // **不要在这里静默出一张空图**——一张画着零的曲线比没有图更糟
+  // The log line above already reports how many stars the repo has, how many the connection returned, and what permission the token has.
+  // **Do not silently emit an empty chart here**. A curve showing zero is worse than having no chart
   throw new Error(
     "no stargazer timestamps came back — see the line above for what the API " +
       "reported. An empty connection with a non-zero star count means the token " +
@@ -92,8 +92,8 @@ if (dates.length === 0) {
   );
 }
 
-/* 按天聚合成累计值。**每一天都要有点**，哪怕当天没有新增——
-   缺口跳过去的话，横轴的间距就不再代表时间，曲线的斜率也就骗人了 */
+/* Aggregate into cumulative values per day. **Every day must have a point**, even when no stars were added that day,
+   if gaps are skipped, the x-axis spacing no longer represents time and the curve's slope becomes misleading. */
 const DAY = 86400000;
 const day0 = Date.UTC(
   dates[0].getUTCFullYear(),
@@ -114,10 +114,10 @@ for (let k = 0; k <= lastDay; k++) {
   series.push({ t: day0 + k * DAY, v: total });
 }
 
-// ---- 画图
+// ---- drawing
 const W = 800, H = 400;
-/* 顶部留得比别处宽：末点的数值标在它上方，而**末点永远在顶上**——
-   累计值单调不减，最后一个点就是最大值 */
+/* The top margin is wider than elsewhere: the end point's value is labelled above it, and **the end point is always at the top**.
+   the cumulative value never decreases, so the last point is the maximum. */
 const PAD = { top: 40, right: 28, bottom: 40, left: 64 };
 const plotW = W - PAD.left - PAD.right;
 const plotH = H - PAD.top - PAD.bottom;
@@ -125,7 +125,7 @@ const maxV = series[series.length - 1].v;
 const x = (i) => PAD.left + (plotW * i) / Math.max(1, series.length - 1);
 const y = (v) => PAD.top + plotH - (plotH * v) / Math.max(1, maxV);
 
-/** 轴上的刻度取整齐的数，不取 max/5 那种带小数的 */
+/** Axis ticks use round numbers, not decimals like max/5. */
 function ticks(max, count = 5) {
   const raw = max / count;
   const mag = 10 ** Math.floor(Math.log10(raw));
@@ -137,30 +137,30 @@ function ticks(max, count = 5) {
 const fmtDate = (t) =>
   new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 
-/** 平滑成三次贝塞尔，用**单调**插值（Fritsch–Carlson）。
+/** Smooth into cubic Bezier curves using **monotone** interpolation (Fritsch–Carlson).
  *
- * 不用普通的 Catmull-Rom：累计星标只增不减，而普通样条会在斜率突变处
- * 过冲，画出一段下凹——**那等于在图上说星标掉了**。单调插值把每段的
- * 切线夹在不制造极值的范围内，曲线因此永远不会往回走。
+ * Not a plain Catmull-Rom: cumulative stars only increase, and a plain spline overshoots at abrupt slope changes,
+ * overshoots and draws a dip, **which would mean the chart claims stars went down**. Monotone interpolation clamps each segment's
+ * tangents within a range that creates no extrema, so the curve never turns back.
  *
- * 平的那几天（当天零新增）切线为零，接上去也不会鼓出来。 */
+ * Flat days (no new stars that day) get a zero tangent, so the joins do not bulge out. */
 function smoothPath(pts) {
   const n = pts.length;
   if (n < 2) return `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
-  // 每段的斜率
+  // slope of each segment
   const dx = [], dy = [], slope = [];
   for (let i = 0; i < n - 1; i++) {
     dx.push(pts[i + 1].x - pts[i].x);
     dy.push(pts[i + 1].y - pts[i].y);
     slope.push(dy[i] / dx[i]);
   }
-  // 每个点的切线：相邻两段异号（或有一段是平的）时取零，那正是不过冲的条件
+  // Tangent at each point: when the two adjacent segments have opposite signs (or one is flat), use zero, which is exactly the no-overshoot condition
   const m = [slope[0]];
   for (let i = 1; i < n - 1; i++) {
     m.push(slope[i - 1] * slope[i] <= 0 ? 0 : (slope[i - 1] + slope[i]) / 2);
   }
   m.push(slope[n - 2]);
-  // Fritsch–Carlson：把切线限制在每段斜率的三倍以内
+  // Fritsch–Carlson: clamp the tangents to within three times each segment's slope
   for (let i = 0; i < n - 1; i++) {
     if (slope[i] === 0) {
       m[i] = 0;
@@ -191,8 +191,8 @@ const pts = series.map((p, i) => ({ x: x(i), y: y(p.v) }));
 const line = smoothPath(pts);
 const area = `${line}L${x(series.length - 1).toFixed(1)},${(PAD.top + plotH).toFixed(1)}L${x(0).toFixed(1)},${(PAD.top + plotH).toFixed(1)}Z`;
 
-/* 末点与它的数值。**贴着右边缘时把文字改成右对齐**，
-   否则一个四位数会伸出画布外——SVG 不会替你裁，它就是没了 */
+/* The end point and its value. **Near the right edge, right-align the text**,
+   otherwise a four-digit number extends past the canvas. SVG won't clip it for you, it just vanishes. */
 const endX = x(series.length - 1);
 const endY = y(maxV);
 const endAnchor = endX > W - PAD.right - 40 ? "end" : "middle";
@@ -201,17 +201,17 @@ const xTickIdx = [...new Set(
   Array.from({ length: 6 }, (_, i) => Math.round((i * (series.length - 1)) / 5)),
 )];
 
-/* 出两张，深浅各一，README 用 `<picture>` 按主题选。
+/* Output two charts, one light and one dark; the README selects by theme with `<picture>`.
  *
- * **白线在浅色主题上是看不见的**——GitHub 浅色底就是白的。想要白色就
- * 必须分两张：`prefers-color-scheme` 写在 SVG 里不算数，README 里的 SVG
- * 是当图片加载的，那条媒体查询问的是操作系统，不是 GitHub 的主题设置，
- * 两者不一致的人就会看到一张空白的图。`<picture>` 问的才是 GitHub 自己。 */
-/** **图自带底色，不靠透明。** 从前这两张是透底的，在 README 里看着没问题——
- *  页面底色透上来正好。可它一离开 README 就散：raw 的 SVG 直接打开是白页，
- *  而深色那张画的是白线，于是一张空图；聊天软件的预览、聚合站、导出的 PDF
- *  同理。一张图该知道自己画在什么底上。取 GitHub 两个主题的画布色，与 README
- *  里那个 picture 元素选中的那一张对上 */
+ * **White lines are invisible on the light theme**, since GitHub's light background is white. To get white
+ * you must output two files: `prefers-color-scheme` inside the SVG does not count, because an SVG in the README
+ * is loaded as an image, and that media query asks the OS, not GitHub's theme setting,
+ * so anyone whose OS and GitHub themes disagree sees a blank chart. `<picture>` asks GitHub itself. */
+/** **The image carries its own background instead of relying on transparency.** These two used to be transparent, which looked fine in the README.
+ *  the page background showed through. But once it left the README it fell apart: a raw SVG opened directly is a white page,
+ *  and the dark one draws white lines, leaving a blank chart; chat app previews, aggregator sites and exported PDFs
+ *  are no different. A chart should know what background it sits on. Use GitHub's two theme canvas colors, matching the README
+ *  the `<picture>` element chooses for each theme. */
 const THEMES = {
   dark: { ink: "#8b949e", accent: "#ffffff", grid: "#8b949e33", bg: "#0d1117" },
   light: { ink: "#6e7781", accent: "#1f2328", grid: "#6e778133", bg: "#ffffff" },

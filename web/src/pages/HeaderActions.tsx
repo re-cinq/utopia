@@ -1,6 +1,6 @@
-/* 顶栏右侧那一组：第一个链接（App 里是 Docs，Docs / 账户页里是回 App）+
-   GitHub·版本胶囊 + 告警铃 + 用户菜单。三个顶栏共用这一份——从前各自拼一遍，
-   内距和间距各差几像素，换页时右上角就跟着抖。 */
+/* The group on the right side of the top bar: the first link (Docs inside the App, back to the App on the Docs / account pages) +
+   the GitHub·version capsule + the alert bell + the user menu. All three top bars share this one copy: previously each assembled its own,
+   and the inner padding and gaps differed by a few pixels, so the top-right corner jumped on page changes. */
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import type { User } from "../api";
@@ -16,16 +16,16 @@ export function HeaderActions({
   user,
   signedOut,
 }: {
-  /** 最左那个链接：去哪、写什么 */
+  /** The leftmost link: where it goes and what it says */
   link: { to: "/" | "/docs"; label: string };
   version?: string;
   user: User | null | undefined;
-  /** 没登录时放在铃铛与用户菜单位置上的东西（Docs 页的「登录」）；缺省什么都不放 */
+  /** What sits in the bell and user-menu position when not logged in (the "Log in" on the Docs page); by default nothing is shown */
   signedOut?: ReactNode;
 }) {
   return (
     <div className="ml-auto flex items-center gap-3">
-      {/* 项目入口是一对（链接 + GitHub·版本），彼此贴得比组间近 */}
+      {/* The project entry is a pair (link + GitHub·version), set closer together than the gap between groups */}
       <div className="flex items-center gap-2">
         <Link to={link.to} className="u-navlink">
           {link.label}
@@ -43,7 +43,7 @@ export function HeaderActions({
       </div>
       {user ? (
         <>
-          {/* 告警角标跟着人走，不跟着页面走：读文档、改账户的时候库照样在跑 */}
+          {/* The alert badge follows the person, not the page: the knowledge base keeps running while reading docs or editing the account */}
           <AlertBell />
           <UserMenu user={user} />
         </>

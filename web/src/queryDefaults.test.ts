@@ -21,7 +21,7 @@ describe("stale time by key", () => {
 
   it("a key with nothing behind it goes stale within the short default", () => {
     expect(staleTimeFor(["tokens"])).toBe(DEFAULT_STALE_MS);
-    // 前缀匹配是按元素比的：reviewSummary 不是 review
+    // Prefix matching compares element by element: reviewSummary is not review
     expect(staleTimeFor(["reviewSummary", "kb-1"])).toBe(DEFAULT_STALE_MS);
     expect(staleTimeFor([42])).toBe(DEFAULT_STALE_MS);
   });
