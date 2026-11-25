@@ -5,7 +5,7 @@ import { OVERVIEW_SETTLE_MS, SETTLE_MS, useKbEvents } from "./useKbEvents";
 import { useAlertEvents } from "./useAlertEvents";
 import { HIDDEN_RELEASE_MS } from "./eventStream";
 
-// 在 Node 环境执行 hook 的 effect，浏览器边界用可控事件源；查询与观察者仍用真实实现。
+// Runs the hook's effects in the Node environment, with a controllable event source at the browser boundary; queries and observers still use the real implementation.
 const hooks = vi.hoisted(() => ({
   effects: [] as Array<() => void | (() => void)>,
   client: undefined as unknown,
@@ -47,7 +47,7 @@ class FakeEventSource {
   }
 }
 
-/** 只有可见性的假页面：node 环境里没有 `document` */
+/** A fake page that only has visibility: there is no `document` in the node environment */
 function fakePage(visible = true) {
   const page = {
     visibilityState: visible ? "visible" : "hidden",
@@ -101,7 +101,7 @@ async function watch(client: QueryClient, key: QueryKey) {
   const fetch = vi.fn(async () => serverData);
   const observer = new QueryObserver(client, { queryKey: key, queryFn: fetch });
   unsubscribes.push(observer.subscribe(() => {}));
-  // subscribe 启动的首次读取与 refetch 共享同一次请求。
+  // The first read started by subscribe shares one request with refetch.
   await observer.refetch();
   expect(fetch).toHaveBeenCalledTimes(1);
   return {
@@ -145,12 +145,12 @@ describe("KB stream reconnect", () => {
 
     source.emit("error");
     for (const query of recoveredQueries) query.changeServer();
-    // staleTime 到期只让缓存变旧，不会自动请求；断线期间完全没有业务事件。
+    // Expiry of staleTime only makes the cache stale and does not request automatically; during a disconnect there are no business events at all.
     await vi.advanceTimersByTimeAsync(STREAM_STALE_MS + 1);
     for (const query of recoveredQueries) expect(query.fetch).toHaveBeenCalledTimes(1);
 
     source.emit("open");
-    // 重连不等普通事件的 300ms 合并窗口。
+    // Reconnection does not wait for the 300ms merge window of ordinary events.
     for (const query of recoveredQueries) expect(query.fetch).toHaveBeenCalledTimes(2);
     await vi.waitFor(() => {
       for (const query of recoveredQueries) expect(query.observer.getCurrentResult().data).toBe("after disconnect");

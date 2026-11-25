@@ -1,31 +1,31 @@
-// KB 事件流订阅：收到事件只做 react-query 失效重取（事件不带业务数据，天然幂等）。
-// EventSource 断线自动重连，重连成功后补刷漏掉的变化；替代 Library/Review 的轮询。
-// 告警也从这条流来：一页只占一条通知用的连接（见 `eventStream`）。
+// KB event stream subscription: on receipt, an event only does react-query invalidation and refetch (events carry no business data, so they are naturally idempotent).
+// EventSource reconnects automatically after a disconnect; after a successful reconnect, refetch whatever was missed. This replaces the polling in Library and Review.
+// Alerts also come in on this stream: a page holds only one connection for notifications (see `eventStream`).
 //
-// **失效是合并着做的。** 一篇文档抽取时每落一条事实就发一个 graph 事件，
-// 从前每个事件各失效一次，图谱页在那几秒里把 overview 重取了十几遍——
-// 每次都是同一张图，最后一次才算数。所以事件只把 key 记下来，等一个窗口
-// 再一次性失效：窗口里的事件只换来一次重取，最后那次一定包含之前所有的变化。
-// 窗口从第一个事件算起、中途不重置：持续推送时定期刷，不必等推送停下。
-// 幂等性没变，只是把「每条都刷」变成「刷最后一条」。
+// **Invalidation is batched.** When a document is extracted, every fact that lands emits a graph event,
+// and previously each event invalidated once, so the graph page refetched the overview a dozen-odd times in those few seconds,
+// always the same graph, with only the last one mattering. So events only record the key and wait for a window,
+// then invalidate once: the events in the window earn one refetch, and the last one necessarily includes all the earlier changes.
+// The window starts from the first event and is not reset midway: during continuous pushes it still flushes periodically, without waiting for pushes to stop.
+// Idempotency is unchanged; it is just that "refresh on every one" became "refresh on the last one".
 //
-// 失效不看 staleTime：这里失效的键在 queryDefaults.ts 里放到了 30 秒，靠的就是
-// 这一层把当前库的变化即时推到页面上。
+// Invalidation ignores staleTime: the keys invalidated here are set to 30 seconds in queryDefaults.ts, and this layer is what
+// pushes the current base's changes to the page immediately.
 import { useEffect } from "react";
 import { partialMatchKey, useQueryClient, type QueryKey } from "@tanstack/react-query";
 import { subscribeEvents } from "./eventStream";
 import { STREAM_KEYS } from "./queryDefaults";
 
-/** 合并窗口。抽取落事实的间隔远小于它，人眼看不出这点延迟 */
+/** The merge window. Facts land much more closely spaced than this, so the delay is invisible to the eye */
 export const SETTLE_MS = 300;
 
-/** 全图 overview 要数遍整个库：推送期间几秒重数一次就够了（#1296） */
+/** The full-graph overview has to count the entire base: recounting it every few seconds during a push is enough (#1296) */
 export const OVERVIEW_SETTLE_MS = 3_000;
 
 /**
- * 把一个窗口里的失效合并成一次：`push` 只记键，第一次 `push` 的 `settleMs` 后一起交给 `invalidate`，
- * 同一个键及其前缀只失效一次；`flush` 给卸载与重连用，攒着的刷掉而不是丢掉。
- * 抽成纯函数是为了能测；订阅那层只是把事件名映射到键。
+ * Merges the invalidations within one window into one: `push` only records keys, and after `settleMs` from the first `push` hands them all to `invalidate`,
+ * so the same key and its prefixes are invalidated only once; `flush` is for unmount and reconnect, flushing what has accumulated rather than dropping it.
+ * It is extracted as a pure function so it can be tested; the subscription layer only maps event names to keys.
  */
 export function createInvalidationCoalescer(
   invalidate: (key: QueryKey) => void,
@@ -41,8 +41,8 @@ export function createInvalidationCoalescer(
     const keys = [...pending.values()];
     pending.clear();
     for (const key of keys) {
-      // 正常 graph 事件可能已排了 ["graph", kbId, "neighborhood"]，重连又补上 ["graph", kbId]：
-      // 前缀已经覆盖后者，不能取消刚开始的请求再重取一遍。
+      // A normal graph event may already have queued ["graph", kbId, "neighborhood"], and a reconnect then adds ["graph", kbId]:
+      // the prefix already covers the latter, so the request just started must not be cancelled and refetched.
       if (keys.some((prefix) => prefix.length < key.length && partialMatchKey(key, prefix))) continue;
       invalidate(key);
     }
@@ -63,8 +63,8 @@ export function useKbEvents(kbId: string | undefined) {
       (key) => queryClient.invalidateQueries({ queryKey: key }),
       SETTLE_MS,
     );
-    // overview 到点也交给快的那层：搭上正在走的窗口，不把别的键提前刷掉；
-    // 重连补上的 ["graph", kbId] 已覆盖它，不再多取一遍
+    // The overview is also handed to the fast layer when due: it rides along the window in flight, without flushing other keys early;
+    // the ["graph", kbId] added by reconnection already covers it, so there is no extra fetch.
     const overview = createInvalidationCoalescer((key) => push(key), OVERVIEW_SETTLE_MS);
     const pushGraph = () => {
       push(["graph", kbId, "neighborhood"]);
@@ -86,24 +86,24 @@ export function useKbEvents(kbId: string | undefined) {
           push(["ontologyRegressions", kbId]);
           pushGraph();
         },
-        // 映射探索跑完发的也是 review：Pending 那一栏得跟着刷新
+        // A mapping exploration run also emits review events: the Pending column has to refresh along with it
         review: () => push(["review", kbId], ["mappings", kbId], ["ontologyRegressions", kbId]),
-        // 一句记忆抽出了等人点头的事实（0015）：对话里那张确认卡跟着长出来
+        // A sentence extracted a fact awaiting a person's nod (0015): the confirmation card in the chat grows along with it
         pending: () => push(["pending", kbId], ["review", kbId]),
         source: () => push(["sources", kbId], ["documents", kbId]),
-        // 告警搭这条流过来（#1028）：打开着一个库的页不再另开告警流
+        // Alerts come in on this stream (#1028): a page with a base open no longer opens a separate alerts stream
         alert: () => push(["alerts"]),
       },
       () => {
-        // 事件没有回放，staleTime 到期也不会自己发请求。断线后恢复必须补刷；
-        // 首次正常连接交给页面已有的读取，首次连接失败再恢复则同样可能漏事件。
+        // Events are not replayed, and expiry of staleTime does not make a request by itself. After a disconnect, recovery must refetch;
+        // the first normal connection is handled by the page's existing read, but if the first connection failed and then recovered, events may be missed too.
         push(...STREAM_KEYS.map((head) => [head, kbId]), ["alerts"]);
         flushAll();
       },
     );
     return () => {
       unsubscribe();
-      // 卸载时把攒着的刷掉而不是丢掉：换页回来看到的必须是新数据
+      // On unmount, flush what has accumulated rather than dropping it: coming back to the page must show fresh data
       flushAll();
     };
   }, [kbId, queryClient]);

@@ -1,17 +1,17 @@
-/** 世界轴日期的读与写，一条规则，全站共用。
+/** Reading and writing world-axis dates: one rule, shared across the site.
  *
- *  服务端的 `time_text`（给模型看的）与导出的 `rdf::world_time`（给审计者的）是同一条
- *  规则的另两份；三处分叉，人看到的、模型看到的、审计者拿到的就不是同一个日期。 */
+ *  The server's `time_text` (for the model) and the exported `rdf::world_time` (for auditors) are the same rule's
+ *  two other copies. If the three diverge, the date the person sees, the model sees and the auditor gets are not the same */
 
-/** 世界轴的一端按**自己的精度**显示：year → 2023，month → 2023-06，day → 2023-06-01。
- *  多少精度显示多少位——从前一律到日，年精度的事实显示成 1 月 1 日，是在无知的
- *  地方填一个确定的值。没有精度的日期（派生行上来自证据的界，0022）按日显示。
+/** A world-axis endpoint is shown at **its own precision**: year → 2023, month → 2023-06, day → 2023-06-01.
+ *  Show as many digits as the precision: previously everything went to the day, so a year-precision fact showed as January 1, which fills in a definite value
+ *  a place where ignorance is filled with a definite value. A date with no precision (a bound from evidence on a derived row, 0022) is shown by day.
  *
- *  按 UTC 取年月日而不是本地：`valid_from` / `valid_to` 来自文档里的陈述
- * （"2019 年 5 月 2 日就任"），是**日历日期不是时刻**，本来就没有时区；存的是那一天
- *  的 UTC 午夜。按本地渲染会让 UTC-5 的读者看到 2019-05-01——凭空差一天，而且差的
- *  方向还随读者所在地变。记录时间（我们何时这么认为）是另一回事，那个该按本地，
- *  见 EntityHistory 里 ymd 的注释。 */
+ *  Take year, month and day in UTC rather than local: `valid_from` / `valid_to` come from statements in the document
+ * ("took office 2 May 2019"), a **calendar date, not an instant**, so it has no timezone to begin with; it stores that day
+ *  the UTC midnight of that day. Rendering in local time would make a UTC-5 reader see 2019-05-01: a day out of nowhere, and the direction of the error
+ *  also changes with where the reader is. Record time (when we came to believe it) is a different thing, and that one should be local,
+ *  see the `ymd` comment in EntityHistory. */
 export function fmtTime(
   iso: string | null,
   precision: string | null,
@@ -23,7 +23,7 @@ export function fmtTime(
   const day = String(d.getUTCDate()).padStart(2, "0");
   if (precision === "year") return `${y}`;
   if (precision === "month") return `${y}-${m}`;
-  // 小时以下（0024）：ISO 的缩略形式，带 Z——钟点没有时区就不是时刻
+  // Below the hour (0024): ISO's short form with a Z; a clock time without a timezone is not an instant
   const hh = String(d.getUTCHours()).padStart(2, "0");
   const mi = String(d.getUTCMinutes()).padStart(2, "0");
   const ss = String(d.getUTCSeconds()).padStart(2, "0");
@@ -33,11 +33,11 @@ export function fmtTime(
   return `${y}-${m}-${day}`;
 }
 
-/** 输入框里的日期 → 时间戳 + 精度。**写多少位就是多少精度**，与抽取端
- *  `parse_time` 同一个约定：2023 是「那一年」，2023-06 是「那个月」。
+/** A date in the input box → timestamp + precision. **The number of digits written is the precision**, the same convention as the extraction side
+ *  `parse_time` uses the same convention: 2023 means 'that year' and 2023-06 means 'that month'.
  *
- *  这也是不用日期选择器的理由——选择器逼人给出一个日，而「文档只说了上半年」
- *  正是这个表单要修的那种错。回读比对是因为 `new Date("2023-13")` 不报错。 */
+ *  This is also the reason for not using a date picker: a picker forces a day, while 'the document only says the first half'
+ *  is exactly the kind of error this form must fix. The read-back comparison exists because `new Date("2023-13")` does not throw. */
 export function parseDateInput(
   s: string,
 ): { iso: string; precision: string } | null {
@@ -57,8 +57,8 @@ export function parseDateInput(
   if (hh === undefined) {
     return { iso, precision: d ? "day" : m ? "month" : "year" };
   }
-  // 钟点（0024）：没有时区就不是一个时刻——不猜，让人补上 Z 或 +08:00；
-  // 有了时区换成 UTC，值截到写出来的那一位
+  // Clock time (0024): without a timezone it is not an instant; do not guess, make the person add Z or +08:00;
+  // with a timezone it is converted to UTC, and the value is truncated to the digit written
   if (!d || !zone) return null;
   const parsed = new Date(`${y}-${m}-${d}T${hh}:${mi ?? "00"}:${ss ?? "00"}${zone}`);
   if (Number.isNaN(parsed.getTime())) return null;

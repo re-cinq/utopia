@@ -1,7 +1,7 @@
-/* 全局消息（toast）：模块级单例 + <ToastHost/>（挂在应用根部一次）。
-   任何模块 `import { toast } from "./toast"` 即可弹消息，无需 context 接线。
-   右下角堆叠，success/info 3.8s、error 6s 自动消失，可手动关闭。
-   可带一个动作（如「撤销」）：带动作的留 8s，点了动作即关闭。 */
+/* Global messages (toast): a module-level singleton + <ToastHost/> (mounted once at the app root).
+   Any module can show a message with `import { toast } from "./toast"`, no context wiring needed.
+   Stacks in the bottom-right; success/info auto-dismiss after 3.8s, error after 6s; can be dismissed manually.
+   It can carry one action (such as "Undo"): with an action it stays for 8s, and clicking the action dismisses it. */
 import { useEffect, useState } from "react";
 import { AlertCircle, CheckCircle2, Info, X } from "lucide-react";
 
@@ -22,7 +22,7 @@ function push(kind: Kind, text: string, action?: Action) {
   const id = nextId++;
   items = [...items, { id, kind, text, action }];
   listener?.(items);
-  // 带动作的多留一会儿：「撤销」要给人看清楚再点的时间
+  // Keep it up a little longer when there is an action: "Undo" needs time for the person to see it clearly before clicking
   const ttl = kind === "error" ? 6000 : action ? 8000 : 3800;
   window.setTimeout(() => dismiss(id), ttl);
 }

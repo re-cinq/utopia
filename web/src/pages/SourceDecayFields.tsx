@@ -10,8 +10,8 @@ const FIELDS: { key: keyof DecaySettings; label: () => string; min: number; max?
   { key: "min_age_days", label: () => S.library.decay.minAge, min: 0 },
 ];
 
-/** 来源的衰减开关和四个数（RC-003）。数不合规就把那一格的标签标红，保存键由调用方按
- *  `decayIssue` 关掉 */
+/** The decay switch and four numbers for a source (RC-003). An invalid number makes that cell's label red; the save key is turned off by the caller according to
+ *  `decayIssue` */
 export function SourceDecayFields({
   enabled,
   onEnabled,

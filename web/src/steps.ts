@@ -1,16 +1,16 @@
-/** 轨迹上的一步怎么说（#942）。
+/** How a step on the trace is worded (#942).
  *
- *  服务端每一步只给字段（0004）：`status`、数、时刻，外加个别步骤自己的几样。
- *  话在这里按读者的语言说。`label` 与问数、remember 的 `detail` 是数据，原样显示。
+ *  The server gives each step only fields (0004): `status`, count, and the moment, plus a few of the step's own.
+ *  The wording is done here in the reader's language. `label`, the analytics query and the remember `detail` are data, shown verbatim.
  *
- *  **没有 `status` 的是这之前存下的消息**，它们只有服务端当时写的那句英文，
- *  原样显示；不去解析那句英文再说一遍。 */
+ *  **a message without a `status` was stored earlier**, and only has the English sentence the server wrote at the time,
+ *  shown as-is; the English sentence is not parsed again. */
 import type { ChatStep } from "./api";
 import { S, type Strings } from "./i18n";
 import { fmtTime } from "./time";
 import { localDateTime } from "./ui";
 
-/** 世界时间：日历上的日子，按 UTC 读（见 fmtTime）。带了钟点的才写钟点 */
+/** World time: a calendar day, read in UTC (see fmtTime). A clock time is written only when one is given */
 function worldMoment(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
@@ -23,12 +23,12 @@ function worldMoment(iso: string): string {
   return fmtTime(iso, precision) ?? iso;
 }
 
-/** 记录时间：一个真实的时刻，按看的人所在的时区（见 localDateTime） */
+/** Record time: a real instant, shown in the timezone of the viewer (see localDateTime) */
 function recordMoment(iso: string): string {
   return Number.isNaN(new Date(iso).getTime()) ? iso : localDateTime(iso);
 }
 
-/** 这一步的对象。只有 changes 要改：服务端拼的「2026-09-01 → now」里 now 是英文 */
+/** The object of this step. Only changes needs to change: the '2026-09-01 → now' the server builds has 'now' in English */
 export function stepLabel(step: ChatStep, T: Strings = S): string {
   if (step.status && step.kind === "changes" && step.since) {
     return `${step.since} → ${step.until ?? T.ask.step.now}`;
@@ -36,11 +36,11 @@ export function stepLabel(step: ChatStep, T: Strings = S): string {
   return step.label;
 }
 
-/** 这一步的结果 */
+/** The result of this step */
 export function stepDetail(step: ChatStep, T: Strings = S): string {
   const W = T.ask.step;
   if (!step.status) return step.detail;
-  // 问数的 detail 是这次查询的目的，结果跟在它后面
+  // The analytics `detail` is the purpose of this query; the result follows it
   const withPurpose = (result: string) =>
     step.kind === "query" && step.detail ? `${step.detail} · ${result}` : result;
   if (step.status === "failed") return withPurpose(W.failed);
@@ -85,10 +85,10 @@ export function stepDetail(step: ChatStep, T: Strings = S): string {
     case "tool":
       if (step.label === "list_rules") return W.rules(n);
       if (step.label === "rule_matches") return W.marked(n);
-      // remember 的 detail 是记下的那句话
+      // remember `detail` is the sentence that was recorded
       return step.detail;
     default:
-      // 以后的服务端多出来的 kind：它的 detail 仍是一句能读的英文
+      // A kind the server adds later: its `detail` is still an English sentence that can be read
       return step.detail;
   }
 }

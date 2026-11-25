@@ -4,7 +4,7 @@ import { cardsOf, chatTestMessage, modelCardStatus } from "./Settings";
 
 describe("model card status", () => {
   it("prefers a fresh test result over a stale save confirmation", () => {
-    // #698：测完显示的一直是 "Saved"，分不清这一句说的是保存还是测试
+    // #698: after testing, the display always said "Saved", so you could not tell whether the line meant saving or testing
     expect(
       modelCardStatus(
         { ok: true, message: "Reachable and authenticated (OK)" },
@@ -29,7 +29,7 @@ describe("model card status", () => {
   });
 
   it("reports a transport-level test failure rather than going quiet", () => {
-    // 从前请求本身没通时卡上什么都不说，旧的 "Saved" 还贴着
+    // Previously, when the request itself did not go through, the card said nothing and the old "Saved" still stuck to it
     expect(
       modelCardStatus(null, "Network Error", { error: null, saved: true, dirty: false }),
     ).toEqual({ kind: "note", tone: "text-danger", text: "Network Error" });
@@ -49,7 +49,7 @@ describe("model card status", () => {
   });
 
   it("says unsaved when the card was edited, whatever the last test said", () => {
-    // #698：改了密钥直接点测试，看到的是旧配置的「已连通」
+    // #698: after changing the key, pressing test straight away showed the old configuration's "connected"
     expect(
       modelCardStatus(
         { ok: true, message: "Reachable and authenticated (OK)" },
@@ -57,7 +57,7 @@ describe("model card status", () => {
         { error: null, saved: false, dirty: true },
       ),
     ).toEqual({ kind: "unsaved" });
-    // 保存失败的报错仍然先说
+    // An error from a failed save is still reported first
     expect(
       modelCardStatus(null, null, { error: "401 Unauthorized", saved: false, dirty: true }),
     ).toEqual({ kind: "note", tone: "text-danger", text: "401 Unauthorized" });
@@ -105,7 +105,7 @@ describe("chat test message", () => {
 
 describe("cards an edit touches", () => {
   it("is only the card whose field changed", () => {
-    // #1424：改读扫描件那张卡，对话卡刚测出的结论还作数
+    // #1424: when the card for reading scanned documents was changed, the conclusion just tested on the chat card still stands
     expect(cardsOf(["ocr_base_url"])).toEqual(["ocr"]);
     expect(cardsOf(["transcribe_api_key"])).toEqual(["transcribe"]);
   });

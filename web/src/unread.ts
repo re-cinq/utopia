@@ -1,14 +1,14 @@
-// 左栏那一列会话此刻各自处在什么状态：正在写 / 写完了你还没看 / 看过了。
+// Which state each conversation in the left column is in right now: being written / finished but unread by you / read.
 //
-// **为什么另起一个模块，而不是放进 Chat。** 回答不随离开而停（见 liveAnswer 的
-// 开头）：人问完一句话就切去图谱页，Chat 组件卸载，那条流还在跑。"写完了"这个
-// 时刻因此常常发生在没有任何组件挂着的时候——判断挂在组件里就等于漏掉它正要
-// 记录的那一类事。这里在模块加载时就订上 liveAnswer，此后无人问津也照记。
+// **Why a separate module rather than in Chat.** Answers do not stop when you leave (see the start of liveAnswer's
+// start): the person asks something and switches to the graph page, the Chat component unmounts, and the stream keeps running. The 'done' moment
+// therefore often happens when no component is mounted: putting the check in a component would mean missing the very kind of event it
+// is meant to record. This subscribes to liveAnswer when the module loads, and keeps recording even when no one is looking.
 //
-// **"未读"是客户端的事，不进库。** 它说的是"这台机器上的这个人还没看过这一条"，
-// 换台机器重新算一遍反而是对的；落进 conversations 表就成了跨设备的一个状态，
-// 那是另一件事（要的话得有 read_at 和一条接口）。放 localStorage：刷新还在，
-// 清了也只是少一个记号，不丢任何内容。
+// **"unread" is client-side and not stored in the database.** It means 'this person on this machine has not seen this one yet',
+// recomputing on another machine is actually right; putting it in the conversations table would make it a cross-device state,
+// which is a different thing (it would need read_at and an endpoint). Stored in localStorage: a refresh keeps it,
+// clearing it only loses a marker and no content.
 import { useSyncExternalStore } from "react";
 import { liveAnswer } from "./liveAnswer";
 
@@ -27,9 +27,9 @@ function load(): string[] {
 const ids = new Set<string>(load());
 const listeners = new Set<() => void>();
 
-/* useSyncExternalStore 靠引用相等跳过重渲染，所以两张表各自留一份快照，
-   只在**真的变了**的时候换新对象：一场回答逐字增长期间 liveAnswer 每个
-   token 都在 emit，而这两张表在那期间一动不动，左栏不该跟着重画。 */
+/* useSyncExternalStore skips re-renders by reference equality, so each of the two tables keeps its own snapshot,
+   only swaps in a new object when it **really changed**: while an answer grows word by word, liveAnswer emits on every
+   token emits, while these two tables do not move in that time, so the left column should not redraw. */
 let unreadSnap: ReadonlySet<string> = new Set(ids);
 let liveSnap: ReadonlySet<string> = new Set<string>();
 
@@ -37,7 +37,7 @@ function save() {
   try {
     localStorage.setItem(KEY, JSON.stringify([...ids]));
   } catch {
-    /* 隐私模式下存不了：这一会话内照常工作，刷新后从零开始 */
+    /* Private mode cannot store: it still works within this session and starts from zero after a refresh */
   }
 }
 
@@ -53,7 +53,7 @@ function same(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   return true;
 }
 
-/** 此刻正看着的那一场。它写完时不该变成"未读"——人就在那儿看着 */
+/** The one being looked at right now. When it finishes it should not become 'unread': the person is watching it */
 let viewing: string | null = null;
 
 liveAnswer.subscribe(() => {
@@ -61,9 +61,9 @@ liveAnswer.subscribe(() => {
   for (const e of liveAnswer.get()) {
     if (e.streaming && e.conversationId) now.add(e.conversationId);
   }
-  /* 上一拍在流、这一拍不在了 = 那一场刚写完（正常结束、出错、或人按了停止，
-     三者对左栏是同一件事：它不再动了，而你可能没在看）。liveAnswer 的条目
-     结束后仍留在表里（只把 streaming 落下来），所以这个差集是可靠的。 */
+  /* It was streaming on the last tick and is gone on this one = that one just finished (normal end, error, or the person pressed stop,
+     all three are the same thing to the left column: it stopped moving, and you may not have been looking). liveAnswer's entry
+     stays in the table after it ends (it only drops streaming), so this set difference is reliable. */
   let changed = false;
   for (const id of liveSnap) {
     if (now.has(id) || id === viewing) continue;
@@ -80,9 +80,9 @@ liveAnswer.subscribe(() => {
 });
 
 export const convMarks = {
-  /** 换人时清空：这些都是上一个人的会话。要在 liveAnswer.clear 之后调——摘掉
-   *  还在写的条目时，上面的订阅会把它们记成写完未读。liveSnap 不在这里清：它跟着
-   *  liveAnswer 走，回答清了它自然空；只清共用那份时，留下的回答还要接着记 */
+  /** Cleared when the person changes: these are all the previous person's conversations. Call it after liveAnswer.clear, so that the
+   *  entries still being written are not recorded as finished-unread by the subscription above. liveSnap is not cleared here: it follows
+   *  liveAnswer does: once the answers are cleared it empties naturally; when only the shared copy is cleared, the remaining answers still need recording */
   clear() {
     ids.clear();
     viewing = null;
@@ -90,7 +90,7 @@ export const convMarks = {
     try {
       localStorage.removeItem(KEY);
     } catch {
-      /* 同 save：存不了就只清内存 */
+      /* Same as save: if it cannot be stored, clear only memory */
     }
     for (const l of listeners) l();
   },
@@ -102,23 +102,23 @@ export const convMarks = {
       listeners.delete(l);
     };
   },
-  /** 打开了某一场（传 null = 谁也没打开，比如新对话）。打开就是看过了 */
+  /** Opens one run (pass null = nobody opened, e.g. a new conversation). Opening it means it has been read */
   view(conversationId: string | null) {
     viewing = conversationId;
     if (conversationId && ids.delete(conversationId)) emitUnread();
   },
-  /** 会话删了，记号跟着走——否则这个 id 永远留在存储里 */
+  /** When a conversation is deleted, its marker goes too; otherwise this id stays in storage forever */
   forget(conversationId: string) {
     if (ids.delete(conversationId)) emitUnread();
   },
 };
 
-/** 有未读的那些会话 */
+/** Conversations with unread answers */
 export function useUnread(): ReadonlySet<string> {
   return useSyncExternalStore(convMarks.subscribe, convMarks.unread);
 }
 
-/** 此刻正在写的那些会话 */
+/** Conversations being written right now */
 export function useLive(): ReadonlySet<string> {
   return useSyncExternalStore(convMarks.subscribe, convMarks.live);
 }

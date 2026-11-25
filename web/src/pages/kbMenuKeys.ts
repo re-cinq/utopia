@@ -1,5 +1,5 @@
-/* 组那一行与它的子菜单认哪些键（KbMenuList）。与菜单的惯例一致：
-   Enter / 空格 / → 打开并进到第一项；Esc / ← 退回那一行；↑↓ 在子菜单里走 */
+/* Which keys the group row and its submenu recognise (KbMenuList). Consistent with the menu convention:
+   Enter / Space / → open and move to the first item; Esc / ← return to the row; ↑↓ move within the submenu */
 const OPENS = new Set(["Enter", " ", "ArrowRight"]);
 const IN_SUBMENU: Record<string, "close" | 1 | -1> = {
   Escape: "close",

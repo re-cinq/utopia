@@ -31,14 +31,14 @@ export function DocViewer() {
     queryKey: ["docDetail", docId],
     queryFn: () => api.documentDetail(docId),
   });
-  // 角色仅详情接口返回；复用 KbScope 的键，不能从工作区 KB 列表判断写权限。
+  // The role is only returned by the detail endpoint; reuse the KbScope key, and write permission cannot be judged from the workspace KB list.
   const roleKbId = detail.data?.document.kb_id;
   const role = useQuery({
     queryKey: ["kbOne", roleKbId],
     queryFn: () => api.kbDetail(roleKbId!),
     enabled: !!roleKbId,
   });
-  // 反向证据链：各分块抽出的事实（一次取整文档，按 chunk 分组）
+  // Reverse evidence chain: the facts extracted from each chunk (the whole document fetched at once, grouped by chunk)
   const extractions = useQuery({
     queryKey: ["docExtractions", docId],
     queryFn: () => api.documentExtractions(docId),
@@ -52,19 +52,19 @@ export function DocViewer() {
     return map;
   }, [extractions.data]);
 
-  // null = 自动定位：有引用跳转时翻到目标分块所在页
+  // null = auto-locate: when a citation jumps, flip to the page containing the target chunk
   const [page, setPage] = useState<number | null>(null);
   useEffect(() => setPage(null), [chunk, docId]);
   useEffect(() => setCaseStatement(null), [docId]);
 
   const highlightRef = useRef<HTMLDivElement>(null);
-  // 引用跳转：滚动到目标分块点亮一下，稍候淡出恢复普通状态（不常驻高亮）
+  // Citation jump: scroll to the target chunk and light it up briefly; it fades out after a moment and returns to normal (no persistent highlight)
   const [flash, setFlash] = useState(false);
   useEffect(() => {
     if (detail.data && highlightRef.current) {
       highlightRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
       setFlash(true);
-      // 平滑滚动本身耗几百毫秒，点亮窗口要留足滚动后的可视时间
+      // The smooth scroll itself takes a few hundred milliseconds, so the lit window must leave enough visible time after the scroll
       const t = setTimeout(() => setFlash(false), 2600);
       return () => clearTimeout(t);
     }
@@ -86,15 +86,15 @@ export function DocViewer() {
 
   return (
     <div className="h-full flex">
-      {/* 来源栏常驻：当前文档所属文件夹高亮，点其他文件夹跳回 Library 对应视图 */}
+      {/* The source bar is always present: the folder the current document belongs to is highlighted; clicking another folder jumps back to the matching Library view */}
       <SourcesRail
         kbId={doc.kb_id}
         active={doc.source_id ?? "uploads"}
         onSelect={(sel) => navigate({ to: "/kb/$kbId/library", params: { kbId }, search: { src: sel } })}
       />
       <div className="flex-1 min-w-0 overflow-y-auto u-scroll">
-        {/* 靠左排，与文库列表同一个内距（px-8 py-6），铺满栏右的整个宽度：
-            分块那一栏和右边的抽取栏一起摊开 */}
+        {/* Left-aligned, with the same inset as the library list (px-8 py-6), spanning the full width to the right of the bar:
+            the chunk column and the extraction column on the right are laid out together */}
         <div className="px-8 py-6">
         <PageHeader
           title={doc.filename}
@@ -119,7 +119,7 @@ export function DocViewer() {
                 >
                   <div className="mb-2 text-small text-ink-2">
                     {S.doc.section} {c.seq + 1}
-                    {/* 认出来、转写出来的字标一句出处：可能认错一个数、听错一个名字 */}
+                    {/* A source note for a wordmark that was recognised and transcribed: it may have misread a number or misheard a name */}
                     {originLabel(c.origin, c.anchor) && (
                       <span title={originHint(c.origin, c.origin_model)}>
                         {" · "}
@@ -136,21 +136,21 @@ export function DocViewer() {
                       </span>
                     )}
                   </div>
-                  {/* 从一条图谱事实的号跳来时，标出说出它的那一句（#968 的后续） */}
+                  {/* When jumping from the number of a graph fact, mark the sentence that stated it (a follow-up to #968) */}
                   {hit && quote ? <QuotedText text={c.text} quotes={[quote]} /> : c.text}
                 </div>
 
-                {/* 抽取对照栏：这个分块产出了哪些事实（实体可跳图谱）。
-                    **宽度跟着屏幕走**：每一条都是一个三元组，窄栏里一条要折三行，
-                    读者要在原文和它之间来回看，折行越多越难对上。384 的时候大多数
-                    三元组占一到两行 */}
+                {/* Extraction comparison bar: which facts this chunk produced (entities can jump to the graph).
+                    **Width follows the screen**: each one is a triple, and in a narrow column one would wrap onto three lines,
+                    and readers go back and forth between the source text and it, so the more it wraps, the harder it is to match up. At 384, most
+                    triples take one or two lines */}
                 {facts.length > 0 && (
                   <aside className="w-64 shrink-0 rounded-panel border border-line bg-surface p-3 xl:w-80 2xl:w-96">
                     <GroupLabel className="mb-2" count={facts.length}>
                       {S.doc.extracted}
                     </GroupLabel>
-                    {/* **条与条之间画一条线**：一条折了三行、下一条折了两行，只靠 8px 的
-                        间距分不开，一栏读下来是一团字。线比加大间距省地方 */}
+                    {/* **Draw a line between rows**: one triple wraps to three lines and the next to two; an 8px gap alone cannot separate them, and the column reads as a blur of text.
+                        A rule saves more room than a bigger gap */}
                     <div className="divide-y divide-line">
                       {facts.map((f) => {
                         const range = factRange(f);
@@ -193,9 +193,9 @@ export function DocViewer() {
                                   {f.object}
                                 </Link>
                               ) : (
-                                /* 字面值的宾语与实体的宾语**一样深**：浅一档的话它和
-                                   中间的短语同色，三元组读起来就断不开哪里是关系、
-                                   哪里是值 */
+                                /* A literal's object is **as deep** as an entity's object: one tier lighter and it would
+                                   share the colour of the phrase in the middle, and the triple could not be read as where the relation ends
+                                   and where the value begins */
                                 <span className="text-ink">{f.object ?? ""}</span>
                               )}
                             </div>
@@ -233,12 +233,12 @@ export function DocViewer() {
   );
 }
 
-/** 文档头部的元数据条：段数 · 大小 · 文档日期 · 上传时刻。
+/** The metadata bar at the top of the document: segment count · size · document date · upload time.
  *
- *  文档日期（`doc_time`）与上传时刻（`created_at`）分开显示（#610）：合成一格，读的人会把
- *  上传时间当成文档上写的日期。两者的读法也不同：文档日期是**日历日期**，存的是那一天的
- *  UTC 午夜，按 UTC 读（`fmtTime`）——按本地读，UTC-5 的人看到的是前一天；上传时刻是一个
- *  真实的时刻，按看的人所在的时区读。 */
+ *  The document date (`doc_time`) and the upload time (`created_at`) are shown separately (#610): merging them into one cell would make readers take
+ *  the upload time for a date written on the document. They are also read differently: the document date is a **calendar date**, stored as that day's
+ *  UTC midnight, and is read in UTC (`fmtTime`), since reading it in local time would show someone at UTC-5 the previous day; the upload time is a
+ *  real instant, read in the time zone of the viewer. */
 function DocMeta({ doc, chunks }: { doc: Doc; chunks: number }) {
   const docDate = fmtTime(doc.doc_time, "day");
   return (

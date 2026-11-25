@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { FOLLOW_SLACK_PX, followsBottom } from "./chatScroll";
 
-/** 视口 600、内容 2000：滚到 1400 就是底 */
+/** Viewport 600, content 2000: scrolling to 1400 reaches the bottom */
 const view = (scrollTop: number, clientHeight = 600, scrollHeight = 2000) => ({
   scrollTop,
   clientHeight,

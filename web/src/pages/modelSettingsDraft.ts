@@ -30,7 +30,7 @@ export function clearSubmittedDraft(
   card: ModelCard,
   submitted: ModelDraft | undefined,
 ): ModelDrafts {
-  // 每次编辑都会替换这张卡的草稿；旧请求完成时不能清掉后来改的内容。
+  // Every edit replaces this card's draft; when an old request completes, it must not clear what was changed later.
   if (!submitted || drafts[card] !== submitted) return drafts;
   const remaining = { ...drafts };
   delete remaining[card];

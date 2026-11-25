@@ -33,7 +33,7 @@ const ROLES = ["owner", "admin", "editor", "viewer"] as const;
 const ROLE_OPTIONS = ROLES.map((r) => ({ value: r, label: S.members.roles[r] }));
 const MEMBER_PAGE = 10;
 
-/** 名单里的一行。停用的账号也是一行——它没有工作区角色，别的都一样 */
+/** A row in the roster. A deactivated account is also a row: it has no workspace role, otherwise identical */
 type Person = {
   user_id: string;
   display_name: string;
@@ -43,11 +43,11 @@ type Person = {
   deactivated: boolean;
 };
 
-/** 一个成员的弹窗：改身份在正文，停用与移出在左下角。
+/** The dialog for one member: changing identity is in the body, deactivate and remove are at the bottom left.
  *
- *  **停用和移出是两件事**，所以是两个按钮而不是一个：前者断掉这个人在整个
- *  部署里的访问（只有管理员做得了，影响面大得多，还要再过一道确认），
- *  后者只是这个工作区不再有他。挤成一个按钮就得让人自己猜点下去会发生什么。 */
+ *  **Deactivate and remove are two different things**, so they are two buttons rather than one: the former cuts this person's access across the whole
+ *  deployment (only an administrator can do it, the blast radius is much larger, and it goes through one more confirmation),
+ *  while the latter only means he is no longer in this workspace. Squeezing them into one button would make people guess what a click will do. */
 function MemberDialog({
   member,
   canDeactivate,
@@ -124,12 +124,12 @@ export function Members({ workspaceId }: { workspaceId: string }) {
   const [addRole, setAddRole] = useState("viewer");
   const [memberPage, setMemberPage] = useState(0);
   const [filter, setFilter] = useState("");
-  // 看在用的、看停用的，还是都看。缺省只看在用的：那是这一页平时的问题
+  // Active only, deactivated only, or all. The default is active only: that is this page's usual question
   const [status, setStatus] = useState<"all" | "active" | "deactivated">("active");
   const [creating, setCreating] = useState(false);
   const [adding, setAdding] = useState(false);
-  // 角色平时是一行字，点了才变成下拉——同时只有一行在编辑
-  // 按角色筛
+  // A role is normally a line of text, and only becomes a dropdown when clicked: only one row is being edited at a time
+  // Filter by role
   const [role, setRole] = useState("all");
   const me = useQuery({ queryKey: ["me"], queryFn: fetchMe });
   const [error, setError] = useState<string | null>(null);
@@ -139,9 +139,9 @@ export function Members({ workspaceId }: { workspaceId: string }) {
     queryFn: () => api.members(workspaceId),
   });
   const orgUsers = useQuery({ queryKey: ["orgUsers"], queryFn: api.orgUsers });
-  /* 停用的账号是部署级的，成员表里查不到（停用之后那个人从成员表、选人器、
-     每一个列表里消失）——所以另取一次，再并进同一份名单。**只有管理员看得到**：
-     恢复也只有他能做 */
+  /* Deactivated accounts are at deployment level and cannot be found in the member table (after deactivation the person disappears from the member table, the person picker,
+     and every list), so they are fetched separately and merged into the same roster. **Only administrators can see them**:
+     only they can restore them */
   const deactivated = useQuery({
     queryKey: ["deactivatedUsers"],
     queryFn: api.deactivatedUsers,
@@ -171,8 +171,8 @@ export function Members({ workspaceId }: { workspaceId: string }) {
     onSuccess: refresh,
     onError,
   });
-  // 停用先问一句——用全站的对话框而不是浏览器原生 confirm()
-  // 正在编辑的那个成员（行尾的铅笔打开它）
+  // Deactivating asks first: use the site-wide dialog rather than the browser's native confirm()
+  // The member being edited (the pencil at the end of the row opens it)
   const [editing, setEditing] = useState<Person | null>(null);
   const [deactivating, setDeactivating] = useState<{ id: string; name: string } | null>(
     null,
@@ -198,9 +198,9 @@ export function Members({ workspaceId }: { workspaceId: string }) {
   const memberIds = new Set(members.data?.map((m) => m.user_id));
   const addable = orgUsers.data?.filter((u) => !memberIds.has(u.id)) ?? [];
 
-  /* **停用不是另一张表，是这份名单里的一种状态。**
-     从前它单独一块挂在页尾：同一个人在两个地方各出现一次，而"这个账号还在不在"
-     恰恰是看名单时最先要问的一件事。合成一份之后，它变成一个可筛的状态 */
+  /* **Deactivated is not a separate table; it is one state within this roster.**
+     Previously it hung on its own block at the page foot: the same person appeared in two places, while "does this account still exist"
+     is exactly the first question when looking at the roster. Merged into one list, it becomes a status you can filter by */
   const people: Person[] = [
     ...(members.data ?? []).map((m) => ({ ...m, deactivated: false })),
     ...(deactivated.data ?? []).map((u) => ({
@@ -222,7 +222,7 @@ export function Members({ workspaceId }: { workspaceId: string }) {
         p.display_name.toLowerCase().includes(q) ||
         p.email.toLowerCase().includes(q),
     )
-    // 停用的沉底：他们仍然列着，但不该排在还在用的人前面
+    // Deactivated ones sink to the bottom: they are still listed, but should not rank ahead of people still in use
     .sort((a, b) => Number(a.deactivated) - Number(b.deactivated));
   const { rows: pagedMembers, safe: safeMemberPage } = pageSlice(memberList, memberPage, MEMBER_PAGE);
 
@@ -233,8 +233,8 @@ export function Members({ workspaceId }: { workspaceId: string }) {
 
   return (
     <div className="space-y-4">
-      {/* 筛这份名单的东西在表格外面（DESIGN.md 6）：三个筛子同一副身材——
-          带放大镜的中号输入框 + 两个下拉，与图谱、文库那几页的筛选条一致 */}
+      {/* The things that filter this roster sit outside the table (DESIGN.md 6): three filters of the same shape:
+          a medium input box with a magnifier + two dropdowns, consistent with the filter bars on the graph and library pages */}
       <div className="flex flex-wrap items-center gap-2">
         <Input
           icon={<Search size={13} />}
@@ -279,7 +279,7 @@ export function Members({ workspaceId }: { workspaceId: string }) {
 
       {error && <p className="text-body text-danger">{error}</p>}
 
-      {/* 一张表：每一列宽度定死，角色、动作都在自己那一列里，不再随名字长短漂移 */}
+      {/* One table: each column's width is fixed, and the role and actions each sit in their own column, so they no longer drift with name length */}
       <div className="glass rounded-panel overflow-hidden">
         <Table>
           <THead>
@@ -294,7 +294,7 @@ export function Members({ workspaceId }: { workspaceId: string }) {
             {pagedMembers.map((m) => (
               <Tr
                 key={m.user_id}
-                // group：行尾那个 ⋯ 靠它认出「指针停在这一行」（见 REVEAL）
+                // group: the ⋯ at the end of the row uses it to recognize "the pointer is on this row" (see REVEAL)
                 className={cn("group", m.deactivated && "opacity-55")}
               >
                 <Td>
@@ -305,8 +305,8 @@ export function Members({ workspaceId }: { workspaceId: string }) {
                   <div className="truncate text-small text-ink-2">{m.email}</div>
                 </Td>
                 <Td className="text-ink-2">
-                  {/* **就是一个词。**改角色搬进行尾那个菜单了——这一列是名单在
-                      陈述事实，不是一排等着填的控件 */}
+                  {/* **It is just one word.** Changing the role has moved into the menu at the end of the row: this column is the roster
+                      stating facts, not a row of controls waiting to be filled in */}
                   {m.deactivated
                     ? "—"
                     : (S.members.roles[m.role as keyof typeof S.members.roles] ??
@@ -319,14 +319,14 @@ export function Members({ workspaceId }: { workspaceId: string }) {
                     <span className="text-small text-ink-2">{S.members.filterActive}</span>
                   )}
                 </Td>
-                {/* **一行的动作收进行尾那支铅笔**：指针停在这一行才现身
-                    （`REVEAL`），点开是一张居中的弹窗，改角色、停用、移出都在
-                    那里面。从前是两三个常驻的红字摊在行尾，十行就是二十个，
-                    一屏最扎眼的成了「移出」和「停用」——而人来这一页十次有九次
-                    只是看看谁在里面。 */}
+                {/* **A row's actions are folded into the pencil at the end of the row**: they only appear when the pointer is on the row
+                    (`REVEAL`), and clicking it opens a centred dialog, where changing the role, deactivating and removing are all done.
+                    Previously two or three permanent red labels were spread at the end of each row, so ten rows meant twenty of them,
+                    and the most eye-catching thing on one screen became "remove" and "deactivate", while nine times out of ten people visiting this page
+                    were only checking who is in it. */}
                 <Td className="text-right">
-                  {/* 停用的账号没有工作区角色，也就没什么可编辑的：它这一行
-                      只有一件事可做，那就直接摆出来，不必藏进弹窗 */}
+                  {/* A deactivated account has no workspace role, so there is nothing to edit: its row
+                      has only one thing to do, so show it directly, without hiding it in a dialog */}
                   {m.deactivated ? (
                     <Button variant="secondary" size="sm"
                       disabled={revive.isPending}
@@ -360,8 +360,8 @@ export function Members({ workspaceId }: { workspaceId: string }) {
         onPage={setMemberPage}
       />
 
-      {/* 把一个**已有账号**加进这个工作区。与「开账号」是两件事：那个凭空造
-          一个人，这个只是给已经存在的人一个角色 */}
+      {/* Add an **existing account** to this workspace. This is a different thing from "create an account": that one makes a person from nothing,
+          this one just gives an already existing person a role */}
       <Dialog
         open={adding}
         onOpenChange={setAdding}
@@ -386,7 +386,7 @@ export function Members({ workspaceId }: { workspaceId: string }) {
       >
         <div className="grid grid-cols-2 gap-3">
           <Field label={S.members.userLabel} className="mb-0">
-            {/* 空列表由 SearchSelect 自己说（它有 noMatches 空态） */}
+            {/* An empty list is explained by the SearchSelect itself (it has a noMatches empty state) */}
             <SearchSelect
               className="w-full"
               value={addUserId}
@@ -463,7 +463,7 @@ export function Members({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-/** 管理员代开账号（注册关闭后的唯一入口）。开账号是个动作，住在弹窗里 */
+/** An administrator creates an account on someone's behalf (the only entry point once registration is closed). Creating an account is an action, so it lives in a dialog */
 function CreateUserDialog({
   open,
   onOpenChange,
@@ -516,10 +516,10 @@ function CreateUserDialog({
         </>
       }
     >
-      {/* 这是**给别人开账号**，不是登录：浏览器看见「邮箱 + 密码」就把当前
-          登录的人填进来（管理员打开它，看到的是自己的名字和一串圆点）。
-          `new-password` 让 Chrome 认出这是设新密码而不是回填旧凭据，
-          上面两格一并关掉自动填充 */}
+      {/* This is **creating an account for someone else**, not logging in: the browser, seeing "email + password", fills in the currently
+          logged-in person (when the administrator opens it, what they see is their own name and a row of dots).
+          `new-password` lets Chrome recognize that this is setting a new password, not back-filling old credentials;
+          the two fields above also turn off autofill */}
       <div className="grid grid-cols-2 gap-3">
         <Field label={S.login.email} className="mb-0">
           <Input className="w-full"

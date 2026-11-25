@@ -21,8 +21,8 @@ interface FakeArea {
   remove(): void;
 }
 
-/** node 里没有 DOM：一个只够 copyText 用的 document。`execCommand` 记下它被调的那一刻
- *  页面上选中的是哪段字——那正是浏览器会放进剪贴板的东西 */
+/** No DOM in node: a document just enough for copyText. `execCommand` records the moment it is called and
+ *  which text is selected on the page, which is exactly what the browser would put on the clipboard */
 function page(result: boolean | "throw") {
   const before = { focus: vi.fn() };
   const areas: FakeArea[] = [];
@@ -79,7 +79,7 @@ describe("copyText", () => {
     const { before, areas, copied } = page(true);
     expect(await copyText("SELECT 1")).toBe(true);
     expect(copied).toEqual(["SELECT 1"]);
-    // 那个看不见的 textarea 用完就拿掉，焦点还给原来那个元素
+    // Remove the invisible textarea once it is used, and return focus to the element it came from
     expect(areas).toHaveLength(1);
     expect(areas[0].readOnly).toBe(true);
     expect(areas[0].attached).toBe(false);

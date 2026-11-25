@@ -29,16 +29,16 @@ import { usePageTitle } from "../useTitle";
 import { fetchMe } from "../authSession";
 
 const TABS = [
-  // 图谱是门面，排第一；两种查询方式（Search/Ask）随后
+  // The graph is the front door, so it comes first; the two ways of querying (Search / Ask) follow
   { to: "/kb/$kbId/graph", label: S.nav.graph, Icon: Waypoints },
   { to: "/kb/$kbId/search", label: S.nav.search, Icon: SearchIcon },
   { to: "/kb/$kbId/chat", label: S.nav.ask, Icon: MessagesSquare },
   { to: "/kb/$kbId/library", label: S.nav.library, Icon: LibraryIcon },
   { to: "/kb/$kbId/review", label: S.review.title, Icon: ListChecks },
   { to: "/kb/$kbId/ontology", label: S.ontology.title, Icon: Shapes },
-  // 本体说「世界上有什么」，数据映射说「这个数在库里怎么算」——挨着放
+  // The ontology says "what exists in the world", data mapping says "how this number is computed in the library": they sit next to each other
   { to: "/kb/$kbId/mappings", label: S.mapping.title, Icon: Database },
-  // 库设置与其它 tab 同为"当前知识库作用域"，并列于内容导航
+  // Library settings, like the other tabs, are "the current knowledge base scope", and sit alongside the content navigation
   { to: "/kb/$kbId/settings", label: S.nav.settings, Icon: SettingsIcon },
 ] as const;
 
@@ -52,19 +52,19 @@ export function Shell() {
     queryFn: api.health,
   });
   const { kb, kbs, setKb, settled } = useKb();
-  // 标题跟随当前 tab：`Graph · Utopia`；文档查看页归入 Library
+  // The title follows the current tab: `Graph · Utopia`; the document viewer page belongs to Library
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const tabLabel =
     TABS.find((t) => pathname.startsWith(t.to))?.label ??
     (pathname.startsWith("/doc/") ? S.nav.library : undefined);
   usePageTitle(S.app.name, tabLabel);
-  // 全局唯一的 KB 事件流连接：文档/审核状态实时刷新（替轮询）。告警也从它来
+  // The one global KB event-stream connection: document and review state refresh in real time (in place of polling). Alerts also come from it
   useKbEvents(kb?.id);
-  // 没有打开着的库时才单开告警流：一页只占一条通知用的连接（#1028）。
-  // 等列表取回来再判断，否则每次加载都先连上、库一到又断开
+  // Only open a separate alert stream when no knowledge base is open: a page takes up just one connection for notifications (#1028).
+  // Wait until the list has come back before judging, otherwise every load connects first and then disconnects once the KB arrives
   useAlertEvents(settled && !kb);
 
-  // 未登录就去登录页。**副作用要在 effect 里**，理由见下面 401 那一支
+  // Not logged in: go to the login page. **Side effects belong in an effect**; the reason is in the 401 branch below
   const unauthorized =
     me.isError && me.error instanceof ApiError && me.error.status === 401;
   useEffect(() => {
@@ -80,10 +80,10 @@ export function Shell() {
   }
 
   if (me.isError) {
-    // **跳转在 effect 里做，不在渲染里。** 渲染期间调 `navigate` 是在别人渲染
-    // 的过程中改路由器的状态，React 会常驻一条「Cannot update a component
-    // while rendering a different component」的警告。今天不出错，但它是
-    // 「渲染顺序依赖」的味道——改布局时最容易在这种地方变成真 bug
+    // **The navigation is done in an effect, not during render.** Calling `navigate` while rendering changes the router's state in the middle of rendering
+    // another component, and React keeps a standing warning "Cannot update a component
+    // while rendering a different component". It does not fail today, but it has the smell of "depends on render order": when the layout changes,
+    // this is the most likely place for it to become a real bug
     if (me.error instanceof ApiError && me.error.status === 401) {
       return null;
     }
@@ -92,25 +92,25 @@ export function Shell() {
 
   return (
     <div className="h-screen flex flex-col overflow-hidden u-arrive">
-      {/* 顶栏：品牌 + 工作区 + 用户（Vercel 式） */}
-      {/* z-40：backdrop-filter 使顶栏与 tab 条各自成 stacking context，
-          不提权则后者按 DOM 序盖住顶栏内的弹出面板 */}
-      {/* 左内距 32px：字标的左缘落在下面第一个标签的图标上（nav px-4 + 标签左 16）。
-          字标与切换器之间 gap-6（切换器自己只有 px-2）：切换器的图标正好落在第二个
-          标签的图标上（132；英文界面下的巧合，字标或标签一换尺寸就得重量）——
-          两行同一套节奏 */}
+      {/* Top bar: brand + workspace + user (Vercel style) */}
+      {/* z-40: backdrop-filter makes the top bar and the tab strip each their own stacking context;
+          without the elevation, the latter would cover the popover panels inside the top bar by DOM order */}
+      {/* Left inner padding 32px: the left edge of the wordmark lines up with the icon of the first tab below (nav px-4 + the tab's left 16).
+          The gap between wordmark and switcher is gap-6 (the switcher itself only has px-2): the switcher's icon lands exactly on the icon of the second
+          tab (132; a coincidence under the English UI, which would need recalculating if the wordmark or tabs changed size),
+          so both rows keep the same rhythm */}
       <header className="glass-strong relative z-40 border-x-0 border-t-0 h-12 shrink-0 flex items-center gap-6 px-2">
-        {/* 字标：逐字母淡入，hover 浮出 ↗，点击去官网 */}
+        {/* Wordmark: letters fade in one by one; on hover an ↗ rises; clicking goes to the website */}
         <Wordmark className="u-wordmark-top pl-3" />
-        {/* 知识库切换器紧跟字标，中间不画斜杠——它不是面包屑的第二级，就是
-            「现在在哪个库」。Workspace 已从概念层折叠为部署级隐形管道
-            （settings/members 仍经它走 API，如 organizations 之于单租户）。
-            左边的图标与账户页左栏「Knowledge bases」那一项同一个，说明这一串字
-            是库名；中号字与下面的标签同一个字号；箭头贴着名字，不顶到一个固定
-            宽度的右边去。
-            纯切换器：建库是管理动作，入口在 System settings › Knowledge bases */}
+        {/* The knowledge base switcher sits right after the wordmark, with no slash between them: it is not a second level of breadcrumb, it is
+            "which KB am I in right now". Workspace has been folded out of the concept layer into a deployment-level invisible pipe
+            (settings/members still go through it to the API, as organizations do for a single tenant).
+            The icon on the left is the same as the "Knowledge bases" item in the left column of the account page, which says this string
+            is a KB name; the size is medium, the same as the labels below; the arrow hugs the name and does not reach a fixed-width
+            right edge.
+            Pure switcher: creating a KB is an admin action, and its entry is under System settings › Knowledge bases */}
         <KbSwitcher kb={kb} kbs={kbs} onChange={setKb} />
-        {/* 右上那一组三个顶栏共用一份（HeaderActions）：换页时它不该动 */}
+        {/* The group of three on the right, shared by the top bars (HeaderActions): it must not move when the page changes */}
         <HeaderActions
           link={{ to: "/docs", label: S.nav.docs }}
           version={health.data?.version}
@@ -118,13 +118,13 @@ export function Shell() {
         />
       </header>
 
-      {/* Tab 导航条：图标 + 文字，选中的那一项是一颗填底的药丸。
-          **左边一条线：盒从 8 起，内容从 20 起**——与左栏完全一样
-          （栏 px-2 = 8，行 px-3 = 12，于是图标落在 20、文字落在 42）。
-          顶栏的字标也按这条线：header pl-2 + 字标 pl-3 = 20。
-          三处左缘从此是同一条竖线，往下看不会错位。
-          py-1 而不是 py-2：药丸自己已经 32 高，外面再垫 8 上下，整条 48，
-          压着下面的正文；垫 4 是 40，与顶栏 48 加起来正好一屏不占太多 */}
+      {/* Tab navigation strip: icon + text, and the selected item is a filled pill.
+          **One line down the left: the box starts at 8, the content starts at 20**, exactly as in the left column
+          (column px-2 = 8, row px-3 = 12, so the icon lands at 20 and the text at 42).
+          The wordmark in the top bar follows this line too: header pl-2 + wordmark pl-3 = 20.
+          The three left edges are now one vertical line, so nothing looks misaligned going down.
+          py-1 rather than py-2: the pill is already 32 high, and padding 8 more above and below would make the whole strip 48, pressing on the body below;
+          padding 4 gives 40, which together with the top bar's 48 takes up not too much of the screen */}
       <nav className="glass-strong border-x-0 border-t-0 shrink-0 flex items-center gap-1 px-2 py-1">
         {TABS.map(({ to, label, Icon }) => (
           <Link

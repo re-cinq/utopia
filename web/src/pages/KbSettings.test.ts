@@ -8,7 +8,7 @@ import { S } from "../i18n";
 import { Button, Checkbox, Input, Segmented, SettingsCard } from "../ui";
 import { KbSettings } from "./KbSettings";
 
-// Node 中执行真实组件与保存回调；查询快照模拟刷新边界，不覆盖 TanStack 缓存集成。
+// Runs the real component and save callback in Node; the query snapshot simulates the refresh boundary and does not cover TanStack cache integration.
 const hooks = vi.hoisted(() => ({
   kbId: "kb-a",
   data: undefined as Kb | undefined,
@@ -109,7 +109,7 @@ function render(): ReactNode {
 
 function find<P>(node: ReactNode, type: JSXElementConstructor<P> | string): P[] {
   if (!isValidElement<{ children?: ReactNode; action?: ReactNode }>(node)) return [];
-  // JSX 的 type 与组件一致时，props 就是该组件的公开属性。
+  // When the JSX type matches the component, the props are that component's public properties.
   const matched = node.type === type ? [node.props as P] : [];
   return [...matched, ...Children.toArray([node.props.children, node.props.action])
     .flatMap((child) => find(child, type))];

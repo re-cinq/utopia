@@ -1,6 +1,6 @@
 import type { DecaySettings } from "../api";
 
-/** 后端的默认值（RC-003，Lore 的常数）：缺的字段取这些，所以库里手写的 `{}` 也读得出 */
+/** Backend defaults (RC-003, a constant from Lore): missing fields take these, so a hand-written `{}` in the library can still be read */
 export const DEFAULT_DECAY: DecaySettings = {
   max_items: 500,
   half_life_days: 60,
@@ -15,8 +15,8 @@ export const decayFormValue = (
 const whole = (n: number, min: number, max = Infinity) =>
   Number.isInteger(n) && n >= min && n <= max;
 
-/** 第一个越界的字段，没有就是 null。范围同后端 `DecaySettings::validate`；
- *  `min_age_days` 可以是 0（谁都可能被淘汰） */
+/** The first field out of range, or null if none. The range is the same as the backend `DecaySettings::validate`;
+ *  `min_age_days` may be 0 (anyone may be evicted) */
 export function decayIssue(form: DecaySettings): keyof DecaySettings | null {
   if (!whole(form.max_items, 1)) return "max_items";
   if (!whole(form.half_life_days, 1, 365)) return "half_life_days";
@@ -25,8 +25,8 @@ export function decayIssue(form: DecaySettings): keyof DecaySettings | null {
   return null;
 }
 
-/** 保存时要带的 `decay`：没改就一个字都不带（后端「缺省 = 不动」），关掉写 null，
- *  打开或改了就整份发过去 */
+/** The `decay` to send on save: if unchanged, nothing at all is sent (the backend's "absent = leave as is"); when turned off, write null,
+ *  and when opened or changed, send the whole object */
 export function decayChange(
   saved: Partial<DecaySettings> | null,
   enabled: boolean,

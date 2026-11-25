@@ -3,7 +3,7 @@ import { fmtObjectValue } from "./objectValue";
 
 describe("fmtObjectValue", () => {
   it("does not stick a unit onto a value that already carries it", () => {
-    // 未采纳的字面值照原文落笔、单位另记一格：显示时不能变成 75.0%% / $2.22 $
+    // Unadopted literal values are written down as they are, with the unit recorded in a separate cell: display must not turn them into 75.0%% / $2.22 $
     expect(fmtObjectValue({ value: "75.0%", unit: "%" })).toBe("75.0%");
     expect(fmtObjectValue({ value: "$2.22", unit: "$" })).toBe("$2.22");
     expect(fmtObjectValue({ value: "€30 million", unit: "€" })).toBe("€30 million");
@@ -17,7 +17,7 @@ describe("fmtObjectValue", () => {
   });
 
   it("formats an adopted amount compactly with its symbol in front", () => {
-    // 紧凑写法随运行环境的 locale（en 是 5B，zh 是 50亿）：只钉符号在前、数被收短
+    // Compact notation follows the runtime locale (en gives 5B, zh gives 50亿): only the symbol's position is pinned, and the number is shortened
     const big = fmtObjectValue({ value: 5_000_000_000, unit: "$" })!;
     expect(big.startsWith("$")).toBe(true);
     expect(big).not.toContain("5000000000");

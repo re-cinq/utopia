@@ -8,7 +8,7 @@ export function driveFolderAccountKey(
   sourceId: string,
   { connected_at, connected_by, account_email }: NonNullable<SourceView["config"]>,
 ) {
-  // 跟服务器一样，只有已验证的邮箱才用来识别同一账号；否则按本次授权区分。
+  // As on the server, only a verified email is used to identify the same account; otherwise tell them apart by this authorization.
   const email = account_email?.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
   const account = email ? ["email", email] : ["grant", connected_at];
   return JSON.stringify([kbId, sourceId, connected_at ? [connected_by, account] : null]);

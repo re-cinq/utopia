@@ -1,17 +1,17 @@
-/* 引用：角标、落款行，和它们共用的预览浮窗。
-   点一条引用先给一段原文，右上角才是去原文的路——核对一句话多半只要看那一段，
-   而跳转会把人从答案里带走，回来时答案已经滚上去了。 */
+/* Citations: the superscript markers, the footer line, and the preview popover they share.
+   Clicking a citation first shows a passage of the source text; the route to the source itself is at the top right. Checking a sentence usually only needs that passage,
+   whereas a jump would take the person away from the answer, and on return the answer has already scrolled up. */
 import { Popover as RadixPopover } from "radix-ui";
 import type { ReactNode } from "react";
 import { quotePieces } from "../quotes";
 
-/** 正文里的一个 `[n]`。流式中来源还没到的号用 {@link CiteMark} 画成静的 */
+/** An `[n]` in the body. While streaming, a number whose source has not arrived yet is drawn static with {@link CiteMark} */
 export function CiteChip({
   n,
   preview,
 }: {
   n: number;
-  /** 浮窗内容；只有点开才挂载，所以里面的请求也是点开才发 */
+  /** Popover content; it only mounts when opened, so the requests inside are also only made when opened */
   preview: ReactNode;
 }) {
   return (
@@ -29,12 +29,12 @@ export function CiteChip({
   );
 }
 
-/** 还点不动的号（来源尚未到达）。占同样的位置，只是不发光 */
+/** A number that cannot be clicked yet (the source has not arrived). It takes the same space, it just does not glow */
 export function CiteMark({ n }: { n: number }) {
   return <span className="u-num px-1 text-ink-2">[{n}]</span>;
 }
 
-/** 落款里的一行。整行是触发器，点开同一个浮窗 */
+/** One line in the footer. The whole line is the trigger, and clicking it opens the same popover */
 export function CiteRow({
   children,
   preview,
@@ -79,8 +79,8 @@ function PreviewPortal({
   );
 }
 
-/** 浮窗的样子：标题一行、原文一段、右上角一条出路 */
-/** 一段原文，被引到的那几句用检索命中的样子标出来（#968 的后续）。对不上的引文不标 */
+/** What the popover looks like: one line for the title, a passage of source text, and one way out at the top right */
+/** A passage of source text, with the quoted sentences marked in the style of a search hit (a follow-up to #968). A quote that does not match is not marked */
 export function QuotedText({ text, quotes }: { text: string; quotes?: readonly string[] }) {
   return (
     <>
@@ -104,10 +104,10 @@ export function PreviewCard({
   action,
 }: {
   title: ReactNode;
-  /** 标题下面的一行小字（章节名、这段文字的来历） */
+  /** A small line under the title (the section name, where this text came from) */
   meta?: ReactNode;
   body: ReactNode;
-  /** 去原文的链接，放在标题右边 */
+  /** Link to the source, placed to the right of the title */
   action: ReactNode;
 }) {
   return (
@@ -119,7 +119,7 @@ export function PreviewCard({
         </div>
         <div className="shrink-0">{action}</div>
       </div>
-      {/* 原文按原样排（换行是它的一部分），长了自己滚，别把浮窗撑穿屏幕 */}
+      {/* The source text is laid out as-is (line breaks are part of it); it scrolls on its own when long, so the popover does not push past the screen */}
       <div className="max-h-64 overflow-auto whitespace-pre-wrap px-3 py-2 text-small leading-relaxed text-ink-2">
         {body}
       </div>

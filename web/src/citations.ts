@@ -1,23 +1,23 @@
-// 正文里的引用标记。
+// The citation markers in the body text.
 //
-// 模型写的是 `[1]`、`[1][2]`、`[1, 2]`、`[1，2]`。**哪些被画成角标，和哪些被列进
-// 落款，必须是同一套判定**——否则正文里点得动的那个号在下面找不到对应的行。
-// 所以这里只有一处形状，`liveAnswer.citedSources` 与 `rehypeCitations` 共用它。
-// **判定也只有一处**：落款从前对整段原文跑正则，代码块里的 `[1, 2]`、链接
-// `[1](…)` 都算进去了，而角标只画在正文文字上；`citedNumbers` 用渲染同一个解析器，
-// 跳过同样的元素。
+// The model writes `[1]`, `[1][2]`, `[1, 2]`, and `[1, 2]` with a full-width comma. **Which are drawn as superscripts and which are listed
+// in the footnote list must use one and the same rule**, otherwise a number you can click in the body has no matching row below.
+// So there is only one shape here, and `liveAnswer.citedSources` and `rehypeCitations` share it.
+// **The rule also lives in one place**: the footnotes used to run the regex over the whole raw text, so `[1, 2]` in code blocks and links
+// `[1](…)` were counted too, while superscripts are drawn only on body text. `citedNumbers` uses the same parser as rendering,
+// and skips the same elements.
 //
-// 每次现造一个正则：`g` 的 `lastIndex` 跟着上一次调用走，共用一个实例会让
-// 第二段文本从中间开始匹配。
+// Build a new regex on each call: the `g` flag's `lastIndex` carries over from the previous call, and sharing one instance would make
+// the second text start matching from the middle.
 
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
 
-/** `[1]` / `[1][2]` / `[1, 2]` / `[1，2]`——括号里只有数字与分隔符才算引用 */
+/** `[1]` / `[1][2]` / `[1, 2]` / `[1, 2]` brackets holding only digits and separators count as citations */
 export const citeRe = () => /\[(\d+(?:\s*[,，]\s*\d+)*)\]/g;
 
-/** 一个标记里的号：`[1, 2]` 是两个 */
+/** The numbers in one marker: `[1, 2]` is two */
 export function citeNumbers(spec: string): number[] {
   return spec
     .split(/[,，]/)
@@ -27,9 +27,9 @@ export function citeNumbers(spec: string): number[] {
 
 export type CitePiece = { text: string } | { cite: number[] };
 
-/** 把一段纯文本切成「文字」与「一组引用号」。
+/** Split plain text into 'text' and 'a group of citation numbers'.
  *
- *  流式中还没收尾的 `[1` 匹配不上——要等右括号，所以角标不会先画出半个再变形。 */
+ *  An unfinished `[1` during streaming does not match; it waits for the closing bracket, so a superscript is never drawn half-way and then reshaped. */
 export function splitCitations(text: string): CitePiece[] {
   const out: CitePiece[] = [];
   const re = citeRe();
@@ -46,23 +46,23 @@ export function splitCitations(text: string): CitePiece[] {
   return out;
 }
 
-/* ── 落款：正文里画成了角标的那些号 ──────────────────────────────────────── */
+/* ── ── Footnotes: the numbers drawn as superscripts in the body ──────────────────────────────────────── */
 
-/** mdast 里我们读的那几个字段（同下面 hast 的理由：结构类型，不多一个依赖） */
+/** mdast fields we read (same reason as the hast types below: structural types, no extra dependency) */
 type MdNode = { type: string; value?: string; children?: MdNode[] };
 
-/** `OPAQUE`（a / code / pre）在 mdast 里的名字，外加原样 HTML：
- *  react-markdown 把它当 raw 节点交给 rehype，`rehypeCitations` 不在里面画角标 */
+/** `OPAQUE` (a / code / pre) in mdast, plus raw HTML:
+ *  react-markdown passes it to rehype as a raw node, and `rehypeCitations` does not draw superscripts inside it */
 const MD_OPAQUE = new Set(["link", "linkReference", "inlineCode", "code", "html"]);
 
-/** 与渲染同一套 remark 解析（remark-gfm 管表格与自动链接） */
+/** Same remark parsing as rendering (remark-gfm handles tables and autolinks) */
 const markdown = unified().use(remarkParse).use(remarkGfm);
 
-/** 按正文记忆：一轮对话里每来一个词元都要重算一遍，收了尾的回答文本不再变 */
+/** Memoized by body text: during a turn every token would recompute it, but a finished answer's text no longer changes */
 const citedMemo = new Map<string, ReadonlySet<number>>();
 const CITED_MEMO_LIMIT = 200;
 
-/** 正文里会被画成角标的那些号。 */
+/** The numbers in the body that get drawn as superscripts. */
 export function citedNumbers(text: string): ReadonlySet<number> {
   const hit = citedMemo.get(text);
   if (hit) return hit;
@@ -87,10 +87,10 @@ function collectCited(node: MdNode, into: Set<number>): void {
   for (const child of node.children ?? []) collectCited(child, into);
 }
 
-/* ── rehype 插件 ────────────────────────────────────────────────────────── */
+/* ── rehype plugin ────────────────────────────────────────────────────────── */
 
-/** hast 里我们要动的那两种节点。用结构类型而不是 `@types/hast`：
- *  这里只读 `children` / `value` / `tagName`，不值得为它多一个依赖 */
+/** The two node kinds we act on in hast. Structural types instead of `@types/hast`:
+ *  we only read `children` / `value` / `tagName`, not worth an extra dependency */
 type HastText = { type: "text"; value: string };
 type HastNode = {
   type: string;
@@ -100,21 +100,21 @@ type HastNode = {
   children?: HastNode[];
 };
 
-/** 这些元素里面的方括号不是引用：链接的锚文本可能正好是一个数字，
- *  代码块里的 `[0]` 是下标 */
+/** Brackets inside these elements are not citations: a link's anchor text may happen to be a number,
+ *  a `[0]` in a code block is a subscript */
 const OPAQUE = new Set(["a", "code", "pre"]);
 
 const CITE_PREFIX = "#cite-";
 
-/** 正文里的 `[n]` 变成 `<a href="#cite-n">`。
+/** A `[n]` in the body becomes `<a href="#cite-n">`.
  *
- *  **为什么是 `a` 而不是一个自定义标签**：react-markdown 把 hast 属性转成 JSX
- *  属性，`href` 是它本来就认得的那一个，于是 `components.a` 拿到的是有类型的
- *  props；自定义标签得从 `node.properties` 里摸，摸出来的是 `unknown`。
+ *  **Why `a` and not a custom tag**: react-markdown turns hast properties into JSX
+ *  properties, and `href` is the one it already recognizes, so `components.a` gets typed
+ *  props; a custom tag would have to dig through `node.properties`, which yields `unknown`.
  *
- *  **为什么是锚点而不是自造一个 `cite:` 协议**：react-markdown 默认只放行
- *  http/https/mailto/tel 与相对地址，别的协议会被洗成空串——角标于是退化成一个
- *  下划线的链接，点不开。`#` 开头是相对地址。 */
+ *  **Why an anchor and not a made-up `cite:` protocol**: react-markdown only allows
+ *  http/https/mailto/tel and relative addresses by default; other protocols are blanked to an empty string, so the superscript degrades into a
+ *  underlined link that cannot be clicked. A leading `#` is a relative address. */
 export function rehypeCitations() {
   return (tree: HastNode) => walk(tree);
 }
@@ -154,7 +154,7 @@ function walk(node: HastNode): void {
   if (changed) node.children = out;
 }
 
-/** `#cite-1,2` → `[1, 2]`；不是引用链接就给 null */
+/** `#cite-1,2` → `[1, 2]`; return null if it is not a citation link */
 export function citeHref(href: string | undefined): number[] | null {
   if (!href?.startsWith(CITE_PREFIX)) return null;
   const ns = citeNumbers(href.slice(CITE_PREFIX.length));

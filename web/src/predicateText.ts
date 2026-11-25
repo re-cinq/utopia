@@ -1,21 +1,21 @@
-/** 谓词在**句子里**怎么读。
+/** How a predicate reads **inside a sentence**.
  *
- * 库里存的是小驼峰（见迁移 0042）：`worksFor`、`acceptedAnswer`、`accessTo`。
- * 那是词表该有的样子——管本体的那几个界面（左栏、表格、画布边标签、详情面板）
- * 就照这个显示，因为在那儿你认的是这个词本身，`acceptedAnswer` 才是能拿去查
- * schema.org 文档的那一个。
+ * The store keeps lowerCamel (see migration 0042): `worksFor`, `acceptedAnswer`, `accessTo`.
+ * That is what the vocabulary should look like: the UIs that manage the ontology (left column, tables, canvas edge labels, detail panels)
+ * show it this way as-is, because there the word itself is what you recognize, and `acceptedAnswer` is the one you can look up in the
+ * schema.org docs.
  *
- * 可事实行不是词表，**它是一句话**：
+ * Fact rows are not vocabulary: **they are a sentence**:
  *
  *   Li Si — works for — Meridian Systems
- *   Li Si — worksFor — Meridian Systems     ← 像代码，不像话
+ *   Li Si — worksFor — Meridian Systems     ← looks like code, not prose
  *
- * 所以只有读成句子的地方（事实行、时间线、Chat 的回答）走这里拆一次。
+ * So only the places that read it as a sentence (fact rows, the timeline, Chat answers) split it here, once.
  *
- * **缩写整段留着大写**：`productID` 拆成 “product ID” 而不是 “product id”，
- * `checkoutPageURLTemplate` 拆成 “checkout page URL template”。判断方法是把
- * 连续的大写看作一个词，只有当它后面紧跟一个小写字母时，最后那个大写才是
- * 下一个词的开头。
+ * **abbreviations stay uppercase as a whole**: `productID` splits into “product ID” rather than “product id”,
+ * `checkoutPageURLTemplate` splits into “checkout page URL template”. The method is to treat
+ * a run of capitals as one word; only when a lowercase letter follows it is the last capital the
+ * start of the next word.
  */
 export function predicateSentence(label: string): string {
   const words: string[] = [];
@@ -37,8 +37,8 @@ export function predicateSentence(label: string): string {
     const next = chars[i + 1];
     const prevUpper = prev !== undefined && prev === prev.toUpperCase() && prev !== prev.toLowerCase();
     const nextLower = next !== undefined && next === next.toLowerCase() && next !== next.toUpperCase();
-    // 大写起新词的两种情形：前面是小写（worksFor 的 F），
-    // 或前面也是大写但后面跟着小写（URLTemplate 的 T）
+    // Two cases where a capital starts a new word: after a lowercase (the F in worksFor),
+    // or after another capital but followed by a lowercase (the T in URLTemplate)
     if (cur && (!prevUpper || nextLower)) {
       words.push(cur);
       cur = "";
@@ -47,7 +47,7 @@ export function predicateSentence(label: string): string {
   }
   if (cur) words.push(cur);
   if (words.length === 0) return label;
-  // 首词小写；**整段大写的词原样留着**，那是缩写
+  // the first word is lowercase; **all-caps words are kept as is**: they are abbreviations
   return words
     .map((w, i) => {
       const allCaps = w.length > 1 && w === w.toUpperCase() && w !== w.toLowerCase();

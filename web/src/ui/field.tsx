@@ -1,5 +1,5 @@
-/* 表单项：标签 + 控件 + 一句提示或一句错误。间距在这里定一次，
-   页面里不再有 mb-3 / mt-1 各写各的。 */
+/* Form field: label + control + one hint or one error line. Spacing is set here once,
+   the pages no longer have mb-3 / mt-1 each written their own way. */
 import { cloneElement, isValidElement, useId, type ReactNode } from "react";
 import { cn, Input, Textarea } from "./index";
 
@@ -12,9 +12,9 @@ export function Field({
   children,
 }: {
   label: ReactNode;
-  /** 控件下面的一句说明 */
+  /** A line of explanation under the control */
   hint?: ReactNode;
-  /** 有错误时替掉说明，用危险色 */
+  /** Replaces the explanation when there is an error, in the danger color */
   error?: ReactNode;
   htmlFor?: string;
   className?: string;

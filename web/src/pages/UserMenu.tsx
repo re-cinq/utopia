@@ -5,8 +5,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-/* 用户菜单：顶栏右侧的头像胶囊 + 弹出面板（个人信息 / 系统管理 / 登出）。
-   Shell（KB 工作区）与 AccountShell（账户层）共用。 */
+/* User menu: the avatar capsule on the right of the top bar + the dropdown panel (profile / system administration / log out).
+   Shared by Shell (KB workspace) and AccountShell (account level). */
 import { useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -25,7 +25,7 @@ import { api, type User } from "../api";
 import { LANGS, LANG_NAMES, S, lang, setLang } from "../i18n";
 import { clearSessionState } from "../authSession";
 
-/** 首字母头像：中性灰底（chrome 零色偏），拉丁取词首两枚，CJK 取前两字。 */
+/** Initials avatar: a neutral grey background (no colour bias from chrome); for Latin, the first two letters of the first word; for CJK, the first two characters. */
 export function Avatar({ name, size = 24 }: { name: string; size?: number }) {
   const trimmed = name.trim();
   const words = trimmed.split(/\s+/).filter(Boolean);
@@ -45,16 +45,16 @@ export function Avatar({ name, size = 24 }: { name: string; size?: number }) {
 
 import { getTheme, setTheme, type Theme } from "../theme";
 
-// 三档的顺序就是菜单里的顺序：本色在前，跟系统在最后
+// The order of the three tiers is the order in the menu: the native colour first, "follow system" last
 const THEMES: Theme[] = ["dark", "light", "system"];
-/** 三档主题各自的符号：月亮 / 太阳 / 一块屏（跟着系统走的那一档，说的是"这台机器"） */
+/** The symbol for each of the three theme tiers: moon / sun / a screen (the tier that follows the system, which means "this machine") */
 const THEME_ICONS: Record<Theme, ReactNode> = {
   dark: <Moon size={13} />,
   light: <Sun size={13} />,
   system: <Monitor size={13} />,
 };
 
-/** 菜单里的一行：与顶栏另外两个面板的行同一副（px-4 py-2，正文号，图标 gap 3） */
+/** One row in the menu: the same as the rows of the other two panels in the top bar (px-4 py-2, body size, icon gap 3) */
 const ITEM = "gap-3 rounded-none px-4 py-2 text-body";
 
 export function UserMenu({ user }: { user: User }) {
@@ -74,26 +74,26 @@ export function UserMenu({ user }: { user: User }) {
     navigate({ to: "/login" });
   };
 
-  // 行通到面板边缘（与 Dropdown 同语汇）：容器不留内衬，高度由行自身撑
+  // Rows run to the panel edge (same vocabulary as Dropdown): the container has no inner padding, and the height is set by the row itself
 
   return (
-    /* 顶栏的用户菜单。**是菜单不是面板**，所以用 DropdownMenu 而不是 Popover：
-       它要的是「一列动作」加上二级菜单。语言与主题收进二级——语言以后会有好几种，
-       主题有三档，全都平铺在一级里，这张菜单会越长越长，而它们都属于「偏好」，
-       不是与个人资料、管理并列的动作。 */
+    /* The user menu in the top bar. **It is a menu, not a panel**, so DropdownMenu rather than Popover is used:
+       it needs "a column of actions" plus a second-level menu. Language and theme are folded into the second level: languages will have several kinds later,
+       and there are three theme tiers; if all were laid flat at the first level, this menu would keep growing, and they all belong to "preferences",
+       not to actions sitting alongside profile and administration. */
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" className="u-avatar-btn">
-          {/* 24：胶囊是 32 高（顶栏所有控件同一个高度），头像两边各留 4 */}
+          {/* 24: the capsule is 32 high (every control in the top bar has the same height), with 4 left over on each side of the avatar */}
           <Avatar name={user.display_name} size={24} />
           <span className="text-body text-ink-2">{user.display_name}</span>
         </Button>
       </DropdownMenuTrigger>
-      {/* **行的节奏跟顶栏另外两个面板一样**（px-4 py-2 text-body，整行出血）：
-          shadcn 菜单项默认是 px-2 py-1.5，挨着库切换器和告警面板一看就更挤。
-          容器去掉 p-1，让行顶到边——悬停归行，与全站一致。 */}
+      {/* **The rhythm of the rows matches the other two panels in the top bar** (px-4 py-2 text-body, the whole row bleeds out):
+          the default shadcn menu item is px-2 py-1.5, which looks even more cramped next to the KB switcher and the alert panel.
+          The container drops p-1 so the rows reach the edge; hover belongs to the row, consistent across the site. */}
       <DropdownMenuContent align="end" className="w-64 p-0">
-        {/* 身份头：不是一个可点的项，只说"你是谁" */}
+        {/* The identity header: not a clickable item, it only says "who you are" */}
         <div className="flex items-center gap-3 border-b border-line px-4 py-3">
           <Avatar name={user.display_name} size={32} />
           <div className="min-w-0 flex-1">
@@ -116,7 +116,7 @@ export function UserMenu({ user }: { user: User }) {
             <UserRound size={13} />
             {S.account.profile}
           </DropdownMenuItem>
-          {/* 人人可看：全部可见库 + 我在每个库的身份 */}
+          {/* Visible to everyone: all visible KBs + my identity in each KB */}
           <DropdownMenuItem className={ITEM} onSelect={() => go("/account/kbs")}>
             <Layers size={13} />
             {S.account.kbsNav}
@@ -129,11 +129,11 @@ export function UserMenu({ user }: { user: User }) {
           )}
         </div>
 
-        {/* 语言与主题：**在值那一头弹出来**，不是把选项摊在下面，也不是往右
-            甩一张子菜单。这一行读起来是「语言：English」——要改的是冒号后面
-            那一格，弹层就该出现在那一格上，像填空。
-            用 shadcn 的 Select：它自己带 portal 与层叠，弹出时盖在菜单之上，
-            选完两层一起收。整行都是触发器，点哪儿都能开。 */}
+        {/* Language and theme: **the pop-out appears at the value end**, not with the options laid out below, nor a submenu flying off to the right.
+            This row reads as "Language: English": what is to be changed is the cell after the colon,
+            so the popover should appear on that cell, like filling in a blank.
+            Uses shadcn's Select: it brings its own portal and stacking, so when open it sits over the menu,
+            and after a choice both layers close together. The whole row is the trigger, so clicking anywhere opens it. */}
         <div className="border-t border-line py-1">
           <MenuSelect
             icon={<Languages size={13} />}

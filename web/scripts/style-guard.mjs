@@ -1,11 +1,11 @@
-// 风格守卫：web/DESIGN.md 的五条规矩在这里变成检查。
+// Style guard: the five rules in web/DESIGN.md become checks here.
 //
-// 扫 src/**/*.tsx，命中下面任何一条就红。`style-guard.baseline.json` 里列的是
-// 还没迁移的页面——它们暂时豁免；每迁一页就从名单里删一行，名单空了这个
-// 文件就删。**新文件永远不豁免**：名单只能缩短，不能加长。
+// It scans src/**/*.tsx; any hit on the rules below fails. The pages listed in `style-guard.baseline.json`
+// have not been migrated yet, so they are exempt for now. Each time a page is migrated, delete its line from the list; when the list is empty,
+// this file goes away. **New files are never exempt**: the list can only shrink, never grow.
 //
-// `src/ui/` 是组件本身，允许写原生元素、hover、transition——那正是它的活；
-// 但颜色与字号的规矩对它一样管。
+// `src/ui/` is the component library itself, so it may use native elements, hover and transitions; that is its job,
+// but the color and font-size rules apply to it just the same.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,9 +17,9 @@ const BASELINE = path.join(ROOT, "style-guard.baseline.json");
 const PALETTE =
   "neutral|zinc|gray|slate|stone|rose|amber|red|green|blue|sky|emerald|violet|indigo|purple|pink|orange|yellow|cyan|teal|lime";
 
-// `text-*` 允许的词从 styles.css 里读：五档字号（--text-*）与颜色令牌（--color-*）。
-// 令牌加一个这里自动认得；不用再改守卫。剩下的是 Tailwind 里不是字号也不是颜色的
-// text- 工具（对齐、换行、省略）和几个颜色关键字
+// The words allowed for `text-*` are read from styles.css: the five font-size tiers (--text-*) and the color tokens (--color-*).
+// Add a token and this picks it up automatically; the guard does not need changing. What remains are the Tailwind
+// text- utilities that are neither font sizes nor colors (alignment, wrapping, truncation) and a few color keywords
 const STYLES = fs.readFileSync(path.join(SRC, "styles.css"), "utf8");
 const TOKENS = [
   ...new Set([
@@ -29,13 +29,13 @@ const TOKENS = [
 ];
 const TEXT_UTILITIES =
   "left|center|right|justify|start|end|ellipsis|clip|wrap|nowrap|balance|pretty|white|black|transparent|current|inherit";
-/* `white` / `black` 留在这张表里，为的是让 `unknown-text` 放过它们——
-   它们归下面 `raw-white` 一条管，两条都报会把同一个错说两遍 */
+/* `white` / `black` stay in this table so that `unknown-text` lets them through;
+   they are handled by the `raw-white` rule below, and reporting both would state the same mistake twice */
 const KNOWN_TEXT = [...TOKENS, ...TEXT_UTILITIES.split("|")]
   .sort((a, b) => b.length - a.length)
   .join("|");
 
-/** 每条规矩：正则 + 一句话说明 + 是否也管组件目录 */
+/** Each rule: a regex, a one-line description, and whether it also covers the components directory */
 const RULES = [
   {
     id: "type-scale",
@@ -45,9 +45,9 @@ const RULES = [
   },
   {
     id: "unknown-text",
-    // 不在五档字号、颜色令牌、对齐/换行工具之内的 text-<词>：多半是编出来的
-    // （text-caption、text-muted），没有定义，渲染成继承的字号或颜色，而且看不出来。
-    // Tailwind 的默认字号另有上面那条报；模型名 text-embedding-* 不是类
+    // text-<word> that is not one of the five font sizes, a color token, or an alignment/wrapping utility is most likely made up
+    // (text-caption, text-muted). It is undefined, so it renders as the inherited font size or color, and nothing shows that.
+    // Tailwind's default font sizes are reported by the rule above; the model name text-embedding-* is not a class
     re: new RegExp(
       `\\btext-(?!(?:${KNOWN_TEXT}|xs|sm|base|lg|\\d*xl)(?![a-z0-9-])|embedding|\\[)[a-z][a-z0-9-]*\\b`,
       "g",
@@ -66,13 +66,13 @@ const RULES = [
   },
   {
     id: "raw-white",
-    /* 白与黑都不是颜色令牌，**带不带透明度都一样**。从前这条只认 `text-white/10`
-       那种带斜杠的写法，`text-white` 光秃秃地写就过了——`white` 还被算进下面
-       `unknown-text` 的合法工具类里（它跟 text-left、text-nowrap 排在一起）。
-       两道门都开着，于是顶栏的字标写死了白色：暗底上看不出来，翻成纸底之后
-       它还是白的，等于隐形。名字要的是 `text-ink`，随主题走。
-       真要"在深色块上永远是浅字"（主按钮、危险按钮里的字）另有令牌：
-       `--u-on-accent` / `--u-on-danger`，它们在浅色那套里也是对的 */
+    /* White and black are not color tokens, **with or without opacity**. This rule used to catch only
+       the slashed form such as `text-white/10`, so a bare `text-white` passed, and `white` was counted as a legal
+       `unknown-text` utility (it sits alongside text-left and text-nowrap).
+       Both gates were open, so the top bar's wordmark was hard-coded white: invisible on the dark background, and still white
+       after switching to the paper theme, so invisible again. The name should be `text-ink`, which follows the theme.
+       If you really want "always light text on a dark block" (text on primary and danger buttons), there is a separate token:
+       `--u-on-accent` / `--u-on-danger`, which are also correct in the light set */
     re: /\b(bg|border|text|ring|outline|divide|fill|stroke|placeholder|decoration|from|via|to)-(white|black)\b(\/\[?[0-9.]+\]?)?/g,
     why: "白与黑不是令牌：文字用 ink / ink-2，面用 surface / surface-2 / surface-3，线用 line；深色块上的字用 on-accent / on-danger（规矩 4）",
     ui: true,
@@ -85,7 +85,7 @@ const RULES = [
   },
   {
     id: "radius",
-    // rounded-none 不是一档，是"这一条要顶到边"（下拉里撑满的行），放行
+    // rounded-none is not a tier; it means "this one goes to the edge" (full-width rows in a dropdown), so it is allowed
     re: /\brounded(-(sm|md|lg|xl|2xl|3xl|\[[^\]]+\]))?(?=[\s"'`}])/g,
     why:
       "圆角按角色分四档：rounded-cell / control / panel / overlay；" +
@@ -94,14 +94,14 @@ const RULES = [
   },
   {
     id: "spacing",
-    // 12 及以上是版面（给浮层留位、页脚净空），不是节奏，放行
+    // 12 and above is layout (room for overlays, footer clearance), not rhythm, so it is allowed
     re: /\b-?(p|px|py|pt|pb|pl|pr|m|mx|my|mt|mb|ml|mr|gap|gap-x|gap-y|space-x|space-y)-(0\.5|1\.5|2\.5|3\.5|5|7|9|10|11|\[[^\]]+\])\b/g,
     why: "间距六档：1 2 3 4 6 8；12 以上只给版面净空（规矩 2）",
     ui: false,
   },
   {
     id: "raw-control",
-    // 隐藏的文件选择框不算控件（它没有样子），放行
+    // A hidden file input is not a control (it has no look), so it is allowed
     re: /<(button|textarea|select)\b|<input\b(?![^>]*type="file")/g,
     why: "控件从 ui/ 来：Button / IconButton / Input / Textarea / Dropdown / SearchSelect（规矩 5）",
     ui: false,
@@ -114,11 +114,11 @@ const RULES = [
   },
   {
     id: "raw-colour",
-    // 页面和组件里不出现色值本身：令牌在 styles.css 里定义一次，浅色/暗色各一套，
-    // 写死一个 #ffffff 就是写死了「暗底」。两个例外文件是**令牌的读者**：
-    // graphVisuals.ts 从 CSS 变量里把画布要的颜色读出来（canvas 不认 var()），
-    // palette.ts 是实体类型的数据色（规矩 4：彩色只属于数据），暗浅两套都在那里。
-    // `rgba(0,0,0,0)` 是透明，不是颜色，放行
+    // Color values themselves never appear in pages or components: tokens are defined once in styles.css, one set each for light and dark,
+    // and a hard-coded #ffffff means hard-coding the "dark background". There are two exception files, and they are **readers of the tokens**:
+    // graphVisuals.ts reads the colors the canvas needs out of the CSS variables (canvas does not accept var()),
+    // and palette.ts holds the data colors for entity types (rule 4: color belongs only to data), with both dark and light sets in it.
+    // `rgba(0,0,0,0)` is transparent, not a color, so it is allowed
     re: /#[0-9a-fA-F]{6}(?![0-9a-fA-F])|(?<![a-zA-Z_])rgba?\(/g,
     why: "颜色只用令牌（规矩 4）；画布从 graphVisuals 的调色板读，数据色在 palette.ts",
     ui: true,
@@ -127,10 +127,10 @@ const RULES = [
   },
   {
     id: "raw-shadow",
-    /* Tailwind 自带的阴影是按浅色界面调的黑影，与 `--u-shadow` 不是一回事；
-       暗底上它们几乎看不见，所以能一直混在页面里没人察觉。浮起只有两档：
-       贴着画布的控件 `u-lift`，盖在页面上的浮层 `u-lift-strong`。
-       `shadow-none` 是"把它取消掉"，不是一档深浅，放行 */
+    /* Tailwind's built-in shadows are black shadows tuned for light interfaces; they are not the same thing as `--u-shadow`,
+       and on a dark background they are nearly invisible, which is why they could hide in pages unnoticed. There are only two elevation tiers:
+       controls that sit against the canvas use `u-lift`, and floating layers over the page use `u-lift-strong`.
+       `shadow-none` means "remove it", not a depth level, so it is allowed */
     re: /\bshadow-(sm|md|lg|xl|2xl)\b/g,
     why: "浮起两档：u-lift（贴着画布的控件）/ u-lift-strong（浮层）；深浅归 --u-shadow（规矩 4）",
     ui: true,
@@ -143,10 +143,10 @@ const RULES = [
   },
 ];
 
-/** shadcn CLI 生成的那一层不受检：它是**供应层**，按 Tailwind 原生刻度写
- *  （text-sm / rounded-md / bg-primary），与这套规矩不是一套词。改它要么去
- *  registry 改，要么重新 `shadcn add` 覆盖，手写规矩管不到也不该管。
- *  规矩仍然管页面：页面怎么用这些组件、有没有自己拼控件，那是这里的事。 */
+/** The layer generated by the shadcn CLI is not checked: it is the **supply layer**, written in Tailwind's native scale
+ *  (text-sm / rounded-md / bg-primary), not the same vocabulary as these rules. To change it, either edit the
+ *  registry, or run `shadcn add` again to overwrite it; hand-written rules neither reach it nor should.
+ *  The rules still govern pages: how pages use these components, and whether they assemble their own controls, is this file's business. */
 const VENDOR = path.join("src", "components", "ui");
 
 function walk(dir, out = []) {
@@ -170,13 +170,13 @@ for (const rel of files) {
   if (baseline.has(rel)) continue;
   const inUi = rel.startsWith("src/ui/");
   let text = fs.readFileSync(path.join(ROOT, rel), "utf8");
-  // 隐藏的文件选择框可以跨好几行，先整段抹掉（保留换行，行号不变）
-  // 时间轴的 range 同理：它的皮在 styles.css 的 .scrubber-range 里
+  // The hidden file input can span several lines, so blank out the whole block first (keeping the newlines, so line numbers stay the same)
+  // The timeline range is the same: its skin lives in .scrubber-range in styles.css
   text = text.replace(/<input\b[^>]*type="(file|range)"[^>]*>/g, (m) =>
     m.replace(/[^\n]/g, " "),
   );
   const lines = text.split("\n");
-  // 块注释里的行也不算：/* … */ 跨行时逐行看不出自己在注释里，这里记个状态
+  // Lines inside block comments don't count either: /* … */ can span lines and a line can't tell that it is inside a comment, so record a state here
   let inBlock = false;
   const commentFree = lines.map((line) => {
     let out = "";
@@ -204,7 +204,7 @@ for (const rel of files) {
     if (inUi && !rule.ui) continue;
     if (rule.skip && rule.skip(rel)) continue;
     commentFree.forEach((line, i) => {
-      // 注释里提到旧写法不算（规矩要能在注释里被引用）
+      // Mentioning the old form inside a comment doesn't count (the rule has to be citable inside comments)
       let code = line.replace(/\/\/.*$/, "");
       if (rule.allow) code = code.replace(rule.allow, "");
       const hits = code.match(rule.re);

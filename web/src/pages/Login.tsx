@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 
-/* lucide 已移除品牌图标，GitHub mark 内联（官方 mark 路径，fill=currentColor） */
+/* lucide has dropped brand icons, so the GitHub mark is inlined (the official mark path, fill=currentColor) */
 function GithubMark({ size = 16 }: { size?: number }) {
   return (
     <svg
@@ -40,7 +40,7 @@ export function Login() {
   const queryClient = useQueryClient();
   const sso = useQuery({ queryKey: ["oidc-status"], queryFn: api.oidcStatus });
   const sections = loginSections(sso.data);
-  // 单点登录回调失败时带着代码跳回这里（`?sso_error=`），措辞按代码查
+  // On a failed single sign-on callback we come back here carrying the code (`?sso_error=`), and the wording is looked up by code
   const ssoError = new URLSearchParams(window.location.search).get("sso_error");
 
   const mutation = useMutation({
@@ -49,12 +49,12 @@ export function Login() {
       return api.register(email, password, displayName);
     },
     onSuccess: ({ user }) => {
-      // 换人先清缓存：`me`、`workspaces` 这些一次会话内不过期（queryDefaults.ts），
-      // 会话过期后同一标签页登另一个账号，不清就看见上一个人的名字和库
+      // Switching person clears the cache first: `me`, `workspaces` and the like do not expire within one session (queryDefaults.ts),
+      // so if the same tab logs in as another account after the session expires, without clearing we would see the previous person's name and bases
       queryClient.clear();
-      // 缓存外的草稿、上次会话和回答只在换了人时清：同一个人重新登录，它们还在（authSession.ts）
+      // Drafts, the last session and answers outside the cache are cleared only when the person changes: the same person logging in again keeps them (authSession.ts)
       claimFor(user.id);
-      // 谢幕：卡片上浮淡出、巨构放大穿越，再进入图谱首页
+      // Curtain call: the card floats up and fades out, the giant structure zooms through, and then we enter the graph home page
       setLeaving(true);
       window.setTimeout(() => navigate({ to: "/" }), 650);
     },
@@ -70,7 +70,7 @@ export function Login() {
 
   return (
     <div className="min-h-screen flex items-center justify-center px-4">
-      {/* 巨构变换背景：星球 → 环形都市 → 城市平原 → 波动巨碑 */}
+      {/* Giant-structure transformation background: planet → ring city → city plain → wave monument */}
       <LoginScene leaving={leaving} />
       <div
         className={`relative z-10 w-full max-w-sm ${leaving ? "u-depart" : ""}`}
@@ -177,7 +177,7 @@ export function Login() {
           )}
         </div>
 
-        {/* 页脚：惯用同意句式内嵌条款/隐私链接 + GitHub 入口 */}
+        {/* Footer: a conventional consent sentence with embedded terms and privacy links, plus the GitHub entry */}
         <div
           className="mt-6 text-center u-rise"
           style={{ animationDelay: "180ms" }}

@@ -1,2 +1,2 @@
-// 旧路径的转发：toast 现在住在 ui/ 里（它是组件）。页面照旧 import "./toast"
+// Forwarding for the old path: toast now lives in ui/ (it is a component). Pages still import "./toast" as before
 export { toast, ToastHost } from "./ui/toast";

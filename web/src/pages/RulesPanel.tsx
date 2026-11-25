@@ -1,13 +1,13 @@
-/** 业务规则的编写台（0021 / #277）。
+/** Authoring desk for business rules (0021 / #277).
  *
- *  **规则读起来要像一句话**：「Well 及其子类，当 全烃 大于 8 且 解释 属于 {…}，
- *  得出 GasBearingWell」。所以这里不做表达式输入框——结构化的下拉与数字框既是
- *  录入方式，也是它唯一的显示方式，两者不会漂移。
+ *  **A rule has to read like a sentence:** "Well and its subclasses, when total gas is greater than 8 and interpretation belongs to {…},
+ *  yields GasBearingWell". So there is no expression input here: the structured dropdowns and number boxes are both how a rule is entered
+ *  and the only way it is displayed, so the two cannot drift apart.
  *
- *  条件整组提交而不是逐条打补丁：一个合取是一个整体，没有「改到一半」的状态。
+ *  Conditions are submitted as a whole group rather than patched item by item: a conjunction is one whole, with no "half-edited" state.
  *
- *  样式按 web/DESIGN.md 那五条：字号五档、间距六档、颜色只用 token、控件与状态
- *  一律从 ui/ 来。 */
+ *  Styling follows the five rules in web/DESIGN.md: five font-size tiers, six spacing tiers, colours only via tokens, and controls and states
+ *  always come from ui/. */
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pencil, Play, Plus, Search, Trash2 } from "lucide-react";
@@ -43,7 +43,7 @@ import { toast } from "../toast";
 import { expressionText, metadataOnly, metadataPatch } from "./ruleExpressions";
 import { ruleDependencies } from "./ruleDependencies";
 
-/** op → 那句话里的动词。**数字与集合两类分开**，因为它们的操作数长得不一样 */
+/** op → the verb in that sentence. **Numeric and set operators are kept apart**, since their operands look different */
 const OPS: {
   value: string;
   label: () => string;
@@ -62,8 +62,8 @@ const OPS: {
 const operandKind = (op: string) =>
   OPS.find((o) => o.value === op)?.operand ?? "num";
 
-/** 一条规则可以被搜到的全部文本。**判据也算**——「哪条规则用到了 Clearance」
-    是找规则最常见的问法，只搜名字的话得先记住自己当初叫它什么 */
+/** All the text a rule can be found by. **The criterion counts too**: "which rule uses Clearance"
+    is the most common way of looking for a rule; searching by name alone would make you first remember what you originally called it */
 function searchText(r: BusinessRule, attributes: RelationTypeView[], relations: RelationTypeView[]): string {
   return [
     r.name,
@@ -82,7 +82,7 @@ function searchText(r: BusinessRule, attributes: RelationTypeView[], relations: 
     .toLowerCase();
 }
 
-/** 条件的操作数 → 输入框里的文本。回读要与写入是同一套，否则编辑一次就变形 */
+/** Condition operand → the text in the input box. Reading back must use the same scheme as writing, otherwise one edit distorts it */
 function operandText(op: string, operand: unknown, attributes: RelationTypeView[] = []): string {
   if (operand && typeof operand === "object" && !Array.isArray(operand)) {
     return expressionText(operand, attributes, S.ontology.ruleUnknownExpression);
@@ -94,17 +94,17 @@ function operandText(op: string, operand: unknown, attributes: RelationTypeView[
   return operand === null || operand === undefined ? "" : String(operand);
 }
 
-/** 输入框文本 → 操作数。**解析不出来就返回 undefined**，由调用方拦在保存之前 */
+/** Input box text → operand. **If it cannot be parsed, return undefined**, and the caller blocks it before saving */
 export function parseOperand(op: string, text: string): unknown | undefined {
   const kind = operandKind(op);
   if (kind === "none") return undefined;
   const t = text.trim();
   if (!t) return undefined;
   if (kind === "set") {
-    // **全角逗号也是分隔符**：中文输入法敲出来的逗号是「，」。从前只认半角，
-    // 「气测异常，气测异常后效」存成了一个成员——「属于」永不成立，
-    // 「不属于」对任何值都成立。metadataOnly 故意不锁含「，」的成员，好让
-    // 这样存下的旧规则打开再保存一次就修好；代价是经 API 写进的也会被拆开
+    // **A full-width comma is a separator too**: a comma typed with a Chinese input method is a full-width one. Previously only the half-width comma was recognised,
+    // so the pair "gas-test anomaly, post-gas-test anomaly" was stored as one member: "belongs to" never held,
+    // and "does not belong to" held for every value. metadataOnly deliberately does not lock members containing a comma, so that
+    // an old rule stored that way is repaired by opening and saving it again; the cost is that values written through the API are split too
     const set = t
       .split(/[,，]/)
       .map((s) => s.trim())
@@ -123,8 +123,8 @@ export function parseOperand(op: string, text: string): unknown | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-/** 条件按组切开，组序升序——与求值器读它的顺序一致（决定记录 0029）。
-    没带组号的当第 0 组：0029 之前写下的规则本来就是一整个合取 */
+/** Conditions are split into groups, with group order ascending: consistent with the order the evaluator reads them (decision record 0029).
+    A condition without a group number is group 0: rules written before 0029 were a single conjunction to begin with */
 function byGroup<T extends { group?: number }>(conditions: T[]): T[][] {
   const g = (c: T) => c.group ?? 0;
   return [...new Set(conditions.map(g))]
@@ -136,12 +136,12 @@ function byGroup<T extends { group?: number }>(conditions: T[]): T[][] {
 const labelOptions = (items: RelationTypeView[]) =>
   items.map((item) => ({ value: item.id, label: item.label }));
 
-/** 表单里的一行条件。**文本原样留着**——解析放到保存那一刻，否则打字打到
-    一半的「1」会被当成写完的数 */
+/** One condition row in the form. **The text is kept as typed**: parsing happens at the moment of saving, otherwise a "1" typed halfway
+    would be taken as a finished number */
 type Row = { side: "x" | "y"; predicate_id: string; op: string; text: string };
 
 type Draft = {
-  /** 改的是哪一条；新建时为 null。**同一份草稿两种用途**——两套表单会漂移 */
+  /** Which rule is being edited; null when creating. **The same draft serves both purposes**: two forms would drift apart */
   id: string | null;
   name: string;
   description: string;
@@ -151,8 +151,8 @@ type Draft = {
   conclude_predicate_id: string;
   join_predicate_id: string;
   conclude_value: string;
-  /** 一块是一个合取，块之间是析取。**空数组只允许出现在唯一一块上**——
-      那是「还没写条件」，不是「无条件成立」（空合取恒真，会归进整个类） */
+  /** Each block is a conjunction, and blocks are disjoined. **An empty array is only allowed on the single block**:
+      that means "no condition written yet", not "unconditionally true" (an empty conjunction is always true, and would sweep in the whole class) */
   groups: Row[][];
 };
 
@@ -176,7 +176,7 @@ const emptyDraft = (
       : [[]],
 });
 
-/** 已有规则 → 草稿。**回读要与写入是同一套形状**，否则编辑一次就变形。 */
+/** Existing rule → draft. **Reading back must have the same shape as writing**, otherwise one edit distorts it. */
 function draftOf(r: BusinessRule): Draft {
   if (metadataOnly(r)) throw new Error(S.ontology.ruleExpressionReadOnly);
   const groups = byGroup(r.conditions).map((g) =>
@@ -202,13 +202,13 @@ function draftOf(r: BusinessRule): Draft {
         : r.conclude_value === undefined || r.conclude_value === null
           ? ""
           : String(r.conclude_value),
-    // 一条条件都没有的规则服务端不收，可草稿要撑得住这一格——空着的那一块
-    // 就是「还没写」，界面靠它摆得出「加一个条件」
+    // The server does not accept a rule with no conditions at all, but the draft must hold up this cell: an empty block
+    // is what says "not written yet", and that is how the interface can show "add a condition"
     groups: groups.length ? groups : [[]],
   };
 }
 
-/** 一条规则此刻标住了谁，以及凭什么。计数点开就是它。 */
+/** What a rule is tagging right now, and on what grounds. Opening the count shows exactly this. */
 function Matches({ kbId, ruleId }: { kbId: string; ruleId: string }) {
   const q = useQuery({
     queryKey: ["ruleMatches", kbId, ruleId],
@@ -232,7 +232,7 @@ function Matches({ kbId, ruleId }: { kbId: string; ruleId: string }) {
             ) : (
               <span className="text-fine text-ink-2">→ {m.concluded}</span>
             )}
-            {/* 同一个实体会因为不同时段的读数出现好几次，写出这一段才不像重复 */}
+            {/* The same entity can appear several times because of readings from different periods; writing out this period is what keeps it from looking like a duplicate */}
             {m.valid_from && (
               <span className="u-num text-fine text-ink-2">
                 {S.ontology.ruleMatchSpan(
@@ -242,7 +242,7 @@ function Matches({ kbId, ruleId }: { kbId: string; ruleId: string }) {
               </span>
             )}
           </div>
-          {/* 前提就是「凭什么」——列表没有它就跟一串凭空的判断没区别 */}
+          {/* The premise is the "on what grounds": without it the list is no different from a string of unexplained judgements */}
           {m.premises.length > 0 && (
             <p className="text-fine text-ink-2">
               {S.ontology.ruleMatchBecause(m.premises.join(", "))}
@@ -259,7 +259,7 @@ function Matches({ kbId, ruleId }: { kbId: string; ruleId: string }) {
   );
 }
 
-/** 一条规则的定义史（0060）。每一版按现在的写法读出来：判据、结论、时段、此刻凭它成立几条 */
+/** The definition history of a rule (0060). Each version is read back in its current form: its criterion, conclusion, period, and how many hold on its strength right now */
 function History({ kbId, ruleId, attributes }: { kbId: string; ruleId: string; attributes: RelationTypeView[] }) {
   const q = useQuery({
     queryKey: ["ruleVersions", kbId, ruleId],
@@ -273,7 +273,7 @@ function History({ kbId, ruleId, attributes }: { kbId: string; ruleId: string; a
     <div className="space-y-4">
       {versions.map((v) => {
         const label = (id: string | null) => (id ? (v.labels[id] ?? id) : "");
-        // 借判据与结论两个渲染器：历史里的一版就是一条规则当时的样子
+        // Reuses the criterion and conclusion renderers: a version in the history is what the rule looked like at the time
         const asRule = {
           id: v.id,
           name: "",
@@ -333,12 +333,12 @@ export function RulesPanel({
   onError,
 }: {
   kbId: string;
-  /** 从模式图上点一条规则边过来时，那一行点亮——省得在一页规则里再找一遍 */
+  /** When a rule edge is clicked on the schema graph, that row lights up, saving a second search through a page of rules */
   focusId?: string;
   classes: EntityTypeView[];
-  /** kind='attribute' 的谓词——规则只读实体自己的字面值 */
+  /** A predicate with kind='attribute': the rule only reads the entity's own literal values */
   attributes: RelationTypeView[];
-  /** kind='relation' 的谓词——一条 joined rule 只走其中一条边 */
+  /** A predicate with kind='relation': a joined rule walks only one of its edges */
   relations: RelationTypeView[];
   onError: (e: unknown) => void;
 }) {
@@ -350,9 +350,9 @@ export function RulesPanel({
   const [draft, setDraft] = useState<Draft | null>(null);
   const [metadataRule, setMetadataRule] = useState<BusinessRule | null>(null);
   useEffect(() => { setDraft(null); setMetadataRule(null); }, [kbId]);
-  /** 待确认删除的那一条。删规则会带走它推出的全部结论，值得停一下 */
+  /** The one pending deletion confirmation. Deleting a rule takes with it all the conclusions it inferred, so it is worth a pause */
   const [doomed, setDoomed] = useState<BusinessRule | null>(null);
-  /** 展开了哪条规则的命中列表。一次只展开一条——两份长列表并排读不了 */
+  /** Which rule's hit list is expanded. Only one at a time: two long lists side by side cannot be read */
   const [opened, setOpened] = useState<string | null>(null);
   const [historyOf, setHistoryOf] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
@@ -375,8 +375,8 @@ export function RulesPanel({
   const save = useMutation({
     mutationFn: async () => {
       const d = draft!;
-      // 组号就是块在表单里的位置。**不必维护成一串连号**——服务端收下发来的
-      // 整数，求值器自己排序（0029）；这里从 0 数起只是因为最省事
+      // The group number is the block's position in the form. **It need not be kept as a run of consecutive numbers**: the server accepts what is sent,
+      // as integers, and the evaluator sorts them itself (0029); counting from 0 here is only because it is the least effort
       const conditions: RuleCondition[] = d.groups.flatMap((g, gi) =>
         g.map((c) => {
           const operand = parseOperand(c.op, c.text);
@@ -398,8 +398,8 @@ export function RulesPanel({
         join_predicate_id:
           d.conclusion === "relation" ? d.join_predicate_id : undefined,
       };
-      // 改一条已有的规则走 PATCH，主类不动——换主类等于换一条规则，
-      // 那时候删了重写比原地改诚实
+      // Editing an existing rule uses PATCH, and the main class stays put: changing the main class is changing a different rule,
+      // so deleting and rewriting it is more honest than editing in place
       await (d.id
         ? api.updateRule(kbId, d.id, {
             name: d.name,
@@ -427,9 +427,9 @@ export function RulesPanel({
     mutationFn: () => api.runRules(kbId),
     onSuccess: (r) => {
       toast.success(S.ontology.ruleRunDone(r.hits, r.inserted, r.invalidated));
-      // 展开不全要单独说：少推几条与「不满足」在结果里长得一样
+      // An expansion that is not complete has to be said separately: inferring fewer results looks the same as "not satisfied" in the outcome
       if (r.capped) toast.error(S.ontology.ruleRunCapped(r.capped));
-      // 链没跑到头也是「少推了东西」，与组合展不完同一类提示（0030）
+      // A chain that did not run to the end is also "fewer inferred", the same kind of hint as an unfinished combination expansion (0030)
       if (r.rounds_capped) toast.error(S.ontology.ruleRunRoundsCapped(r.rounds));
       invalidate();
     },
@@ -462,7 +462,7 @@ export function RulesPanel({
   const list = needle
     ? all.filter((r) => searchText(r, attributes, relations).includes(needle))
     : all;
-  /** 命中列表看的是哪一条。一次一条——两份长列表并排读不了 */
+  /** Which one the hit list is for. One at a time: two long lists side by side cannot be read */
   const opening = list.find((r) => r.id === opened) ?? null;
 
   return (
@@ -488,9 +488,9 @@ export function RulesPanel({
         sub={S.ontology.rulesHint}
       />
 
-      {/* 搜索与两个动作同一行，都在表格外面（DESIGN.md 6）：筛空了这一行还在，
-          否则改筛选的唯一入口跟着列表一起消失。输入框不进 PageHeader 的
-          actions——那一排是贴着标题基线排的，塞个控件进去基线就断了 */}
+      {/* Search and the two actions sit on the same row, all outside the table (DESIGN.md 6): when the filter empties the list, this row stays,
+          otherwise the only entry for changing the filter would vanish along with the list. Controls do not go into the PageHeader's
+          actions: that row is aligned to the title's baseline, and putting a control in would break the baseline */}
       <div className="flex flex-wrap items-center gap-2">
         <Input
           icon={<Search size={13} />}
@@ -509,7 +509,7 @@ export function RulesPanel({
             <Play size={12} />
             {run.isPending ? S.ontology.ruleRunning : S.ontology.ruleRun}
           </Button>
-          {/* 入口不设门槛：缺属性时表单自己会在缺的那一处说 */}
+          {/* No threshold for entry: when an attribute is missing, the form itself says so at the missing spot */}
           <Button
             size="sm"
             variant="primary"
@@ -523,13 +523,13 @@ export function RulesPanel({
 
       {!list.length ? (
         <p className="text-small text-ink-2">
-          {/* 一条都没有，与「筛掉了」是两回事：前者该去建一条，后者该改筛选 */}
+          {/* Zero rules is not the same as "all filtered out": the former should lead to creating one, the latter to changing the filter */}
           {needle ? S.ontology.rulesNoMatch : S.ontology.rulesEmpty}
         </p>
       ) : (
-        /* 一张表，不是一条一张卡片（DESIGN.md 6）。**第一列仍然是那句话**——
-           规则的全部语义就在那句话里，收进详情等于把规则本身藏起来；其余几列
-           是扫一眼要的答案：推出什么、此刻成立几条、开着没有 */
+        /* One table, not one card per rule (DESIGN.md 6). **The first column is still the sentence**:
+           all the semantics of a rule are in that sentence, and tucking it into details would hide the rule itself; the other columns
+           are the answers you want at a glance: what it infers, how many hold right now, and whether it is on */
         <div className="glass overflow-hidden rounded-panel">
           <Table>
             <THead>
@@ -556,7 +556,7 @@ export function RulesPanel({
                   <Td>
                     <div className="text-body text-ink">{r.name}</div>
                     <LinkButton onClick={() => setDependenciesOf(r.id)}>{S.ontology.ruleDependencies}</LinkButton>
-                    {/* 第几版，点开是定义史：改了判据的规则，旧结论凭的是旧版 */}
+                    {/* Which version this is; click to open the definition history. A rule whose criterion has changed has old conclusions that rest on the old version */}
                     <LinkButton className="u-num ml-2" onClick={() => setHistoryOf(r.id)}>
                       {S.ontology.ruleVersion(r.version ?? 1)}
                     </LinkButton>
@@ -567,15 +567,15 @@ export function RulesPanel({
                   <Td>
                     <RuleCriterion rule={r} attributes={attributes} />
                   </Td>
-                  {/* **主类跟结论写在一起**：一条规则说的是「这样的 Person 是个
-                      Veteran」，主类是这句话的左半边，不是判据的一部分 */}
+                  {/* **The main class is written together with the conclusion**: a rule says "such a Person is a
+                      Veteran"; the main class is the left half of that sentence, not part of the criterion */}
                   <Td className="max-w-96 break-words text-small text-ink">
                     <span className="text-ink-2">{r.subject_label} → </span>
                     <RuleConclusion rule={r} attributes={attributes} />
                   </Td>
                   <Td className="whitespace-nowrap">
-                    {/* 此刻凭它成立的结论条数。**点得动**——二十个实体还能一个个
-                        点开看，两百个就只能靠这份列表 */}
+                    {/* The number of conclusions that hold on its strength right now. **Clickable**: twenty entities can still be opened one by one,
+                        but at two hundred, only this list is usable */}
                     {r.derived_count > 0 ? (
                       <LinkButton
                         className="u-num"
@@ -586,8 +586,8 @@ export function RulesPanel({
                     ) : (
                       <span className="text-small text-ink-2">—</span>
                     )}
-                    {/* 展不完的组合：常驻，不只在跑完那一刻的提示里。少推几条与
-                        「不满足」在结果里长得一样 */}
+                    {/* Combinations that cannot be fully expanded: always shown, not only in the hint right after a run. Inferring fewer results looks
+                        the same as "not satisfied" in the outcome */}
                     {r.capped > 0 && (
                       <Chip
                         tone="warn"
@@ -599,8 +599,8 @@ export function RulesPanel({
                     )}
                   </Td>
                   <Td>
-                    {/* 开关是个动作，所以是 Button；启用与否用 variant 区分，
-                        而不是拿 Chip 当按钮——Chip 是状态标签，不接受点击 */}
+                    {/* The switch is an action, so it is a Button; enabled or not is told apart by variant,
+                        rather than using a Chip as a button, since a Chip is a status label and does not accept clicks */}
                     <Button
                       size="sm"
                       variant={r.enabled ? "secondary" : "ghost"}
@@ -645,7 +645,7 @@ export function RulesPanel({
         </div>}
       </Dialog>
 
-      {/* 命中：这一条此刻推出了哪些结论 */}
+      {/* Hits: which conclusions this one has inferred right now */}
       <Dialog
         open={!!opening}
         onOpenChange={(o) => !o && setOpened(null)}
@@ -656,7 +656,7 @@ export function RulesPanel({
         {opening && <Matches kbId={kbId} ruleId={opening.id} />}
       </Dialog>
 
-      {/* 定义史：这一条改过几次、每一版怎么说 */}
+      {/* Definition history: how many times this one has changed, and what each version said */}
       <Dialog
         open={!!historyOf}
         onOpenChange={(o) => !o && setHistoryOf(null)}
@@ -686,14 +686,14 @@ export function RulesPanel({
   );
 }
 
-/** 判据。**这一格就是规则的全部语义**，没有别处再藏着条件。
+/** The criterion. **This cell is the whole semantics of the rule**; there is no other place where conditions are hidden.
  *
- *  一个条件一行，摞在一起就是「与」——一列条件读作「全都要成立」，是筛选器
- *  一贯的读法，不必再印一个连词。**唯一印出来的连词是「或」**，因为只有它
- *  需要标：组与组之间换的是判据的满足方式，不是又加一条要求（0029）。
+ *  One condition per row, stacked together means "and": a column of conditions reads as "all must hold", which is the filter
+ *  convention throughout, so there is no need to print a conjunction word. **The only conjunction printed is "or"**, because only it
+ *  needs marking: moving between groups changes how the criterion is satisfied, not adding another requirement (0029).
  *
- *  从前这里是一句连排的话，`A and B or C` 里两个连词一样重，谁先结合读不出来
- *  ——而那正是规则最容易被误读的地方。 */
+ *  Previously this was one run-on sentence, where the two conjunctions weighed the same and you could not tell which bound first,
+ *  and that is exactly where a rule is most easily misread. */
 function RuleCriterion({ rule, attributes }: { rule: BusinessRule; attributes: RelationTypeView[] }) {
   const groups = byGroup(rule.conditions);
   return (
@@ -701,8 +701,8 @@ function RuleCriterion({ rule, attributes }: { rule: BusinessRule; attributes: R
       {groups.map((group, gi) =>
         group.map((c, i) => (
           <div key={`${gi}-${i}`} className="flex items-baseline gap-2">
-            {/* 「或」占住行首那一竖列：只有每一块的第一行写它，读的人扫一眼
-                左边就知道这条规则有几种满足方式 */}
+            {/* "or" occupies the first column at the start of the line: only the first row of each block writes it, so a reader can glance at
+                the left and see how many ways this rule can be satisfied */}
             <span className="w-6 shrink-0 text-right text-fine text-ink">
               {gi > 0 && i === 0 ? S.ontology.ruleOr : ""}
             </span>
@@ -721,8 +721,8 @@ function RuleCriterion({ rule, attributes }: { rule: BusinessRule; attributes: R
   );
 }
 
-/** 写一条规则。**与全站其他表单同一副样子**：弹窗、Field 标签、底栏两个按钮。
-    从前它是页面里长出来的一张卡，与新建令牌、登记数据源各说各的。 */
+/** Write a rule. **Looks the same as every other form on the site**: a dialog, Field labels, and two buttons in the bottom bar.
+    Previously it was a card grown inside the page, which said different things from "new token" and "register data source". */
 function RuleDialog({
   draft,
   setDraft,
@@ -753,8 +753,8 @@ function RuleDialog({
     text: "",
   });
   const setGroups = (groups: Row[][]) =>
-    // 空块只有在它是唯一一块时才算数（「还没写条件」）。别的地方留一个空块
-    // 就是留一个恒真的合取，会把整个主类归进结论里
+    // An empty block only counts when it is the sole block ("no condition written yet"). Elsewhere, leaving an empty block
+    // would be keeping an always-true conjunction, which swallows the whole main class into the conclusion
     setDraft({ ...draft, groups: groups.some((g) => g.length) ? groups.filter((g) => g.length) : [[]] });
   const editRow = (gi: number, ri: number, patch: Partial<Row>) =>
     setGroups(
@@ -768,8 +768,8 @@ function RuleDialog({
     );
   const addRow = (gi: number) =>
     setGroups(draft.groups.map((g, j) => (j === gi ? [...g, newRow()] : g)));
-  // 新的一块自带一行：空块在别处没有意义，让它一出生就不是空的，
-  // 比事后拦一次「这块还空着」少一条规则
+  // A new block comes with one row of its own: an empty block means nothing elsewhere, so make it non-empty from birth,
+  // which removes one rule of "block still empty" checking afterwards
   const addGroup = () => setGroups([...draft.groups, [newRow()]]);
 
   return (
@@ -784,8 +784,8 @@ function RuleDialog({
           <Button size="sm" variant="secondary" onClick={() => setDraft(null)}>
             {S.graph.editCancel}
           </Button>
-          {/* 保存的门槛与服务端同一条：名字、主类、至少一个条件。空合取恒真，
-              会把整个类归进去（business_rules.rs 也是这么挡的） */}
+          {/* The save threshold is the same as the server's: name, main class, at least one condition. An empty conjunction is always true,
+              and would sweep in the whole class (business_rules.rs blocks it the same way) */}
           <Button size="sm" variant="primary" onClick={onSave} disabled={busy || !ready}>
             {S.ontology.ruleSave}
           </Button>
@@ -809,8 +809,8 @@ function RuleDialog({
             className="mb-0"
           >
             {draft.id ? (
-              // 改一条已有规则时主类固定：换主类等于换一条规则，
-              // 而它推出来的结论全挂在旧主类上
+              // When editing an existing rule the main class is fixed: changing the main class is changing a different rule,
+              // and the conclusions it infers all hang off the old main class
               <p className="py-1 text-body text-ink">
                 {classes.find((c) => c.id === draft.subject_type_id)?.label}
               </p>
@@ -833,9 +833,9 @@ function RuleDialog({
           />
         </Field>
 
-        {/* 条件是一块一块写的：块里的行同时成立，块与块任一成立即可（0029）。
-            **块不画框**——行首的「并且」和块间那条「或者」已经把范围说清楚了，
-            再套一圈边框就是给表单里的一段字段发面板（DESIGN.md 6） */}
+        {/* Conditions are written block by block: rows within a block hold together, and any one block holding is enough (0029).
+            **Blocks are not boxed**: the "and" at the start of each row and the "or" between blocks already make the scope clear,
+            and an extra border would turn a stretch of form fields into a panel (DESIGN.md 6) */}
         <Field
           label={S.ontology.ruleConditions}
           hint={S.ontology.ruleConditionsHint}
@@ -844,8 +844,8 @@ function RuleDialog({
           <div className="space-y-2">
             {draft.groups.map((group, gi) => (
               <div key={gi} className="space-y-2">
-                {/* 析取不写成又一个行首连词：跟「并且」长得一样的话，谁先谁后
-                    就读不出来了。一条线把两块分开，词落在同一条竖列上 */}
+                {/* Disjunction is not written as another line-initial conjunction: if it looked the same as "and", you could not tell which came first.
+                    A line separates the two blocks, and the word sits in the same vertical column */}
                 {gi > 0 && (
                   <div className="flex items-center gap-2 pt-1">
                     <span className="w-10 shrink-0 text-right text-fine text-ink">
@@ -856,8 +856,8 @@ function RuleDialog({
                 )}
                 {group.map((c, i) => (
                   <div key={i} className="flex items-center gap-2">
-                    {/* 合取写在行首而不是行尾：读的人先知道「还要同时成立」，
-                        再读这一行说了什么 */}
+                    {/* Conjunction is written at the start of the line rather than the end: the reader first learns "this must also hold",
+                        and then reads what this row says */}
                     <span className="w-10 shrink-0 text-right text-fine text-ink-2">
                       {i === 0 ? "" : S.ontology.ruleAnd}
                     </span>
@@ -901,7 +901,7 @@ function RuleDialog({
                     </IconButton>
                   </div>
                 ))}
-                {/* 加行的按钮一块一个：有两块的时候，「加到哪一块」只有它答得出 */}
+                {/* The add-row button is one per block: when there are two blocks, only it can say which block "add to" refers to */}
                 {attributes.length > 0 && (
                   <div className="flex items-center gap-2">
                     <span className="w-10 shrink-0" />
@@ -913,16 +913,16 @@ function RuleDialog({
                 )}
               </div>
             ))}
-            {/* 一个条件判的是属性的值。没有属性时，「加一个条件」只会加出一行
-                选不了东西的空条件——所以这里说清缺的是什么，按钮不摆 */}
+            {/* A condition tests the value of an attribute. With no attribute, "add a condition" would only add a row of
+                a condition that cannot select anything, so here we say what is missing and do not show the button */}
             {attributes.length === 0 && (
               <p className="text-small text-ink-2">
                 {S.ontology.ruleNeedsAttribute}
               </p>
             )}
-            {/* 加一整块。**不跟行缩进对齐**——缩进进去就跟上一块的「加一个条件」
-                成了并排的两个按钮，一个加行一个加块，看不出管的不是一件事。
-                第一个条件都没写时不摆：没有第一种情况，「另一种情况」无从谈起 */}
+            {/* Adds a whole block. **Not aligned with row indentation**: indenting it would make it sit beside the previous block's "add a condition"
+                as two side-by-side buttons, one adding a row and one adding a block, and it would not be clear they govern different things.
+                Not shown until the first condition has been written: with no first case, "another case" has nothing to refer to */}
             {draft.groups.some((g) => g.length > 0) && (
               <div className="pt-2">
                 <Button size="sm" variant="ghost" onClick={addGroup}>

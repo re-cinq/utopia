@@ -1,7 +1,7 @@
-/* 实体的认知变更历史（记录时间轴）。
-   与同面板的 Timeline 视图正交：那条轴问"这件事在现实里何时成立"，这条轴问
-   "我们何时这么认为、又何时改了主意"。数据来自 append-only 账本里那些被
-   entity_detail 用 invalidated_at IS NULL 滤掉的行。 */
+/* The entity's belief-change history (the record timeline).
+   Orthogonal to the Timeline view on the same panel: that axis asks 'when did this hold in reality', this axis asks
+   "'when did we believe this, and when did we change our mind'. The data comes from the rows in the append-only ledger that
+   entity_detail filters out using invalidated_at IS NULL. */
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
@@ -14,24 +14,24 @@ import { Pager } from "../ui";
 
 const PER = 20;
 
-/** 事件类型 → 图标与色调（语义色只给"被推翻"，其余保持中性） */
+/** Event type → icon and tone (the semantic color is reserved for 'overturned'; the rest stay neutral) */
 const KIND_ICON = {
   asserted: FileText,
   corrected: PencilLine,
   rejected: Undo2,
-  // 并入不是撤回：内容一字未少地进了另一条断言
+  // Merging is not a withdrawal: the content moved into another assertion without losing a word
   merged: Merge,
-  /* 实体合并：这条轴上最大的一次认识改变——从此它和另一个实体算同一个东西。
-     两个方向共用一个图标，方向写在正文里（"←" 是别人并进来） */
+  /* Entity merge: the largest belief change on this axis. From now on it counts as the same thing as another entity.
+     Both directions share one icon; the direction is written in the body ('←' means someone was merged into it) */
   merged_in: Merge,
   merged_away: Merge,
   merge_reverted: Undo2,
-  // 改类不是事实变更：图上的节点换了个类，事实一条没动
+  // Changing class is not a fact change: the node on the graph got a different class, no fact moved
   retyped: Tag,
   retype_reverted: Undo2,
 } as const;
 
-/** 实体合并那三种：正文换成对方实体，而不是谓词 + 宾语 */
+/** The three entity-merge kinds: the body names the other entity, not a predicate + object */
 const MERGE_KINDS = new Set(["merged_in", "merged_away", "merge_reverted"]);
 
 const KIND_TONE: Record<string, string> = {
@@ -41,22 +41,22 @@ const KIND_TONE: Record<string, string> = {
   merged: "text-ink-2",
   merged_in: "text-ink-2",
   merged_away: "text-ink-2",
-  // 撤销与「改类被撤销」同一档：做过、又收回了
+  // Undo and 'class change undone' are the same tier: done, then taken back
   merge_reverted: "text-warn",
   retyped: "text-ink-2",
   retype_reverted: "text-warn",
 };
 
-/* 这两个函数**故意不一样**，别"统一一下"——它们渲染的是两种时间。
+/* These two functions are **deliberately different**; do not 'unify' them: they render two kinds of time.
 
-   `ymd` 给的是**记录时刻**（我们何时这么认为）：那是一个真实时刻，
-   该按看的人所在的时区显示。从前这里也是切 ISO 字符串，等于按 UTC 显示——
-   UTC+8 的人在早上八点前做的修订，历史里会显示成前一天。
+   `ymd` gives the **recording moment** (when we came to believe it): that is a real instant,
+   and should be shown in the timezone of the reader. It used to slice an ISO string too, which meant showing it in UTC:
+   a revision a UTC+8 person made before 8 a.m. showed up in history as the previous day.
 
-   `ym` 给的是**世界时间**（这件事何时成立）：它来自文档里的陈述
-   （"2019 年 5 月就任"），是**日历日期不是时刻**，本来就没有时区。
-   切 ISO 字符串正是按 UTC 读回存进去的那一天；转成本地反而会让
-   UTC-5 的读者看到前一个月。 */
+   `ym` gives the **world time** (when this happened): it comes from the statement in the document
+   ('took office in May 2019'), a **calendar date, not an instant**, so it never had a timezone.
+   Slicing the ISO string reads back the day as stored in UTC; converting it to local would make
+   a reader in UTC-5 sees the previous month. */
 const ymd = (iso: string) => {
   const d = new Date(iso);
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -65,7 +65,7 @@ const ymd = (iso: string) => {
 };
 const ym = (iso: string | null) => (iso ? iso.slice(0, 7) : null);
 
-/** 宾语：实体名优先，其次字面值（属性事实）的摘要/值 */
+/** Object: entity name first, otherwise the summary or value of the literal (attribute fact) */
 function objectText(e: EntityHistoryEvent): string {
   if (e.other_name) return e.other_name;
   const v = e.object_value as { summary?: unknown; value?: unknown } | null;
@@ -73,16 +73,16 @@ function objectText(e: EntityHistoryEvent): string {
   return raw === undefined || raw === null ? "—" : String(raw);
 }
 
-/** 这次变更对有效区间做了什么（记录轴上的事件，改的是有效轴上的边界）。
+/** What this change did to the validity interval (an event on the record axis, changing the boundary on the validity axis).
  *
- *  修正行**不再假设修正就是闭合**。从前这里是「有 valid_to 就说 closed at，
- *  否则什么都不说」，那在只有自动闭合的年代成立；人工改起点（302）产生的
- *  修正行没有结束端，于是整条事件只剩一个图标，看不出改成了什么。
+ *  Correction rows **no longer assume a correction means closing**. Previously this said 'closed at' whenever valid_to existed,
+ *  and otherwise said nothing; that held when only automatic closing existed. Correction rows from manual start edits (302)
+ *  have no end side, so the whole event reduced to one icon, with no way to tell what it was changed to.
  *
- *  两个分支说的都是修正**之后**的状态，不声称原因——引擎接任、Review 裁决
- *  和有人手改在这一行上分不出来，也不必分：谁改的写在下面那行的归因里。 */
+ *  Both branches describe the state **after** the correction and do not claim a cause: engine takeover, Review verdicts
+ *  and manual edits cannot be told apart on this row, and need not be: who changed it is in the attribution on the line below. */
 function intervalNote(e: EntityHistoryEvent): string | null {
-  // 结束端存在 = 区间在此闭合。这句对三种来源都成立
+  // An end side present = the interval closes here. This sentence holds for all three sources
   if (e.kind === "corrected" && e.valid_to) {
     return S.graph.historyClosedAt(ym(e.valid_to)!);
   }
@@ -107,8 +107,8 @@ function EventRow({ e }: { e: EntityHistoryEvent }) {
           </span>
           {note && <span className="u-num text-fine text-ink-2">{note}</span>}
         </div>
-        {/* 改类事件没有谓词也没有宾语，正文换成类的两端。
-            起点为空 = 从「未分类」改过来，0009 之后最常见的一种 */}
+        {/* A change-class event has no predicate and no object; the body swaps in the two ends of the class.
+            A missing start = changed from 'unclassified', the most common case since 0009 */}
         {e.kind === "retyped" || e.kind === "retype_reverted" ? (
           <div className="mt-1 text-body text-ink-2 truncate">
             <span className="text-small text-ink-2">
@@ -117,8 +117,8 @@ function EventRow({ e }: { e: EntityHistoryEvent }) {
             <span className="text-ink">{e.to_type_label}</span>
           </div>
         ) : MERGE_KINDS.has(e.kind) ? (
-          /* 合并事件的正文只有对方。**箭头指方向**：并进来是「←」，
-             并出去是「→」，与上面事实那一行的读法一致 */
+          /* A merge event's body names only the other party. **Arrows show direction**: merged in is '←',
+             merged out is '→', the same reading as the fact line above */
           <div className="mt-1 text-body text-ink-2 truncate">
             <span className="text-small text-ink-2">
               {e.kind === "merged_away" ? "→ " : "← "}
@@ -130,7 +130,7 @@ function EventRow({ e }: { e: EntityHistoryEvent }) {
             <span className="text-small text-ink-2">
               {e.direction === "in" ? "← " : ""}
               <span className={e.predicate_label === null ? "italic text-ink-2" : undefined}>
-                {/* 年表也是一行一句话，与事实行同一个拆法 */}
+                {/* The chronology is also one sentence per line, split the same way as the fact lines */}
                 {e.predicate_label
                   ? predicateSentence(e.predicate_label)
                   : S.graph.unknownPredicate}
@@ -143,7 +143,7 @@ function EventRow({ e }: { e: EntityHistoryEvent }) {
         <div className="mt-1 flex items-center gap-2 text-fine text-ink-2">
           <span className="u-num">{ymd(e.at)}</span>
           <span>·</span>
-          {/* 归因：人名，或引擎（抽取写入 / 时态对账自动闭合） */}
+          {/* Attribution: a person's name, or the engine (extraction write / temporal reconciliation auto-close) */}
           <span>{e.actor_name ?? S.graph.historyEngine}</span>
           {e.filename && e.document_id && (
             <>
@@ -175,15 +175,15 @@ export function EntityHistory({ kbId, entityId }: { kbId: string; entityId: stri
 
   const total = q.data?.total ?? 0;
   if (q.isPending) return <p className="p-2 text-body text-ink-2">{S.nav.loading}</p>;
-  // 只有"一条都没有"才是空。记录轴上首次断言本身就是一次事件——
-  // "我们何时、从哪份文档得知这件事"是这条轴要回答的问题的一半
+  // It is empty only when there are zero entries. The first assertion on the record axis is itself an event:
+  // "// 'when and from which document did we learn this' is half of what this axis is meant to answer
   if (total === 0) return <p className="p-2 text-small text-ink-2">{S.graph.historyEmpty}</p>;
 
   return (
     <div>
       <p className="px-2 pb-2 text-fine text-ink-2">{S.graph.historyHint}</p>
       <div className="divide-y divide-line">
-        {/* key 里用 fact_id ?? at：改类事件没有 fact_id */}
+        {/* key {/* The key uses fact_id ?? at: a change-class event has no fact_id */}
         {(q.data?.events ?? []).map((e) => (
           <EventRow key={`${e.fact_id ?? e.at}-${e.kind}`} e={e} />
         ))}

@@ -1,15 +1,15 @@
-// 两块画布共用的那台机器（#496）。
+// The one machine shared by the two canvases (#496).
 //
-// `/graph` 画实例与事实，本体页画类与关系。它们的**数据**不共享，语义也不共享，
-// 但把数据变成一块能看能点的画布的那套东西是同一份：节点程序的四层解剖、标签
-// 何时出没、悬停卡、状态表、相机、拖拽。从前这些在两个文件里各写一遍，字面
-// 相同——连解释标签阈值为什么是 5 和 0.8 的那段注释都是逐字两份。代价不是行数，
-// 是**会走样**：压暗系数一边 0.52 一边 0.55，谁也不知道哪个是对的。
+// `/graph` draws instances and facts, and the ontology page draws classes and relations. Their **data** is not shared, and neither is their meaning,
+// but the machinery that turns data into a canvas you can see and click is one copy: the four-layer anatomy of the node program, the label
+// appear/disappear timing, the hover card, the state table, the camera and dragging. Previously these were written out twice in two files, word for word the same:
+// even the comment explaining why the label threshold is 5 and 0.8 was duplicated character for character. The cost is not the line count,
+// it is **drift**: the dimming factor was 0.52 on one side and 0.55 on the other, and nobody knew which was right.
 //
-// 分界线：这个文件管「怎么画、怎么动」，页面管「画什么」。页面把自己的数据投影
-// 成一张 graphology 图，给每个节点一个类型色，再说清楚哪些该藏；其余的在这里。
+// The dividing line: this file owns "how it is drawn and how it moves", the page owns "what is drawn". The page projects its own data
+// into one graphology graph, gives each node a type colour, and states which should be hidden; everything else is here.
 //
-// `graphVisuals.ts` 是上一轮抽出来的常量与绘制函数，这个文件建在它上面。
+// `graphVisuals.ts` holds the constants and drawing functions extracted in the previous round; this file is built on top of it.
 
 import type Graphology from "graphology";
 import Sigma from "sigma";
@@ -36,36 +36,36 @@ import {
   INK,
 } from "./graphVisuals";
 
-/* ============ 节点程序 ============ */
+/* ============ Node program ============ */
 
-/** Semantica 节点解剖：状态环 → 描边 → 深色壳 → 微彩核心。
+/** Semantica node anatomy: state ring → outline → dark shell → lightly coloured core.
  *
- * 两页同一份。从前默认那一种在 `/graph` 叫 `shell`、在本体页叫 `circle`，
- * 而它们是同一个 `createNodeBorderProgram`——两个名字说的是同一件事 */
+ * One copy for both pages. Previously the default one was called `shell` on `/graph` and `circle` on the ontology page,
+ * yet they were the same `createNodeBorderProgram`: two names for one thing */
 export const NODE_TYPE_SHELL = "shell";
 export const NODE_TYPE_SQUARE = "square";
 
-/* ---------- 高亮的边画在最上层 ---------- */
+/* ---------- Highlighted edges are drawn on top ---------- */
 
-/** 「最上层」那一批的类型名后缀 */
+/** The type-name suffix for the "top layer" batch */
 const TOP = "Top";
 
-/** 一条边高亮时该用的类型名。
+/** The type name an edge should use when it is highlighted.
  *
- * **`zIndex` 在这里不管用。**sigma 一个程序一批绘制，`zIndex` 只在批内排序；
- * 跨程序谁先谁后，看的是 `edgeProgramClasses` 里键的顺序。于是选中一个节点
- * 之后，它那几条亮线照样会被别的程序里压暗的边切断——放大看就是白线被一条条
- * 细黑条切开。
+ * **`zIndex` does not work here.** sigma draws one program at a time, and `zIndex` only sorts within a batch;
+ * which program goes first across programs depends on the order of the keys in `edgeProgramClasses`. So after selecting a node,
+ * its bright lines are still cut by the dimmed edges of other programs: zoomed in, the white line is sliced
+ * into thin black bars one by one.
  *
- * 解法是把同一个程序**注册两遍**（见 `withTopLayer`），高亮的边整批走后注册的
- * 那一份，最后画。两页都踩过这个坑：图谱页先解的，本体页后来又踩了一遍——
- * 所以它收在这里，不在任何一页里。 */
+ * The fix is to **register the same program twice** (see `withTopLayer`): highlighted edges go in the batch of the copy registered later,
+ * which is drawn last. Both pages fell into this trap: the graph page solved it first, and the ontology page fell into it again later,
+ * so it lives here, not in either page. */
 export function drawLast(type: string): string {
   return type.endsWith(TOP) ? type : type + TOP;
 }
 
-/** 给一份边程序表配上「最上层」的那一份：同样的程序，键排在后面。
- *  高亮时把 `res.type` 换成 `drawLast(res.type)` 就落进这一批。 */
+/** Pair an edge-program table with its "top layer" copy: the same program, with the key placed later.
+ *  When highlighted, replace `res.type` with `drawLast(res.type)` to land in this batch. */
 export function withTopLayer<T>(programs: Record<string, T>): Record<string, T> {
   return {
     ...programs,
@@ -87,46 +87,46 @@ export const NODE_PROGRAMS = {
   [NODE_TYPE_SQUARE]: NodeSquareShellProgram,
 };
 
-/* ============ 构造选项 ============ */
+/* ============ Construction options ============ */
 
-/** 两页真正不同的那几项。其余一律在 `sigmaOptions` 里定死——它们决定画布
- *  长什么样、怎么响应，两页长得不一样就是 bug 而不是特性 */
+/** The few items that really differ between the two pages. Everything else is fixed in `sigmaOptions`: they decide
+ *  what the canvas looks like and how it responds, and it would be a bug, not a feature, for the two pages to look different */
 export interface CanvasOptions {
-  /** 边的类型名到程序的映射。`/graph` 只有直线与弧，本体页还要箭头 */
+  /** Mapping from edge type names to programs. `/graph` only has straight lines and arcs; the ontology page also needs arrows */
   edgeProgramClasses: Settings["edgeProgramClasses"];
   defaultEdgeType: string;
-  /** 相机能缩到多远、放到多近。两页的图规模差几个量级，取景范围本就不同 */
+  /** How far the camera can zoom out and in. The two graphs differ by several orders of magnitude in size, so their framing ranges are naturally different */
   minCameraRatio: number;
   maxCameraRatio: number;
-  /** 边上写不写字。`/graph` 的边是谓词，要写；本体页只有关系边写 */
+  /** Whether edges get text. `/graph` edges are predicates and need it; the ontology page only labels relation edges */
   renderEdgeLabels?: boolean;
   minEdgeThickness?: number;
 }
 
-/** `new Sigma(g, el, { ...sigmaOptions(...), nodeReducer, edgeReducer })`。
+/** `new Sigma(g, el, { ...sigmaOptions(...), nodeReducer, edgeReducer })`.
  *
- * **两个 reducer 不从这里过。** sigma 的 reducer 类型跟着它自己的泛型参数走，
- * 中转一手就把推断掐断了；而 reducer 的**内容**本就是两页各自的事，共用的是
- * 它们调用的那张状态表（下一节），不是函数本身。
+ * **The two reducers do not pass through here.** sigma's reducer types follow its own generic parameters, and passing them through a middle layer cuts off the inference;
+ * and the **contents** of the reducers are each page's own business, so what is shared is the state table they call
+ * (next section), not the functions themselves.
  *
- * 标签按距离出没——离得远只看形状，走近了才认名字。**试过不按距离**
- * （阈值归零、只按拥挤程度筛）：缩远之后一百多个名字铺开互相压字，读不出也
- * 点不准。阈值 5、每 130px 见方留 0.8 个：只比原先松半档。**放宽到 3 / 1.2
- * 试过一轮，一屏上百个名字铺开，太吵**——这里要的是「远处认得出几个地标」，
- * 不是「每个点都报名字」。放大时 sigma 自己按 1/ratio² 放开这个上限
- * （见 `getLabelsToDisplay`），越走近露得越全，不封顶。
+ * Labels appear according to distance: far away only the shape is shown, and names appear only when close. **Tried without distance**
+ * (threshold zeroed, filtering only by crowding): after zooming out, over a hundred names spread out and overprinted each other, unreadable and
+ * impossible to point at accurately. Threshold 5, with 0.8 per 130px square: only half a step looser than before. **Loosening to 3 / 1.2 was tried,
+ * and a screen with a hundred names spread across it was too noisy**. What is wanted here is "a few landmarks recognizable at a distance",
+ * not "every point reports its name". When zoomed in, sigma lifts this cap itself by 1/ratio²
+ * (see `getLabelsToDisplay`), so the closer you get, the more is revealed, with no ceiling.
  *
- * 边的字与节点同一档（fine）、同一个次要色。从前是 9px/#a1a1a1——9 比界面里
- * 最小的字还小一半，而 #a1a1a1 是上一版的 ink-2。
+ * Edge text is the same tier as the nodes (fine) and the same secondary colour. Previously it was 9px/#a1a1a1: 9 is half the size of the smallest
+ * text in the interface, and #a1a1a1 was the previous version's ink-2.
  *
- * 边的悬停事件默认是关的，这里一律开：两页都靠 `enterEdge` 让边说话。 */
+ * Edge hover events are off by default; here they are all turned on, since both pages rely on `enterEdge` to make edges speak. */
 export function sigmaOptions(o: CanvasOptions) {
   return {
-    /* **按层级画**。两个 reducer 一直在设 `res.zIndex`（压暗 0、邻居 2、
-       选中 3、指到 4、高亮的边 5），可 sigma 默认不看它——绘制顺序就是缓冲区
-       顺序，于是一条高亮的白边会被后画的暗边一段段切断，看着像被虚线打断。
-       打开它，那些层级值才真正生效。代价是每帧多一次排序，几百条边这个量级
-       可以忽略 */
+    /* **Draw by level.** Both reducers have been setting `res.zIndex` (dimmed 0, neighbours 2,
+       selected 3, pointed-at 4, highlighted edges 5), but sigma does not look at it by default: the drawing order is the buffer order,
+       so a highlighted white edge is cut segment by segment by dark edges drawn later, looking as if it were broken by a dashed line.
+       Turning it on makes those level values take effect. The cost is one extra sort per frame, which at the scale of a few hundred edges
+       is negligible */
     zIndex: true,
     allowInvalidContainer: true,
     defaultNodeType: NODE_TYPE_SHELL,
@@ -154,22 +154,22 @@ export function sigmaOptions(o: CanvasOptions) {
   };
 }
 
-/* ============ 状态表 ============ */
+/* ============ State table ============ */
 
-/** reducer 收到的属性袋与它要交回去的那一份。sigma 的类型在这一层是 `any`，
- *  两页各自的属性键也不一样，所以这里只认「一袋东西」 */
+/** The attribute bag a reducer receives and the one it hands back. sigma's types are `any` at this layer,
+ *  and the two pages' attribute keys differ, so here it only recognizes "a bag of things" */
 export type NodeAttrs = Record<string, unknown>;
 
-/** 状态环取节点**自己的类型色**，不取已经混过壳色的 `color`——见 graphVisuals
- *  里 RING_*_MIX 的说明 */
+/** The state ring takes the node's **own type colour**, not the `color` that has already been mixed with the shell colour: see the
+ *  notes on RING_*_MIX in graphVisuals */
 export function ownColorOf(attrs: NodeAttrs): string {
   return (attrs.typeColor as string) ?? NODE_CORE_BASE;
 }
 
-/** 压到底：其余都退场，只留形状。
+/** Pressed to the bottom: everything else exits, leaving only the shape.
  *
- * 系数从前两页不一样，0.52 与 0.55，没有一处说明为什么。设计表里写的是 0.52，
- * 这里按它统一——那个 0.55 是抄的时候走的样，不是谁定的 */
+ * The factor used to differ between the two pages, 0.52 and 0.55, and nowhere was it explained why. The design table says 0.52,
+ * and this unifies on it: that 0.55 was a slip when copying, not something anyone decided */
 export const MUTE_SCALE = 0.52;
 
 export function mutedNode(res: NodeAttrs, base: number): NodeAttrs {
@@ -183,8 +183,8 @@ export function mutedNode(res: NodeAttrs, base: number): NodeAttrs {
   return res;
 }
 
-/** 悬停时其余的按 `HOVER_MUTE` 压一档（选中是压到底）。
- *  邻居不压——悬停要回答的是「它连着谁」，把邻居也压掉就等于没回答 */
+/** On hover, the rest are muted one step by `HOVER_MUTE` (selection mutes them all the way down).
+ *  Neighbours are not muted: hover answers "who is it connected to", and muting the neighbours too would mean not answering at all */
 export function softMutedNode(
   res: NodeAttrs,
   attrs: NodeAttrs,
@@ -208,9 +208,9 @@ export function softMutedNode(
   return res;
 }
 
-/** 指着的那一个：×1.08，最小 10.4，偏白的环——为的是跳出来。
- *  名字那块牌子的底亮一档并浮起来，与选中那一档同一副形状（选中是反色的
- *  浅底深字）。从前这里是一张浮起来的两行卡片，与选中完全不像 */
+/** The one being pointed at: ×1.08, minimum 10.4, a slightly white ring, so that it stands out.
+ *  The backing of its name label is one step brighter and floats up, with the same shape as the selected state (selected is inverted:
+ *  light background, dark text). Previously this was a floating two-line card that looked nothing like the selected state */
 export function hoveredNode(
   res: NodeAttrs,
   attrs: NodeAttrs,
@@ -224,26 +224,26 @@ export function hoveredNode(
   return deferToHoverLayer(res);
 }
 
-/** 交给高亮层画：标签层跳过这一个（见 `drawNodeLabel` 里那段说明）。
+/** Handed to the highlight layer to draw: the label layer skips this one (see the note in `drawNodeLabel`).
  *
- * 正被指着的节点，sigma 会在标签层和高亮层各画一遍名字。这个记号是给标签层
- * 让路用的，**只该落在此刻真被指着的那一个身上**——所以它不属于 `selectedNode`：
- * 选中的那一个没被指着时，画它的正是标签层。 */
+ * sigma draws the name in both the label layer and the highlight layer for a node that is being pointed at. This marker exists to make way
+ * for the label layer, and **it should only ever land on the one that is really being pointed at right now** — so it does not belong to `selectedNode`:
+ * when the selected one is not being pointed at, the label layer is what draws it. */
 export function deferToHoverLayer(res: NodeAttrs): NodeAttrs {
   res.hideBaseLabel = true;
   return res;
 }
 
-/** 选中的那一个：**名字反色**。
+/** The selected one: **the name is inverted**.
  *
- * 反的是标签底牌，不是节点自己。节点四层解剖（环/描边/壳/核心）一律不动——
- * 试过让壳吃满类型色、核心退到深色，画面立刻变吵：一个实心亮圈把周围一圈
- * 邻居都压下去了，而邻居正是选中之后最该读的东西。**大小也几乎不动
- * （×1.02）**，一选中就胖一圈，整张图的疏密看着就变了。
+ * What is inverted is the label backing, not the node itself. The four-layer node anatomy (ring / outline / shell / core) is left untouched.
+ * Tried letting the shell take the full type colour and the core fade to dark: the picture immediately became noisy, since one solid bright ring
+ * pressed down all the neighbours around it, and the neighbours are exactly what should be read once something is selected. **Size is also nearly unchanged
+ * (×1.02)**, since a node that gets fatter on selection changes the density of the whole graph as it looks.
  *
- * 于是"选中"全部落在名字上：底牌浅底深字，与指到的那一个（深底浅字）同一副
- * 形状调个个儿，一眼分得出"我正指着"和"我选中了"，不必再添第三种记号。
- * 环仍留着，取偏本色那一档，与悬停那圈偏白的分得开。 */
+ * So "selected" is entirely expressed on the name: a light backing with dark text, the same shape flipped relative to the pointed-at one (dark backing with light text),
+ * so you can tell "I am pointing at it" from "I selected it" at a glance, without a third marker.
+ * The ring is kept, taking the tier that leans toward the node's own colour, so it is distinct from the slightly white hover ring. */
 export function selectedNode(
   res: NodeAttrs,
   attrs: NodeAttrs,
@@ -253,19 +253,19 @@ export function selectedNode(
   res.ringColor = mix(ownColorOf(attrs), INK, RING_SELECT_MIX);
   res.forceLabel = true;
   res.labelLift = true;
-  // **反色**：浅底深字。指到的那一个是底亮一档的牌子，同一副形状调个个儿——
-  // 一眼分得出"我正指着"和"我选中了"，而不必再多一种记号
+  // **Inverted**: light background, dark text. The one being pointed at is a label whose backing is one step brighter; the same shape flipped —
+  // so you can tell "I am pointing at it" from "I selected it" at a glance, without needing another marker
   res.labelInvert = true;
-  // 再加粗一档。反色要看向它才读得出来，字重在余光里也分得清
+  // One step bolder. The inverted form has to be looked at to be read; the weight is still distinguishable in peripheral vision
   res.labelBold = true;
   res.zIndex = 3;
   return res;
 }
 
-/** 选中的那一个的邻居。
+/** The neighbours of the selected one.
  *
- * `scale` 两页不同，这一处是真的设计差别不是走样：`/graph` 上千个节点，
- * 收到 0.76 是为了给选中的那一条路让地方；本体页几十个类，收了反而显得瘫 */
+ * `scale` differs between the two pages, and this spot is a real design difference rather than drift: `/graph` has thousands of nodes,
+ * and 0.76 makes room for the selected path; the ontology page has a few dozen classes, where shrinking them would look limp */
 export function neighborNode(
   res: NodeAttrs,
   base: number,
@@ -276,7 +276,7 @@ export function neighborNode(
   return res;
 }
 
-/* ============ 相机 ============ */
+/* ============ Camera ============ */
 
 export interface Point {
   x: number;
@@ -291,7 +291,7 @@ export function nodePosition(sigma: Sigma, id: string): Point {
   };
 }
 
-/** 节点此刻是否在视口里（按上一次渲染的相机算） */
+/** Whether the node is inside the viewport at this moment (computed from the camera of the last render) */
 export function nodeInView(sigma: Sigma, id: string, margin = 48): boolean {
   const { x, y } = sigma.graphToViewport(nodePosition(sigma, id));
   const { width, height } = sigma.getDimensions();
@@ -300,11 +300,11 @@ export function nodeInView(sigma: Sigma, id: string, margin = 48): boolean {
   );
 }
 
-/** 相机推到一个节点上。sigma 的相机坐标是归一化到 [0,1] 的「框内」坐标，
- *  不是图坐标——直接喂图坐标（x 动辄几百）相机会飞出画面几万像素，画布
- *  一片空白。sigma 没有公开的图→框内换算，绕一趟视口：`graphToViewport` 用的
- *  是上一次渲染的矩阵，与 `viewportToFramedGraph` 用同一台相机，一来一回把
- *  相机抵消掉，剩下的就是框内坐标 */
+/** Push the camera onto a node. sigma's camera coordinates are "in-frame" coordinates normalized to [0,1],
+ *  not graph coordinates: feeding graph coordinates directly (x values often in the hundreds) makes the camera fly tens of thousands of pixels off-screen, and the canvas
+ *  goes blank. sigma has no public graph→frame conversion, so it takes a detour through the viewport: `graphToViewport` uses
+ *  the matrix from the last render, and `viewportToFramedGraph` uses the same camera, so going there and back cancels the camera out,
+ *  and what remains is the in-frame coordinate */
 export function focusNode(sigma: Sigma, id: string, maxRatio = 0.5): void {
   if (!sigma.getGraph().hasNode(id)) return;
   const framed = sigma.viewportToFramedGraph(
@@ -316,17 +316,17 @@ export function focusNode(sigma: Sigma, id: string, maxRatio = 0.5): void {
     .animate({ x: framed.x, y: framed.y, ratio }, { duration: 300 });
 }
 
-/** 把一张刚算好的图**搬进**正在渲染的那一张。
+/** **Move** a freshly computed graph into the one being rendered.
  *
- * sigma 绑死在构造时给它的那个 graphology 实例上，所以"图变了"很容易被写成
- * "杀掉重建"。代价不小：GPU 缓冲、相机、悬停与选中态全部丢掉，还要再走一遍
- * 首帧——本体页为了把一个类揭进画面就走一遍这套，画面会明显顿一下。
+ * sigma is bound to the graphology instance it was given at construction, so "the graph changed" is easily written as
+ * "kill and rebuild". The cost is not small: the GPU buffers, camera, hover and selection state are all lost, and the first frame must be run again.
+ * The ontology page goes through this whole thing just to reveal a class in the picture, and the picture visibly stutters.
  *
- * graphology 每一次增删改都发事件，sigma 听得见，所以**就地改本来就是它支持的
- * 路**。这里做的是最朴素的对账：多的删掉、少的补上、留下的属性覆盖一遍。
- * 几十上百个类的规模，一次全量覆盖比算精确差异更省事，也不容易错。
+ * graphology emits an event for every add, delete and change, and sigma listens, so **changing in place is what it is designed to support**.
+ * What is done here is the plainest reconciliation: delete the extras, add the missing, and overwrite the properties of what remains.
+ * At the scale of dozens or hundreds of classes, one full overwrite is simpler than computing an exact diff, and less error-prone.
  *
- * 删点会连带删掉它的边，所以先取一份快照再遍历（`nodes()` 返回的是数组）。 */
+ * Deleting a node also removes its edges, so take a snapshot first, then iterate (`nodes()` returns an array). */
 export function syncGraph(live: Graphology, next: Graphology): void {
   for (const node of live.nodes()) if (!next.hasNode(node)) live.dropNode(node);
   next.forEachNode((node, attrs) => {
@@ -340,29 +340,29 @@ export function syncGraph(live: Graphology, next: Graphology): void {
   });
 }
 
-/* ============ 拖拽 ============ */
+/* ============ Dragging ============ */
 
-/** 拖一个节点。**按下只记候选，位移超过阈值才升格成拖拽**——否则一次纯点击
- *  也会被当成拖了 0 像素的拖拽，鼠标松手的时机跟点选打架。
+/** Drag a node. **On press it only records a candidate; it becomes a drag only once the displacement passes a threshold**: otherwise a plain click
+ *  would also be treated as a 0-pixel drag, and the moment of mouse release would fight with click-to-select.
  *
- * 升格的那一刻冻住包围盒：拖着拖着节点飞出画面边缘时，相机不该跟着自动缩放去
- * 「适应」新的包围盒，那样一拖全图就跟着抖。松手再解开——「归位」要看得见刚
- * 挪过去的新位置，不能还按拖拽开始前的旧范围来算。
+ * At the moment it is promoted, freeze the bounding box: while dragging, when the node flies toward the edge of the screen, the camera should not
+ * auto-zoom to "fit" the new bounding box, since then the whole graph would shake with every drag. On release, unfreeze it: "return to place" must show
+ * the new position just moved to, and cannot still be computed from the old range from before the drag started.
  *
- * 两页对「拖动过程中还要做什么」的回答不同：`/graph` 要把光标位置喂进力模拟，
- * 本体页要把位置记进它自己的坐标表。所以那两件事是回调，不在这里。 */
+ * The two pages answer "what else to do during the drag" differently: `/graph` feeds the cursor position into the force simulation,
+ * and the ontology page records the position in its own coordinate table. So those two things are callbacks, not here. */
 export function attachDrag(
   sigma: Sigma,
   o: {
-    /** 升格成拖拽的那一刻。`/graph` 在这里唤醒力模拟 */
+    /** The moment it is promoted to a drag. `/graph` wakes the force simulation here */
     onStart?: (node: string) => void;
-    /** 每一帧的新位置。写进图的那两笔已经做过了 */
+    /** The new position each frame. The two writes into the graph have already been done */
     onMove?: (node: string, pos: Point) => void;
-    /** 松手。`/graph` 在这里安排力模拟停下 */
+    /** On release. `/graph` schedules the force simulation to stop here */
     onEnd?: (node: string) => void;
-    /** 光标形状归谁管；不给就不动光标 */
+    /** Who owns the cursor shape; if not given, the cursor is left alone */
     container?: () => HTMLElement | null;
-    /** 悬停在节点上是不是「可以抓」的样子。本体页给，`/graph` 不给 */
+    /** Whether hovering over a node should look "grabbable". The ontology page supplies it; `/graph` does not */
     hovering?: () => boolean;
   } = {},
 ): void {
@@ -393,7 +393,7 @@ export function attachDrag(
     graph.setNodeAttribute(dragged, "x", pos.x);
     graph.setNodeAttribute(dragged, "y", pos.y);
     o.onMove?.(dragged, pos);
-    // 阻止相机跟着平移
+    // Stop the camera from following the pan
     e.preventSigmaDefault();
     e.original.preventDefault();
     e.original.stopPropagation();
@@ -410,7 +410,7 @@ export function attachDrag(
   };
   sigma.getMouseCaptor().on("mouseup", endDrag);
 
-  // 悬停在节点上方给个「可以抓」的提示——发现得靠猜的交互等于没有
+  // Hovering over a node shows a "grabbable" hint: an interaction that has to be guessed at is as good as absent
   if (o.hovering) {
     sigma.on("enterNode", () => {
       if (!dragged) cursor("grab");

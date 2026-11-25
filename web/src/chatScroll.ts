@@ -1,17 +1,17 @@
-// 回答在往外写的时候，画面跟不跟着往下走。
+// Whether the view follows downward as the answer is written out.
 //
-// 从前 `shown` 每变一次就把底部的哨兵滚进视野，而生成期间 liveAnswer 每 33ms 通知一次：
-// 往上翻着读前文（轨迹、上一轮回答、引用）的人，每 33ms 被拽回底部一次。一个正在写的
-// 回答让屏幕上别的东西都读不成。
+// Previously every change to `shown` scrolled the bottom sentinel into view, and during generation liveAnswer notifies every 33ms:
+// a person scrolled up reading earlier text (trace, previous answer, citations) was yanked back to the bottom every 33ms. An answer still being written
+// made everything else on screen unreadable.
 //
-// 判据改成**人此刻停在哪**：停在底部就跟着新写出的字走；翻上去了就留在原地，自己滚回
-// 底部再接着跟。「底部」留一点余量——列表底下有 pb-12 的留白，换行与缩放也会让最后
-// 几像素对不齐。要求分毫不差的话，一个一直停在底部的人会被当成「翻上去了」而跟丢。
+// The criterion is now **where the person is right now**: if they are at the bottom, follow the newly written text; if they scrolled up, stay put and, once they scroll back
+// to the bottom, resume following. 'Bottom' has some slack: the list has pb-12 padding below, and line wrapping and zoom can also leave the last
+// few pixels misaligned. Requiring an exact match would count someone who stays at the bottom as scrolled up and lose the follow.
 
-/** 离底部多近算「在跟着读」，CSS 像素 */
+/** How close to the bottom counts as 'still reading along', in CSS pixels */
 export const FOLLOW_SLACK_PX = 48;
 
-/** 这个滚动容器此刻是不是停在底部。内容比视口短时恒为真：没有地方可以翻走 */
+/** Whether this scroll container is currently at the bottom. Always true when the content is shorter than the viewport: there is nowhere to scroll away to */
 export function followsBottom(el: {
   scrollTop: number;
   clientHeight: number;

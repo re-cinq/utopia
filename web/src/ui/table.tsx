@@ -1,5 +1,5 @@
-/* 表格：只管皮。表头 fine 号大写字距，行间细线，指针停上一行变 surface-2。
-   数据列的对齐、宽度由页面决定；这里不做排序、不做分页（Pager 在 index.tsx）。 */
+/* Table: styling only. Header in fine-spaced uppercase, thin lines between rows, and the row under the pointer turns surface-2.
+   Alignment and width of the data columns are decided by the page; there is no sorting and no paging here (Pager is in index.tsx). */
 import type {
   HTMLAttributes,
   TableHTMLAttributes,
@@ -42,12 +42,12 @@ export function Tr({
   className,
   ...props
 }: HTMLAttributes<HTMLTableRowElement> & {
-  /** 可点的行：指针停上变面，光标变手 */
+  /** Clickable rows: the surface appears under the pointer and the cursor becomes a hand */
   interactive?: boolean;
-  /** 选中的那一行。**用 `u-nav-active`，与左栏的行同一个记号**——它是
-   *  hover 那一档面的两倍（0.09 对 0.045）再加白字，所以「我选中的」与
-   *  「我正指着的」分得开；两者用同一副样子的话，一旦指到别的行，屏幕上
-   *  就有两行长得一样 */
+  /** The selected row. **Uses `u-nav-active`, the same marker as the rows in the left column**: it is
+   *  twice the hover surface level (0.09 vs 0.045) plus white text, so "what I selected" and
+   *  "what I am pointing at" stay distinct; if both looked alike, moving to another row would leave two rows that look the same
+   *  on screen */
   active?: boolean;
 }) {
   return (

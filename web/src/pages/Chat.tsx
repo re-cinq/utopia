@@ -1,6 +1,6 @@
-/* Chat：agentic 对话（检索/图谱工具 + remember 记忆）。
-   会话持久化：左栏会话列表;上下文由服务端拼,前端只发 conversation_id + 新消息;
-   行动轨迹(steps)与引用(sources)随消息落库,历史回放与实时流共用渲染。 */
+/* Chat: agentic conversation (retrieval and graph tools, plus the remember memory).
+   Session persistence: a session list in the left column; the server assembles the context, and the frontend only sends conversation_id plus the new message;
+   the action trace (steps) and citations (sources) are saved with the messages, and history replay and the live stream share one renderer. */
 import { memo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
@@ -77,11 +77,11 @@ import { NextStep, nextStep, useReadiness } from "./NextStep";
 import { KbMenuList } from "./KbMenuList";
 import { DRAFT_KEY, fetchMe, lastKey } from "../authSession";
 
-/* `Turn` 定义在 liveAnswer 里：进行中的那一次也是一串 Turn，
-   而它必须活得比这个组件长（见那个文件顶上的说明） */
+/* `Turn` is defined in liveAnswer: the run in progress is also a series of Turns,
+   and it has to outlive this component (see the note at the top of that file). */
 
-/** 还没有来源的那一轮共用这一个空数组：新建一个会让 context 每次渲染都变，
- *  正文里每个角标跟着重画 */
+/** The turn that has no sources yet shares this one empty array: creating a new one would make the context change on every render,
+ *  and every citation marker in the body would be redrawn. */
 const NO_SOURCES: Source[] = [];
 
 type ViewRequest = { kbId: string; id: string | null };
@@ -95,9 +95,9 @@ const historyTurns = (messages: ConversationMessage[]): Turn[] => messages.map((
 }));
 const viewKey = (kbId: string, id: string | null) => `${kbId}/${id ?? ""}`;
 
-/** 能重答的那一问在屏上的位置（#936），没有就是 -1。只看最后一问：它后面要么什么
- *  也没有（重开会话时的样子），要么只有一条出错的回答（刚答到一半失败）。
- *  服务端同样只答会话的最后一条，答过的、后面又有人接着问的都不答 */
+/** The position on screen of the question that can be re-answered (#936), or -1 if there is none. Only the last question counts: what follows it is either nothing
+ *  (as when a session is reopened) or a single failed answer (it failed halfway through).
+ *  The server likewise only answers the last message of a session; earlier ones that were answered, and ones someone asked after, are not answered. */
 function retryableQuestion(shown: Turn[]): number {
   const last = shown.at(-1);
   const at =
@@ -113,9 +113,9 @@ export function Chat() {
   const kbId = useKbId();
   const { kb, kbs, setKb } = useKb();
   const me = useQuery({ queryKey: ["me"], queryFn: fetchMe });
-  /* **只拦模型这一档。** 空的知识库照样能聊——挂载的数据库查得了，记忆也读得到；
-     没有对话模型才是真的一句都问不出来，而问候语从前照常显示，用户敲完第一句
-     才撞墙（#313） */
+  /* **Only the model tier is gated.** An empty knowledge base can still be chatted with: the mounted database can still be queried and memory can still be read;
+     only with no chat model is nothing at all answerable. The greeting used to show as usual, so the user only hit the wall
+     after typing the first sentence (#313). */
   const readiness = useReadiness(kbId);
   const modelStep = readiness.data?.has_chat_model
     ? null
@@ -126,18 +126,18 @@ export function Chat() {
       });
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  // 会话即路由：/chat/$conversationId，URL 是当前会话的唯一事实来源（刷新/回退天然可用）
+  // The session is the route: /chat/$conversationId. The URL is the single source of truth for the current session (refresh and back work naturally).
   const { conversationId: routeConvId } = useParams({ strict: false }) as {
     conversationId?: string;
   };
   const [activeId, setActiveId] = useState<string | null>(null);
-  // 路由同步 effect 的判据：state 的提交时序晚于 navigate 触发的重渲染，
-  // 用 ref 同步写入才能让"流式新建后仅换 URL"的守卫可靠命中
+  // The route-sync effect's criterion: state commits later than the re-render that navigate triggers,
+  // so only a synchronous write into a ref makes the "after a streaming create, only the URL changes" guard hit reliably.
   const activeIdRef = useRef<string | null>(null);
-  // 读者是不是停在对话底部（见 chatScroll.ts）。换会话、发新消息都回到「跟着」：
-  // 那一刻人要看的就是底部
+  // Whether the reader is at the bottom of the conversation (see chatScroll.ts). Switching session and sending a new message both return to "follow":
+  // at that moment the person wants to see the bottom.
   const following = useRef(true);
-  // 已经结束的那些轮次，从库里读来。**进行中的那一次不在这里**——见下
+  // Turns that have already ended are read from the database. **The one in progress is NOT here**: see below.
   const [turns, setTurns] = useState<Turn[]>([]);
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [idleHistoryKey, setIdleHistoryKey] = useState<string | null>(null);
@@ -157,9 +157,9 @@ export function Chat() {
     const key = viewKey(kbId, routeConvId ?? null);
     if (previousRoute.current === key) return;
     previousRoute.current = key;
-    // 新建会话的 URL 同步也会走这里：旧 send owner 失效、activeIdRef 清空，
-    // 因而 route-sync 会调用 loadConversation。onConversation 已先 identify 生成句柄，
-    // loadConversation 必须先检查 liveAnswer.entry，直接认领，避免流中途读库覆盖。
+    // Syncing the URL for a new session also goes through here: the old send owner is invalidated and activeIdRef is cleared,
+    // so route-sync calls loadConversation. onConversation has already identified the generation handle,
+    // so loadConversation must check liveAnswer.entry first and claim it directly, so a database read mid-stream does not overwrite it.
     claimView(routeConvId ?? null);
     activeIdRef.current = null;
     following.current = true;
@@ -174,54 +174,54 @@ export function Chat() {
     activeIdRef.current = null; // StrictMode's next setup must issue its own read.
   }, []);
   const [input, setInput] = useState(() => sessionStorage.getItem(DRAFT_KEY) ?? "");
-  /* **按 URL 认领，不按 state。** 这个文件开头就写着「URL 是当前会话的唯一
-     事实来源」，而这里一度用了 `activeId`——它是 state，切走再回来时更新得
-     比第一次渲染晚，于是那一帧认不出自己，屏幕空着。用地址栏里的那个 id
-     就没有时序可言。新会话还没拿到 id 时两者都是空，也对得上 */
+  /* **Claim by URL, not by state.** The top of this file says "the URL is the single source of truth for the current session",
+     but here `activeId` was used once. It is state, and when you switch away and back it updates later than the first render,
+     so that frame cannot recognize its own run and the screen is empty. Using the id in the address bar has no timing to speak of.
+     When a new session has not yet got an id, both are empty, which also matches. */
   const currentId = routeConvId ?? activeId;
-  // 进行中的那些回答都活在组件之外（见 liveAnswer.ts），这里只认领「正在看的
-  // 这一场」。别场的任何变更都不动这一场的快照引用——「一个正在别处生成的
-  // 回答不该改变这里的任何东西」如今在渲染层也字面成立：React 靠引用相等
-  // 跳过重渲染，别场逐字增长不再打扰当前会话
+  // Runs still in progress all live outside the component (see liveAnswer.ts); here we only claim "the run being viewed"
+  // from among them. Any change in another run leaves this run's snapshot reference alone. "An answer being generated elsewhere
+  // should not change anything here" now also holds literally in the render layer: React skips re-renders by reference equality,
+  // so another run growing character by character no longer disturbs the current session.
   const liveHere = useSyncExternalStore(
     liveAnswer.subscribe,
     () => liveAnswer.entry(kbId || null, currentId),
   );
-  /* **是「这一场」在流，不是「有一场」在流。**
-     写成全局的话，另一场在生成时这一场的输入框也会变成停止按钮、发不出消息，
-     而且最后一轮会被当成还在流——引用于是被藏起来（那条判据见 TurnView）。
-     一个正在别处生成的回答不该改变这里的任何东西 */
+  /* **It is "this run" that is streaming, not "a run".**
+     If it were global, then while another run is generating, this run's input would also turn into a stop button and be unable to send,
+     and the last turn would count as still streaming, so its citations would be hidden (that criterion is in TurnView).
+     An answer being generated elsewhere should not change anything here. */
   const streaming = liveHere?.streaming ?? false;
   const shown = liveHere ? liveHere.turns : loadedKey === viewKey(kbId, currentId) ? turns : [];
   const retryAt = retryableQuestion(shown);
   const [scopeOpen, setScopeOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<ConversationRow | null>(null);
-  // 会话搜索。**搜标题也搜正文**——人记得住的往往是问过的那句话
+  // Session search. **It searches titles and the body too: people remember the question they asked, not the title.**
   const [convSearch, setConvSearch] = useState("");
-  // 三点菜单展开的是哪一条。同时只开一个
-  // 「最近」这一组收起来没有。默认展开：左栏本来就是为了看见这些会话
+  // Which row's three-dot menu is open. Only one at a time.
+  // Whether the "Recent" group is collapsed. Expanded by default: the left column exists precisely to show these sessions.
   const [recentOpen, setRecentOpen] = useState(true);
-  /* 左栏每一条会话的记号（正在写 / 写完了还没看）。两张表都活在组件外面——
-     "写完了"常常发生在这个组件已经卸载的时候（见 unread.ts 开头） */
+  /* The marker on each session in the left column (being written / finished but not yet seen). Both tables live outside the component:
+     "finished writing" often happens after this component has already unmounted (see the top of unread.ts). */
   const liveIds = useLive();
   const unreadIds = useUnread();
   const scopeRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  /* 打开哪一场就等于看过哪一场：记号消掉，并且告诉 unread「此刻看的是它」——
-     正看着的那一场写完时不该变成未读。传 null（新对话、删掉了当前这场）
-     同样有意义：那之后写完的任何一场都算未读 */
+  /* Opening a run is the same as having seen it: the marker is cleared, and unread is told "this is the one being looked at":
+     a run being watched should not become unread when it finishes writing. Passing null (a new conversation, or the current run was deleted)
+     is equally meaningful: any run that finishes writing after that counts as unread. */
   useEffect(() => {
     convMarks.view(activeId);
   }, [activeId]);
 
-  // 作用域弹层：点外面 / Esc 关闭（与 ui/Dropdown 同惯例）
+  // Scope popover: click outside or Esc closes it (same convention as ui/Dropdown).
   useEffect(() => {
     if (!scopeOpen) return;
     const onDoc = (e: MouseEvent) => {
       const target = e.target as Element;
-      // 组的子菜单挂在 body 上，不在 scopeRef 里——点它不算点外面（KbMenuList）
+      // The group's submenu is attached to body, not inside scopeRef, so clicking it does not count as a click outside (KbMenuList).
       if (!scopeRef.current?.contains(target) && !target.closest?.("[data-kb-submenu]"))
         setScopeOpen(false);
     };
@@ -245,8 +245,8 @@ export function Chat() {
       return last.conversations.length > 0 && loaded < last.total ? loaded : undefined;
     },
     enabled: !!kbId && kb?.id === kbId,
-    // 换搜索词时留着上一屏，别每敲一个字就清空再冒出来（Graph、Library 同理）。
-    // 换了库不留：另一个库的会话一刻也不该出现在这里
+    // When the search term changes, keep the previous screen, so it does not clear and reappear on every keystroke (Graph and Library do the same).
+    // Switching base does not keep it: a session from another base should not appear here for even a moment.
     placeholderData: (prev, prevQuery) =>
       prevQuery?.queryKey[1] === kbId ? prev : undefined,
   });
@@ -255,7 +255,7 @@ export function Chat() {
   const conversations = [...new Map(
     (convs.data?.pages.flatMap((page) => page.conversations) ?? []).map((c) => [c.id, c]),
   ).values()];
-  // 改标题：**就地编辑**，不弹对话框——改一个名字不值得打断整页
+  // Renaming: **edit in place**, no dialog; renaming something is not worth interrupting the whole page.
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const rename = useMutation({
@@ -268,13 +268,13 @@ export function Chat() {
     onError: (e: Error) => toast.error(e.message),
   });
 
-  // 直落底部（instant）：平滑滚动在流式追加下会一路慢爬。**只在人停在底部时落**：
-  // 生成期间 `shown` 每 33ms 变一次，翻上去读前文的人不该被每一批新字拽回来
+  // Jump straight to the bottom (instant): smooth scrolling would crawl along behind the streaming appends. **Only scroll when the person is at the bottom:**
+  // while generating, `shown` changes every 33ms, and someone who scrolled up to read earlier text should not be pulled back by each new batch.
   useEffect(() => {
     if (following.current) bottomRef.current?.scrollIntoView({ behavior: "instant" });
   }, [shown]);
 
-  // 路由 → 会话装载；裸 /chat 还原本库上次会话（切页回来仍在原对话）
+  // Route to session loading: a bare /chat restores the base's last session (switching back to the page is still on the same conversation).
   useEffect(() => {
     if (!kb || kb.id !== kbId) return;
     if (!routeConvId) {
@@ -288,12 +288,12 @@ export function Chat() {
       }
       return;
     }
-    if (routeConvId === activeIdRef.current) return; // 流式新建会话后仅 URL 同步，勿重载
+    if (routeConvId === activeIdRef.current) return; // After a streaming create, only the URL syncs; do not reload.
     loadConversation(routeConvId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kb?.id, kbId, routeConvId]);
 
-  // 还原的草稿撑开输入框（高度平时由 onChange 维护）
+  // Restored draft grows the input box (the height is normally maintained by onChange).
   useEffect(() => {
     const el = inputRef.current;
     if (el && el.value) {
@@ -305,7 +305,7 @@ export function Chat() {
   const invalidateList = () =>
     queryClient.invalidateQueries({ queryKey: ["conversations", kb?.id] });
 
-  /** 列表点击只改 URL，装载由路由同步 effect 负责 */
+  /** A list click only changes the URL; loading is handled by the route-sync effect. */
   const openConversation = (id: string) => {
     if (id === currentId) return;
     claimView(id);
@@ -315,16 +315,16 @@ export function Chat() {
     });
   };
 
-  /** 接回一个正在生成的回答。没有在跑的话服务端回 `idle`，补读一次已保存历史。 */
+  /** Reattaches to an answer that is being generated. If nothing is running, the server replies `idle` and the saved history is read once more. */
   const attachIfRunning = (id: string, history: Turn[], owner: ViewRequest) => {
     let abort = () => {};
     let handle: LiveHandle | null = null;
     let checkedIdle = false;
     const stop = reattachChat(owner.kbId, id, {
       onConversation: () => {},
-      /* **快照到了才建这一轮。** 先摆一个空位再等回答的话，没有在跑的会话
-         上会闪一下空的助手气泡——而那是绝大多数情况。
-         快照是覆盖：它是那个回答此刻的全貌，不是增量 */
+      /* **The turn is only created once the snapshot arrives.** If an empty slot were placed first and then waited for the answer,
+         a session with nothing running would briefly flash an empty assistant bubble, and that is the vast majority of cases.
+         The snapshot is an overwrite: it is the full picture of the answer at this moment, not an increment. */
       onSnapshot: (s) => {
         if (!ownsView(owner)) { abort(); return; }
         if (handle) return;
@@ -382,7 +382,7 @@ export function Chat() {
     setIdleHistoryKey(null);
     setHistoryError(null);
     setLoadingHistory(false);
-    // 回到正在写的那一场：直接认领，别去库里读——库里要等它写完才有那一行
+    // Returning to the run that is still being written: claim it directly, do not read from the database, since the row only exists once it has finished.
     if (liveAnswer.entry(kb!.id, id)) {
       activeIdRef.current = id;
       setActiveId(id);
@@ -400,11 +400,11 @@ export function Chat() {
       const history = historyTurns(messages);
       setTurns(history);
       setLoadedKey(viewKey(owner.kbId, id));
-      /* **刷新之后接回去。** 上面那个 store 只活在这一个页面里；刷新、
-         新标签页、换台机器都拿不到它，而服务端那边生成还在跑。问一句
-         「这个会话有没有在跑的」——没有是最常见的答案，代价是一次会
-         立刻回 `idle` 的请求。
-         最后一条是用户说的话时才问：那正好是「问了但还没答上」的形状 */
+      /* **Reattach after a refresh.** The store above lives only in this one page; a refresh,
+         a new tab, or another machine cannot get it, while on the server the generation is still running. Ask
+         "is there one running in this session?": "no" is the most common answer, and the cost is one
+         request that immediately returns `idle`.
+         Only ask when the last message is the user's: that is exactly the shape of "asked but not yet answered". */
       if (history[history.length - 1]?.role === "user") {
         attachIfRunning(id, history, owner);
       }
@@ -414,7 +414,7 @@ export function Chat() {
         setHistoryError(error instanceof Error ? error.message : String(error));
         return;
       }
-      // 失效链接（会话已删 / 属于别的库）：安静回到新对话
+      // Dead link (the session was deleted or belongs to another base): quietly return to a new conversation.
       sessionStorage.removeItem(lastKey(kb!.id));
       activeIdRef.current = null;
       setActiveId(null);
@@ -430,7 +430,7 @@ export function Chat() {
     setHistoryError(null);
     setLoadingHistory(false);
     setLoadedKey(null);
-    // 同样不 abort：开一场新的不等于放弃上一场
+    // Likewise no abort: starting a new run is not giving up on the previous one.
     if (kb) sessionStorage.removeItem(lastKey(kb.id));
     activeIdRef.current = null;
     following.current = true;
@@ -445,11 +445,11 @@ export function Chat() {
     try {
       await conversationsApi.remove(kb!.id, id);
     } catch (e) {
-      // 确认框已经关了：删不掉不说出来的话，这一行只是安静地留在列表里
+      // The confirm dialog has already closed: a delete that fails silently leaves this row quietly in the list.
       toast.error(e instanceof Error ? e.message : String(e));
       return;
     }
-    // 记号跟着会话走，否则这个 id 会一直留在浏览器的那张表里
+    // The marker follows the session; otherwise this id would stay in the browser's table forever.
     convMarks.forget(id);
     if (sessionStorage.getItem(lastKey(kb!.id)) === id) {
       sessionStorage.removeItem(lastKey(kb!.id));
@@ -472,16 +472,16 @@ export function Chat() {
     answer(
       owner,
       kb.id,
-      // 从屏上正在显示的那些轮续接，而不是组件 state——流结束后内容只落在
-      // store 里，state 还是上次装 conversation 时的库内历史，用它会让
-      // 上一条回答从画面里消失
+      // Continue from the turns currently shown on screen, not from component state: after the stream ends, the content only lands
+      // in the store, while state still holds the database history from when the conversation was last loaded, and using it would make
+      // the last answer disappear from the screen.
       [...(liveHere?.turns ?? turns), { role: "user", content: q }, { role: "assistant", content: "" }],
       { conversation_id: activeId ?? undefined, message: q },
     );
   };
 
-  /** 重答最后那个没有回答的问题（#936）。问题已经在库里，不再存一遍：屏上它后面
-   *  若挂着一条出错的回答，换成一条空的，带着它存下的 id 重新开流 */
+  /** Re-answers the last question that has no answer (#936). The question is already in the database and is not saved again. If the screen
+   *  shows a failed answer after it, that is replaced with an empty one, and a stream is reopened with the id it was saved under. */
   const retry = () => {
     const at = retryableQuestion(shown);
     if (at < 0 || !kb || kb.id !== kbId || !activeId || loadingHistory || historyError) return;
@@ -497,11 +497,11 @@ export function Chat() {
     });
   };
 
-  /* **结果留在 store 里，不交回组件状态。**
-     交回去要经过一个 `setTurns`，而流结束时这个组件可能早就卸载了——
-     那一下是空操作，内容就此消失（切回来一片空白，问题气泡都没有）。
-     留在 store 里，谁挂载谁认领。这一场从开场起就有名有姓：先建条目、
-     后开流，回调顺着句柄只写自己这一场。新问题与重答走同一段 */
+  /* **The result stays in the store and is not handed back to component state.**
+     Handing it back requires a `setTurns`, and the component may have unmounted long before the stream ends:
+     that call is a no-op, and the content vanishes (switching back shows a blank screen, not even the question bubble).
+     Keeping it in the store lets whoever mounts claim it. This run has a name from the moment it starts: the entry is created first,
+     and the stream opened after, with callbacks writing only to their own run through the handle. New questions and re-answers go through the same path. */
   const answer = (
     owner: ViewRequest,
     kbNow: string,
@@ -514,7 +514,7 @@ export function Chat() {
         handle.identify(id, questionId, generationId);
         invalidateList();
         if (!ownsView(owner)) return;
-        // 先 identify 生成句柄再换 URL；layout effect 重置视图后，loadConversation 会认领该句柄。
+        // Identify the generation handle first, then swap the URL; after the layout effect resets the view, loadConversation claims that handle.
         activeIdRef.current = id;
         setActiveId(id);
         sessionStorage.setItem(lastKey(kbNow), id);
@@ -549,11 +549,11 @@ export function Chat() {
         handle.finish();
       },
     });
-    // streamChat 的 abort 要等它返回才有；真 abort 到手前，句柄上先占着空操作
+    // streamChat's abort only exists once it returns; until the real abort is in hand, the handle holds a no-op in its place.
     handle.setAbort(abort);
   };
 
-  /* Composer 卡：新对话首屏居中出场，进入对话后停靠底部（同一块 JSX 两处复用） */
+  /* Composer card: centred on the first screen of a new conversation, docked at the bottom once in a conversation (the same JSX is reused in both places). */
   const composerCard = (
     <div className="u-composer px-4 pt-3 pb-2">
       <Textarea
@@ -582,13 +582,13 @@ export function Chat() {
       )}
       <div className="flex items-center justify-between gap-3 pt-1">
         <div className="flex items-center gap-3 min-w-0">
-          {/* 作用域 chip：提问点位可见"在问哪个库"，切库沿用现有语义（开新会话） */}
+          {/* Scope chip: the prompt point shows "which base is being asked", and switching base keeps the existing semantics (starts a new session). */}
           <div ref={scopeRef} className="relative shrink-0">
-            {/* 图标的左缘要落在上面占位符的起点上（与顶栏切换器同一个图标——
-                两处都是「在哪个库」）。**做法是整颗按钮左挂一档，不是把内距抹掉**：
-                抹掉内距，图标就贴死在按钮的边上，指针一停，底色紧紧箍着图标，
-                左边没有一点余地。挂出去则内距照留——图标落在同一个位置，
-                而那块底色在它四周是匀的。挂多少就给多少内距（都是 8）。 */}
+            {/* The left edge of the icon has to land on the start of the placeholder above (it is the same icon as the top-bar switcher,
+                since both mean "which base"). **Done by indenting the whole button by one step on the left, not by removing its padding**:
+                removing the padding would stick the icon to the button's edge; when the pointer rests there, the background would hug the icon tightly
+                with no room on the left. Indenting out keeps the padding, so the icon sits in the same place and the background is even on all sides.
+                Give as much padding as you indent (both are 8). */}
             <Button
               variant="ghost"
               size="sm"
@@ -626,8 +626,8 @@ export function Chat() {
         {streaming ? (
           <IconButton
             onClick={() => {
-              // **只停正在看的这一场**——切页面、换会话、换库都不打断（liveAnswer.ts），
-              // 别场照常写它们自己的条目
+              // **Stops only the run being viewed.** Switching page, session, or base does not interrupt it (liveAnswer.ts);
+              // other runs keep writing their own entries as usual.
               if (kb) liveAnswer.stop(kb.id, currentId);
             }}
             label={liveHere?.stopping ? S.ask.stopping : S.ask.stop}
@@ -635,10 +635,10 @@ export function Chat() {
             variant="secondary"
             className="shrink-0"
           >
-            {/* **尺寸写在 class 上，不写在 size 上**：按钮那档皮有
-                `[&_svg:not([class*="size-"])]:size-4`，lucide 的 size 属性会被它盖掉，
-                于是一个实心方块按 16 画出来——32 的按钮里塞半格白，比旁边那个细线
-                箭头重一大截。10 是实心记号在这档按钮里该有的分量 */}
+            {/* **Size goes on the class, not on the size prop:** the button's skin has
+                `[&_svg:not([class*="size-"])]:size-4`, which overrides lucide's size attribute,
+                so a solid square would be drawn at 16, leaving half a grid of white in a 32 button, which looks heavier than the thin-line
+                arrow next to it. 10 is the weight a solid marker should carry on a button of this size. */}
             <Square className="size-2.5" fill="currentColor" strokeWidth={0} />
           </IconButton>
         ) : (
@@ -658,12 +658,12 @@ export function Chat() {
 
   return (
     <div className="h-full flex">
-      {/* 会话栏 */}
+      {/* Session column */}
       <aside className={`${RAIL_CLS} flex flex-col`}>
-        {/* 搜索在最上面，与图谱页的搜索框、本体页的过滤框同一副身材、同一个
-            角落（左上各 12px、中号带放大镜）：换标签页时框留在原地。
-            **标题重是常态**（同一个问题问两次就重了），而正文里那句话才是人
-            记得住的——所以服务端两处都搜 */}
+        {/* Search is at the top, with the same build and the same corner as the graph page's search box and the ontology page's filter box
+            (12px in from the top left, medium size with a magnifier): the box stays put when switching tabs.
+            **A heavy title is the norm** (asking the same question twice makes it heavy), while the sentence in the body is what people
+            remember, so the server searches both. */}
         <div className="px-2 pt-3 pb-1">
           <Input
             icon={<Search size={12} />}
@@ -673,19 +673,19 @@ export function Chat() {
             onKeyDown={(e) => e.key === "Escape" && setConvSearch("")}
           />
         </div>
-        {/* 左栏的节奏（DESIGN 规矩 2 的左栏基线）：**盒 8 / 图标 20 / 文字 42**。
-            栏的横内距 8，行的横内距 12，图标 14，图标到字 8——所以这一栏里
-            每一行的字都从 42 起，搜索框的占位字也是（它的图标槽正好 left-3
-            + pl-[34px]）。不带图标的行**留着那一格**（Row 自动补），字才落在
-            同一条竖线上；`flush` 是给整组都没有图标的栏用的，不是给这一栏用的 */}
+        {/* The rhythm of the left column (the left-column baseline of DESIGN rule 2): **box 8 / icon 20 / text 42**.
+            The column's horizontal padding is 8, the row's is 12, the icon is 14, and icon to text is 8, so in this column
+            every row's text starts at 42, and so does the search box's placeholder (its icon slot is exactly left-3
+            plus pl-[34px]). Rows without an icon **keep that cell** (Row fills it in automatically), so the text lands
+            on the same vertical line; `flush` is for columns where the whole group has no icons, not for this one. */}
         <div className="px-2 pb-1">
           <Row density="nav" icon={<SquarePen size={14} />} onClick={newChat}>
             {S.ask.newChat}
           </Row>
         </div>
-        {/* 「最近」是这一组的名字，不是一条会话：同一副行的身材、同一档字色
-            （字色只有两档，见 styles.css），右端的三角说明这一组收得起来
-            （朝右=收着，朝下=开着） */}
+        {/* "Recent" is the name of this group, not a session: the same row build, the same text colour tier
+            (text colour has only two tiers, see styles.css), and the triangle at the right end shows the group can be collapsed
+            (pointing right = collapsed, pointing down = open). */}
         <div className="px-2">
           <Row
             density="nav"
@@ -708,9 +708,9 @@ export function Chat() {
               key={c.id}
               className="group relative"
             >
-              {/* 单行标题；删除键悬停浮现（弹确认，不直接删） */}
+              {/* Single-line title; the delete key appears on hover (it asks for confirmation rather than deleting outright) */}
               {renamingId === c.id ? (
-                /* 就地编辑：Enter 保存、Esc 取消。改一个名字不值得弹对话框 */
+                /* Edit in place: Enter saves, Esc cancels. Renaming something is not worth a dialog. */
                 <Input size="sm" className="w-full"
                   autoFocus
                   value={renameDraft}
@@ -749,11 +749,11 @@ export function Chat() {
                   </span>
                 </Row>
               )}
-              {/* 三点菜单：**一个入口装下所有动作**（从前右边直接是删除，
-                  而删除是这里最不该一步到位的那个）。走 shadcn 的
-                  DropdownMenu：弹层样式与全站统一，触发器由 Radix 自动带上
-                  `aria-haspopup`——按钮的"按下去沉 1px"那条特意排除了菜单
-                  触发器，手搓的入口没有这个标记，所以从前一点就跳。 */}
+              {/* Three-dot menu: **one entry point holds every action** (previously the delete was right there on the right,
+                  and delete is the last thing that should be one step away). It uses shadcn's
+                  DropdownMenu: the popup style is uniform across the site, and the trigger gets
+                  `aria-haspopup` from Radix automatically. The button's "sink 1px when pressed" rule specifically excludes the menu
+                  trigger, and a hand-rolled entry has no such marker, which is why it used to jump on a click. */}
               {renamingId !== c.id && (
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -802,11 +802,11 @@ export function Chat() {
               {S.ask.loadEarlierConversations}
             </Button>
           )}
-          {/* 文字从 20 起：栏的 px-2（8）加行自己的 px-3（12），与「最近」和
-              上面每条会话的标题同一条线。写成 px-2 就落在 16，差那 4px 一眼看得出 */}
+          {/* Text starts at 20: the column's px-2 (8) plus the row's own px-3 (12), on the same line as "Recent" and
+              the title of each session above. Writing px-2 would land it at 16, a difference of 4px that is obvious at a glance. */}
           {convs.isSuccess && conversations.length === 0 && (
-            /* 34 = 行内距 12 + 图标 14 + 间距 8：这句话与上面每一条会话的
-               标题同一条竖线，而不是自己另起一列 */
+            /* 34 = row padding 12 + icon 14 + gap 8: this sentence sits on the same vertical line
+               as the title of each session above, rather than starting a column of its own. */
             <p className="py-2 pl-[34px] pr-3 text-small text-ink-2">
               {S.ask.noConversations}
             </p>
@@ -815,8 +815,8 @@ export function Chat() {
         )}
       </aside>
 
-      {/* 对话区：新对话首屏 = 问候 + 居中 composer（ChatGPT/Claude 惯例）；
-          有消息后 composer 停靠底部 */}
+      {/* Conversation area: on a new conversation the first screen is a greeting + a centred composer (the ChatGPT/Claude convention);
+          once there are messages, the composer docks at the bottom. */}
       <div className="flex-1 min-w-0 flex flex-col">
         {idleHistoryKey === loadedKey && idleHistoryKey === viewKey(kbId, currentId) && !streaming && (
           <div role="status" className="px-4 pt-4 flex flex-wrap items-center gap-2 text-body text-ink-2">
@@ -837,8 +837,8 @@ export function Chat() {
         ) : loadingHistory && !liveHere ? (
           <div role="status" className="p-6 text-body text-ink-2">{S.ask.loadingHistory}</div>
         ) : shown.length === 0 ? (
-          /* 锚定上三分之一而非垂直居中：居中在高窗口下会显得下坠。
-             22vh + 顶部 chrome(~100px) ≈ 问候落在 37% 高度、composer 中心 ~49% */
+          /* Anchored to the upper third rather than vertically centred: centring looks like it sinks in a tall window.
+             22vh + top chrome (~100px) puts the greeting at about 37% of the height and the composer's centre at about 49%. */
           <div className="flex-1 px-4 pt-[22vh]">
             <div className="w-full max-w-3xl mx-auto">
               <h1
@@ -903,16 +903,16 @@ export function Chat() {
   );
 }
 
-/** 一段正文，或一组同时发生的调用。 */
+/** A run of body text, or a group of calls that happen at the same time. */
 type Segment =
   | { kind: "text"; text: string; last: boolean }
   | { kind: "steps"; steps: ChatStep[] };
 
-/** 把一轮回复拆成按发生顺序排列的段。
+/** Splits a turn's reply into segments in the order they happened.
  *
- *  切分点是 `step.at`——那一步发生时正文已经有多长。**这条迁移之前落库的
- *  消息没有 `at`**，那时的顺序信息是真的没有存下来，编不出来也不该编：
- *  它们退回旧样子，整段轨迹在最前面。 */
+ *  The split point is `step.at`, which is how long the body already was when that step happened. **Messages saved before this migration
+ *  have no `at`**: the ordering information was genuinely never stored then, so it cannot and should not be invented.
+ *  They fall back to the old layout, with the whole trace at the front. */
 function segments(turn: Turn): Segment[] {
   const steps = turn.steps ?? [];
   const text = turn.content ?? "";
@@ -929,7 +929,7 @@ function segments(turn: Turn): Segment[] {
   let cursor = 0;
   for (let i = 0; i < steps.length; ) {
     const at = steps[i].at!;
-    // 同一位置的连成一组：一轮里的多次调用之间没有正文，它们本来就是一次扇出
+    // Calls at the same position are grouped together: between the several calls in one turn there is no body text, so they are one fan-out.
     let j = i;
     while (j < steps.length && steps[j].at === at) j++;
     const before = text.slice(cursor, at);
@@ -949,17 +949,17 @@ function stepIcon(kind: ChatStep["kind"]) {
   if (kind === "entity" || kind === "neighbors" || kind === "path")
     return <Waypoints size={11} />;
   if (kind === "facts" || kind === "timeline") return <History size={11} />;
-  // facts 读世界轴、changes 读认知轴，两个图谱工具给不同的图标——
-  // 用户看步骤条时该看得出问的是哪根轴
+  // facts reads the world axis and changes reads the cognition axis; the two graph tools get different icons,
+  // so the user can tell which axis was asked about when looking at the step bar.
   if (kind === "changes") return <GitCompareArrows size={11} />;
   if (kind === "query") return <Database size={11} />;
   return <Wrench size={11} />;
 }
 
-/** 轨迹上的一行。话按读者的语言说（`stepDetail`，#942）；没做成的那一步用危险色。
+/** One line in the trace. Phrased in the reader's language (`stepDetail`, #942); a step that failed is shown in the danger colour.
  *
- *  问数那一步可以展开它跑的 SQL（#936）：答案里的数是这条语句算出来的，
- *  读的人该能自己核，而不只看到一句「查了一下」。 */
+ *  The data-query step can expand the SQL it ran (#936): the numbers in the answer come from that statement,
+ *  so a reader should be able to check them, rather than only seeing "looked it up". */
 function StepRow({ step, kbId }: { step: ChatStep; kbId: string }) {
   const [sqlOpen, setSqlOpen] = useState(false);
   return (
@@ -990,24 +990,24 @@ function StepRow({ step, kbId }: { step: ChatStep; kbId: string }) {
           {step.sql}
         </pre>
       )}
-      {/* remember 那一步后面跟着确认卡（0015）：这句话抽出的事实先等人点头。
-          抽取是异步的，卡片在任务完成时才长出来；回放时按同一个 chunk 重画 */}
+      {/* After the remember step comes a confirmation card (0015): the facts extracted from this sentence wait for a person to nod first.
+          Extraction is asynchronous, so the card grows only once the task completes; on replay it is redrawn from the same chunk. */}
       {step.chunk_id && <NodCard kbId={kbId} chunkId={step.chunk_id} />}
     </div>
   );
 }
 
-/** 工具步骤 → 球体状态：思考球讲当前动作的语言 */
-/** 一段 markdown。**按文本记忆化**：一次生成里每来一个词元，整条消息都要重渲染，
- *  而 react-markdown 每次都把那一段从头解析一遍——答案越长每个词元越贵，读起来
- *  就是越写越顿。收了尾的段落文本不再变，`memo` 让它们一次也不重解析；
- *  还在长的那一段照旧，它本来就得重解析。 */
+/** Tool step → orb state: the thinking orb speaks the language of the current action. */
+/** A markdown segment. **Memoized by text:** during a generation every token that arrives re-renders the whole message,
+ *  and react-markdown reparses that segment from scratch each time, so the longer the answer, the costlier each token gets, and it reads
+ *  as if it is stuttering more and more. A paragraph that has finished no longer changes text, so `memo` means it is never reparsed;
+ *  the segment still growing is left as it is, since it is supposed to be reparsed. */
 const Segment = memo(function Segment({ text }: { text: string }) {
   return (
     <div className="u-chat-prose">
-      {/* rehypeCitations 把正文里的 `[n]` 变成角标（见 citations.ts）。
-          它在 rehype 这一层跑，所以看得见「这个方括号在链接里还是在代码里」——
-          在正文上做字符串替换看不见，会把 markdown 链接的锚文本也改了 */}
+      {/* rehypeCitations turns the `[n]` in the body into superscript markers (see citations.ts).
+          It runs at the rehype layer, so it can see whether a square bracket sits inside a link or inside code;
+          a string replacement on the body cannot, and would also change the anchor text of a markdown link. */}
       <Markdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight, rehypeCitations]}
@@ -1019,16 +1019,16 @@ const Segment = memo(function Segment({ text }: { text: string }) {
   );
 });
 
-/** 思考指示：**正在做的那句话自己在发光**。
+/** Thinking indicator: **the sentence being worked on glows by itself**.
  *
- * 这里换过两轮。最早是 `thinking-orbs` 的球体，跟这套界面不是一路——chrome 是
- * 零色偏的中性灰，花样留给画布，而那颗球自带一套发光点阵，`theme` 还写死成暗色。
- * 换成房里的转圈之后问题只剩一半：在做什么本来就由那行字说了
- * （「检索文档 · 3 篇」），旁边再转一个零件，等于同一件事说两遍，而且转圈说的是
- * 「有个东西在忙」，跟屏幕上这句话没关系。
+ * This has been swapped twice. The first was the `thinking-orbs` orb, which did not fit this interface: the chrome is
+ * neutral grey with no colour cast, leaving the decoration to the canvas, while that orb carries its own glowing dot matrix, and `theme` is hard-coded to dark.
+ * Swapping in the spinner in the room only solved half the problem: what is being done is already said by that line of text
+ * ("searching documents · 3 files"), and a spinning part next to it says the same thing twice, and the spinner only says
+ * "something is busy", which has nothing to do with this sentence on screen.
  *
- * 现在没有零件：亮带横扫过那行字。它既是「还在动」，也是「动的是这句话」。
- * 还没有步骤可说的时候就扫「Thinking…」——那也是一句话，不是一个图标。 */
+ * Now there is no part at all: a bright band sweeps across the line of text. It is both "still moving" and "the thing moving is this sentence".
+ * When there are no steps to show yet, the band sweeps "Thinking…", which is also a sentence, not an icon. */
 function Thinking({ step }: { step?: ChatStep }) {
   return (
     <span className="u-thinking text-small truncate">
@@ -1044,16 +1044,16 @@ function TurnView({
 }: {
   turn: Turn;
   live?: boolean;
-  /** 这是出错的最后一轮、它的问题存着 id 时才有：重答那一问（#936） */
+  /** This is the last turn, and it errored, and its question has an id stored: only then is there a re-answer action for that question (#936). */
   onRetry?: () => void;
 }) {
   const kbId = useKbId();
   if (turn.role === "user") {
     return (
       <div className="flex justify-end">
-        {/* **对话按 title 那一档读**（16/24，不是正文的 14/22）。这一页是这个
-            产品里唯一一块拿来"读"的长文本，其余都是表格、清单、面板里的字段，
-            14px 在那些地方是对的，成段读就偏小了。仍在五档之内，不新增字号 */}
+        {/* **The conversation uses the title tier** (16/24, not the body's 14/22). This page is the only
+            long text in the product that is meant to be read; everything else is tables, lists, and fields in panels,
+            where 14px is right, but reading a passage at that size is too small. It stays within the five tiers, no new font size. */}
         <div className="u-bubble-user max-w-[85%] rounded-panel px-4 py-2 text-title whitespace-pre-wrap text-ink">
           {turn.content}
         </div>
@@ -1068,13 +1068,13 @@ function TurnView({
   return (
     <SourcesProvider value={turn.sources ?? NO_SOURCES}>
     <div className="max-w-[95%]">
-      {/* agent 回复无气泡：正文直接落在画布上（用户消息保留气泡以区分角色） */}
+      {/* The agent's reply has no bubble: the body lands directly on the canvas (the user's message keeps its bubble to tell the roles apart) */}
       <div className="py-1 text-title text-ink leading-relaxed">
-        {/* **轨迹按发生的顺序穿在正文里。**
-            模型是边说边查的：说一句、调一次、再说一句。把调用整块提到最前面，
-            读起来就成了「先查七次再一口气说完」——那不是它做的事，而且相邻两次
-            调用之间那句「我先看看这一个」失去了它解释的对象。
-            同一轮里的多次调用共享一个位置，于是自然并成一组——一组就是一轮 */}
+        {/* **The trace is threaded through the body in the order it happened.**
+            The model looks things up as it talks: it says something, makes a call, and says something more. Moving all the calls to the front
+            would make it read as "looked up seven things, then said it all at once": that is not what it did, and between two adjacent calls
+            the line "let me check this one first" would lose the thing it explains.
+            Several calls in the same turn share one position, so they naturally merge into one group, and a group is a turn. */}
         {segments(turn).map((seg, i) =>
           seg.kind === "steps" ? (
             <div
@@ -1086,10 +1086,10 @@ function TurnView({
               ))}
             </div>
           ) : (
-            /* react-markdown 承载渲染（皮肤全归 u-chat-prose 设计系统），
-               流式中经 remend 修补未闭合语法（粗体/围栏/链接），
-               rehype-highlight 做代码高亮——成熟件组装，观感自持。
-               **只有还在长的那一段需要 remend**：先前的段落已经收尾了 */
+            /* react-markdown does the rendering (all the skin belongs to the u-chat-prose design system),
+               during streaming remend patches unclosed syntax (bold, fences, links),
+               and rehype-highlight does the code highlighting: a mature assembly of parts, so the look stands on its own.
+               **Only the segment still growing needs remend**: earlier paragraphs have already finished. */
             <Segment
               key={i}
               text={live && seg.last ? remend(seg.text) : seg.text}
@@ -1100,22 +1100,22 @@ function TurnView({
         {turn.stopped && <div className="text-small text-ink-2">{S.ask.stopped}</div>}
         {turn.error && <div className="text-danger">{turn.error}</div>}
       </div>
-      {/* **引用等答案说完再出。**
-          `sources` 是随检索一次次增量发来的，跟着渲染的话，一份还在生长的清单
-          就挂在一段还没写完的话下面，一边长一边把正文往上推。它是答案的落款，
-          不是过程的一部分——过程已经由上面的轨迹交代了 */}
-      {/* 一个面板装多行（DESIGN.md 6）：引用是同构的一组，悬停归行。
-          只列正文引到的那几条（见 citedSources）：检索到的不等于用到的。
-          点一行先开预览，不直接跳走——见 chatCitations */}
+      {/* **Sources come out only once the answer has finished.**
+          `sources` arrives incrementally with each retrieval, and if rendered as it goes, a list still growing
+          would sit under a sentence not yet written, pushing the body upward as it grows. It is the answer's sign-off,
+          not part of the process; the process is already explained by the trace above. */}
+      {/* One panel holds several rows: citations are a uniform group, with hover tied to each row.
+          Only the ones the body actually cites are listed (see citedSources): retrieved does not mean used.
+          Clicking a row opens a preview first rather than jumping away; see chatCitations. */}
       {!live && cited.length > 0 && <SourceList sources={cited} />}
-      {/* 没有引用时，引用那一格换成一句「未引用任何来源」（#547）：
-          缺席没人读得出来，得写出来。判据见 answeredWithoutSources */}
+      {/* When there are no citations, the citation cell is replaced by one line, "no sources cited" (#547):
+          an absence nobody can read, so it has to be written out. The criterion is in answeredWithoutSources. */}
       {answeredWithoutSources(turn, !!live) && (
         <div className="mt-2 text-small text-ink-2">{S.ask.noSources}</div>
       )}
-      {/* 回答上的动作（#936），同样等说完了才出。复制的是存下的 Markdown，
-          角标 `[n]` 照写——表格、代码块贴到别处还是原样。答到一半失败的那一轮
-          多一个重试：问题已经在库里，重答不再存一遍 */}
+      {/* Actions on the answer (#936), likewise shown only once it has finished. Copy takes the saved Markdown,
+          and the `[n]` markers are kept as they are: tables and code blocks pasted elsewhere stay as they are. A turn that failed halfway through
+          gets one extra retry: the question is already in the database, so a re-answer is not saved again. */}
       {!live && (turn.content || onRetry) && (
         <div className="mt-2 flex items-center gap-2">
           {turn.content && <CopyButton label={S.ask.copyAnswer} text={() => turn.content} />}

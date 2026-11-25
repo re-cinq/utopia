@@ -1,7 +1,7 @@
-// 英文语言包。这一份是**结构的权威**：`Strings = typeof en`，其余语言包按它定型，
-// 漏一条就编译不过（见 docs/decisions/0004）。
+// English language pack. This one is the **authority on structure**: `Strings = typeof en`, and the other packs are shaped by it,
+// a missing entry fails to compile (see docs/decisions/0004).
 //
-// 加新文案时先加在这里，再补其余语言包——顺序反了会得到一个类型错误，那正是本意。
+// When adding new copy, add it here first, then fill in the other packs. Doing it the other way round gives a type error, which is the intent.
 export const en = {
   hinted: {
     openChain: "Open chain",
@@ -53,17 +53,17 @@ export const en = {
   },
   app: {
     name: "Utopia",
-    // 化用《乌托邦》全书最后一句（Burnet 1684 译本）：
+    // Adapted from the last sentence of the whole of *Utopia* (Burnet 1684 translation):
     // "there are many things in the commonwealth of Utopia that I rather wish,
     //  than hope, to see followed in our governments."
-    // 改 I 为 We、去掉插入语逗号、留白 to see 的宾语。
+    // Change I to We, drop the interjection comma, and leave the object of 'to see' blank.
     tagline: "We rather wish than hope to see.",
     taglineSource: "— Thomas More, 1516",
     siteUrl: "https://utopia.bi",
     docsUrl: "https://utopia.bi/docs",
   },
-  /** 服务端校验错误的措辞。key = 服务端给的 code；缺一条就退回英文原句，不会崩。
-      契约守卫（调错接口才碰得到）刻意不在这里——它们的读者是开发者 */
+  /** Wording for server validation errors. key = the code the server sends; a missing entry falls back to the English original, so nothing breaks.
+      Contract guards (only reachable by calling the wrong API) are deliberately not here: their readers are developers */
   err: {
     bad_case_expectation: "Choose a property and direction, or expect no binding.",
 
@@ -76,7 +76,7 @@ export const en = {
     password_login_disabled: "Password sign-in is turned off on this deployment. Continue with SSO.",
     no_chat_model:
       "No chat model configured yet. Set one under Administration → Models.",
-    // 对话流里没答成的那一轮：`error` 帧带的 code（服务端的英文原句只给日志）
+    // Turn in the chat stream that failed to answer: the code the `error` frame carries (the server's English sentence is only for logs)
     answer_empty: "The model returned an empty answer. Ask again.",
     answer_tool_text: "The model wrote a tool call as text instead of answering. Ask again.",
     answer_tool_call: "The model kept calling tools after its lookups ran out. Ask again.",
@@ -97,7 +97,7 @@ export const en = {
     context_too_long: "This conversation is too long for the model. Start a new conversation.",
     model_rejected:
       "The model endpoint refused the request. Check the model settings under Administration → Models.",
-    // 重答（#936）被拒。生成中又来一个新问题（#961）也是 409；两边用同一个 code
+    // Regenerate (#936) was rejected. Asking a new question while generating (#961) is also a 409; both share one code
     answer_running: "An answer is still being written in this conversation. Wait for it to finish.",
     retry_answered: "That question already has an answer, or the conversation went on after it.",
     retry_not_question: "Only a question can be answered again.",
@@ -141,7 +141,7 @@ export const en = {
       "Pick the date this fact ended — the new one does not say when it started.",
     empty_query: "Type something to search for.",
     no_data_sources: "No databases are mounted on this knowledge base.",
-    // 授权是逐工作区的（0014）：源没授权给本库所属的工作区
+    // Authorization is per workspace (0014): the source is not authorized for the workspace the library belongs to
     source_not_granted:
       "This data source is not granted to this workspace. Ask a deployment admin to grant it in Administration → Data sources.",
     memory_source_permanent:
@@ -164,7 +164,7 @@ export const en = {
     ds_name_required: "Give this data source a name.",
     only_postgres: "Only PostgreSQL is supported for now.",
     bad_conn_string: "A connection string starts with postgres://",
-    // 刷新结构失败；引擎的原话走 detail（括号里那句）
+    // Refreshing the structure failed; the engine's own words go in detail (the sentence in brackets)
     schema_sync_failed:
       "The schema could not be read — the engine's own message is in parentheses. Check " +
       "the catalog, schema and account privileges in the connection string, then try Refresh schema again.",
@@ -179,25 +179,25 @@ export const en = {
     unknown_marks: "A single date marks the start, the end, or neither.",
     marks_needs_state:
       "Only a state property says what a single date marks. Events and timeless properties don't.",
-    // 采纳提案（0061 决定 3）：撞上别的写、整次回滚了；复用要写的都已由人另定
+    // Adopting a proposal (0061 decision 3): it collided with another write and was rolled back as a whole; what the reuse would write was already decided separately by a person
     alignment_busy: "Something else is updating the same items. Nothing was saved; try again shortly.",
     proposal_stale:
       "Nothing in this proposal is left to adopt: each of its phrases or kind words is decided differently by a person or no longer appears in any statement. Reject it to clear it.",
   },
-  /** 机器给的补充（cron 解析器的原话之类）缀在措辞后面 */
+  /** Extra machine detail (such as the cron parser's own words) is appended after the wording */
   errDetail: (msg: string, detail: string) => `${msg} (${detail})`,
   toast: {
     saved: "Saved",
     created: "Created",
     deleted: "Deleted",
     added: "Added to the ontology",
-    // 哪一处复制不成都说这一句：页面没有剪贴板 API，浏览器也不让用老办法复制
+    // Every copy failure gets this one sentence: the page has no clipboard API, and the browser does not allow the old copy method either
     copyFailed: "Could not copy. Select the text and copy it by hand.",
   },
   account: {
-    /* 账户区字标：Persona——你在这座城里的身份面具 */
+    /* Wordmark in the account area: Persona, your mask of identity in this city */
     brand: "Utopia Persona",
-    /* 网页标题用的短名：`Utopia | Persona` */
+    /* Short name for the web page title: `Utopia | Persona` */
     titleTag: "Persona",
     profile: "Profile",
     cancel: "Cancel",
@@ -251,7 +251,7 @@ export const en = {
     deploymentAdmin: "Deployment admin",
     openKb: "Open",
     kbSettingsBtn: "Settings",
-    /* 个人令牌页（0014 / 0016 A2）：给 agent 的钥匙，以这个人的身份行事 */
+    /* Personal token page (0014 / 0016 A2): keys for agents, acting as this person */
     tokensNav: "Agents & tokens",
     tokensTitle: "Personal access tokens",
     tokensHint: "A token lets an agent reach Utopia over MCP as you, with no more access than you have. Read-only by default, limited to the bases you pick, revocable here.",
@@ -298,14 +298,14 @@ export const en = {
     } as Record<string, string>,
   },
   docs: {
-    /* 文档区字标：Charter——理想之城的立城宪章，与主字标同字体同字号 */
+    /* Wordmark in the docs area: Charter, the city's founding charter, same font and size as the main wordmark */
     brand: "Utopia Charter",
     backTitle: "Back to Utopia",
     searchPlaceholder: "Search the docs…",
     noResults: "No matches.",
   },
-  // 告警的措辞在客户端，按 kind 查——服务端只发 kind 与 detail，
-  // 不产出展示文案（docs/decisions/0004）
+  // Alert wording lives on the client and is looked up by kind; the server sends only kind and detail,
+  // and does not produce display copy (docs/decisions/0004)
   alerts: {
     title: "Alerts",
     badgeLabel: "Alerts",
@@ -314,8 +314,8 @@ export const en = {
       "Ingestion, sync and model failures show up here instead of only in the logs.",
     markAllRead: "Mark all read",
     close: "Close",
-    // 说清搜的是什么：标题的措辞在客户端，服务端搜不到它，
-    // 所以别让人以为输入 "sync failed" 会有结果
+    // Say clearly what is searched: the title wording lives on the client and the server cannot search it,
+    // so don't let people think typing 'sync failed' will return results
     searchPlaceholder: "Search sources, knowledge bases, errors",
     noMatch: "Nothing matches",
     andMore: (n: number) => `and ${n} more`,
@@ -324,8 +324,8 @@ export const en = {
       `${sheet}: read ${read} of ${total} rows`,
     partialRecords: (read: number, total: number) =>
       `read ${read} of ${total} records`,
-    // kind → 一句说清出了什么事。第二句说该做什么——这才是告警比日志多出来的东西。
-    // **一条告警就是一次故障**，所以标题里没有数量
+    // kind → one sentence saying what happened. The second sentence says what to do; that is what alerts have beyond logs.
+    // **An alert is one failure**, so the title carries no count
     kinds: {
       "source.sync_failed": {
         title: "A source failed to sync",
@@ -364,9 +364,9 @@ export const en = {
         hint: "Two of its merges were reverted within seven days, so the switch went off. Look at what it did under Review → Agent, then turn it back on in the base settings when you want it to resume.",
       },
     } as Record<string, { title: string; hint: string } | undefined>,
-    // 没见过的 kind 也要能显示：新告警源上线时前端可能还没更新
+    // Unseen kinds must still display: the frontend may not be updated yet when a new alert source goes live
     unknownKind: (kind: string) => kind,
-    /** 修好之后接着跑（#216） */
+    /** Keep running after a fix (#216) */
     runAgain: "Run those again",
     requeued: (n: number) =>
       n === 1 ? "1 job back in the queue" : `${n} jobs back in the queue`,
@@ -406,14 +406,14 @@ export const en = {
     reportIssue: "Report an issue",
     refresh: "Refresh",
   },
-  /* 空状态的共用文案（#313）。
-     **状态一句话，动作在按钮上，不解释原理。** 从前这里是一整段：
-     「图是空的。先去 管理 → 模型 配置对话模型，然后在文库上传文档——
-     实体和关系会自动抽取。」——一句话里塞了状态、两个动作和一段原理，
-     而盯着空页面的人要的是下一步点哪儿。原理属于文档，不属于空状态 */
+  /* Shared copy for empty states (#313).
+     **State in one sentence; the action is on the button; do not explain the mechanism.** This used to be a whole paragraph:
+     'The graph is empty. First go to Admin → Models to configure the chat model, then upload documents in the Library,
+     entities and relations are extracted automatically.' That one sentence packed in the state, two actions and a mechanism,
+     while someone staring at an empty page wants to know where to click next. The mechanism belongs in the docs, not the empty state */
   steps: {
     noModel: "No chat model yet.",
-    /* 配模型要工作区管理员，别人只能去找人——所以话不同，按钮也不给 */
+    /* Configuring models needs a workspace admin; everyone else can only ask someone, so the wording differs and no button is shown */
     noModelAsk: "No chat model yet. Ask an administrator.",
     configureModel: "Configure model",
     noDocs: "No documents yet.",
@@ -421,7 +421,7 @@ export const en = {
     processing: (n: number) => `Reading ${n} document${n === 1 ? "" : "s"}…`,
     viewProgress: "View progress",
     someFailed: (n: number) => `${n} document${n === 1 ? "" : "s"} failed.`,
-    /* 文档齐了、抽取也跑完了，图还是空的：不是「还没开始」，是没抽出东西 */
+    /* Documents are all in and extraction has finished too, yet the graph is still empty: not 'not started yet', it means nothing was extracted */
     nothingExtracted: "Nothing extracted yet.",
     openLibrary: "Open Library",
   },
@@ -452,7 +452,7 @@ export const en = {
       already_linked: "Your account already has a linked identity. Unlink it first.",
     } as Record<string, string>,
     ssoErrorOther: "Single sign-on failed. Try again.",
-    // 惯用同意句式：By continuing, you agree to the <Terms> and acknowledge the <Privacy>.
+    // Common consent phrasing: By continuing, you agree to the <Terms> and acknowledge the <Privacy>.
     agreePrefix: "By continuing, you agree to the ",
     agreeAnd: " and acknowledge the ",
     agreeSuffix: ".",
@@ -548,7 +548,7 @@ export const en = {
     },
   },
   library: {
-    /** 删除是墓碑（#268）：说清作废了几条事实，并给撤销 */
+    /** Deletion is a tombstone (#268): say how many facts were voided, and offer undo */
     deletedWithFacts: (n: number) =>
       n === 0
         ? "Document deleted"
@@ -557,7 +557,7 @@ export const en = {
           : `Document deleted · ${n} facts retired with it`,
     undo: "Undo",
     restored: "Document restored",
-    /** 「已删除」视图与真删（#268 下半） */
+    /** The 'Deleted' view and real deletion (#268, second half) */
     deleted: "Deleted",
     colDeleted: "Deleted",
     restore: "Restore",
@@ -598,16 +598,16 @@ export const en = {
     extract: "Extract",
     reExtract: "Re-extract",
     reprocess: "Reprocess",
-    // 抽取进度（当前视图内聚合，SSE 推动刷新）
+    // Extraction progress (aggregated in the current view, SSE drives the refresh)
     extractProgress: (done: number, total: number) =>
       `Extracting · ${done} / ${total}`,
-    // 失败详情：chip 可点开，不再只有 tooltip
+    // Failure details: the chip is clickable, not only a tooltip any more
     errorTitle: "Failure details",
     errorParse: "Ingestion pipeline",
     errorGraph: "Graph extraction",
     copyError: "Copy",
     errorCopied: "Error copied",
-    /* 抽取丢弃：事实抽出来了却没能落地。此前完全无声——图里少了东西，没人说得出少了什么 */
+    /* Extraction dropped: a fact was extracted but could not be landed. Previously this was completely silent: something was missing from the graph and nobody could say what */
     dropsChip: (n: number) => `${n} dropped`,
     dropsTitle: "Facts that did not land",
     dropsNote:
@@ -627,7 +627,7 @@ export const en = {
       object_is_value: "Kept, with the object read as a value",
       attr_datatype: "Kept as an open statement, but the value cannot be read as the attribute's datatype",
     } as Record<string, string>,
-    // 来源级重抽：不危险，只是费时费钱——轻确认，文案直说成本与保留项
+    // Re-extracting a source: not dangerous, just slow and costly; a light confirmation, with the copy stating cost and what is kept
     reExtractSource: "Re-extract",
     reExtractTitle: "Re-extract this source?",
     reExtractHint: (n: number, name: string) =>
@@ -635,7 +635,7 @@ export const en = {
       `Existing merges, review decisions and confirmed facts are preserved.`,
     reExtractConfirm: "Re-extract",
     queuedDocs: (n: number) => `${n} document${n === 1 ? "" : "s"} queued`,
-    // 全库重建：毁灭性——打字级确认
+    // Rebuilding the whole library: destructive; confirmation by typing
     rebuild: "Rebuild graph",
     rebuildTitle: "Rebuild the knowledge graph?",
     rebuildHint: (docs: number, name: string) =>
@@ -746,7 +746,7 @@ export const en = {
     feedPlaceholder: "https://your-service/utopia-feed",
     endpointCopied: "Endpoint URL copied",
     copyEndpoint: "Click to copy the full URL",
-    // api 来源的推送状态（queued/running 不会出现，仅为类型完备）
+    // api // Push status of api sources (queued/running never appear, only for type completeness)
     pushStatus: {
       never: "No pushes yet",
       queued: "—",
@@ -787,7 +787,7 @@ export const en = {
       "The first sync records what the feed holds now and imports nothing. Each item that appears after that is stored from the feed's own text when there is enough of it, otherwise from the linked article; an item with neither is listed as skipped.",
     rssFeedModeHint:
       "Stores what the feed itself carries — the entry text or its summary — and never opens the linked article.",
-    // 五个数一起读，所以收一个对象：分开传五个位置参数，调换两个不会有人发现
+    // These five are read together, so pass one object: passing five positional arguments means a swap of two would go unnoticed
     rssHydrationCounts: (c: { pending: number; queued: number; retrying: number; complete: number; terminal: number }) =>
       `pending ${c.pending} · queued ${c.queued} · retrying ${c.retrying} · complete ${c.complete} · terminal ${c.terminal}`,
     repoField: "Repository (owner/name)",
@@ -929,17 +929,17 @@ export const en = {
   },
   ask: {
     streamInterrupted: "The answer stream was interrupted. Reopen the conversation to check its status.",
-    /* 重开会话时，最后一问没有回答、也没有在写的回答（多半是答到一半失败了） */
+    /* When reopening a conversation, the last question has no answer and no answer being written (most likely it failed halfway) */
     noActiveAnswer: "The last question has no answer. Retry it, or send a new message.",
     historyLoadFailed: "Could not load this conversation.",
     retryHistory: "Retry",
-    // 重答最后那个没有回答的问题（#936）
+    // Re-answer the last question that has no answer (#936)
     retryQuestion: "Retry",
     loadingHistory: "Loading conversation…",
     loadEarlierConversations: "Load earlier conversations",
     conversationsLoadFailed: "Could not load conversations.",
     retryConversations: "Retry",
-    /* 新对话首屏问候：碑铭衬线，品牌名入句（标题不带句号） */
+    /* Serif greeting on the new-conversation first screen: the inscription serif, with the brand name in the sentence (no full stop on the title) */
     greeting: "Ask Utopia what it remembers",
     emptyTitle: "Chat",
     emptyBody:
@@ -952,16 +952,16 @@ export const en = {
     stopping: "Stopping…",
     stopped: "Stopped",
     thinking: "Thinking…",
-    /* 轨迹上每一步的话（#942）。服务端只给字段：状态、数、时刻，怎么说在这里定。
-       查询、实体名、来源名、问数的目的、记下的那句话是数据，原样显示；
-       没有这些字段的旧消息仍显示当时存下的英文 */
+    /* The wording for each step in the trace (#942). The server only supplies fields: status, count, time; how it is phrased is set here.
+       Queries, entity names, source names, the purpose of an analytics query, and the sentence recorded are data, shown verbatim;
+       old messages without these fields still show the English saved at the time */
     step: {
       failed: "failed",
       documentNotFound: "document not found",
       entityNotFound: "entity not found",
       sourceNotFound: "no such data source",
       unknownTool: "unknown tool",
-      /* 参数整个解析不出来：多半是模型的输出撞上上限，在半路断了 */
+      /* Parameters failed to parse at all: most likely the model's output hit the limit and was cut off midway */
       unparsed: "incomplete arguments",
       missing: (param: string) => `missing ${param}`,
       invalid: (param: string) => `invalid ${param}`,
@@ -971,7 +971,7 @@ export const en = {
         total === undefined
           ? `${n} match${n === 1 ? "" : "es"}`
           : `${n} of ${total} matches`,
-      /* `at` 是世界时间（那时成立的），`recorded` 是下面两句之一（那时记下的） */
+      /* `at` is world time (when it held), `recorded` is one of the two sentences below (recorded at the time) */
       facts: (n: number, at: string | null, recorded: string | null) =>
         `${n} fact${n === 1 ? "" : "s"}${at ? ` at ${at}` : ""}${recorded ? `, ${recorded}` : ""}`,
       recordedBy: (t: string) => `as recorded by ${t}`,
@@ -982,21 +982,21 @@ export const en = {
         n === total
           ? `${n} dated fact${n === 1 ? "" : "s"}`
           : `${n} of ${total} dated facts`,
-      /* `more`：列到上限就停了，后面可能还有 */
+      /* `more`: the list stopped at the cap, there may be more after it */
       paths: (n: number, more: boolean, hops: number) =>
         n === 0
           ? "no path"
           : `${n}${more ? "+" : ""} path${n === 1 && !more ? "" : "s"}, shortest ${hops} hop${hops === 1 ? "" : "s"}`,
       changes: (n: number, more: boolean) =>
         n === 0 ? "no changes" : `${n}${more ? "+" : ""} change${n === 1 && !more ? "" : "s"}`,
-      /* 没给 until 的窗口开到现在：「2026-09-01 → now」 */
+      /* A window with no `until` runs to now: '2026-09-01 → now' */
       now: "now",
       rows: (n: number, more: boolean) =>
         `${n}${more ? "+" : ""} row${n === 1 && !more ? "" : "s"}`,
       rules: (n: number) => (n === 0 ? "none" : `${n} rule${n === 1 ? "" : "s"}`),
-      /* rule_matches：这条规则此刻标出了几处 */
+      /* rule_matches: how many places this rule flags right now */
       marked: (n: number) => `${n} marked`,
-      /* 问数那一步可以展开看它跑的 SQL（#936） */
+      /* The analytics step can be expanded to show the SQL it ran (#936) */
       sql: "SQL",
     },
     newChat: "New chat",
@@ -1013,17 +1013,17 @@ export const en = {
       `“${name}” and its messages will be permanently removed.`,
     deleteBtn: "Delete",
     cancel: "Cancel",
-    // 这条回答背后一条来源都没有（#547）。是事实陈述，所以每条都挂，不猜哪条该挂
+    // This answer has no source at all behind it (#547). It is a factual statement, so every one attaches; no guessing which should attach
     noSources: "No sources cited",
-    // 预览浮窗右上角那条出路：看完这一段还想看整篇的人走这里
+    // The exit at the top right of the preview popup: for someone who wants the whole document after reading this section
     openOriginal: "Open original",
-    // 复制（#936）：回答整段一个，代码块各一个
+    // Copy (#936): one for the whole answer, one per code block
     copyAnswer: "Copy answer",
     copyCode: "Copy code",
     copied: "Copied",
   },
   graph: {
-    // 还没判出类型的实体（0009）。不是一个类，是"这一格还空着"
+    // Entity whose type has not been judged yet (0009). Not a class, it means 'this cell is still empty'
     untyped: "Untyped",
     legendMore: (n: number) => `All ${n} classes`,
     nodeBudget: "How many entities to draw",
@@ -1046,10 +1046,10 @@ export const en = {
     searchEntity: "Search entities…",
     searchInSubgraph: "Search in subgraph…",
     backToOverview: "← Full graph",
-    // 顺序不是随便排的：模型没配好之前，上传的文档只会排队等着，
-    // 一个实体也抽不出来。先配模型，再传文档
-    // 管理页在头像菜单里叫 Administration，提示语得叫同一个名字（#267）。
-    // 能配模型的人和不能配的人看到的不是同一句：后者只能去找管理员
+    // The order is deliberate: until the model is configured, uploaded documents just queue and no entity can be extracted.
+    // Configure the model first, then upload documents
+    // The admin page is called Administration in the avatar menu; the hint must use the same name (#267).
+    // Those who can configure models and those who cannot see different sentences: the latter can only ask an admin
     facts: "facts",
     noFacts: "No facts for this entity yet",
     confidence: "confidence",
@@ -1057,11 +1057,11 @@ export const en = {
     noEvidence: "No evidence recorded",
     noQuote: "(no quote)",
     openInDoc: "Open the passage in the document",
-    /* 抽取器从原文读出来的谓词，规范成了标识符。词表外的说法会被降级成
-       related to，原意只在这里活着。
-       **措辞不能宣称这是引文**：关系 key 只能是 [a-z0-9_]，所以中文语料里
-       「采购了」出来是 purchases——说"原文说的是 purchases"是假的。
-       逐字原句就在旁边的证据引文里，没丢。 */
+    /* The predicate the extractor read from the source was normalized to an identifier. Out-of-vocabulary wording is downgraded to
+       related to, and the original meaning survives only here.
+       **The wording must not claim this is a quote**: relation keys can only be [a-z0-9_], so in Chinese corpora
+       a Chinese verb meaning 'bought' comes out as purchases, and saying 'the source says purchases' would be false.
+       The verbatim sentence is in the evidence quote next to it, nothing lost. */
     proposedPredicate: (p: string) => `read from the text as “${p}”`,
     saidAs: (words: string) => `the documents say it “${words}”`,
     inferredPredicate:
@@ -1070,7 +1070,7 @@ export const en = {
     sectionRef: (filename: string, seq: number) =>
       `${filename} · section ${seq} →`,
     fromVersion: (v: number) => `v${v}`,
-    /** 证据所在的文档已删（#268）：事实还在是因为另有出处 */
+    /** The document holding the evidence was deleted (#268): the fact still stands because it has another source */
     sourceDeleted: "source deleted",
     sourceDeletedHint:
       "The document this quote came from was deleted. The fact stays because it has another source.",
@@ -1081,7 +1081,7 @@ export const en = {
     staleFactHint:
       "All evidence for this fact comes from earlier versions of its source documents — " +
       "the current content no longer states it. It may still be true; review it under Review.",
-    /* 实体修正：抽取给的是初判，人可以推翻它 */
+    /* Entity correction: the extractor's first judgment, which a person can overturn */
     edit: "Edit",
     editName: "Name",
     editType: "Type",
@@ -1089,17 +1089,17 @@ export const en = {
     editCancel: "Cancel",
     editSaved: "Entity updated",
     editEmptyName: "Name cannot be empty",
-    /* 同名不是错误——两个张伟可以并存。只提示，不阻断 */
+    /* Same name is not an error: two people named Zhang Wei can coexist. Only a hint, no blocking */
     viewRelations: "Relations",
     viewTimeline: "Timeline",
-    /* 第三视图：记录时间轴——不是"事情何时发生"，而是"我们何时这么认为" */
+    /* Third view: the record timeline. Not 'when things happened' but 'when we came to believe it' */
     viewHistory: "History",
     viewDerived: "Derived",
     derivedEdges: (n: number) => `${n} derived`,
     derivedHint:
       "Nothing here was asserted — the engine worked it out, from an axiom your ontology declares or from a rule someone wrote. Each one shows the premises it came from.",
     derivedNoProof: "The premises are gone.",
-    /* 争议（0017 §3） */
+    /* Dispute (0017 §3) */
     contestedChip: "disputed",
     contestedHint: (kind: string, derived: string | null) =>
       kind === "derived_contradiction"
@@ -1112,7 +1112,7 @@ export const en = {
       "The engine could draw these edges; an assertion stood in the way. They show on the graph as ghost edges.",
     blockedBy: (t: string) => `blocked by ${t}`,
     blockedReview: "Review",
-    /** 证明链（0002 R2）：每一步是一条断言前提，展开到原句 */
+    /** Proof chain (0002 R2): each step is a premise of an assertion, expandable to the original sentence */
     proofStep: (n: number) => `Step ${n}`,
     proofRetracted: "since retracted",
     proofLoading: "Tracing the proof…",
@@ -1139,8 +1139,8 @@ export const en = {
       `${added} added · ${gone} retracted`,
     derivedCapped: (n: number) => `${n} predicate(s) not closed fully`,
     close: "Close",
-    // 派生边靠哪条规则来的。**四种都要有**——查不到的会退回原始 kind 串，
-    // 而那对读的人没有意义
+    // The rule that a derived edge came from. **All four must exist**: a lookup miss falls back to the raw kind string,
+    // which means nothing to the reader
     ruleNames: {
       transitive: "transitive",
       symmetric: "symmetric",
@@ -1153,65 +1153,65 @@ export const en = {
       asserted: "Recorded",
       corrected: "Interval corrected",
       rejected: "Withdrawn",
-      /* 并入另一条断言：内容一字未少，不是撤回 */
+      /* Merged into another assertion: no content was lost, it is not a withdrawal */
       merged: "Merged into an existing fact",
-      /* 实体合并。**两个方向分开说**——「吸收了谁」和「被谁吸收」在图上
-         是两件事，回滚也是按方向做的 */
+      /* Entity merge. **Say the two directions separately**: 'absorbed whom' and 'absorbed by whom' are two different things on the graph,
+         and rollback is done per direction too */
       merged_in: "Another entity was merged into this one",
       merged_away: "Merged into another entity",
       merge_reverted: "Merge undone",
-      /* 改的是节点上的类,一条事实都没动 */
+      /* The class on the node changed; no fact moved */
       retyped: "Type changed",
       retype_reverted: "Type change undone",
     } as Record<string, string>,
-    /* 对方实体已经不在了（库被清理过）：合并事件仍然要列出来 */
+    /* The counterpart entity is gone already (the library was cleaned up): the merge event must still be listed */
     historyGoneEntity: "an entity that is gone",
     historyEngine: "engine",
-    /* 有效区间的变化：修正后区间闭合到某个时点 */
+    /* A change to the validity interval: after correction the interval closes at a point in time */
     historyClosedAt: (t: string) => `closed at ${t}`,
     historyFrom: (t: string) => `from ${t}`,
     historyOngoing: "open-ended",
     historicalNote: (n: number) =>
       `${n} past fact${n === 1 ? "" : "s"} not shown — see Timeline →`,
     undated: "Undated",
-    /* 0064：句子没写时间，文档说了自己是哪天的。是「截至」，不是「自…起」 */
+    /* 0064: the sentence has no time, but the document states its own date. It means 'as of', not 'since' */
     asOf: (date: string, by: string | null) =>
       by ? `as of ${date} · ${by}` : `as of ${date}`,
-    /* 实体面板的 Relations：两节的标题、组尾的折、行上的证据开关 */
+    /* Entity panel Relations: the two section titles, the fold at the group end, the evidence toggle on each row */
     fromEntity: (name: string) => `From ${name}`,
     toEntity: (name: string) => `To ${name}`,
     openEntity: (name: string) => `Open ${name}`,
     past: (n: number) => (n === 1 ? "1 past" : `${n} past`),
     sources: (n: number) => (n === 1 ? "1 source" : `${n} sources`),
-    /* 名字一节（0041）：本名、简称、曾用名 */
+    /* Names section (0041): real name, short name, former names */
     names: "Names",
     shownName: "shown name",
     nameUntil: (d: string) => `until ${d}`,
     removeName: "Remove",
-    // 问一句再移除：名字是事实，界面上没有再加回来的地方
+    // Ask before removing: a name is a fact, and there is nowhere in the UI that adds it back
     removeNameAsk: "Remove this name?",
     removeNameCancel: "Keep",
     removeNameGo: "Remove",
     nameRemoved: "Name removed",
     timelineEmpty: "No dated facts yet.",
     lastConfirmed: (d: string) => `confirmed ${d}`,
-    /* 三种来源共用一个标记（引擎接任对账、Review 裁决、有人手改），所以这句
-       不再声称是哪一种——加上人工编辑之后，原来那句「由对账闭合」会说错来源。
-       想知道是谁改的，History 有 actor 和时刻 */
+    /* Three sources share one marker (the engine's reconciliation takeover, Review verdicts, and manual edits), so this sentence
+       no longer claims which one it was: after a manual edit, the old 'closed by reconciliation' would misstate the source.
+       To see who changed it, History has the actor and time */
     correctedHint:
       "This interval comes from a correction rather than a sentence in a document: " +
       "automatic succession, a review decision, or someone editing it. " +
       "The superseded assertion stays in the ledger — see History for who and when.",
-    /* ---- 人工修正有效区间（302） ---- */
+    /* ---- Manual correction of validity interval (302) ---- */
     editTime: "Correct the interval",
     editTitle: "Edit entity",
     timeStart: "Start",
     timeEnd: "End",
-    /* 结束端的三态，与账本里的三种写法一一对应（见迁移 0003 的注释） */
+    /* The three states at the end map one-to-one to the three forms in the ledger (see the comment in migration 0003) */
     timeEndOpen: "Still going",
     timeEndUnknown: "Ended, date unknown",
     timeEndDate: "Ended on",
-    /* 写多少位就是多少精度：2023 是「那一年」，2023-06 是「那个月」 */
+    /* The number of digits written is the precision: 2023 means 'that year', 2023-06 means 'that month' */
     timeFormat: "2023 · 2023-06 · 2023-06-15 · 2023-06-15T14:32Z",
     timeBadDate:
       "Use 2023, 2023-06, 2023-06-15, or a clock time with its zone such as 2023-06-15T14:32Z — a time without a zone is not a moment.",
@@ -1225,13 +1225,13 @@ export const en = {
     timeSavedConflicts: (n: number) =>
       `Interval corrected — ${n} conflict${n === 1 ? "" : "s"} need a ruling in Review`,
     ongoing: "now",
-    /* 必须跟 ongoing 看得出区别：混淆这两个正是迁移 0046 要修的东西——
-       原文说 "former CEO"，界面却显示 now */
+    /* Must be distinguishable from ongoing: confusing the two is exactly what migration 0046 fixes,
+       the source says 'former CEO' but the UI shows now */
     endedUnknown: "ended, date unknown",
     stats: (n: number, e: number, active: number | null) =>
       `${n} entities · ${e} facts${active === null ? "" : ` · ${active} active`}`,
-    /** 画布只画度数最高的一批。**说清楚画了多少、共多少**——从前这里写的是
-     *  上限，一个上万实体的库右上角永远是 150 */
+    /** The canvas draws only the highest-degree batch. **State clearly how many were drawn and how many in total**; previously this said
+     *  the cap, so a library with tens of thousands of entities always showed 150 in the top right */
     statsCapped: (
       shown: number,
       total: number,
@@ -1273,7 +1273,7 @@ export const en = {
     loading: "Loading…",
     extracted: "Extracted",
     ongoing: "now",
-    /** `#610`：`doc_time` 是从文件里读出来的日期；与上传时刻是两件事 */
+    /** `#610`: `doc_time` is the date read from the file; it is a separate thing from the upload time */
     docDate: "Document date",
     docDateFromContent: "Detected from the filename or first line",
     uploadedAt: "Uploaded",
@@ -1302,14 +1302,14 @@ export const en = {
         "real throttle is the per-model limit below, so keep this comfortably above the sum of " +
         "those. Takes effect immediately.",
       workersApply: "Apply",
-      /* 真正的节流：约束来自供应商的速率限制，而那是按模型算的 */
+      /* The real throttle: the constraint comes from the provider's rate limit, which is computed per model */
       modelConcurrency: "Model concurrency",
       modelConcurrencyHint:
         "How many calls a model will take at once. The limit that matters belongs to the " +
         "provider and is per model — a local Ollama may manage two, a hosted API fifty. " +
         "Background work (extraction, resolution, indexing) waits for a slot; chat and search " +
         "never do. Takes effect immediately.",
-      /* 部署级默认值：新建库时用。名字刻意不叫"系统语言" */
+      /* Deployment-level default: used when creating a new library. The name deliberately is not 'system language' */
       ontologyLang: "Default ontology language",
       ontologyLangHint:
         "The language new knowledge bases start their ontology in — class descriptions go " +
@@ -1329,7 +1329,7 @@ export const en = {
         "Register connections here; each knowledge base mounts the ones it may query.",
       name: "Name",
       connString: "Connection string — the scheme picks the engine",
-      // 每种写法各一行；令牌放 password 位，Databricks 的路径就是控制台里的 httpPath
+      // One line per form; the token goes in the password slot, and the Databricks path is the httpPath in the console
       connSchemes:
         "postgres://user:pass@host:5432/db\n" +
         "mysql://user:pass@host:3306/db   (MariaDB, TiDB, OceanBase, Doris, StarRocks)\n" +
@@ -1552,7 +1552,7 @@ export const en = {
     missesShort: "Unmatched",
     uniquenessShort: "Overlaps",
     refineShort: "Refine types",
-    /* ---- 业务规则（0021 / #277）---- */
+    /* ---- Business rules (0021 / #277) ---- */
     rulesShort: "Business rules",
     ruleExpressionReadOnly: "This definition is read-only in this form. You can edit its name and description without changing its expressions or conditions.",
     ruleUnknownExpression: "Unsupported expression (read-only)",
@@ -1563,26 +1563,26 @@ export const en = {
     rulePotentialConsumers: "May provide input to",
     ruleDependenciesEmpty: "No candidates found in the readable definitions.",
     rulesTitle: "Business rules",
-    /* 说清三件事：谁写的、结论是什么身份、什么时候重算。第三件最容易被误解成
-       「保存就生效」，而它其实等下一轮物化 */
+    /* Say three things: who wrote it, what identity the conclusion carries, and when it is recomputed. The third is easiest to misread as
+       'it takes effect on save', when it actually waits for the next materialization round */
     rulesHint: "Rules that decide a class or compute a value from an entity's own attributes. A conclusion is derived and lapses when its premises do.",
     rulesEmpty: "No rules yet.",
     rulesNoMatch: "No rule matches that.",
-    /** 搜的是整条规则，不只是名字——判据里的谓词和值也在里面 */
+    /** Search covers the whole rule, not just the name: the predicates and values in the criteria are included too */
     ruleSearch: "Search rules, attributes, values",
     ruleNew: "New rule",
-    /* 按不下去时必须说清为什么。**一条规则判的是属性的值**，没有属性就无从写起——
-       而一个灰着的按钮不解释，读者只会以为坏了 */
+    /* When you cannot proceed, say why. **A rule judges the value of an attribute**, and without an attribute there is nothing to write,
+       a greyed-out button explains nothing, and the reader would just think it is broken */
     ruleNeedsAttribute:
       "A rule tests an attribute's value, and this ontology has none yet. Open a class and add one under Attributes.",
     ruleNeedsClass: "Add a class first — a rule concludes one.",
     ruleColRule: "Rule",
     ruleColDerived: "Derived",
     ruleColStatus: "Status",
-    /* 条件之间是合取。**写「并且」而不是一个点号**——符号读不出「全都要成立」，
-       而那正是规则最容易被误读的地方 */
+    /* Conditions are joined with AND. **Write 'and' rather than a dot**: a symbol does not convey 'all must hold',
+       and that is exactly where rules are most easily misread */
     ruleAnd: "and",
-    /** 组与组之间。**读起来是「或者」而不是符号**——同一条判据的另一种满足方式 */
+    /** Between groups. **Reads as 'or' in words, not a symbol**: another way for the same criterion to be satisfied */
     ruleOr: "or",
     ruleWhere: "where",
     ruleDropCondition: "Remove this condition",
@@ -1605,13 +1605,13 @@ export const en = {
       `${conclude} from X through ${join}`,
     ruleSideX: "X",
     ruleSideY: "Y",
-    /* 从前是「当以下全部成立」。**一条规则现在可以写第二种情况**，那句话就
-       不再是真的——标签退回一个「当」，全不全由下面那句说明交代 */
+    /* It used to read 'when all of the following hold'. **A rule can now have a second case**, so that sentence
+       is no longer true: the label falls back to 'when', and whether all hold is explained by the note below */
     ruleConditions: "When",
     ruleConditionsHint:
       "The conditions in a block must all hold. Add another way and any one block is enough.",
     ruleAddCondition: "Add a condition",
-    /** 加一整块：同一条判据的另一种满足方式，不是另一条规则 */
+    /** Adds a whole block: another way for the same criterion to be satisfied, not another rule */
     ruleAddGroup: "Another way",
     ruleOpGt: "is above",
     ruleOpGte: "is at least",
@@ -1631,21 +1631,21 @@ export const en = {
     ruleDeleteConfirm: (n: string) => `Delete “${n}”? What it concluded goes with it.`,
     ruleEnabled: "On",
     ruleDisabled: "Off",
-    /* 数字是「此刻凭它成立的结论条数」，不是历史总数 */
+    /* The number is 'how many conclusions currently hold on its strength', not the historical total */
     ruleDerivedCount: (n: number) =>
       n === 1 ? "1 entity" : `${n} entities`,
     ruleRun: "Run now",
     ruleRunning: "Running…",
-    /* 跑完要说清三件事，因为图会自己变：命中多少、新落多少、退了多少 */
+    /* After a run, say three things, because the graph changes by itself: how many matched, how many newly landed, how many were withdrawn */
     ruleRunDone: (hits: number, inserted: number, invalidated: number) =>
       `${hits} matched · ${inserted} new · ${invalidated} retired`,
     ruleRunCapped: (n: number) =>
       `${n} entity/rule pairs had too many readings to expand; their conclusions are incomplete`,
-    /** 链跑满上限就停了。**说出来**：没接上的那一环与「不满足」长得一样 */
+    /** The chain hit its cap and stopped. **Say so**: an unconnected link looks the same as 'not satisfied' */
     ruleRunRoundsCapped: (n: number): string =>
       `Rules kept concluding after ${n} rounds; anything further down the chain was not reached`,
     ruleNeedsCondition: "A rule needs at least one condition.",
-    /* ---- 打磨：可点的计数、常驻的 capped 提示、改结论 ---- */
+    /* ---- Polish: clickable counts, persistent capped hint, changing conclusions ---- */
     ruleEdit: "Edit",
     ruleEditing: "Editing",
     ruleMatchesTitle: "What it marks",
@@ -1656,15 +1656,15 @@ export const en = {
     ruleVersionCurrent: "current",
     ruleVersionSince: (from: string, to: string | null) => (to ? `${from} to ${to}` : `since ${from}`),
     ruleVersionStanding: (n: number) => (n === 1 ? "1 conclusion stands on it" : `${n} conclusions stand on it`),
-    /* 前提要读成「凭什么」，所以用 because 起头而不是干列 */
+    /* Premises should read as 'on what grounds', so start with 'because' instead of listing bare items */
     ruleMatchBecause: (premises: string) => `because ${premises}`,
-    /* 同一个实体会因为不同时段的读数出现好几次——不写出这一段就像重复了 */
+    /* The same entity can appear several times because of readings from different periods; without this paragraph it looks like a duplicate */
     ruleMatchSpan: (from: string, to: string | null) =>
       to ? `${from} – ${to}` : `since ${from}`,
     ruleMatchesMore: (shown: number, total: number) =>
       `showing ${shown} of ${total}`,
-    /* 常驻在卡片上，而不只在跑完那一刻的 toast 里——少推几条与「不满足」
-       在结果里长得一样，读的人得随时看得见 */
+    /* Persistent on the card, not just in the toast at the moment of the run: fewer pushes, and 'not satisfied' looks the same in the result,
+       so the reader has to be able to see it at all times */
     ruleCappedChip: "incomplete",
     ruleCappedHint:
       "Some entities carry too many readings of the same attribute to expand every combination, so this rule's conclusions for them are incomplete.",
@@ -1695,7 +1695,7 @@ export const en = {
     attributesHint:
       "Literal-valued fields of this class (a person's salary, a contract's amount). Extracted with evidence and history, like any fact.",
     newAttribute: "New attribute",
-    /* 编辑弹窗（面板只展示，改动在弹窗里）：标题与面板里的入口 */
+    /* Edit dialog (the panel only displays; changes are made in the dialog): the title and the entry point in the panel */
     edit: "Edit",
     editClass: "Edit class",
     editProperty: "Edit relation",
@@ -1733,9 +1733,9 @@ export const en = {
     noDisjoint: "None declared yet",
     disjointWithParent:
       "This class inherits from a class it says it cannot be — nothing could ever satisfy it.",
-    /* 多父时左栏只能画一处，说明画在哪一支下 */
+    /* With multiple parents the left column can draw only one place; say which branch it is drawn under */
     primaryParentHint: "Shown in the tree under the first one.",
-    /* 类型签名。措辞要说清它是引导不是闸门——本体写错时模型仍可覆盖 */
+    /* Type signature. The wording must make clear it is a guide, not a gate: the model can still override it when the ontology is wrong */
     signature: "Type signature",
     signatureHint:
       "Which classes this relation connects. It goes into the extraction prompt as a hint, " +
@@ -1783,7 +1783,7 @@ export const en = {
     save: "Save",
     delete: "Delete",
     deleteBlocked: "In use — cannot delete",
-    /* ---- OWL / RDFS 导入 ---- */
+    /* ---- OWL / RDFS import ---- */
     importShort: "Import",
     importTitle: "Import an ontology",
     importHint: "Import an OWL or RDFS file (.owl, .rdf, .ttl). Classes and properties are matched by IRI, so importing a newer version of the same vocabulary updates what is already here.",
@@ -1797,38 +1797,38 @@ export const en = {
       `${fmt === "rdfxml" ? "RDF/XML" : "Turtle"} · ${triples.toLocaleString()} triples`,
     importNothing:
       "Nothing to import — no classes or properties found in this file.",
-    /* 计划三列：新建 / 更新 / key 被占 */
+    /* Plan's three columns: new / update / key taken */
     importWillCreate: (n: number) => `${n} new`,
     importWillUpdate: (n: number) => `${n} updated`,
     importKeyTaken: (n: number) => `${n} skipped`,
     importClasses: "Classes",
     importRelations: "Relations",
     importAttributes: "Attributes",
-    /* 属性还落不了库：它们要 domain，而 domain 要等类先建好并解析 IRI */
+    /* Attributes cannot land in the library yet: they need a domain, and the domain waits until the class is created and the IRI resolved */
     importAttributesLater:
       "Parsed, but not created yet — attributes need a class to hang from, which lands in the next step.",
-    /* 预览必须警告的第一件事：functional 会让时序引擎自动关掉旧事实。
-       part_of 那次一个错误的唯一性声明造了 59 条假冲突 */
+    /* The first thing the preview must warn about: functional makes the temporal engine automatically close old facts.
+       part_of, in one such import, a wrong uniqueness declaration created 59 false conflicts */
     warnFunctional: (n: number) =>
       `${n} ${n === 1 ? "relation declares" : "relations declare"} itself functional`,
     warnFunctionalBody:
       "A functional relation may hold one value at a time, so a new fact automatically closes the previous one. When the vocabulary claims uniqueness your data does not keep, that shows up as a queue of conflicts. Review these after importing.",
-    /* 第二件事：description 逐字进抽取提示词，没有它的类抽得明显差 */
+    /* Second: description goes verbatim into the extraction prompt; classes without it extract noticeably worse */
     warnNoDescription: (n: number) =>
       `${n} ${n === 1 ? "class arrives" : "classes arrive"} with no description`,
     warnNoDescriptionBody:
       "A class description goes verbatim into the extraction prompt — it is the only thing telling the model what belongs there. Write one for these, or they will quietly under-extract.",
-    /* key 撞了：报告不解决。自动加后缀会让下次重导入认不出自己上次建的是哪个 */
+    /* key /* Key collision: the report does not resolve it. Auto-adding a suffix would make the next re-import unable to recognize what it created last time */
     warnKeyTaken: (n: number) =>
       `${n} ${n === 1 ? "key is" : "keys are"} already taken`,
     warnKeyTakenBody:
       "Something else already holds this key under a different identity. These are left alone — rename the existing one first if you want the imported version instead.",
-    /* 占位者没有 IRI = 这库里手工建的或内置的，那句话比一个空 IRI 有用 */
+    /* A placeholder with no IRI = created by hand or built in for this library; that sentence is more useful than an empty IRI */
     importTakenBy: (iri: string | null) =>
       iri
         ? `taken by ${iri}`
         : "taken by an entry defined in this knowledge base",
-    /* 出现过但今天不投影的公理，按名字与次数列出——"暂未投影"不是"已跳过" */
+    /* Axioms that appeared but are not projected today, listed by name and count: 'not projected yet' is not 'skipped' */
     importUnprojected: "Not projected yet",
     importUnprojectedBody:
       "Axioms this file uses that Utopia does not consume yet. Nothing is lost: the source file is stored as uploaded, so a later version can project them.",
@@ -1845,7 +1845,7 @@ export const en = {
     importUpdatedN: (n: number) => `${n} updated`,
     importSkippedN: (n: number) => `${n} skipped`,
     importTakenN: (n: number) => `${n} key taken`,
-    /* 细账的行名。**动词都是过去式**：这一屏说的是那一次导入做过什么 */
+    /* Row names of the detailed ledger. **All verbs are past tense**: this screen says what that import did */
     statClassesCreated: "Classes created",
     statClassesUpdated: "Classes updated",
     statClassesTaken: "Classes whose key was taken",
@@ -1860,7 +1860,7 @@ export const en = {
     statAttributesSeen: "Attributes in the file",
     statAttributesCreated: "Attributes created",
     statAttributesSkipped: "Attributes skipped",
-    /* 跳过的理由。**每一条都要说得出下一步动哪里**，不然报了也白报 */
+    /* Reasons for skipping. **Each one must say where to act next**, otherwise reporting it is pointless */
     skipReason: {
       key_taken: "key already in use",
       unusable_range: "range cannot be a value type",
@@ -1874,24 +1874,24 @@ export const en = {
       bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(0)} KB`,
     misses: "Not in the ontology yet",
     missesHint: "What the documents say that the ontology has no place for, and what the agent proposes for it.",
-    /* ---- 一端挂着两个以上开放值的谓词（#341） ----
-       文案克制：状态一句话，后果一句话，动作在按钮上。这一档的读者要判断的是
-       「这条关系一次只能有一个值吗」，不是读一篇关于双时态的说明 */
+    /* ---- A predicate with two or more open values on one end (#341) ----
+       Restrained copy: state in one sentence, consequence in one sentence, the action is on the button. The reader at this level needs to judge
+       'can this relation have only one value at a time?', not read an essay on bitemporality */
     uniqueness: "Overlapping values",
     uniquenessHint: "Say which relations may hold only one value at a time, and a new value will end the old one on its own.",
     uniquenessEmpty: "No overlaps. Every holder has at most one open value.",
-    /* 主语侧 / 宾语侧：说人话，不写 functional / inverse functional */
+    /* Subject side / object side: plain words, not functional / inverse functional */
     uniquenessSubject: (n: number) =>
       `${n} subject${n === 1 ? "" : "s"} with two or more open values`,
     uniquenessObject: (n: number) =>
       `${n} value${n === 1 ? "" : "s"} held open by two or more subjects`,
-    /* 按钮按下去会动账本，所以先说清动多少 */
+    /* Pressing the button changes the ledger, so first say how much will change */
     uniquenessEffect: (close: number, review: number) =>
       review > 0
         ? `Closes ${close}, sends ${review} to review`
         : `Closes ${close}`,
     uniquenessDeclare: "Declare and close",
-    /* 声明过了、只是还没对过账（导入的，或声明之前就在的行） */
+    /* Declared, just not yet reconciled against the ledger (imported, or rows that existed before the declaration) */
     uniquenessReconcile: "Close them",
     uniquenessDeclared: "Declared",
     uniquenessBusy: "Closing…",
@@ -1900,8 +1900,8 @@ export const en = {
         ? `Closed ${close} · ${review} in Review`
         : `Closed ${close}`,
     uniquenessSince: (d: string) => `since ${d}`,
-    /* 数字是**忽略之后**还在涨的那个——这一行的全部意义就在于此：
-       当初"只出现过一次"的判断依据可能早就不成立了 */
+    /* The number is the one that keeps climbing **after ignoring**. The whole point of this row is:
+       the original 'appeared only once' judgment may no longer hold */
     noMisses: "Nothing the documents say is waiting for a place in the ontology.",
     uncovered: (kindWords: number, phrases: number) => {
       const what = [
@@ -1913,13 +1913,13 @@ export const en = {
       return `The documents use ${what} the ontology has no place for. Ask the agent to propose classes and properties for them; nothing is added until you accept it.`;
     },
     approve: "Add",
-    /* 映射那一档的按钮。刻意不叫 Add——它不加东西，本体里已经有了。
-       两个按钮都写 Add 的话，"已经有了"这件事在界面上就消失了 */
+    /* Button for the mapping tier. Deliberately not 'Add': it adds nothing, the ontology already has it.
+       If both buttons said Add, the fact that 'it already exists' would vanish from the interface */
     mapOver: "Use existing",
-    /* 影响面：采纳一个提案会把多少条无谓词事实认过去。
-       没有这一句，"Add" 只是凭空多一个空关系 */
-    /* 自动扩本体的通知：默认开启的前提是它的动作可见且可退。
-       只记在审计台账里不算可见——那是查证用的，不是通知用的 */
+    /* Impact: how many predicate-less facts adopting a proposal will confirm.
+       Without this sentence, 'Add' just creates an empty relation out of nowhere */
+    /* Notification for automatic ontology expansion: default-on requires its action to be visible and reversible.
+       Recording it only in the audit ledger does not count as visible: that is for verification, not notification */
     proposals: "AI proposals",
     keyHint: "lowercase_snake_case",
     /* ---- 0061: the ontology agent and its questions ---- */
@@ -1940,8 +1940,8 @@ export const en = {
     rejectReasonPrompt:
       "Why not? (optional — the agent reads it before proposing again)",
     rejectedProposal: "Rejected",
-    /* 复用时人另定了的，照人的留着没写（0061 决定 3）：只说留了几条。不说是代理读过之后定的：
-       没记下读到哪一刻的旧提案，人在提案之前定的也照留 */
+    /* Items a person decided separately during reuse are kept as they were, not overwritten (0061 decision 3): only says how many were kept. Does not claim they were decided after the agent read the material:
+       old proposals that did not record when they were read, and decisions made before the proposal, are kept too */
     adoptKept: (n: number) =>
       n === 1
         ? "Saved. One of these was decided differently by a person and stays as they decided."
@@ -1964,7 +1964,7 @@ export const en = {
     acceptQuestion: "Accept",
     questionAnswered: "answered",
     questionUnanswered: "not answered",
-    /* 回答从哪里来的（competency.mjs 记的 via） */
+    /* Where the answer came from (the via recorded by competency.mjs) */
     questionVia: { graph: "from the graph", text: "from text", both: "graph and text" } as Record<string, string>,
     questionsScore: (answered: number, checked: number) =>
       `${answered} of ${checked} answered`,
@@ -1980,9 +1980,9 @@ export const en = {
       "Of the agent's proposals people decided on, how many were rejected or edited before adoption.",
     /* ---- Schema diagram ---- */
     schemaDiagram: "Schema diagram",
-    /* 从前这句把「先加个类或导入 OWL 文件」说成了开始的前提，而本体本来就
-       从语料里长（0003，默认开）——那句话正是 #313 说的劝退点。现在只说状态，
-       动作留给左栏本来就有的 New class 与 Import */
+    /* This sentence used to present 'first add a class or import an OWL file' as the precondition to start, although the ontology grows from the corpus by itself
+       (0003, on by default): that line is exactly the discouragement #313 describes. Now it only states the status,
+       and leaves the actions to the New class and Import already in the left column */
     schemaEmpty:
       "No classes yet. Documents are read without them; classes and properties are what turn what was read into typed facts. Have the agent propose them from your documents, import an ontology, or add a class yourself.",
     schemaEmptyAction: "See what the documents need",
@@ -1996,15 +1996,15 @@ export const en = {
     schemaUnscoped: (n: number) => `Unscoped properties (${n})`,
     schemaUnscopedHint:
       "Not limited to specific classes, so no line on the canvas would be honest. Select one to inspect or edit it.",
-    // 取景说明：大本体只画库用到的类，这里说没画的有多少、为什么、去哪找
+    // Framing note: the large ontology draws only the classes the library uses; here we say how many were not drawn, why, and where to find them
     schemaMoreClasses: (n: number) => (n === 1 ? "+1 class" : `+${n} classes`),
     schemaScopeInUseHint:
       "Drawn: the classes with instances, and their ancestors. Pick any other class in the rail to add it.",
     schemaScopeTopHint:
       "No class has instances yet, so the top two levels are drawn. Pick any other class in the rail to add it.",
     schemaClosePanel: "Close",
-    // 面板里的四段：定义（表单）/ 关系（边）/ 属性（字面值字段）/ 实例。
-    // 关系和属性是两种东西——左栏的 Properties 只列关系，属性挂在类下
+    // The four sections in the panel: definition (form) / relations (edges) / attributes (literal value fields) / instances.
+    // Relations and attributes are different things: the left column's Properties lists only relations, attributes hang under their class
     schemaTabDefinition: "Definition",
     schemaTabRelations: "Relations",
     schemaTabAttributes: "Attributes",
@@ -2015,7 +2015,7 @@ export const en = {
         ? "1 new ontology issue from this change"
         : `${n} new ontology issues from this change`,
     schemaCheckReview: "Review",
-    /** 画布上并成一条的关系边写的字 */
+    /** The word written on the edge where relations are merged into one line on the canvas */
     schemaBundle: (n: number) => `${n} relations`,
     schemaOutgoing: "From this class",
     schemaIncoming: "To this class",
@@ -2092,9 +2092,9 @@ export const en = {
       "An agent reads these schemas and proposes metric and dimension definitions. Proposals land in Pending; Ask uses them only once confirmed.",
     exploreQueued:
       "Exploration queued — proposals will appear under Pending. If nothing can be proposed, the alert bell will say so.",
-    // **最近一轮探索的账**——单看列表答不了「漏了多少」（#503）：
-    // 十二条提议对着八十列的宽表与刚好覆盖完一个小库长得一样。这条贴出来人
-    // 才能从「等量提议」里看出覆盖范围。
+    // **The ledger of the latest exploration round**: looking at the list alone cannot answer 'how much was missed' (#503):
+    // twelve proposals against a wide table of eighty columns look the same as exactly covering a small library. Pasting this lets people
+    // see the coverage scope among 'equal-sized proposals'.
     lastRun: (r: {
       tables: number;
       columns: number;
@@ -2123,7 +2123,7 @@ export const en = {
     tabHistory: "History",
     empty: "Nothing to review — the graph is clean.",
     historyEmpty: "No merges yet.",
-    // 左栏分类导航
+    // Left column category navigation
     railOverview: "Overview",
     railPending: "Awaiting your nod",
     railDuplicates: "Duplicates",
@@ -2139,7 +2139,7 @@ export const en = {
     railMerges: "Merges",
     railAgent: "Agent",
     categoryEmpty: "This queue is clear.",
-    // agent 的队列（0025）
+    // The agent queue (0025)
     agentTitle: "Agent",
     agentHint:
       "What the agent proposed or decided for this base, from the decisions people made here before. Answering here is your decision, and it becomes precedent for the next look.",
@@ -2177,7 +2177,7 @@ export const en = {
       n === 0 ? "The agent is working on its last cluster" : `The agent is working · ${n} pairs still to look at`,
     overviewAgentQueue: (n: number) => (n === 1 ? "1 pair waiting for the agent" : `${n} pairs waiting for the agent`),
     agentDeciding: "The agent is deciding this pair",
-    // 总览（#377）
+    // Overview (#377)
     overviewTitle: "Overview",
     overviewHint:
       "What the base needs from you: how much is waiting and for how long, what has been decided, and how much of the base is still provisional.",
@@ -2199,7 +2199,7 @@ export const en = {
     overviewFacts: (n: number) =>
       n === 1 ? "1 fact currently held. Of it:" : `${n} facts currently held. Of them:`,
     overviewContested: "Contested",
-    // 决策台账
+    // Decision ledger
     decisionsTitle: "Decisions",
     decisionsHint:
       "Every review decision, by whom and when — snapshots taken at decision time, kept even after the underlying fact is gone.",
@@ -2221,34 +2221,34 @@ export const en = {
       "merge.manual": "Merged manually",
       "fact.time_corrected": "Time corrected",
     } as Record<string, string>,
-    /** 升格给人裁决的原因。服务端存 code（可选 |detail），措辞在这里 */
+    /** Reasons for escalating to a human decision. The server stores a code (optionally | detail); the wording lives here */
     escalated: {
       escalate_no_model: "No chat model — the adjudicator could not run",
       escalate_no_verdict: "The adjudicator returned no verdict",
       escalate_entity_changed: "The entity changed while being adjudicated",
       escalate_unsure: "The adjudicator was not confident enough",
-      /* 抽给人看的一份（0026）：机器有把握也不动手，detail 是它本来的答案 */
+      /* A sample for a person to review (0026): the machine is confident but does not act; detail is its original answer */
       escalate_sample: "Sampled for a person; the adjudicator was confident",
-      /* 执行闸门（0027）：合并会立刻送出图外的东西，把握再高也留给人 */
+      /* Execution gate (0027): a merge immediately sends something outside the graph, so it stays with a person however confident the machine is */
       escalate_impact: "Held for a person; the merge would not stay in the graph",
       escalate_identity:
         "Held for a person; a source treats one side's names as identifiers",
       proposed: "The agent looked and left a proposal",
       governed: "Decided by the agent from precedent",
       namesake: "Two entities with this name in one document",
-      /* 画像分不开时的并列：分数是真的，所以百分比照常显示（与 namesake 的哨兵值不同） */
+      /* Ties when profiles cannot be told apart: the score is real, so the percentage still shows (unlike the namesake sentinel value) */
       namesake_tie: "Same name, and the profiles cannot tell them apart",
       shared_name: "Another entity already has this name",
-      /* 名字向量召回（0041 第 2 刀）：简称、另一种文字的同一个名字；只提议，裁决器判 */
+      /* Name vector recall (0041 step 2): short names, the same name in another script; only proposes, the adjudicator decides */
       name_vector: "A similar name, found by vector recall",
-      /* 名字互相包含：等值召回看不见，简称会静默变成第二个实体 */
+      /* Names containing one another: equality recall cannot see them, and a short name silently becomes a second entity */
       contains: "One name contains the other",
       ambiguous_name: "Same name, context did not settle it",
       type_drift: "Same name arrived under a different type",
       auto_merged: "Merged by the AI adjudicator",
       kept_apart: "The AI adjudicator judged these different",
     } as Record<string, string>,
-    /** 闸门留下的原因，按 kind 措辞；value 是谓词标签或一个数 */
+    /** Reasons left by the gate, worded by kind; value is the predicate label or a number */
     impact: {
       contradiction: (p: string) => `it would put two “${p}” facts on one entity`,
       derived: (n: string) => `${n} derived facts rest on one side`,
@@ -2264,9 +2264,9 @@ export const en = {
     noFacts: "No recorded facts",
     merge: "Merge",
     keep: "Keep separate",
-    /** 理由框（0026）。是一个问题，不是一张表：可以不答 */
+    /** Reason box (0026). It is a question, not a table: it can be left unanswered */
     rationalePlaceholder: "What told you? Optional",
-    // 重复项的类型筛选与批量裁决（#428）
+    // Type filter and batch decisions for duplicates (#428)
     typesAny: "All",
     typesSame: "Same type",
     typesConflict: "Types differ",
@@ -2286,7 +2286,7 @@ export const en = {
           : `${ok} pairs decided`
         : `${ok} decided, ${failed} could not be — they stay in the queue`,
     lowConfidence: "Low-confidence facts",
-    // 对齐队列（#725）
+    // Alignment queue (#725)
     alignment: "The aligner could not settle these",
     alignmentHint:
       "A phrase between two kinds of thing, or a kind word, where the aligner's two votes disagreed. Pick the property or class the documents' words mean, or say none fits: the statements then stay in the open graph. Your decision stands; the aligner never overrides a person.",
@@ -2299,7 +2299,7 @@ export const en = {
     alignmentStatements: (n: number) => (n === 1 ? "1 statement" : `${n} statements`),
     alignmentEntities: (n: number) => (n === 1 ? "1 thing" : `${n} things`),
     alignmentVotes: (first: string, second: string) => `Votes: ${first} · ${second}`,
-    // 状态属性下，单个日期标的是什么（#966）
+    // Under the status property, what a single date stands for (#966)
     alignmentMarks: "A single date",
     alignmentMarksStart: "starts it",
     alignmentMarksEnd: "ends it",
@@ -2318,7 +2318,7 @@ export const en = {
     alignmentApprove: "Approve rule",
     alignmentReject: "Reject",
     alignmentRuleAccepted: "Saved. Implied facts are being computed in the background.",
-    // 勘误队列（0044 决定 7）
+    // Errata queue (0044 decision 7)
     errata: "The errata agent held these for you",
     errataHint:
       "After extraction an agent rereads each document's typed facts, structural flags first, and retracts, revises or adds with the document's own words as evidence. An action that would reach outside the graph (a derived fact rests on it, someone asked about it, or it would give a one-value property two values) waits here for a person.",
@@ -2388,14 +2388,14 @@ export const en = {
     violationSelfLoop: "Points at itself",
     violationAsymmetry: "Both directions hold at once",
     violationCycle: "Cycle through the transitive chain",
-    /** 互斥的三类只在同时成立时才报（#634），所以文案说「同一时间」 */
+    /** The three mutually exclusive kinds are reported only when they hold at the same time (#634), so the wording says 'at the same time' */
     violationFunctional: "More than one value at once",
-    /** 宾语侧（#634）：同一个对象同一时间被不止一个主语指着 */
+    /** Object side (#634): the same object is pointed to by more than one subject at the same time */
     violationInverseFunctional: "More than one holder at once",
-    /** 签名违规（#190 / #196）：一条事实的主语或宾语落在谓词声明的类型之外——
-     *  抽取时会掰正，采纳与合并这两条路从前绕过了检查 */
+    /** Signature violation (#190 / #196): a fact's subject or object falls outside the class the predicate declares,
+     *  the extraction corrects it, but the accept and merge paths used to bypass the check */
     violationSignature: "Subject or object outside the declared types",
-    /** 0017：派生撞上断言。卡片是一次审核，线索指向上游的错 */
+    /** 0017: a derivation colliding with an assertion. The card is one review, and the clue points to an upstream error */
     violationDerived: "A derivation contradicts an assertion",
     derivedLine: (s: string, p: string, o: string) =>
       `Derived: ${s} · ${p} · ${o}`,
@@ -2416,11 +2416,11 @@ export const en = {
     violationVia: (p: string) => `via ${p}`,
     violationPath: (n: number) => `${n} facts in the cycle`,
     retractFact: "Data is wrong",
-    /** 双事实与环上的违规：撤具体哪一条（#202） */
+    /** Violations on double facts and cycles: retract the specific one (#202) */
     retractThis: "Retract",
     retractThisHint: "Withdraw this fact from the graph; the rest stay.",
     relaxAxiom: "Axiom is wrong",
-    /** 互斥组可以不止两条 */
+    /** Mutual-exclusion groups can have more than two members */
     acceptBoth: (n: number): string => (n > 2 ? "All are right" : "Both are right"),
     runCheck: "Run check",
     checkNeverRun:
@@ -2429,15 +2429,15 @@ export const en = {
     checkNoAxioms:
       "No axioms declared, so nothing could be checked. Import an ontology that declares them.",
     checkFound: (n: number) => `${n} new`,
-    /** 算出来了，但都是已经在队列里或已被裁决过的——说「3 处矛盾」而列表只有
-     *  一条会让人以为界面漏了东西 */
+    /** Computed, but all are already in the queue or already decided: saying '3 conflicts' while the list has only
+     *  one entry would make people think the interface dropped something */
     checkNothingNew: "Nothing new",
     checkClean: (n: number) => `${n} facts checked, no contradictions`,
     mappings: "Data mapping",
     mappingsHint:
       "Proposed mappings from a business concept to how it is computed. Confirm one and Ask uses it instead of guessing from the schema.",
     mappingDerived: "derived",
-    // 记忆抽出、等人点头的事实（0015）
+    // Facts extracted from memory, awaiting a person's nod (0015)
     pending: "Awaiting your confirmation",
     pendingHint:
       "Facts extracted from what you asked the assistant to remember. Nothing here is in the graph yet: " +
@@ -2447,7 +2447,7 @@ export const en = {
     pendingOwnWords: "In the document's own words; binding to the ontology comes with alignment.",
     pendingNoPredicateChip: "no relation in ontology",
     pendingSaidBy: (name: string) => `said by ${name}`,
-    /* 同一个人可以挂着好几个 agent，只写人名分不出是哪一个记的 */
+    /* The same person can have several agents attached; writing only the person's name cannot tell which one recorded it */
     pendingSaidVia: (name: string, agent: string) => `said by ${name} · via ${agent}`,
     nodCardTitle: (n: number) =>
       n === 1
@@ -2491,7 +2491,7 @@ export const en = {
     closeFact: "Close",
     closeFactAt: (d: string) => `Close at ${d}`,
   },
-  /** 通用组件文案（SearchSelect 等） */
+  /** Generic component copy (SearchSelect etc.) */
   ui: {
     close: "Close",
     noMatches: "No matches",
@@ -2522,7 +2522,7 @@ export const en = {
     exportKb: "Export knowledge base (RDF)",
     exportKbNote: "Download every fact and its provenance as a Turtle file.",
     exportKbAction: "Export",
-    /* 语料语言。措辞要把"这不是界面语言"讲清楚，否则一定有人当成界面开关 */
+    /* Corpus language. The wording must make clear this is not the interface language, otherwise someone will treat it as the interface switch */
     cardIdentity: "Name and description",
     cardIdentityNote:
       "Up to 64 characters. This is the name in the switcher and at the top of every page of this base.",
@@ -2575,7 +2575,7 @@ export const en = {
     activityRetry: "Retry",
     activityEmpty: "Nothing recorded yet.",
     deletedUser: "a removed user",
-    // actor_id 为空的两种引擎动作：审阅队列里的自动裁决，和其余后台工作
+    // The two engine actions with an empty actor_id: automatic verdicts in the review queue, and other background work
     adjudicator: "AI adjudicator",
     engine: "the engine",
     auditActions: {
@@ -2655,5 +2655,5 @@ export const en = {
   },
 };
 
-/** 语言包的结构契约。其余语言包写成 `const zh: Strings = {…}`，漏一条即编译失败 */
+/** Structural contract for language packs. Other packs are written as `const zh: Strings = {…}`, and a missing entry fails to compile */
 export type Strings = typeof en;

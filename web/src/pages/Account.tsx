@@ -1,4 +1,4 @@
-/* 个人信息页：头像（首字母占位）、显示名、邮箱、改密码。 */
+/* Profile page: avatar (initial placeholder), display name, email, change password. */
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
@@ -55,7 +55,7 @@ export function Account() {
 
   return (
     <div className="px-8 py-6">
-      {/* 与管理页同一副身材：内容居中限宽，行长不随窗口拉长 */}
+      {/* Same layout as the admin page: content centered with a width limit, line length does not stretch with the window */}
       <div className="mx-auto w-full max-w-4xl">
         <PageHeader title={S.account.profileTitle} />
 

@@ -35,23 +35,23 @@ import {
   type ModelCard, type ModelDraft, type ModelDrafts,
 } from "./modelSettingsDraft";
 
-/** 两张模型卡的备注只讲一件事，且只讲最新的那件（#698）。
+/** The notes on the two model cards say only one thing, and only the latest one (#698).
  *
- * 从前备注是"有测试结果就说测试，否则说保存"——测完再改键，旧结果还贴在卡上；
- * 测一次是两套一起测，两个按钮却一起转"Testing…"；嵌入卡的报错还是正文字色，
- * 聊天卡的报错却是危险色。于是"Saved" 说的是哪次操作、这次测的又是哪张卡，
- * 全得靠猜。
+ * Previously the note was 'say the test result if there is one, otherwise say saved': after a test, changing the key left the old result stuck to the card;
+ * one test ran both cards together while both buttons spun 'Testing…' at once; the embedding card's error was body-text colored,
+ * while the chat card's error was danger-colored. So 'Saved' did not say which action it was, nor which card this test belonged to:
+ * all had to be guessed.
  *
- * 三条规矩，显示层只管最后一条，前两条在调用处保证：
- * 1. 改任何一格、按任何一次保存，旧的 Saved、报错全部过期；测试结果只过期改了的那张卡的
- *    （见 `cardsOf`），别的卡配置没动，测出的结论还作数（#1424）；
- * 2. 一张卡一个测试（#1424）：测的、"Testing…"、测出的结论都只属于按下的那张卡；
- * 3. 新测到的结果（含测挂了）盖掉旧保存态——刚按了"测试"，卡上就该说测试的事。
+ * Three rules. The display layer only enforces the last one; the first two are guaranteed at the call site:
+ * 1. Changing any cell or pressing any save expires the old Saved and any errors; a test result expires only for the card that was changed
+ *    (see `cardsOf`). Cards whose config was not touched keep their test conclusions (#1424);
+ * 2. One test per card (#1424): the test, its 'Testing…' and its conclusion belong only to the card whose button was pressed;
+ * 3. A newly arrived test result (including a failed one) overrides the old saved state: having just pressed 'Test', the card should talk about the test.
  *
- * 传纯数据、回纯结论（含用哪个色调），字串仍在调用处配 i18n；
- * 纯函数方便 vitest 直接钉住这张优先级表。 */
+ * Pass in plain data and get back a plain conclusion (including which tone to use); the strings are still localized (i18n) at the call site,
+ * and the pure function lets vitest pin this priority table directly. */
 export type ModelCardTest = { ok: boolean; message: string } | null;
-/** `dirty`：这张卡有改过、还没保存的格子 */
+/** `dirty`: the cells on this card that were changed but not yet saved */
 export type ModelCardSave = { error: string | null; saved: boolean; dirty: boolean };
 export type ModelCardStatus =
   | { kind: "note"; tone: "text-ok" | "text-danger"; text: string }
@@ -59,16 +59,16 @@ export type ModelCardStatus =
   | { kind: "saved" }
   | { kind: "idle" };
 
-/** 改了这几格，是哪几张卡的配置变了。字段名的前缀就是卡：chat_ / embed_ / ocr_ / transcribe_；
- *  预设一次填对话与嵌入两张卡的格，两张都算（#1424） */
+/** Which cards' config changed given the cells just edited. The field-name prefix is the card: chat_ / embed_ / ocr_ / transcribe_;
+ *  a preset that fills both the chat and embedding cells at once counts both (#1424) */
 export function cardsOf(fields: readonly string[]): ModelCard[] {
   return (["chat", "embed", "ocr", "transcribe"] as const).filter((c) =>
     fields.some((f) => f.startsWith(`${c}_`)),
   );
 }
 
-/** 对话卡的测试结论：三种请求形状各一行，被拒的那一行带上端点的原话，于是一眼看得出
- *  是哪个参数不收（#1354）。旧服务端不回 `checks` 时退回一整句 */
+/** The test conclusion for the chat card: one row per request shape; a rejected row carries the endpoint's own words, so at a glance you see
+ *  which parameter is not accepted (#1354). When an old server does not return `checks`, fall back to one whole sentence */
 export function chatTestMessage(chat: {
   ok: boolean;
   reply?: string;
@@ -94,9 +94,9 @@ export function modelCardStatus(
   testError: string | null,
   save: ModelCardSave,
 ): ModelCardStatus {
-  /* 测试测的永远是**已保存**的那份配置。卡上有没存的修改时，任何测试结果说的都不是
-     表单里这一份——从前改了密钥直接点测试，看到的是旧密钥的「已连通」，或者格子都填着
-     却说 Not configured（#698 的第 2、3 条）。保存失败的报错仍然先说 */
+  /* A test always tests the **saved** config. When the card has unsaved edits, no test result describes the form's values:
+     in the form. Previously, after changing the key, pressing test showed the old key's 'connected', or the cells were all filled in
+     yet it said Not configured (#698's rules 2 and 3). An error from a failed save still speaks first */
   if (save.error)
     return { kind: "note", tone: "text-danger", text: save.error };
   if (save.dirty) return { kind: "unsaved" };
@@ -109,11 +109,11 @@ export function modelCardStatus(
   return { kind: "idle" };
 }
 
-/** 管理页的六节。**它们是左栏的第二层，不是正文顶上的一条 tab 带**——
-    与账户栏那四项是同一种东西（去哪儿），只是矮一级；地址里是 `?tab=`，
-    刷新、回退、分享链接都落回同一节。左栏（AccountShell）与这一页的标题
-    读的是同一份，名字只有一处。**label 是函数**：界面语言在运行时可切，
-    模块顶上取值会把第一次加载时的那门语言焊死 */
+/** The six sections of the admin page. **They are the second level of the left column, not a row of tabs above the body**:
+    *  they are the same kind of thing as the four items in the account bar (where you are), just one level lower; the address uses `?tab=`,
+    *  so refresh, back, and shared links all land on the same section. The left column (AccountShell) and this page's title
+    *  read from the same source, so the name exists in only one place. **label is a function**: the interface language can be switched at runtime,
+    *  and reading it at module top would lock in the language loaded the first time */
 export const ADMIN_TABS = [
   { key: "models", label: () => S.settings.tabModels },
   { key: "members", label: () => S.settings.tabMembers },
@@ -122,13 +122,13 @@ export const ADMIN_TABS = [
   { key: "deployment", label: () => S.settings.tabDeployment },
 ] as const;
 
-/** 一个源授权给了哪些工作区（0014）。
+/** Which workspaces a source is authorized for (0014).
  *
- * **授权与挂载是两层**：这里说「这个源可以给谁用」，KB 管理员再在授权过的
- * 集合里挑挂不挂。从前没有这一层——可挂载列表返回全部署每一个源，于是任何
- * 库的管理员都能把任意生产库挂进自己库。
+ * **Authorization and mounting are two layers**: here we say 'who this source may be used by'; the KB admin then picks, among the authorized set, which to mount.
+ * Previously there was no such layer: the mountable list returned every source in the deployment, so the admin of any
+ * library could mount any production library into their own.
  *
- * 两层都是多对多：一个源可授权给多个工作区，一个工作区可拿到多个源。 */
+ * Both layers are many-to-many: one source can be authorized to many workspaces, and one workspace can get many sources. */
 function SourceGrants({ sourceId }: { sourceId: string }) {
   const queryClient = useQueryClient();
   const [picked, setPicked] = useState("");
@@ -156,8 +156,8 @@ function SourceGrants({ sourceId }: { sourceId: string }) {
   });
   const revoke = useMutation({
     mutationFn: (wsId: string) => api.revokeDataSource(sourceId, wsId),
-    // 卸了几个要说出来：收回授权会顺带断掉正在用的挂载，
-    // 悄悄断比断本身更糟
+    // Say how many were removed: revoking authorization also cuts off mounts in use,
+    // and a silent cut is worse than the cut itself
     onSuccess: (r) => {
       setNotice(S.settings.datasources.grantRevoked(r.unmounted));
       invalidate();
@@ -219,7 +219,7 @@ function SourceGrants({ sourceId }: { sourceId: string }) {
   );
 }
 
-/** 部署级配置：注册开关 + worker 并发。 */
+/** Deployment-level config: the registration switch + worker concurrency. */
 export function DeploymentAdmin() {
   const queryClient = useQueryClient();
   const dep = useQuery({
@@ -228,7 +228,7 @@ export function DeploymentAdmin() {
   });
   const [workers, setWorkers] = useState<number | null>(null);
   const shown = workers ?? dep.data?.worker_concurrency ?? 64;
-  // 按模型的并发：缺省值 + 每个在用模型的覆盖
+  // Per-model concurrency: a default value + an override for each model in use
   const [modelDefault, setModelDefault] = useState<number | null>(null);
   const shownDefault =
     modelDefault ?? dep.data?.default_model_concurrency ?? 10;
@@ -260,8 +260,8 @@ export function DeploymentAdmin() {
   const open = dep.data?.open_registration ?? true;
 
   return (
-    /* 一件事一张卡，与库设置同一副排法。改即生效的（注册开关、默认本体语言）
-       没有底栏——它们没有"保存"这一步；数字要按一下才算数的，按钮在底栏 */
+    /* One concern per card, with the same layout as library settings. Those that take effect immediately (the registration switch, the default ontology language)
+       have no footer: they have no 'save' step; numbers that only count after a press have their button in the footer */
     <div className="space-y-4">
       <SettingsCard title={S.settings.cardAccounts}>
         <Checkbox
@@ -273,8 +273,8 @@ export function DeploymentAdmin() {
         />
       </SettingsCard>
 
-      {/* 新建库的本体语言。**不是界面语言**——界面语言是每个人自己在账户菜单里选的，
-          根本不经过后端（docs/decisions/0004）。说明里必须把这句讲出来 */}
+      {/* The ontology language for newly created libraries. **Not the interface language**: the interface language is picked by each person in the account menu,
+          and never goes through the backend at all (docs/decisions/0004). The explanation must state this */}
       <SettingsCard
         title={S.settings.deployment.ontologyLang}
         hint={S.settings.deployment.ontologyLangHint}
@@ -321,8 +321,8 @@ export function DeploymentAdmin() {
         }
       />
 
-      {/* 按模型的并发才是真正的节流：约束来自供应商的速率限制，而那是按模型算的。
-          上面那个 worker 并发只是外层兜底，防任务无限堆积 */}
+      {/* Per-model concurrency is the real throttle: the constraint comes from the provider's rate limit, which is computed per model.
+          The worker concurrency above is only an outer fallback, to stop tasks from piling up without bound */}
       <SettingsCard
         title={S.settings.deployment.modelConcurrency}
         hint={S.settings.deployment.modelConcurrencyHint}
@@ -354,7 +354,7 @@ export function DeploymentAdmin() {
           </>
         }
       >
-        {/* 在用的模型各自一行：这一行的数字与按钮是这一行的事，不归底栏 */}
+        {/* Each model in use gets its own row: the numbers and buttons on this row belong to this row, not to the footer */}
         {!!dep.data?.models_in_use?.length && (
           <div className="divide-y divide-line">
             {dep.data.models_in_use.map((m) => {
@@ -376,9 +376,9 @@ export function DeploymentAdmin() {
                   <span className="text-ink-2 truncate hidden sm:inline">
                     {m.base_url}
                   </span>
-                  {/* 数字框与按钮包成一组，**和底栏那一组同一副几何**
-                      （w-16、gap-3）：右缘都顶到卡的内距，间距一差 4px，
-                      同一列上下两个框的左缘就错开，看着就是内距没对齐 */}
+                  {/* The number box and button are grouped, **with the same geometry as the group in the footer**
+                      (w-16, gap-3): both right edges reach the card's inner padding; if the spacing differs by 4px,
+                      the left edges of the two boxes in the same column misalign, and it looks like the padding is not aligned */}
                   <div className="ml-auto flex shrink-0 items-center gap-3">
                     <Input size="sm" className="u-input-plain w-16 u-num text-center"
                       type="number"
@@ -440,16 +440,16 @@ export function DeploymentAdmin() {
   );
 }
 
-/** 知识库管理（部署层）：全部库总览 + 新建（建库是管理动作，切换器只切换）。 */
+/** Library management (deployment level): an overview of all libraries + creating new ones (creating is an admin action; the switcher only switches). */
 
-/** 系统层数据源注册（问数）：凭据只进不出，列表只显示 host:port/db 摘要。 */
-/* ---- 每种引擎问什么，以及那些答案怎么拼成一条连接串 ----
+/** System-level data source registration (for query): credentials go in but never come out; the list only shows a host:port/db summary. */
+/* ---- What each engine asks for, and how those answers are assembled into one connection string ----
 
-   **人填的是字段，存的仍然是连接串。** 服务端一直按 scheme 认引擎（见
-   `query_engine::engine_from_conn`），所以这里只是把「写一条 URL」这件事
-   换成「填几格」——密码里的 @ 和 / 也不用人自己转义了。
+   **The person fills in fields, but what is stored is still a connection string.** The server has always identified the engine by scheme (see
+   `query_engine::engine_from_conn`), so here we just turn 'writing a URL' into
+   'filling in a few boxes': the @ and / in a password need not be escaped by hand either.
 
-   最后一档是原样的连接串：sslmode、附加参数这类写法拼不出来，得给行家留门。 */
+   The last tier is the verbatim connection string: forms like sslmode and extra parameters cannot be assembled, so leave a door open for experts. */
 type DsField = {
   key: string;
   label: string;
@@ -459,26 +459,26 @@ type DsField = {
 };
 type EngineSpec = {
   id: string;
-  /** 引擎名是专有名词，不翻译 */
+  /** Engine names are proper nouns and are not translated */
   label: string;
   fields: DsField[];
-  /** 从填好的几格拼出连接串。
+  /** Assemble the connection string from the filled-in boxes.
    *
-   * **拿到的是一张残缺的表**：`values` 里只有人真填过的那几格，刚换到一档
-   * 引擎时它可能是空的。所以每个 build 都必须容忍缺键——
-   * 类型写成 `Partial` 而不是 `Record<string, string>`，是因为后者是句假话：
-   * 索引签名声称取哪个键都是 string，于是 `v.conn.trim()` 编译得过、
-   * 一选中「连接串」就抛，整页换成错误屏（#573）。
-   * 其余几档当时没炸，只因为模板串把 `undefined` 安静地拼成了 "undefined"。 */
+   * **What it receives is an incomplete table**: `values` holds only the boxes a person has actually filled in; right after switching to a tier
+   * of engine it may be empty. So every build must tolerate missing keys:
+   * the type is written as `Partial` rather than `Record<string, string>`, because the latter is a lie:
+   * an index signature claims that any key yields a string, so `v.conn.trim()` compiles,
+   * and selecting 'connection string' throws, replacing the whole page with an error screen (#573).
+   * The other tiers did not blow up at the time, only because the template string quietly rendered `undefined` as "undefined". */
   build: (v: Partial<Record<string, string>>) => string;
 };
 
-/** 这两个助手**都收得下缺席的值**，因为表单本来就是一格一格填起来的：
- *  刚换到一档引擎时一格都没有。它们的函数体早就按这个写了（`enc` 缺值当空串、
- *  `auth` 用真值判断），只是签名一直写成 `string`，没把这件事说出来。
- *  #573 就是从这个缝里掉下去的。 */
+/** Both helpers **accept an absent value**, because the form is filled in one box at a time:
+ *  right after switching to a tier of engine, no box has a value. Their bodies were already written this way (`enc` treats a missing value as an empty string,
+ *  `auth` uses truthiness), but the signature always said `string`, and never made this explicit.
+ *  #573 fell through exactly this gap. */
 const enc = (v?: string) => encodeURIComponent(v ?? "");
-/** `user:pass@` 那一段：两处都可能为空（Trino 允许无密码） */
+/** `user:pass@` segment: both parts may be empty (Trino allows no password) */
 const auth = (user?: string, pass?: string) =>
   pass ? `${enc(user)}:${enc(pass)}@` : user ? `${enc(user)}@` : "";
 
@@ -514,8 +514,8 @@ export function dsSpecs(): EngineSpec[] {
     {
       id: "clickhouse",
       label: "ClickHouse",
-      // 用户与库都可以不填：不写用户就是服务器的 default，不写库就读所有非系统库。
-      // 端口 8443 / 443 服务端自己走 https，表单里不用再问一次
+      // Both user and database may be left blank: no user means the server's default, and no database means read all non-system databases.
+      // Port 8443 / 443 makes the server itself use https, so the form need not ask again
       fields: [
         { key: "host", label: D.fHost, placeholder: "ch.internal" },
         { key: "port", label: D.fPort, placeholder: "8123" },
@@ -523,7 +523,7 @@ export function dsSpecs(): EngineSpec[] {
         { key: "user", label: D.fUser, optional: true, placeholder: "default" },
         { key: "password", label: D.fPassword, optional: true, secret: true },
       ],
-      // 只填了密码就是 default 用户的密码：没有用户名，服务端不会把密码发出去
+      // A password alone is the password of the default user: with no user name, the server will not send the password out
       build: (v) =>
         `clickhouse://${auth(v.user || (v.password ? "default" : ""), v.password)}` +
         `${v.host}:${v.port || "8123"}` +
@@ -584,7 +584,7 @@ export function dsSpecs(): EngineSpec[] {
   ];
 }
 
-/** 登记一个数据源：选引擎、填几格、**存之前先试一次**。 */
+/** Register a data source: pick an engine, fill in a few boxes, and **try it once before saving**. */
 function NewDataSourceDialog({
   open,
   onOpenChange,
@@ -603,7 +603,7 @@ function NewDataSourceDialog({
   const filled = spec.fields.every((f) => f.optional || (values[f.key] ?? "").trim());
   const ready = !!name.trim() && filled;
 
-  // 试连不落库，所以换引擎、改字段之后上一次的结果就不作数了
+  // The trial connection saves nothing, so after switching engine or editing fields the previous result no longer counts
   const probe = useMutation({
     mutationFn: () => api.adminTestConnString(conn),
   });
@@ -615,8 +615,8 @@ function NewDataSourceDialog({
       onCreated();
     },
   });
-  // 对话框上一次只说一个结果：试连和新增各有自己的错误，两个都留着就是同一句话出现两次
-  // （#921）。改字段、换动作，前一个结果就不作数了
+  // The dialog shows only one result at a time: the trial and the add each have their own error; keeping both would show the same sentence twice
+  // (#921). Editing a field or switching the action makes the previous result no longer count
   const set = (key: string, v: string) => {
     probe.reset();
     create.reset();
@@ -632,7 +632,7 @@ function NewDataSourceDialog({
       width="lg"
       footer={
         <>
-          {/* 试连在左边：它不是"完成"，是完成之前的那一步 */}
+          {/* The trial connection sits on the left: it is not 'done', it is the step before done */}
           <Button variant="secondary" size="sm" className="mr-auto"
             disabled={!filled || probe.isPending}
             onClick={() => {
@@ -705,8 +705,8 @@ function NewDataSourceDialog({
           ))}
         </div>
 
-        {/* 拼出来的那条串给人看一眼——密码位打码。填错端口、库名多一个斜杠，
-            在这里一眼就看得出来，不必等到试连 */}
+        {/* The assembled string is shown for a glance, with the password masked. A wrong port, or an extra slash in the database name,
+            is obvious here at a glance, without waiting for the trial connection */}
         {engineId !== "raw" && filled && (
           <p className="truncate font-mono text-fine text-ink-2" title={maskConn(conn)}>
             {maskConn(conn)}
@@ -731,7 +731,7 @@ function NewDataSourceDialog({
   );
 }
 
-/** 回显时把密码位打码：`postgres://user:••••@host/db` */
+/** When echoing, mask the password segment: `postgres://user:••••@host/db` */
 function maskConn(conn: string): string {
   return conn.replace(/:\/\/([^:@/]*):([^@]*)@/, (_m, user: string) =>
     user ? `://${user}:••••@` : "://:••••@",
@@ -745,8 +745,8 @@ function DataSourcesAdmin() {
     queryFn: api.adminDataSources,
   });
   const [creating, setCreating] = useState(false);
-  // 授权是按工作区的，单租户部署里那一个工作区谁也没见过——所以它不占表里一列，
-  // 点「可用于」那一格才展开
+  // Authorization is per workspace; in a single-tenant deployment nobody has seen that one workspace, so it does not take a column in the table,
+  // and expands only when the 'available to' cell is clicked
   const [grantsFor, setGrantsFor] = useState<DataSourceView | null>(null);
   const invalidate = () =>
     queryClient.invalidateQueries({ queryKey: ["dataSources"] });
@@ -764,7 +764,7 @@ function DataSourcesAdmin() {
 
   return (
     <div className="space-y-4">
-      {/* 登记在名单上面、靠右：动作在内容之前 */}
+      {/* The registration sits above the list, on the right: actions come before content */}
       <div className="flex items-start gap-4">
         <p className="min-w-0 flex-1 text-small text-ink-2">
           {S.settings.datasources.hint}
@@ -869,8 +869,8 @@ function DataSourcesAdmin() {
   );
 }
 
-/** 表里那一格：授权给了谁。点它展开授权面板——**没授权要看得见**，
-    那条源谁也挂不上，而这是它唯一说得出口的地方 */
+/** The cell in the table: who it is authorized to. Clicking it expands the authorization panel. **Being unauthorized must be visible**,
+    *  since such a source cannot be mounted by anyone, and this is the only place that can say so */
 function GrantsCell({
   sourceId,
   onOpen,
@@ -883,7 +883,7 @@ function GrantsCell({
     queryFn: () => api.dataSourceGrants(sourceId),
   });
   const names = (grants.data?.workspaces ?? []).map((w) => w.name);
-  // 没授权是个要紧的状态（谁也挂不上它），用警示胶囊；授权过的只是一句事实
+  // Unauthorized is a serious state (no one can mount it), so it uses a warning pill; an authorized one is only a plain fact
   return names.length === 0 ? (
     <Chip tone="warn" onClick={onOpen}>
       {S.settings.datasources.grantsNoneShort}
@@ -933,9 +933,9 @@ const PRESETS: Record<
 
 export function Settings() {
   const { workspace } = useKb();
-  /* 人在哪一节，**地址说了算**：左栏第二层是一组 Link（见 AccountShell），
-     刷新、回退、把链接发给同事都落回同一节。从前这里另存一份 state，
-     于是地址与页面各说各的 */
+  /* Which section the person is in is decided by **the address**: the second level of the left column is a set of Links (see AccountShell),
+     so refresh, back, and sending the link to a colleague all land on the same section. Previously a separate state was kept here,
+     so the address and the page each said something different */
   const { tab: tabParam } = useSearch({ from: "/account/admin" });
   const tab = tabParam ?? "models";
   if (!workspace)
@@ -955,7 +955,7 @@ function WorkspaceSettings({ workspaceId, tab }: { workspaceId: string; tab: str
   const form = { ...saved, ...drafts.chat, ...drafts.embed, ...drafts.ocr, ...drafts.transcribe };
   type Fields = typeof form;
 
-  // 对话和嵌入共用整体替换的 PUT：邻卡字段取服务端已保存值，密钥只传当前卡的。
+  // Chat and embedding share a PUT that replaces the whole thing: neighboring card fields take the server's saved values, and the key is sent only for the current card.
   const sharedFields = {
     chat_base_url: saved.chat_base_url,
     chat_model: saved.chat_model,
@@ -1015,13 +1015,13 @@ function WorkspaceSettings({ workspaceId, tab }: { workspaceId: string; tab: str
     model: form.transcribe_model,
   }, api.saveTranscribeSettings);
   const saves = { chat: saveChat, embed: saveEmbed, ocr: saveOcr, transcribe: saveTranscribe };
-  // 等保存后的回读完成，下一张卡才会拿到 PUT 所需的最新基线。
+  // Only after the read-back following the save completes does the next card get the latest baseline that the PUT needs.
   const canSave = settings.isSuccess && !settings.isFetching
     && !Object.values(saves).some((save) => save.isPending);
 
-  /* 四张卡各测各的，一张一个 mutation（#1424）：从前四张共用一次测试，按任意一张四套一起测，
-     还得另记一个"是哪张按的"才能只让那一张转"Testing…"（#698）。分开以后测一张，
-     别的卡上还作数的结论不受影响 */
+  /* The four cards each test their own, one mutation per card (#1424): previously the four shared one test, and pressing any one tested all four together,
+     and one still had to record 'which one was pressed' so that only that one spun 'Testing…' (#698). Now testing one tests only that one,
+     and conclusions still valid on the other cards are unaffected */
   const useCardTest = (card: ModelCard) =>
     // eslint-disable-next-line react-hooks/rules-of-hooks
     useMutation({ mutationFn: () => api.testSettings(workspaceId, card) });
@@ -1034,7 +1034,7 @@ function WorkspaceSettings({ workspaceId, tab }: { workspaceId: string; tab: str
   const editCard = (card: ModelCard, fields: ModelDraft) => {
     tests[card].reset();
     for (const save of Object.values(saves)) {
-      // 编辑可以让旧备注失效，但要继续跟踪尚未完成的保存。
+      // Editing may invalidate the old note, but we must keep tracking a save that has not yet finished.
       if (!save.isPending) save.reset();
     }
     setDrafts((current) => ({ ...current, [card]: { ...current[card], ...fields } }));
@@ -1054,8 +1054,8 @@ function WorkspaceSettings({ workspaceId, tab }: { workspaceId: string; tab: str
 
   const label = "block text-small font-medium text-ink-2 mb-1";
 
-  /* 两张卡的备注：新测到的盖掉旧保存态，测挂了（连接口都没通）也不再
-     悄悄退回"Saved"或空白——从前请求本身失败时卡上什么都不说（#698） */
+  /* The notes on the two cards: a newly arrived test result overrides the old saved state; a failed test (even if the connection could not be made at all) also no longer
+     quietly falls back to 'Saved' or blank: previously, when the request itself failed, the card said nothing (#698) */
   const testTransportError = (card: keyof typeof tests) =>
     tests[card].error ? (tests[card].error as Error).message : null;
   const chatStatus = modelCardStatus(
@@ -1120,8 +1120,8 @@ function WorkspaceSettings({ workspaceId, tab }: { workspaceId: string; tab: str
       dirty: drafts.transcribe !== undefined,
     },
   );
-  /* 备注的画法四张卡共用：成功走 ok 色、失败走 danger 色——从前成功是中性 accent、
-     嵌入卡的报错还是正文字色，与本页数据源那节的 ok/danger 不一致（#698） */
+  /* The note's styling is shared by all four cards: success uses the ok color, failure uses the danger color. Previously success was neutral accent,
+     and the embedding card's errors were body-text colored, inconsistent with the ok/danger on this page's data sources section (#698) */
   const cardNote = (s: ModelCardStatus) =>
     s.kind === "idle" ? undefined : s.kind === "saved" ? (
       S.settings.saved
@@ -1130,16 +1130,16 @@ function WorkspaceSettings({ workspaceId, tab }: { workspaceId: string; tab: str
     ) : (
       <span className={`${s.tone} whitespace-pre-line`}>{s.text}</span>
     );
-  /* 读取模型那两张卡存完多说一句：等着它的文件开始读了几份 */
+  /* On the two model cards that read files, add one more line after saving: how many files it has started reading for the pending job */
   const readerNote = (s: ModelCardStatus, requeued: number | undefined) =>
     s.kind === "saved" && requeued ? S.settings.savedRequeued(requeued) : cardNote(s);
 
   return (
     <div className="h-full overflow-y-auto u-scroll px-8 py-6">
-      {/* 同 KbSettings：设置是读一列字段，居中限宽，行长不随窗口拉长 */}
+      {/* As with KbSettings: settings are a column of fields, centered with a width limit; line length does not stretch with the window */}
       <div className="mx-auto w-full max-w-4xl">
-        {/* 标题是这一节的名字，不是「Administration」——左栏已经说了人在
-            管理区，页顶再说一遍等于每一节的标题都一样 */}
+        {/* The title is the name of this section, not 'Administration': the left column already says the person is in the admin area,
+            and repeating it at the top of the page would make every section's title the same */}
         <PageHeader
           title={ADMIN_TABS.find((t) => t.key === tab)?.label() ?? S.settings.title}
         />
@@ -1162,7 +1162,7 @@ function WorkspaceSettings({ workspaceId, tab }: { workspaceId: string; tab: str
               </div>
             )}
 
-            {/* 预设一按填满两张卡的字段：它不是设置本身，所以在卡外面 */}
+            {/* The preset that fills both cards' fields with one press: it is not a setting itself, so it sits outside the cards */}
             <div className="flex flex-wrap gap-2">
               {Object.entries(PRESETS).map(([name, p]) => (
                 <Pill
@@ -1221,9 +1221,9 @@ function WorkspaceSettings({ workspaceId, tab }: { workspaceId: string; tab: str
                   </div>
                   <div>
                     <label className={label}>{S.settings.reasoningEffort}</label>
-                    {/* 推理模型默认边想边答，抽取一次调用九成的输出是思考。每一种调用都用这一个值；
-                        哪个值关得掉思考看端点（有的认 minimal，有的只认 none）。
-                        小而有界的枚举：Dropdown（web/DESIGN.md 规矩 5，页面上没有原生 select） */}
+                    {/* Reasoning models answer while thinking by default; for extraction, about 90% of a call's output is thinking. Every kind of call uses this one value;
+                        which value turns thinking off depends on the endpoint (some accept minimal, some accept only none).
+                        A small bounded enumeration: Dropdown (web/DESIGN.md rule 5; the page has no native select) */}
                     <Dropdown
                       className="w-full"
                       value={form.chat_reasoning_effort}
@@ -1318,8 +1318,8 @@ function WorkspaceSettings({ workspaceId, tab }: { workspaceId: string; tab: str
               </div>
             </SettingsCard>
 
-            {/* 读取模型：扫描件、图片、录音（0040）。跟上面两张分开讲，因为它们只在
-                那几类文件上用得到，没配也不影响别的——文件等着，消息中心会说 */}
+            {/* Read-file models: scanned documents, images, recordings (0040). Explained separately from the two cards above, because they are only used for those file types;
+                if they are not configured, other things are not affected: the file waits, and the message center will say so */}
             <h2 className="pt-4 text-title text-ink">{S.settings.readersTitle}</h2>
             <p className="text-body text-ink-2">{S.settings.readersIntro}</p>
 
@@ -1347,9 +1347,9 @@ function WorkspaceSettings({ workspaceId, tab }: { workspaceId: string; tab: str
               }
             >
               <div className="space-y-3">
-                {/* 两种协议（0065）：MinerU 交任务再问，方舟把每页送给视觉模型。换一种就是换一家
-                    服务，地址、密钥、模型都不通用，所以切换时整张卡清空重填；服务端也不会把
-                    旧密钥带到新供应商 */}
+                {/* Two protocols (0065): MinerU takes the job and then polls, Ark sends each page to a vision model. Switching to the other is switching to another provider;
+                    the address, key and model do not carry over, so the whole card is cleared and refilled on switch; the server also will not carry
+                    the old key over to the new provider */}
                 <div>
                   <label className={label}>{S.settings.readerProvider}</label>
                   <Dropdown

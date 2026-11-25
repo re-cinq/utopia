@@ -1,4 +1,4 @@
-/* 来源栏（"来源即文件夹"）：Library 与 DocViewer 共用的左侧导航。 */
+/* The sources rail ("a source is a folder"): the left-side navigation shared by Library and DocViewer. */
 import type { SourceKind } from "../sourceKinds";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -36,11 +36,11 @@ import { api, type SourceView } from "../api";
 import { S } from "../i18n";
 import { RAIL_CLS, RailItem } from "../ui";
 
-/** 左栏选择：全部 / 手动上传 / 某个来源 id */
-/** "deleted" = 墓碑视图（#268）：删了、还能恢复或清除的文档 */
+/** Left column selection: all / manual upload / a particular source id */
+/** "deleted" = tombstone view (#268): documents that were deleted but can still be restored or purged */
 export type LibrarySelection = "all" | "uploads" | "deleted" | string;
 
-/** 可选的来源图标（lucide 图标名 → 组件）。 */
+/** Optional source icons (lucide icon name → component). */
 export const SOURCE_ICONS: Record<string, LucideIcon> = {
   "folder-open": FolderOpen,
   globe: Globe,
@@ -63,7 +63,7 @@ export const SOURCE_ICONS: Record<string, LucideIcon> = {
   users: Users,
 };
 
-// 按 SourceKind 键全：加一种来源没配图标，tsc 就红
+// The map is keyed fully by SourceKind: adding a kind of source without an icon turns tsc red
 export const KIND_ICON: Record<SourceKind, LucideIcon> = {
   folder: FolderOpen,
   url: Globe,
@@ -86,7 +86,7 @@ export const KIND_ICON: Record<SourceKind, LucideIcon> = {
   upload: Upload,
 };
 
-/** 有拉取/同步语义的来源类型（folder/api 无同步概念） */
+/** Source types with pull/sync semantics (folder/api have no sync concept) */
 export const SYNCING_KINDS = new Set([
   "url",
   "rss",
@@ -113,7 +113,7 @@ export const SYNC_DOT: Record<SourceView["last_sync_status"], string> = {
 };
 
 export function sourceIcon(s: SourceView): LucideIcon {
-  // 内置类型图标固定，只有 custom 尊重用户自选图标
+  // Built-in type icons are fixed; only custom respects the icon the user picked
   if (s.kind === "custom" && s.icon && SOURCE_ICONS[s.icon]) return SOURCE_ICONS[s.icon];
   return KIND_ICON[s.kind] || Globe;
 }
@@ -127,11 +127,11 @@ export function SourcesRail({
   kbId: string;
   active: LibrarySelection | null;
   onSelect: (sel: LibrarySelection) => void;
-  /** 缺省时隐藏 "+"（如文档查看页） */
+  /** Hide the "+" by default (e.g. on the document view page) */
   onAdd?: () => void;
 }) {
-  // 左栏只要两个数：整库多少篇、没有来源的多少篇。**各取一页零条**——
-  // 统计随响应回来，不必把文档拉下来数
+  // The left column only needs two numbers: how many documents in the whole library, and how many have no source. **Each takes a page of zero rows**:
+  // the counts come back with the response, so there is no need to pull documents down and count them
   const docs = useQuery({
     queryKey: ["docCount", kbId],
     queryFn: () => api.documents(kbId, { limit: 1, offset: 0 }),
@@ -150,8 +150,8 @@ export function SourcesRail({
 
   return (
     <aside className={`${RAIL_CLS} flex flex-col`}>
-      {/* 全部文档置顶为一级入口。**不带计数**：它是总数，下面各行已经说了
-          文档都在哪，这个数只是装饰 */}
+      {/* All documents pinned at the top as the first-level entry. **No count**: it is the total, and the rows below already say
+          where the documents are; this number would be pure decoration */}
       <div className="px-2 pt-3">
         <RailItem
           active={active === "all"}
@@ -161,9 +161,9 @@ export function SourcesRail({
           {S.library.allDocs}
         </RailItem>
       </div>
-      {/* 新建来源是一行，与 Chat 的「New chat」、本体页的「New class」同一个
-          语汇：加号在图标槽里，行本身与周围的行同一副样子——这一栏从头到尾只有
-          一种东西。没有 onAdd 的页面（文档查看页）不渲染这一行 */}
+      {/* Creating a new source is a row, with the same vocabulary as Chat's 'New chat' and the ontology page's 'New class':
+          the plus sign sits in the icon slot; the row itself looks the same as the rows around it: this rail has only one kind of thing from start to finish.
+          Pages without onAdd (the document view page) do not render this row */}
       {onAdd && (
         <div className="px-2 pt-1">
           <RailItem icon={<Plus size={14} />} onClick={onAdd}>
@@ -172,7 +172,7 @@ export function SourcesRail({
         </div>
       )}
       <div className="u-rail-list u-scroll flex-1 overflow-y-auto px-2 pt-1 pb-3">
-        {/* Uploads：常驻默认来源（上传的默认去处，不可删除） */}
+        {/* Uploads: a permanent default source (the default destination for uploads; cannot be deleted) */}
         <RailItem
           active={active === "uploads"}
           onClick={() => onSelect("uploads")}
@@ -201,7 +201,7 @@ export function SourcesRail({
           );
         })}
       </div>
-      {/* 已删除（#268）：墓碑在这里等着被恢复或清除。一个都没有就不占一行 */}
+      {/* Deleted (#268): tombstones wait here to be restored or purged. When there are none, it takes no row */}
       {((docs.data?.deleted ?? 0) > 0 || active === "deleted") && (
         <div className="px-2 pb-3">
           <RailItem
