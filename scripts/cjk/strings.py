@@ -4,10 +4,12 @@ it, and swaps it in. The translator only returns {id: english}; this script edit
 usage: strings.py extract PATH...            writes tasks as JSON to stdout
        strings.py check TASKS.json TRANSLATIONS.json   reports problems, edits nothing
        strings.py apply TASKS.json TRANSLATIONS.json
+       strings.py verify BASE_REV PATH...           only string text may differ from BASE_REV
 """
 
 import json
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,6 +94,15 @@ def apply_translation(line: str, target: Target, english: str) -> str:
     return line[: target.start] + english + line[target.end :]
 
 
+def changed_beyond_strings(before_lines: list[str], after_lines: list[str]) -> list[int]:
+    """Changed lines where more than the text inside the string literals differs."""
+    return [
+        number
+        for number, (old, new) in enumerate(zip(before_lines, after_lines), start=1)
+        if old != new and STRING_LITERAL.sub('""', old) != STRING_LITERAL.sub('""', new)
+    ]
+
+
 def message_tasks(path: str, lines: list[str]) -> list[dict]:
     in_code = lines_starting_in_code(lines, is_rust_path(path))
     tasks = []
@@ -144,8 +155,23 @@ def apply_all(tasks: list[dict], translations: dict[str, str]) -> list[str]:
     return problems
 
 
+def verify(base_revision: str, paths: list[str]) -> int:
+    findings = []
+    for path in paths:
+        shown = subprocess.run(["git", "show", f"{base_revision}:{path}"], capture_output=True, text=True, check=True)
+        before, after = shown.stdout.split("\n"), Path(path).read_text().split("\n")
+        if len(before) != len(after):
+            findings.append(f"{path}: line count {len(before)} -> {len(after)}")
+            continue
+        findings += [f"{path}:{number}: more than a string changed" for number in changed_beyond_strings(before, after)]
+    print("\n".join(findings))
+    return 1 if findings else 0
+
+
 def main() -> int:
     command, *arguments = sys.argv[1:]
+    if command == "verify":
+        return verify(arguments[0], arguments[1:])
     if command == "extract":
         tasks = [
             task for path in arguments for task in message_tasks(path, Path(path).read_text().split("\n"))

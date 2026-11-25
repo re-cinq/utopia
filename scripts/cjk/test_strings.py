@@ -1,6 +1,6 @@
 import unittest
 
-from strings import apply_translation, message_target, message_tasks, placeholders_of, translation_problems
+from strings import apply_translation, changed_beyond_strings, message_target, message_tasks, placeholders_of, translation_problems
 
 
 def target_text(line):
@@ -105,6 +105,20 @@ class MessageTasks(unittest.TestCase):
             message_tasks("a.rs", ["fn f() {", '    x.context("抽取失败")?;']),
             [{"id": "a.rs:2", "path": "a.rs", "line": 2, "text": "抽取失败"}],
         )
+
+
+class ChangedBeyondStrings(unittest.TestCase):
+    def test_only_the_string_text_changed_is_fine(self):
+        self.assertEqual(changed_beyond_strings(['x.context("抽取失败")?;'], ['x.context("extraction failed")?;']), [])
+
+    def test_code_outside_the_string_changed_is_reported(self):
+        self.assertEqual(changed_beyond_strings(['x.context("抽取失败")?;'], ['y.context("extraction failed")?;']), [1])
+
+    def test_a_string_that_became_two_is_reported(self):
+        self.assertEqual(changed_beyond_strings(['x.context("抽取失败")?;'], ['x.context("a", "b")?;']), [1])
+
+    def test_unchanged_line_is_fine(self):
+        self.assertEqual(changed_beyond_strings(["let a = 1;"], ["let a = 1;"]), [])
 
 
 if __name__ == "__main__":
