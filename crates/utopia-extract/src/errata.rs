@@ -1,10 +1,10 @@
-//! 勘误 agent 的提示词与回复解析（0044 决定 7）：一份文档、本体的属性、从它读出的事实，
-//! 结构报了的带着理由；模型对每一条说 keep / retract / revise，全部答完才许 add。
-//! 撤、改、加都得引文档的原话——引文在不在文档里由调用方验，这里只认形状。
+//! Prompt and reply parsing for the errata agent (0044 decision 7): a document, the ontology's attributes, and the facts read from it;
+//! facts flagged by structure carry a reason; the model says keep / retract / revise for each one, and add is allowed only once all are answered.
+//! Retract, revise and add all need the document's exact words quoted; whether the quote is in the document is checked by the caller, here only the shape is checked.
 
 use utopia_llm::ChatMessage;
 
-/// 送去看的一条事实
+/// A fact sent for review
 #[derive(Debug, Clone)]
 pub struct ErrataFact<'a> {
     pub id: i64,
@@ -13,18 +13,18 @@ pub struct ErrataFact<'a> {
     pub property: &'a str,
     pub object: &'a str,
     pub object_class: Option<&'a str>,
-    /// 结构报的理由：domain / range / name_absent / no_date；空 = 抽样
+    /// Reasons flagged by structure: domain / range / name_absent / no_date; empty = sampled
     pub flag: Option<&'a str>,
     pub quote: Option<&'a str>,
 }
 
-/// 本体里的一条属性，给模型当词汇表
+/// An ontology attribute, given to the model as a vocabulary
 #[derive(Debug, Clone)]
 pub struct ErrataProperty<'a> {
     pub key: &'a str,
     pub label: &'a str,
     pub description: &'a str,
-    /// relation（宾语是东西）| attribute（宾语是值）
+    /// relation (the object is a thing) | attribute (the object is a value)
     pub kind: &'a str,
     pub domains: Vec<&'a str>,
     pub ranges: Vec<&'a str>,
@@ -99,7 +99,7 @@ pub fn build_errata_messages(
         .join("\n");
     let mut list = facts.iter().map(fact_line).collect::<Vec<_>>().join("\n");
     if list.is_empty() {
-        // 没有类型化事实的文档也送去看：清单为空，agent 只能加
+        // Documents with no typed facts are also sent for review: the list is empty, so the agent can only add
         list.push_str("(none yet: add what the document states plainly)");
     }
     vec![
@@ -114,7 +114,7 @@ pub fn build_errata_messages(
     ]
 }
 
-/// 模型对一条事实的说法
+/// The model's verdict on one fact
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Keep,
@@ -146,9 +146,9 @@ pub struct Addition {
 pub struct ErrataResponse {
     pub verdicts: Vec<FactVerdict>,
     pub additions: Vec<Addition>,
-    /// 形状不对的行：不认识的 id、重复的 id、撤改加没带引文、改了等于没改
+    /// Malformed rows: unknown id, duplicate id, retract/revise/add without a quote, revise that changes nothing
     pub malformed: usize,
-    /// 没把给它的事实答完就加的：加的全部不算（「先查完给它的，再加」是契约）
+    /// Add made before all given facts are answered: all adds are void ("answer all given facts, then add" is the contract)
     pub additions_refused: usize,
 }
 
@@ -161,7 +161,7 @@ fn text_of(v: Option<&serde_json::Value>) -> Option<String> {
     .filter(|s| !s.is_empty())
 }
 
-/// 解析勘误的回复。给出的事实一条一票，多的、错的计数不算；加的只在全部答完时算
+/// Parse the errata reply. Each given fact gets one vote; extra or wrong ones are not counted; adds count only when all are answered
 pub fn parse_errata_response(
     raw: &str,
     facts: &[ErrataFact<'_>],
@@ -247,8 +247,8 @@ pub fn parse_errata_response(
     Ok(out)
 }
 
-/// 第二票（撤改要两票）：agent 说撤或改的那几条再问一遍，只问「文档说了没有」。
-/// 第一票带着整份清单和结构的理由，容易顺着理由撤掉原文其实说了的事；第二票只看事实与原文
+/// Second vote (retract and revise need two votes): the facts the agent retracts or revises are asked again, only "does the document say so or not".
+/// The first vote carries the full list and the structural reasons, so it easily retracts something the source actually says by following the reasons; the second vote looks only at the fact and the source
 pub const CONFIRM_SYSTEM: &str = "You check facts against ONE document. For each numbered fact answer whether the document states it, \
 in its own words or in other words with the same meaning. Answer stated when the document supports the fact even if a name is \
 abbreviated or the wording differs; answer not_stated only when the document does not say it or says otherwise. \
@@ -272,7 +272,7 @@ pub fn build_confirm_messages(document: &str, facts: &[ErrataFact<'_>]) -> Vec<C
     ]
 }
 
-/// 第二票的回复：哪些 id 被判 not_stated。没答到的、答成别的都不算票——撤要两票齐，缺一票就留着
+/// Reply to the second vote: which ids are judged not_stated. Unanswered or differently answered ids are not votes: retract needs both votes, so a missing vote keeps the fact
 pub fn parse_confirm_response(
     raw: &str,
     ids: &[i64],
@@ -370,7 +370,7 @@ mod tests {
             Some("Acme is based in London")
         );
         assert_eq!(r.verdicts[1].verdict, Verdict::Keep);
-        // 重复的 0、不认识的 7、改了等于没改的、不是数组的：四条坏行
+        // Duplicate 0, unknown 7, revise that changes nothing, non-array: four bad rows
         assert_eq!(r.malformed, 4);
     }
 
@@ -410,7 +410,7 @@ mod tests {
         )
         .unwrap();
         assert!(r.contains(&0) && !r.contains(&1) && !r.contains(&7));
-        // 没答到的不算票
+        // Unanswered does not count as a vote
         assert!(parse_confirm_response(r#"{"c":[]}"#, &ids)
             .unwrap()
             .is_empty());

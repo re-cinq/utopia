@@ -1,24 +1,24 @@
-//! 时间提法的解读（0045 决定 2、3、8）：**模型读，代码算**。
+//! Reading time references (0045 decisions 2, 3, 8): **the model reads, the code computes**.
 //!
-//! 只返回结构化的字段，模型从不写一个算出来的日期：
+//! Only structured fields come back; the model never writes a computed date:
 //!
-//! **解读提法**（[`build_interpretation_messages`] / [`parse_interpretation_response`]）：
-//! 每条提法给形状、引用、粒度。绝对值按原文的字抄成数字部件；相对的说锚点（另一条
-//! 提法、文档本身、文档命名的期间）与偏移（数、单位、方向）；期间报名字。日历算术、
-//! 财年到区间、按粒度截断、形状蕴含的区间，全在服务端算。
+//! **Reading references** ([`build_interpretation_messages`] / [`parse_interpretation_response`]):
+//! each reference gives its shape, quote and granularity. Absolute values are copied from the source as numeric parts; relative ones name an anchor (another reference,
+//! the document itself, a period the document names) and an offset (number, unit, direction); periods name themselves. Calendar arithmetic,
+//! fiscal years to intervals, truncation by granularity, and intervals implied by a shape are all computed on the server.
 //!
-//! 文档自己的日期不再单独问一次模型：每块在抽取时报它那段文字写明的日期（0064）。
+//! The document's own dates are no longer asked of the model separately: each block reports the date its text states during extraction (0064).
 //!
-//! 代码里**没有时间词**（决定 8）：不认月份名、不认「去年」「上年末」，只解 JSON、验
-//! 部件范围、拼提示词。提示词是常量英文；例子是中性的（镇议会、桥、面包房），不出自
-//! 任何测量语料。
+//! The code has **no time words** (decision 8): it does not recognize month names or "last year" or "end of last year"; it only parses JSON, checks
+//! part ranges, and assembles prompts. The prompts are constant English; the examples are neutral (town council, bridge, bakery) and come from no
+//! measured corpus.
 //!
-//! 部件的键是短的：`y` 年、`m` 月、`d` 日、`h` 时、`min` 分、`s` 秒；只写原文说到的
-//! 部件（「2024 年」就是 `{"y": 2024}`）。细的部件必须带着粗的（有日必有月），这是
-//! 0024 的精度阶梯。
+//! Part keys are short: `y` year, `m` month, `d` day, `h` hour, `min` minute, `s` second; only the parts the source actually mentions are written
+//! (e.g. "2024" is `{"y": 2024}`). A finer part must come with the coarser ones (a day implies a month); this is
+//! the precision ladder of 0024.
 //!
-//! 解析逐项宽容：坏的条目计数，不毁整批；调用方**必须**把计数报出去（#108 那类错）。
-//! 截断的回复退到最后一个完整条目补括号，与 `open.rs` 同一套修补。
+//! Parsing is lenient per item: bad entries are counted and do not ruin the batch; the caller **must** report the count (the kind of bug in #108).
+//! A truncated reply falls back to the last complete entry and closes the brackets, using the same repair as `open.rs`.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -31,12 +31,12 @@ use utopia_llm::ChatMessage;
 use crate::open::repair_truncated_compact;
 use crate::{json_block, json_text};
 
-/// 原文说到的日期部件；只有原文写了的才是 `Some`。存成 JSONB 时用全名键
+/// Date parts the source mentions; `Some` only where the source wrote them. When stored as JSONB, full-name keys are used
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DateParts {
     pub year: i32,
-    /// 写明的年里的第几季度（「2025年第三季度」「Q3 2025」），1–4；有它就没有月。
-    /// 季度到月份是日历算术，归代码（0045 决定 2）：模型只抄「第三」这个数
+    /// The quarter within the year as written ("2025 Q3", "Q3 2025"), 1–4; if present there is no month.
+    /// Quarter-to-month is calendar arithmetic and belongs to code (0045 decision 2): the model only copies the number "third"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quarter: Option<u32>,
     pub month: Option<u32>,
@@ -47,8 +47,8 @@ pub struct DateParts {
 }
 
 impl DateParts {
-    /// 部件够到的那一级：有日就是日、只有年就是年。服务端拿它对照模型报的粒度——
-    /// 两者不合的提法进审核（记录「不做」的最后一条）
+    /// The finest level the parts reach: a day if there is a day, a year if only a year. The server compares it with the granularity the model reports;
+    /// references that disagree go to review (the last item of the "not done" list)
     pub fn granularity(&self) -> Granularity {
         if self.second.is_some() {
             Granularity::Second
@@ -66,7 +66,7 @@ impl DateParts {
     }
 }
 
-/// 只排版、不计算：`2011`、`2011-03`、`2011-03-04`、`2011-03-04 14:30`
+/// Formatting only, no calculation: `2011`, `2011-03`, `2011-03-04`, `2011-03-04 14:30`
 impl fmt::Display for DateParts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.year)?;
@@ -92,7 +92,7 @@ impl fmt::Display for DateParts {
     }
 }
 
-/// 文档命名的期间及其边界（「fiscal 2019」到 9 月 30 日；「2024年」作为报告年）
+/// A period the document names and its bounds ("fiscal 2019" to September 30; "2024 year" as the reporting year)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedPeriod {
     pub name: String,
@@ -100,17 +100,17 @@ pub struct NamedPeriod {
     pub to: DateParts,
 }
 
-/// 文档说到的一个日期，连它的名字和它管到哪（0064 决定 1）。抽取每一块时报上来，
-/// 服务端核对字在块里、算出它所在的标题路径，存在文档的时间语境里。
+/// A date the document states, with its name and what it governs (0064 decision 1). Reported with each block during extraction;
+/// the server checks the words are in the block, computes the heading path it sits under, and stores it in the document's time context.
 ///
-/// 一篇文档不止一个日期，哪个都不比别的大：提报日期、数据统计截止、生效日期各管各的事。
-/// 相对的时间词从哪天起算，看它所在的那一节里哪个 `now` 在管（[`now_in_force`]）
+/// A document can have more than one date, and none outranks the others: the reporting date, the data cutoff and the effective date each govern their own things.
+/// Relative time words are counted from whichever `now` governs the section they sit in ([`now_in_force`])
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeEntry {
-    /// `now`：文本说话的那一刻（电头、报告的提报日、会议的日期）；
-    /// `date`：文本给了名字的别的日期（截止、生效、期限）；`period`：命名的期间
+    /// `now`: the moment the text speaks from (dateline, report submission date, meeting date);
+    /// `date`: another date the text names (cutoff, effective date, deadline); `period`: a named period
     pub kind: String,
-    /// the label as written ("提报日期", "Data as of"); empty for a bare dateline
+    /// the label as written ("Date of report", "Data as of"); empty for a bare dateline
     pub name: String,
     /// the date words as written
     pub words: String,
@@ -126,11 +126,11 @@ pub struct TimeEntry {
     pub char_start: Option<i32>,
 }
 
-/// 块的正文里，这个字符位置之前还在管着的标题，由外到内。
+/// The headings still in force before this character position in the block's body, from outermost to innermost.
 ///
-/// 判据是结构的：行首连着的 `#` 是标题的级，同级或更深的旧标题被新标题顶掉。分块器让
-/// 每一块以它所在的标题开头，所以一块自己的正文就说得出它在哪一节——不靠块与块的先后，
-/// 块并行抽的时候照样成立（#588）
+/// The criterion is structural: a `#` run at the start of a line is the heading's level, and older headings of the same or deeper level are replaced by the new heading. The chunker makes
+/// each block start with the heading it sits under, so a block's own body can say which section it is in, without depending on the order of blocks;
+/// this holds even when blocks are extracted in parallel (#588)
 pub fn headings_at(text: &str, char_pos: usize) -> Vec<String> {
     let mut stack: Vec<(usize, String)> = Vec::new();
     let mut seen = 0usize;
@@ -180,8 +180,8 @@ pub fn headings_at(text: &str, char_pos: usize) -> Vec<String> {
     stack.into_iter().map(|(_, t)| t).collect()
 }
 
-/// 这个位置上管事的那个 `now`：所在的标题路径以它的范围开头的里面，范围最深的那个；
-/// 同一层有几个时取先说的。没有就是 `None`——相对的时间词锚不到，等着（0045 决定 4）
+/// The `now` in force at this position: among those whose heading path starts within its scope, the one with the deepest scope;
+/// if several are at the same level, the one stated first. If none, it is `None`: a relative time word has no anchor and waits (0045 decision 4)
 pub fn now_in_force<'a>(entries: &'a [TimeEntry], path: &[String]) -> Option<&'a TimeEntry> {
     let mut best: Option<&TimeEntry> = None;
     for e in entries.iter().filter(|e| e.kind == "now") {
@@ -195,8 +195,8 @@ pub fn now_in_force<'a>(entries: &'a [TimeEntry], path: &[String]) -> Option<&'a
     best
 }
 
-/// 抽取回复里的一条 `t`：`[kind, name, words, from, to]`。部件是照字抄的数字，出界的、
-/// 缺字的都是坏条目
+/// One `t` in an extraction reply: `[kind, name, words, from, to]`. Parts are numbers copied from the text; those out of range,
+/// or missing words, are bad entries
 pub fn time_entry(item: &Value) -> Option<TimeEntry> {
     let a = item.as_array()?;
     let text = |i: usize| a.get(i).and_then(Value::as_str).map(str::trim);
@@ -222,11 +222,11 @@ pub fn time_entry(item: &Value) -> Option<TimeEntry> {
     })
 }
 
-/// 文档自己的时间语境（决定 3）：从开头读出来、存在文档上、每块都带着
+/// The document's own time context (decision 3): read from the opening, stored on the document, carried by every block
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DocumentDating {
-    /// 抽取时各块报上来的日期（0064）：有它们就不再另问一次开头
+    /// Dates reported by each block during extraction (0064): when present, the opening is not asked about again
     pub entries: Vec<TimeEntry>,
     /// the document's own date as the text states it (a dateline, a filing date, a bulletin's
     /// reporting year); None when the text gives none
@@ -234,7 +234,7 @@ pub struct DocumentDating {
     /// the words that state it, verbatim (the server checks they occur in the opening)
     pub date_words: Option<String>,
     /// periods the document names with bounds it states ("fiscal 2027" with its end date;
-    /// "2024年" as a reporting year)
+    /// "2024 year" as a reporting year)
     pub periods: Vec<NamedPeriod>,
     /// (month, day) on which the document's fiscal year ends, when stated
     pub fiscal_year_end: Option<(u32, u32)>,
@@ -243,7 +243,7 @@ pub struct DocumentDating {
     pub skipped: usize,
 }
 
-/// 提法对它所定的陈述做了什么
+/// What the reference did to the statement it governs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Shape {
@@ -256,14 +256,14 @@ pub enum Shape {
     EndedUnknown,
 }
 
-/// 原文的字够到阶梯的哪一级（0024），与引用分开记
+/// How far the source's words reach on the ladder (0024), recorded separately from the quote
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Granularity {
     Year,
     Month,
-    /// 阶梯上没有「周」（0024）：说到周的提法（「上周」）落在日这一档。模型照字报 week，
-    /// 从前整条解释因此被当成坏条目丢掉，「上周」就永远没有日期
+    /// The ladder has no "week" (0024): a reference that mentions a week ("last week") falls to the day level. The model reports week as written;
+    /// before, the whole interpretation was discarded as a bad entry, so "last week" never got a date
     #[serde(alias = "week")]
     Day,
     Hour,
@@ -291,7 +291,7 @@ pub enum Direction {
     After,
 }
 
-/// 原文写的偏移：「two years later」= 2 年 after；「this quarter」= 0 quarter
+/// Offset as written: "two years later" = 2 years after; "this quarter" = 0 quarter
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Offset {
     pub count: i64,
@@ -330,7 +330,7 @@ pub enum Reference {
     None,
 }
 
-/// 一条提法的解读；存成 JSONB，服务端从它算区间
+/// The interpretation of one reference; stored as JSONB, the server computes intervals from it
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Interpretation {
     pub id: i64,
@@ -339,7 +339,7 @@ pub struct Interpretation {
     pub granularity: Granularity,
 }
 
-/// 送去解读的一条提法：编号、原文的字、所在的句子（模型靠句子挑锚点）
+/// A reference sent for interpretation: number, the words of the source, and the sentence it sits in (the model picks the anchor from the sentence)
 #[derive(Debug, Clone, Copy)]
 pub struct MentionInput<'a> {
     pub id: i64,
@@ -347,7 +347,7 @@ pub struct MentionInput<'a> {
     pub sentence: &'a str,
 }
 
-/// 进提示词的时间语境：[`DocumentDating`] 的借用视图
+/// Dating context for the prompt: a borrowed view of [`DocumentDating`]
 #[derive(Debug, Clone, Copy)]
 pub struct TimeContext<'a> {
     pub date: Option<&'a DateParts>,
@@ -356,7 +356,7 @@ pub struct TimeContext<'a> {
     pub fiscal_year_end: Option<(u32, u32)>,
 }
 
-/// 解读提法的系统消息。形状各一行；引用是字面说的，不是它蕴含的；从不计算
+/// System message for reading references. Each shape on its own line; a quote is what is said literally, not what it implies; never compute
 const INTERPRETATION_SYSTEM: &str = "\
 You interpret the time expressions of a document. Each mention is given with its id, its words \
 exactly as written and the sentence it occurs in; before them, the document's own time context: \
@@ -425,7 +425,7 @@ a second shop.\"]:\n\
  [4, \"point\", {\"kind\": \"anchored\", \"anchor\": {\"kind\": \"mention\", \"id\": 3}, \"offset\": {\"count\": 2, \"unit\": \"year\", \"direction\": \"after\"}}, \"year\"],\n\
  [5, \"point\", {\"kind\": \"anchored\", \"anchor\": {\"kind\": \"document\"}, \"offset\": {\"count\": 1, \"unit\": \"year\", \"direction\": \"before\"}}, \"year\"]]}";
 
-/// 解读提法的两条消息：常量系统消息 + 语境块 + 提法清单（编号、原文的字、句子）
+/// Two messages for reading references: constant system message + context block + list of references (number, words of the source, sentence)
 pub fn build_interpretation_messages(
     context: &TimeContext<'_>,
     mentions: &[MentionInput<'_>],
@@ -475,8 +475,8 @@ pub fn build_interpretation_messages(
     ]
 }
 
-/// 先按常规取块解；解不开再从第一个 `{` 取到结尾，退到最后一个完整条目补括号
-/// （同 `open.rs`：紧凑回复的最后一个 `}` 不是可靠的结尾）
+/// Parse as usual first; if that fails, take from the first `{` to the end and back up to the last complete entry to close the brackets
+/// (as in `open.rs`: in a compact reply the last `}` is not a reliable end)
 fn reply_value(raw: &str, what: &str) -> anyhow::Result<Value> {
     let block = json_block(raw)
         .and_then(|b| serde_json::from_str::<Value>(&b).map_err(anyhow::Error::from));
@@ -494,7 +494,7 @@ fn reply_value(raw: &str, what: &str) -> anyhow::Result<Value> {
     }
 }
 
-/// 一个整数：JSON 数字，或模型偶尔写成字符串的数字
+/// An integer: a JSON number, or a number the model occasionally writes as a string
 fn int(v: &Value) -> Option<i64> {
     match v {
         Value::Number(n) => n.as_i64(),
@@ -503,7 +503,7 @@ fn int(v: &Value) -> Option<i64> {
     }
 }
 
-/// 可选的整数部件，带范围：缺或 null 是 `Some(None)`；有但出界或不是数是 `None`（坏）
+/// An optional integer part, with range: missing or null is `Some(None)`; present but out of range or not a number is `None` (bad)
 fn part(obj: &Value, key: &str, range: std::ops::RangeInclusive<i64>) -> Option<Option<u32>> {
     match obj.get(key) {
         None | Some(Value::Null) => Some(None),
@@ -514,8 +514,8 @@ fn part(obj: &Value, key: &str, range: std::ops::RangeInclusive<i64>) -> Option<
     }
 }
 
-/// 日期部件：`y` 必有；细的部件必须带着粗的（有日必有月），月 1–12、日 1–31、
-/// 时 0–23、分秒 0–59；出界就是坏条目
+/// Date parts: `y` is always required; a finer part must come with the coarser (a day implies a month); month 1–12, day 1–31,
+/// hour 0–23, minute and second 0–59; out of range is a bad entry
 fn parts(v: &Value) -> Option<DateParts> {
     if !v.is_object() {
         return None;
@@ -523,7 +523,7 @@ fn parts(v: &Value) -> Option<DateParts> {
     let year = i32::try_from(int(v.get("y")?)?).ok()?;
     let quarter = part(v, "q", 1..=4)?;
     let month = part(v, "m", 1..=12)?;
-    // 季度和月不同时写：写了季度就是说到季度为止
+    // Quarter and month are not written together: writing a quarter means the statement goes only as far as the quarter
     if quarter.is_some() && month.is_some() {
         return None;
     }
@@ -552,7 +552,7 @@ fn parts(v: &Value) -> Option<DateParts> {
     })
 }
 
-/// 可选的部件：缺或 null 是 `Some(None)`；有但坏是 `None`
+/// Optional part: missing or null is `Some(None)`; present but bad is `None`
 fn opt_parts(v: Option<&Value>) -> Option<Option<DateParts>> {
     match v {
         None | Some(Value::Null) => Some(None),
@@ -560,7 +560,7 @@ fn opt_parts(v: Option<&Value>) -> Option<Option<DateParts>> {
     }
 }
 
-/// 非空文字，去首尾空白
+/// Non-empty text, trimmed of leading and trailing whitespace
 fn text(v: &Value) -> Option<String> {
     v.as_str()
         .map(str::trim)
@@ -568,7 +568,7 @@ fn text(v: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// 枚举词：借 serde 的 snake_case 名认，大小写、空格与连字符都宽容（"As of" → as_of）
+/// Enum words: recognized by serde's snake_case names; case, spaces and hyphens are all tolerated ("As of" → as_of)
 fn word<T: DeserializeOwned>(v: &Value) -> Option<T> {
     let s = v
         .as_str()?
@@ -578,8 +578,8 @@ fn word<T: DeserializeOwned>(v: &Value) -> Option<T> {
     serde_json::from_value(Value::String(s)).ok()
 }
 
-/// 锚点：`{"kind": "mention", "id": N}` / `{"kind": "document"}` / `{"kind": "period", "name"}`；
-/// 光秃秃的 "document" 也认——只有它不带别的字段
+/// Anchor: `{"kind": "mention", "id": N}` / `{"kind": "document"}` / `{"kind": "period", "name"}`;
+/// a bare "document" is accepted too, when it carries no other field
 fn anchor(v: &Value) -> Option<Anchor> {
     let kind = match v {
         Value::String(s) => s.clone(),
@@ -598,7 +598,7 @@ fn anchor(v: &Value) -> Option<Anchor> {
     }
 }
 
-/// 偏移：数不为负（方向另说），单位与方向是枚举词
+/// Offset: the number is not negative (direction is separate); unit and direction are enum words
 fn offset(v: &Value) -> Option<Offset> {
     let count = int(v.get("count")?)?;
     if count < 0 {
@@ -618,7 +618,7 @@ fn opt_offset(v: Option<&Value>) -> Option<Option<Offset>> {
     }
 }
 
-/// 引用：按 `kind` 分四种；JSON null 当 none
+/// Reference: four kinds by `kind`; JSON null counts as none
 fn reference(v: &Value) -> Option<Reference> {
     if v.is_null() {
         return Some(Reference::None);
@@ -643,7 +643,7 @@ fn reference(v: &Value) -> Option<Reference> {
     }
 }
 
-/// 一条 `[id, shape, reference, granularity]`
+/// One `[id, shape, reference, granularity]`
 fn interpretation(v: &Value) -> Option<Interpretation> {
     let arr = v.as_array()?;
     Some(Interpretation {
@@ -654,8 +654,8 @@ fn interpretation(v: &Value) -> Option<Interpretation> {
     })
 }
 
-/// 解解读的回复：返回解开的解读与坏条目数。编号不在 `ids` 里的、同一编号第二次出现的
-/// 都算坏；截断的回复修补后少掉的条目不算坏——调用方拿 `ids` 对一下就知道谁没回来
+/// Parse the interpretation reply: returns the entries parsed and the count of bad entries. An id not in `ids`, or a second appearance of the same id,
+/// both count as bad; entries lost to a truncated reply's repair are not bad; the caller checks `ids` to see who did not come back
 pub fn parse_interpretation_response(
     raw: &str,
     ids: &[i64],
@@ -694,12 +694,12 @@ mod tests {
             headings_at(text, at("无。")),
             vec!["周报汇编", "第35周周报", "风险"]
         );
-        // 同级的新标题顶掉旧的，连同它下面更深的
+        // A new heading of the same level replaces the old one, along with the deeper ones under it
         assert_eq!(
             headings_at(text, at("上周开售")),
             vec!["周报汇编", "第36周周报"]
         );
-        // `#` 后面没有空白的不是标题（`#588`、`#标签`）
+        // A `#` with no whitespace after it is not a heading (`#588`, `#tag`)
         assert_eq!(
             headings_at("#588 是一个编号\n正文", 12),
             Vec::<String>::new()
@@ -745,7 +745,7 @@ mod tests {
                 .words,
             "2026年8月28日"
         );
-        // 别的节里的不管这里；退到整篇的那个
+        // Those in other sections are not our concern here; fall back to the one for the whole document
         assert_eq!(
             now_in_force(&entries, &path(&["汇编", "附录"]))
                 .unwrap()
@@ -761,10 +761,10 @@ mod tests {
         assert_eq!((q.year, q.quarter, q.month), (2025, Some(3), None));
         assert_eq!(q.granularity(), Granularity::Month);
         assert_eq!(q.to_string(), "2025-Q3");
-        // 季度和月不同时写；第五季度不存在
+        // Quarter and month are not written together; there is no fifth quarter
         assert!(parts(&serde_json::json!({"y": 2025, "q": 3, "m": 7})).is_none());
         assert!(parts(&serde_json::json!({"y": 2025, "q": 5})).is_none());
-        // 老数据里没有这一格：读回来是 None，写出去不带这一格
+        // Old data has no such cell: read back as None, and written out without this cell
         let old: DateParts = serde_json::from_value(serde_json::json!({
             "year": 2024, "month": 3, "day": null, "hour": null, "minute": null, "second": null
         }))
@@ -833,7 +833,7 @@ mod tests {
         assert_eq!(ymd(2019, 9, 30).granularity(), Granularity::Day);
     }
 
-    /// 四种引用、七种形状都在这一份回复里
+    /// Four kinds of reference and seven shapes all appear in this one reply
     const INTERPRETED: &str = r#"{"m": [
         [1, "point", {"kind": "absolute", "from": {"y": 2011, "m": 3, "d": 4}}, "day"],
         [2, "since", {"kind": "anchored", "anchor": {"kind": "document"}, "offset": {"count": 2, "unit": "year", "direction": "before"}}, "year"],
@@ -963,7 +963,7 @@ mod tests {
         );
     }
 
-    /// 坏形状、13 月、不在清单里的编号、重复的编号、坏单位各计一次；好的照收
+    /// Bad shape, month 13, an id not in the list, a duplicate id, a bad unit each count once; good ones are kept
     #[test]
     fn malformed_interpretation_items_are_counted_not_fatal() {
         let raw = r#"{"m": [
@@ -993,7 +993,7 @@ mod tests {
         assert_eq!(skipped, 7);
     }
 
-    /// 截在第三条中间：前两条留下，没有报错
+    /// Cut in the middle of the third entry: the first two stay, and no error is raised
     #[test]
     fn a_cut_off_interpretation_reply_keeps_the_complete_items() {
         let marker = r#"[3, "interval", {"kind": "period", "name": "fis"#;
@@ -1010,7 +1010,7 @@ mod tests {
         assert!(parse_interpretation_response("no", &[1]).is_err());
     }
 
-    /// 语料里的字样：提示词里一个都不许有（例子是镇议会、桥、面包房）
+    /// Corpus wording: none of it may appear in the prompt (the examples are town council, bridge, bakery)
     const CORPUS_MARKS: &[&str] = &[
         "NVIDIA",
         "Food and Drug",
@@ -1104,7 +1104,7 @@ mod tests {
         assert!(user.contains("fiscal year end: not stated"));
     }
 
-    /// 存成 JSONB 再读回来，一字不差
+    /// Stored as JSONB and read back, byte for byte
     #[test]
     fn interpretations_round_trip_through_serde() {
         let ids: Vec<i64> = (1..=11).collect();

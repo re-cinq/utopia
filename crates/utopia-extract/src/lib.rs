@@ -1,9 +1,9 @@
-//! utopia-extract：抽取用的提示词与解析。
+//! utopia-extract: prompts and parsing for extraction.
 //!
-//! 开放抽取（[`open`]）是唯一的抽取契约（0044 决定 2）：模型用文档自己的话写陈述，
-//! 不读本体、不算日期。这里留的是它借用的零件（已知实体的句柄、文件开头的预算、
-//! JSON 取块与补括号）、实体消解的攒批裁决，以及量与时间的读法——本体属性的采纳、
-//! 工具参数、连接器都用它们。
+//! Open extraction ([`open`]) is the only extraction contract (0044 decision 2): the model writes statements in the document's own words,
+//! without reading the ontology or computing dates. What lives here are the parts it borrows (handles of known entities, the file-opening budget,
+//! JSON block extraction and bracket closing), the batched entity-resolution verdicts, and the reading of quantities and times: adoption of ontology attributes,
+//! tool arguments and connectors all use them.
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use serde::Deserialize;
@@ -26,14 +26,14 @@ pub struct KnownEntity {
     pub name: String,
 }
 
-/// 文件开头进提示词的字符预算。一份补充协议的标题、生效日、当事方和「修订的是哪份
-/// 协议」通常在头一千字符里；新闻稿的电头与导语也是
+/// The character budget for the start of a file going into the prompt. A supplementary protocol's title, effective date, parties and "which protocol it amends"
+/// are usually within the first thousand characters; a press release's dateline and lead are too
 pub(crate) const OPENING_BUDGET_CHARS: usize = 1500;
 
-/// 文件开头排版成提示词里的一段。开头为空（或只有空白）时返回空串；
-/// 「这一块就是开头本身」由调用方判断，那时它传 `None`。
+/// Format the start of a file as a paragraph of the prompt. An empty start (or only whitespace) returns an empty string;
+/// "this block is the opening itself" is decided by the caller, which then passes `None`.
 ///
-/// 按字符截：不会截断一个字符，但会截在词中间——英文的最后一个词可能只剩半个
+/// Truncates by character: never cuts a character, but can cut mid-word, so an English file's last word may be left as half a word
 pub(crate) fn opening_block(opening: Option<&str>) -> String {
     let Some(text) = opening.map(str::trim).filter(|t| !t.is_empty()) else {
         return String::new();
@@ -53,21 +53,21 @@ pub(crate) fn opening_block(opening: Option<&str>) -> String {
     )
 }
 
-/// 已在本文档中出现过的实体，放进提示词的字符预算。
+/// Entities already mentioned in this document, put into the prompt's character budget.
 ///
-/// 超出就截断（保留先出现的）。中文商业文本先出全称、主角先出场，所以
-/// **首次出现顺序天然偏向那些后面会被简称的名字**。
+/// Truncates when over budget (keeping those that appeared first). Chinese business text gives the full name first and the protagonist first, so
+/// **first-appearance order naturally favors names that will later be shortened**.
 pub(crate) const KNOWN_BUDGET_CHARS: usize = 1200;
 
-/// 回复里可能是 JSON 的那段文字：切掉思考过程与代码围栏。前后的废话留给调用方按
-/// 括号定位——[`json_block`] 取第一个 `{` 到最后一个 `}`；开放抽取的截断修补则从
-/// 第一个 `{` 取到结尾，那边的记录是数组，最后一个 `}` 不是可靠的结尾
+/// The part of the reply's text that may be JSON: strip thinking and code fences. Chatter before and after is left to the caller to locate by brackets:
+/// bracket positioning: [`json_block`] takes the first `{` through the last `}`; open extraction's truncation repair instead takes from
+/// the first `{` to the end, since there the records are arrays and the last `}` is not a reliable end
 pub(crate) fn json_text(raw: &str) -> &str {
     let text = raw.trim();
-    // 推理模型的思考过程（#690）：`LlmClient::chat` 那边会先切，但取块这一层
-    // 自己认得标记才是最后的保障——`chat_tools` 那条路就不经过 `chat`。
-    // 不切的话，思考过程里的大括号会把下面"第一个 `{`"的起点提前，
-    // 而修补截断的逻辑认不出夹在中间的废话，整块直接作废。
+    // Reasoning models' thinking (#690): `LlmClient::chat` strips it first, but this block-extraction layer
+    // must recognize the markers itself to be the final safeguard, because the `chat_tools` path does not go through `chat`.
+    // Without stripping, braces inside the thinking would move the start of "the first `{`" earlier,
+    // and the truncation-repair logic cannot recognize the chatter sitting in between, so the whole block is voided.
     let text = match text.rfind("</think>") {
         Some(pos) => text[pos + "</think>".len()..].trim(),
         None => text,
@@ -78,7 +78,7 @@ pub(crate) fn json_text(raw: &str) -> &str {
         .unwrap_or(text)
 }
 
-/// 从 LLM 回复中稳健地取出 JSON 块（容忍代码围栏与前后废话）。
+/// Robustly extract the JSON block from an LLM reply (tolerating code fences and surrounding chatter).
 pub fn json_block(raw: &str) -> anyhow::Result<String> {
     let cleaned = json_text(raw);
     let start = cleaned.find('{');
@@ -89,9 +89,9 @@ pub fn json_block(raw: &str) -> anyhow::Result<String> {
     }
 }
 
-/// 把 head 后面缺的括号补上。字符串字面量里的括号不算——`"a[b"` 不是一个开括号。
+/// Append the missing brackets after head. Brackets inside string literals do not count: `"a[b"` is not an open bracket.
 ///
-/// 返回 None = 结构本身就不对（比如括号已经多了），不是"没写完"。
+/// Returns None = the structure itself is wrong (e.g., brackets already too many), not "not finished".
 pub(crate) fn close_brackets(head: &str) -> Option<String> {
     let mut stack: Vec<char> = Vec::new();
     let (mut in_str, mut esc) = (false, false);
@@ -109,8 +109,8 @@ pub(crate) fn close_brackets(head: &str) -> Option<String> {
         match c {
             '"' => in_str = true,
             '[' | '{' => stack.push(c),
-            // 不写成两条带守卫的分支：那样 stack.pop() 的副作用藏在守卫里，
-            // 碰巧是对的，但读的人不会预期守卫会改状态
+            // Not written as two guarded branches: that would hide the side effect of stack.pop() inside the guard,
+            // which happens to be right, but a reader would not expect a guard to change state
             ']' | '}' => {
                 let want = if c == ']' { '[' } else { '{' };
                 if stack.pop() != Some(want) {
@@ -121,7 +121,7 @@ pub(crate) fn close_brackets(head: &str) -> Option<String> {
         }
     }
     if in_str {
-        return None; // 断在字符串中间，这一截不可用
+        return None; // cut mid-string, this piece is unusable
     }
     let mut out = String::from(head);
     for c in stack.iter().rev() {
@@ -131,10 +131,10 @@ pub(crate) fn close_brackets(head: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// 实体消解裁决（攒批：一次调用裁多对，LLM 只处理 embedding 分不出的灰区）
+// Entity-resolution verdicts (batched: one call judges several pairs; the LLM only handles the gray zone that embeddings cannot separate)
 // ---------------------------------------------------------------------------
 
-/// 待裁决的一侧：名字 + 类型 + 事实摘要行。
+/// One side awaiting a verdict: name + type + fact summary line.
 #[derive(Debug, Clone)]
 pub struct AdjudicationSide {
     pub name: String,
@@ -146,18 +146,18 @@ pub struct AdjudicationSide {
 pub struct AdjudicationPair {
     pub left: AdjudicationSide,
     pub right: AdjudicationSide,
-    /// 这个库里的人对这一对、这个名字、这种类型对做过什么（0025）。空就不提
+    /// What people in this library have done on this pair, this name, or this type pairing (0025). Empty means not mentioned
     pub precedents: Vec<String>,
-    /// 这一对是**怎么**被提出来的，只在提议依据不是「同名」时写：名字向量召回（0041 第 2 刀）
-    /// 提的是两个**不同的字符串**，裁决器不知道这一点就会把「张伟」当成「财务部总监张伟」
-    /// 去掉限定词后的同一个人——测量台上那次错合就是这么来的。空就不提，同名对照旧
+    /// How the pair was proposed: written only when the proposal basis is not "same name": name-vector recall (0041, second cut)
+    /// It proposes two **different strings**; if the adjudicator does not know this, it would treat "Zhang Wei" as "finance director Zhang Wei",
+    /// the same person once the qualifier is removed. That wrong merge on the measurement bench came from exactly this. Empty means not mentioned; same-name pairs stay as before
     pub proposed_because: Option<String>,
 }
 
-/// 名字向量召回提的对，写成裁决器读得懂的一句提议依据；`cosine` 是召回记下的余弦文本
-/// （`utopia_core::review_reasons::name_vector_cosine` 从审核对的 reason 里取）。其余原因
-/// （同名灰区、同名并列、包含）都是「同一个字符串」的家族，裁决器的规则本来就是为它们写的，
-/// 传 None
+/// A pair proposed by name-vector recall, written as a proposal basis sentence the adjudicator can read; `cosine` is the cosine text recorded by recall
+/// (taken from the review pair's reason in `utopia_core::review_reasons::name_vector_cosine`). Other reasons
+/// (same-name gray zone, same-name tie, containment) all belong to the "same string" family, for which the adjudicator's rules were written,
+/// pass None
 pub fn proposed_because(cosine: Option<&str>) -> Option<String> {
     let cosine = cosine?;
     Some(format!(
@@ -173,7 +173,7 @@ pub struct AdjudicationVerdict {
     pub verdict: String,
     #[serde(default)]
     pub confidence: Option<f32>,
-    /// 一句理由；带先例的裁决要说依据了哪条
+    /// one sentence of reasoning; a verdict with precedent must say which precedent it relied on
     #[serde(default)]
     pub why: Option<String>,
 }
@@ -184,12 +184,12 @@ struct AdjudicationReply {
     verdicts: Vec<AdjudicationVerdict>,
 }
 
-/// 构造攒批裁决提示词。保守偏置：证据不足答 unsure（宁分勿合，合并要证据）。
-/// 身份规则（0025 第一轮迭代，2026-09-07）：攒批与工具循环两个提示词共用。
+/// Build the batched adjudication prompt. Conservative bias: insufficient evidence answers unsure (split rather than merge; merging needs evidence).
+/// Identity rules (0025 first iteration, 2026-09-07): shared by the batched and tool-loop prompts.
 ///
-/// 从 ai-timeline 真值上量出来的四种错：版本并进系列、「X 的 Y」并进 X、列表并进成员、
-/// 子公司并进母公司；以及同名被「类型标签不同」「合作伙伴不同」拆开。每一条都写成
-/// 一句规则加例子，例子取自那份语料。
+/// Four kinds of error measured against the ai-timeline ground truth: versions merged into the series, "X's Y" merged into X, lists merged into members,
+/// subsidiaries merged into the parent company; and same names split by "different type label" or "different partner". Each is written as
+/// one rule plus an example; the examples come from that corpus.
 pub const IDENTITY_RULES: &str = "\
 A record is one specific thing in the world: a person, an organization, a legal entity, a \
 product, one version of a product, a document, an event, a place, or a concept. Two records \
@@ -338,15 +338,15 @@ pub fn parse_adjudication(raw: &str) -> anyhow::Result<Vec<AdjudicationVerdict>>
     parse_adjudication_repairing(raw).map(|(verdicts, _)| verdicts)
 }
 
-/// 同 `parse_adjudication`，另回一个「修补过没有」。
+/// Same as `parse_adjudication`, but also returns whether it was repaired.
 ///
-/// 模型在引号里的理由中间直接换行——JSON 不许字符串里出现裸控制字符，serde
-/// 会报 `control character (\u0000-\u001F) found while parsing a string`。一批
-/// 几十对的裁决为一个换行整批作废、重试三次同样的回复再整批作废，队里的对
-/// 就一直挂着（Re-DocRED 一百篇上挂了 2903 条）。先按原样解；解不开就把字符串
-/// 字面量里的控制字符转义成 `\n`、`\t`、`\u00XX` 再解一次。字符串外的
-/// 换行本来就是合法空白，不动。修补与否只改 bool，裁决本身一样：形状好的回复
-/// 走第一条路，与从前没有分别。调用方拿到 true 就记一条 WARN 说明是哪一批
+/// The model writes a line break directly inside the quoted reason: JSON forbids bare control characters in strings, and serde
+/// reports `control character (\u0000-\u001F) found while parsing a string`. A batch
+/// of dozens of pairs is voided entirely by one line break; retrying the same reply three times voids the whole batch again, and the pairs in it
+/// stay queued forever (on 100 Re-DocRED documents, 2903 were stuck). Parse as-is first; if that fails, escape the control characters inside
+/// string literals as `\n`, `\t`, `\u00XX` and parse again. Line breaks outside strings
+/// are legal whitespace and left alone. The repair flag is only a bool, and the verdict is the same: a well-formed reply
+/// takes the first path, as before. A caller that gets true logs a WARN saying which batch it was.
 pub fn parse_adjudication_repairing(raw: &str) -> anyhow::Result<(Vec<AdjudicationVerdict>, bool)> {
     let json_str = json_block(raw)?;
     match serde_json::from_str::<AdjudicationReply>(&json_str) {
@@ -363,8 +363,8 @@ pub fn parse_adjudication_repairing(raw: &str) -> anyhow::Result<(Vec<Adjudicati
     }
 }
 
-/// 把字符串字面量里的裸控制字符（U+0000–U+001F）写成 JSON 转义；字面量外的原样。
-/// 引号与反斜杠的跟踪同 `close_brackets`：`\"` 不结束字符串
+/// Escape bare control characters (U+0000–U+001F) inside string literals as JSON escapes; outside literals they are kept as is.
+/// Quote and backslash tracking is the same as `close_brackets`: `\"` does not end the string
 pub(crate) fn escape_control_in_strings(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let (mut in_str, mut esc) = (false, false);
@@ -393,51 +393,51 @@ pub(crate) fn escape_control_in_strings(text: &str) -> String {
     out
 }
 
-/// 一个**整体就是一个量**的字符串 → (数值, 单位)。
+/// A string that is **entirely one quantity** → (value, unit).
 ///
-/// 判据从严：可选货币符号 + 数字 + 可选量级词 + 可选百分号，此外**一个词都不许有**。
-/// 尾巴上还挂着实词的，含义就不再只是那个数：
+/// Strict criteria: optional currency symbol + number + optional magnitude word + optional percent sign, and **no other word** is allowed.
+/// A word still attached at the tail makes the meaning no longer just that number:
 ///
 /// ```text
 /// "$5 billion"                        → (5e9, Some("$"))
 /// "52%"                               → (52.0, Some("%"))
 /// "3.5 million"                       → (3.5e6, None)
 /// "35,000"                            → (35000.0, None)
-/// "900 million weekly active users"   → None   后面还有实词
-/// "2025 Atlantic hurricane season"    → None   那是一场赛事，不是 2025
+/// "900 million weekly active users"   → None   a content word follows
+/// "2025 Atlantic hurricane season"    → None   that is an event, not 2025
 /// "8GW data center"                   → None
-/// "3M"                                → None   那是一家公司
+/// "3M"                                → None   that is a company
 /// ```
 ///
-/// **量级词只认全写**。单字母后缀（`3M`、`5k`、`2B`）看着省事，代价是把 3M、
-/// K2、B1 这些名字读成数字——一个真实体被读成量值，事实的形状就错了，
-/// 而错的那一头是不可逆的：节点没建，名字也没留下。
+/// **Magnitude words are recognized only in full.** Single-letter suffixes (`3M`, `5k`, `2B`) look convenient, but they read names like 3M,
+/// K2, B1 as numbers: a real entity gets read as a quantity, which makes the fact's shape wrong,
+/// and the wrong direction is irreversible: the node is never created and the name is not kept.
 ///
-/// **单位照抄符号，不猜币种。** `$` 可能是美元、加元、澳元，`¥` 可能是日元或
-/// 人民币。猜出来的 "USD" 是一条没人负责的断言，而原文写的 `$` 是事实。
+/// **Units are copied as the symbol; currency is not guessed.** `$` may be USD, CAD or AUD, and the yen sign may be JPY or
+/// CNY. A guessed "USD" is an assertion nobody is responsible for, while the `$` written in the source is the fact.
 pub fn parse_quantity(s: &str) -> Option<(f64, Option<String>)> {
     scan_quantity(s, true).map(|q| (q.n, q.unit))
 }
 
-/// 开头是一个量、后面还挂着词的 → 那个量。`"1,250 people"` → (1250, "people")。
+/// Starts with a quantity and has words after it → that quantity. `"1,250 people"` → (1250, "people").
 ///
-/// **这是给已经知道要什么的地方用的**，与 `parse_quantity` 的严不是一回事。
-/// `parse_quantity` 要判「这串字是不是一个东西」，判错就把一个真实体吃掉，
-/// 所以尾巴上有实词一律不认。而这里的调用方手上已经有一条声明了
-/// `datatype = number` 的属性——问的不再是「是不是数」，是「那个数是多少」，
-/// 判错的代价只是一个值不对，量级差着好几档。
+/// **This is for places that already know what they want**, and is not the same strictness as `parse_quantity`.
+/// `parse_quantity` must judge "is this string one thing", and a wrong judgement swallows a real entity,
+/// so any content word at the tail is rejected. The callers here already have an attribute declaring
+/// `datatype = number`; the question is no longer "is it a number" but "what is that number",
+/// and a wrong judgement only costs a wrong value, with magnitudes off by several orders.
 pub fn parse_leading_quantity(s: &str) -> Option<(f64, Option<String>)> {
     scan_quantity(s, false).map(|q| (q.n, q.unit))
 }
 
-/// 货币：符号、ISO 码、中英文单词，统一成符号。**只认这张表**，认不出的不猜。
+/// Currency: symbol, ISO code, English and Chinese words, all unified to a symbol. **Only this table is accepted**; anything unrecognized is not guessed.
 pub(crate) fn currency_unit(tok: &str) -> Option<&'static str> {
     Some(
         match tok.trim_matches(|c: char| c == ',' || c == '.' || c == ';') {
             "$" | "USD" | "usd" | "US$" | "dollar" | "dollars" | "美元" => "$",
             "€" | "EUR" | "eur" | "euro" | "euros" | "欧元" => "€",
             "£" | "GBP" | "gbp" | "pound" | "pounds" | "英镑" => "£",
-            // 中文排版的「￥」是全角的同一个符号
+            // The full-width yen sign (U+FFE5) used in Chinese typesetting is the same symbol
             "¥" | "￥" | "JPY" | "jpy" | "yen" | "日元" => "¥",
             "CNY" | "cny" | "RMB" | "rmb" | "yuan" | "人民币" | "元" | "元人民币" | "人民币元" => {
                 "¥"
@@ -450,7 +450,7 @@ pub(crate) fn currency_unit(tok: &str) -> Option<&'static str> {
     )
 }
 
-/// 量级词对应的十进制指数：英文全写，中文千/万/亿。**不认单字母**（`3M` 是一家公司）。
+/// Decimal exponents of magnitude words: English spelled out; Chinese thousand, ten-thousand and hundred-million. **Single letters are not recognized** (`3M` is a company).
 fn magnitude(tok: &str) -> Option<u8> {
     Some(match tok {
         "thousand" | "千" => 3,
@@ -464,9 +464,9 @@ fn magnitude(tok: &str) -> Option<u8> {
     })
 }
 
-/// 把 `2亿美元`、`15亿元人民币`、`€30 million`、`30 million euros`、`USD 30m`（不认 m）
-/// 这类写法拆成 [前缀货币] 数字 [量级] [后缀货币/单位] [其余]。
-/// `strict` = 整体必须就是一个量：其余部分非空就不认。
+/// Splits forms like `200 million USD`, `1.5 billion RMB`, `€30 million`, `30 million euros`, `USD 30m` (m not recognized)
+/// into [prefix currency] number [magnitude] [suffix currency/unit] [rest].
+/// `strict` = the whole must be exactly one quantity: if the rest is not empty it is not recognized.
 fn scan_quantity(s: &str, strict: bool) -> Option<Quantity> {
     let s = s.trim();
     if s.is_empty() {
@@ -478,7 +478,7 @@ fn scan_quantity(s: &str, strict: bool) -> Option<Quantity> {
         Some(b) => (b.trim_end(), true),
         None => (s, false),
     };
-    // 1. 前缀货币：符号紧贴，或 ISO 码/单词后跟空格
+    // 1. Prefix currency: the symbol touches the number, or an ISO code/word followed by a space
     let mut rest = body;
     let mut currency: Option<&'static str> = None;
     if let Some(c) = rest.chars().next() {
@@ -495,7 +495,7 @@ fn scan_quantity(s: &str, strict: bool) -> Option<Quantity> {
             }
         }
     }
-    // 2. 数字：前导的 [-+0-9.,_]，负号也可以是排版用的 U+2212
+    // 2. Number: leading [-+0-9.,_]; the minus sign may also be a typesetting U+2212
     let num_end = rest
         .char_indices()
         .find(|(_, c)| !matches!(c, '0'..='9' | '.' | ',' | '_' | '-' | '+' | '−'))
@@ -508,7 +508,7 @@ fn scan_quantity(s: &str, strict: bool) -> Option<Quantity> {
         .map(|c| if c == '−' { '-' } else { c })
         .collect();
     let mut n: f64 = cleaned.parse().ok()?;
-    // 3. 数字后面：紧贴或空格隔开的量级词、货币词，逐个吃；吃不动的就是「其余」
+    // 3. After the number: magnitude and currency words, attached or space-separated, are consumed one by one; whatever cannot be consumed is the "rest"
     let mut tail = after.trim_start();
     let mut unit: Option<String> = None;
     let mut ate_magnitude = false;
@@ -516,10 +516,10 @@ fn scan_quantity(s: &str, strict: bool) -> Option<Quantity> {
         if tail.is_empty() {
             break;
         }
-        // 取下一个记号：中文按字（量级/货币词最长两三个字），其它按空白分词
+        // Take the next token: Chinese by character (magnitude/currency words are at most two or three characters long), others split on whitespace
         let (tok, next) = next_token(tail);
         if !ate_magnitude {
-            // 标题里写成「$5 Billion」：量级词不分大小写，不然 5 billion 读成 5
+            // In headings written as "$5 Billion": magnitude words are case-insensitive, otherwise 5 billion would read as 5
             if let Some(m) = magnitude(&tok.to_ascii_lowercase()) {
                 // Parse the written decimal with its scale in one conversion. Multiplying
                 // an already rounded f64 needs an epsilon that can erase real fractions.
@@ -553,7 +553,7 @@ fn scan_quantity(s: &str, strict: bool) -> Option<Quantity> {
     if strict && !tail.is_empty() {
         return None;
     }
-    // 宽松：其余部分的第一个词当单位（`1,250 people` → people），没有货币时才用
+    // Loose: the first word of the rest is the unit (`1,250 people` → people); used only when no currency is present
     let unit = unit.or_else(|| (!tail.is_empty()).then(|| next_token(tail).0.to_string()));
     Some(Quantity {
         n,
@@ -562,9 +562,9 @@ fn scan_quantity(s: &str, strict: bool) -> Option<Quantity> {
     })
 }
 
-/// 财报的写法：括号里的数是负数。`(1,234)` → `-1,234`，`$(1.2) billion` → `$-1.2 billion`，
-/// `(12.5%)` → `-12.5%`。括号前只许有一个货币，括号里只许是数，括号后只许是量级词、
-/// 货币或 `%`：「(1) 1,200 employees」「(2024) 500」里的括号是编号和年份，不是负号
+/// Accounting notation: a number in parentheses is negative. `(1,234)` → `-1,234`, `$(1.2) billion` → `$-1.2 billion`,
+/// `(12.5%)` → `-12.5%`. Before the parenthesis only one currency is allowed, inside only a number, after only a magnitude word, currency or `%`:
+/// "(1) 1,200 employees" and "(2024) 500" have parentheses that are numbering and years, not a minus sign
 fn accounting_negative(s: &str) -> Option<String> {
     let (head, rest) = s.split_once('(')?;
     let (inner, after) = rest.split_once(')')?;
@@ -591,16 +591,16 @@ fn accounting_negative(s: &str) -> Option<String> {
     Some(format!("{head}-{}{after}", inner.trim()))
 }
 
-/// 读出来的一个量。`n` 已经乘上了量级词；`scaled` 记下原文写没写量级词——换算到属性
-/// 声明的单位时要知道 `5000` 是原文就这么写的数，还是 `5000万` 展开出来的
+/// A quantity read out. `n` has already been multiplied by the magnitude word; `scaled` records whether the source wrote a magnitude word. When converting to the attribute's
+/// declared unit we need to know whether `5000` is written that way in the source, or was expanded out of a form like `5000 ten-thousand`
 struct Quantity {
     n: f64,
     unit: Option<String>,
     scaled: bool,
 }
 
-/// 「约」「左右」这类只说数是个约数的词。去掉它们数还是那个数；「超过」「余」不在这里：
-/// 它们说的是一个界，把界当成值就是一条原文没说的断言
+/// Words like "about" and "around" that say the number is only approximate. Removing them leaves the same number; "over" and "more than" are not here:
+/// they state a bound, and treating the bound as a value is an assertion the source never made
 fn strip_approx(s: &str) -> &str {
     let mut s = s.trim();
     for p in [
@@ -618,7 +618,7 @@ fn strip_approx(s: &str) -> &str {
         "~",
         "≈",
     ] {
-        // 句首的「About 350」「Approximately 1,200」：英文的约数词不分大小写
+        // An approximation word at the start of a sentence, such as "About 350" or "Approximately 1,200": English approximation words are case-insensitive
         if s.get(..p.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(p))
         {
@@ -629,7 +629,7 @@ fn strip_approx(s: &str) -> &str {
     s.strip_suffix("左右").map_or(s, str::trim_end)
 }
 
-/// 计数的量词：`1200人`、`350名`、`32家`。数后面只跟这一个词的，整体还是一个数
+/// Counting classifiers: `1200 people`, `350 members`, `32 companies`. A number followed by just this word is still one number as a whole.
 const COUNTERS: &[&str] = &[
     "人",
     "名",
@@ -651,13 +651,13 @@ const COUNTERS: &[&str] = &[
     " staff",
 ];
 
-/// 一个宾语的名字是不是其实是个值：一个量（带量级词、货币、百分号或计数量词）或一个
-/// 写法说得清的日期。开放抽取里模型有时把「成立于 2015年3月12日」「注册资本为
-/// 5000万元」的值列成东西写进宾语，签名于是成了两样东西之间的关系，永远对不上属性。
+/// Whether an object's name is actually a value: a quantity (with a magnitude word, currency, percent sign or counting classifier) or a
+/// date with a clear format. In open extraction the model sometimes lists values such as "established on 2015-03-12" or "registered capital of
+/// 50 million yuan" as things in the object, so the signature becomes a relation between two things and never matches an attribute.
 ///
-/// **光秃秃的一个数只在它不是点了名的东西时才算值**：`1200` 是个数，而被点了名的
-/// `1984`、`360` 多半是一本书、一家公司——吃掉一个真实体是不可逆的，留一条数
-/// 在宾语上只是少绑一个属性
+/// **A bare number counts as a value only when it is not a named thing**: `1200` is a number, while named items like
+/// `1984` or `360` are most likely a book or a company. Swallowing a real entity is irreversible; leaving a number
+/// in the object only fails to bind an attribute
 pub fn literal_object(name: &str, named: bool) -> bool {
     let t = strip_approx(name);
     if t.is_empty() {
@@ -677,8 +677,8 @@ pub fn literal_object(name: &str, named: bool) -> bool {
     }
 }
 
-/// 下一个记号：ASCII 按空白切；CJK 试最长三字、两字、一字里能认出的量级/货币词，
-/// 都认不出就取到下一个空白为止
+/// Next token: ASCII is split on whitespace; for CJK try the longest three-, two-, then one-character magnitude/currency word that can be recognized,
+/// and if none can be recognized, take up to the next whitespace
 fn next_token(s: &str) -> (&str, &str) {
     let first = s.chars().next().unwrap_or(' ');
     if first.is_ascii() {
@@ -702,21 +702,21 @@ fn next_token(s: &str) -> (&str, &str) {
     (&s[..end], &s[end..])
 }
 
-/// 属性值按 datatype 归一。失败返回 None——宁缺勿脏，调用方跳过并记日志。
-/// number 容忍千分位/空格；date 收规则 3 的格式（YYYY[-MM[-DD]]、带时区的时刻，原样保留），
-/// 也收写法说得清是哪天的日期（[`written_date`]），换成规则 3 的样子；bool 宽容 yes/no。
+/// Normalize an attribute value by its datatype. Failure returns None — prefer missing to dirty; the caller skips it and logs.
+/// number tolerates thousands separators and spaces; date accepts rule 3's formats (YYYY[-MM[-DD]], a time with timezone, kept as is),
+/// and also accepts dates whose format makes the day clear ([`written_date`]), converting them to rule 3's form; bool accepts yes/no loosely.
 pub fn normalize_attr_value(datatype: &str, raw: &serde_json::Value) -> Option<serde_json::Value> {
     match datatype {
         "number" => match raw {
-            // 模型给的 JSON 数也过一遍 f64：`65` 与 "65%" 解出来的 `65.0` 是同一个数，
-            // 而 serde_json 把整数和浮点当两种值——实测同一条边上 65 撞 65.0 记成了冲突
+            // A JSON number from the model also goes through f64: `65` and "65%" parse to the same number `65.0`,
+            // whereas serde_json treats integers and floats as two kinds of value; on one edge 65 collided with 65.0 and was recorded as a conflict
             serde_json::Value::Number(n) => n
                 .as_f64()
                 .filter(|f| f.is_finite())
                 .and_then(serde_json::Number::from_f64)
                 .map(serde_json::Value::Number),
             serde_json::Value::String(s) => {
-                // 「约350名」：约数的那个字挡在数前面，宽的那套也解不动
+                // "about 350 members": the approximation word stands before the number, which the loose path also cannot handle
                 let s = strip_approx(s);
                 let cleaned: String = s
                     .chars()
@@ -725,12 +725,12 @@ pub fn normalize_attr_value(datatype: &str, raw: &serde_json::Value) -> Option<s
                 cleaned
                     .parse::<f64>()
                     .ok()
-                    // 清洗解不动的再当量解：`$5 billion`、`52%` 这些整体就是数，
-                    // 只是带着符号与量级词。单位不在这里落笔——它随事实走
-                    // （见 `parse_quantity`），这一档只负责把值变成可比的数
-                    // 清洗解不动的再当量解。**这一档已经声明了 datatype = number**，
-                    // 问的不是「是不是数」而是「那个数是多少」，所以用宽的那套：
-                    // `$5 billion` → 5e9，`1,250 people` → 1250，
+                    // Values cleaning cannot handle are parsed as quantities: `$5 billion` and `52%` are whole numbers,
+                    // only carrying a sign and a magnitude word. The unit is not decided here; it travels with the fact
+                    // (see `parse_quantity`); this tier only turns the value into a comparable number
+                    // Whatever cleaning cannot handle is parsed as a quantity. **This tier has already declared datatype = number**,
+                    // so the question is not "is it a number" but "what number is it", so the broad path is used:
+                    // `$5 billion` → 5e9, `1,250 people` → 1250,
                     // `42% from customers in Europe` → 42
                     .or_else(|| parse_leading_quantity(s).map(|(n, _)| n))
                     .filter(|f| f.is_finite())
@@ -739,8 +739,8 @@ pub fn normalize_attr_value(datatype: &str, raw: &serde_json::Value) -> Option<s
             }
             _ => None,
         },
-        // 按规则 3 写的原样留着（精度随写了几位，带时区的时刻也在内）；写成别的样子、又读得
-        // 出来的日期（#688）换成规则 3 的样子——同一天只该有一种写法，比较和去重才对得上
+        // Dates written in rule 3's form are kept as is (precision follows how many digits are written, and time-of-day with timezone too); dates written in another form that can still be read
+        // (#688) are converted to rule 3's form, so the same day has only one form and comparison and dedup can match
         "date" => {
             let s = raw.as_str()?.trim();
             match written_date(s) {
@@ -772,12 +772,12 @@ pub fn normalize_attr_value(datatype: &str, raw: &serde_json::Value) -> Option<s
     }
 }
 
-/// 一条开放陈述的值落到一个属性上：按属性的 datatype 归一，数再换算到属性声明的单位。
+/// Put a string value of an open statement onto an attribute: normalize by the attribute's datatype, and convert the number to the attribute's declared unit.
 ///
-/// 单位只换量级：属性写「万元」、原文写「2.3亿元」，存 23000；原文写「5000」这样光
-/// 秃秃的数，就当它已经是声明的单位。原文的货币和声明的货币对不上（「5000万美元」落到
-/// 「万元」上）返回 None——换汇是一条没人负责的断言。读不出来的也是 None：宁缺勿脏，
-/// 陈述留在开放图谱里，不把「约350名」这样的字当成一个数写进类型化图谱
+/// Units only rescale magnitude: the attribute is in "ten-thousand yuan" and the source writes "2.3 hundred-million yuan", store 23000; a source writing a bare number such as "5000"
+/// is taken as already in the declared unit. If the source currency differs from the declared one ("50 million USD" landing on "ten-thousand yuan"),
+/// it returns None: a currency conversion is an assertion nobody is responsible for. Unreadable values are also None: prefer missing to dirty,
+/// the statement stays in the open graph, and a string like "about 350 members" is not written into the typed graph as a number
 pub fn attribute_value(
     datatype: &str,
     unit: Option<&str>,
@@ -793,8 +793,8 @@ pub fn attribute_value(
     let Some((q, declared)) = read else {
         return normalize_attr_value(datatype, raw);
     };
-    // 声明的单位拆成量级和其余：「万元」→ (4, 元)，「million dollars」→ (6, dollars)
-    // 币种写在前面的「USD million」「€ million」，量级在末尾
+    // Split the declared unit into magnitude and the rest: "ten-thousand yuan" → (4, yuan), "million dollars" → (6, dollars)
+    // Currency written first, as in "USD million" or "€ million": the magnitude is at the end
     let (tok, rest) = next_token(declared);
     let trailing = declared
         .rsplit_once(char::is_whitespace)
@@ -808,9 +808,9 @@ pub fn attribute_value(
     if written.is_some() && wanted.is_some() && written != wanted {
         return None;
     }
-    // 原文写了量级词，或写了和声明一样的单位（「50000000元」对「万元」、「12,000人」对
-    // 「万人」），或写了计数量词，n 才是绝对量，要除下来；光秃秃的数就是声明单位下的数。
-    // 除法走一次十进制解析，同 `scan_quantity` 乘量级词的道理：先算成 f64 再除会留下
+    // Either the source wrote a magnitude word, or it wrote the same unit as declared ("50000000 yuan" against "ten-thousand yuan", "12,000 people" against
+    // "ten-thousand people"), or wrote a counting classifier, then n is an absolute quantity and must be divided; a bare number is already in the declared unit.
+    // Division is done by one decimal parse, for the same reason `scan_quantity` multiplies magnitude words: computing in f64 and then dividing leaves
     // 23000.000000000004
     let counted = q
         .unit
@@ -824,14 +824,14 @@ pub fn attribute_value(
     serde_json::Number::from_f64(n).map(serde_json::Value::Number)
 }
 
-/// 解析时间字符串 → (UTC 时间, 精度)。
+/// Parse a time string → (UTC time, precision).
 ///
-/// 日期：YYYY / YYYY-MM / YYYY-MM-DD，精度随写了几位。带时区的时刻（0024）：
-/// `YYYY-MM-DDTHH[:MM[:SS]]` 后跟 `Z` 或 `±HH:MM`，精度到 hour / minute / second，
-/// 值截到那一位。**没有时区的钟点不是时刻**——「14:32」是哪里的 14:32 没人知道——
-/// 所以只取日期那一半，按天；钟点留在引文里。亚秒一律丢：账本到秒为止。
+/// Date: YYYY / YYYY-MM / YYYY-MM-DD, with precision following how many digits are written. A time with timezone (0024):
+/// `YYYY-MM-DDTHH[:MM[:SS]]` followed by `Z` or `±HH:MM`, precision to hour / minute / second,
+/// with the value truncated to that place. **A clock time without a timezone is not a moment** (nobody knows which place "14:32" refers to),
+/// so only the date half is taken, by day; the clock time stays in the quote. Sub-second parts are always dropped: the ledger stops at seconds.
 ///
-/// 这是规则 3 的契约格式，工具参数、界面上的时刻都只认它。读模型回复用 [`read_time`]
+/// This is rule 3's contract format; tool arguments and times shown in the UI accept only it. Reading a model reply uses [`read_time`]
 pub fn parse_time(s: &str) -> Option<(DateTime<Utc>, &'static str)> {
     let s = s.trim();
     if s.is_empty() || s.eq_ignore_ascii_case("null") {
@@ -869,8 +869,8 @@ pub fn parse_time(s: &str) -> Option<(DateTime<Utc>, &'static str)> {
     None
 }
 
-/// 读模型回复里的时间：先按规则 3（[`parse_time`]）；没照它写、但写法说得清是哪天的日期
-/// 也收（[`written_date`]，#688）。区间端点、日期属性、边上的日期属性都从这里读
+/// Times in a model reply: first rule 3 ([`parse_time`]); a date not written in that form but whose format makes the day clear
+/// is also accepted ([`written_date`], #688). Range endpoints, date attributes, and date attributes on edges are all read from here.
 pub fn read_time(s: &str) -> Option<(DateTime<Utc>, &'static str)> {
     parse_time(s).or_else(|| {
         let (date, precision) = written_date(s)?;
@@ -881,7 +881,7 @@ pub fn read_time(s: &str) -> Option<(DateTime<Utc>, &'static str)> {
     })
 }
 
-/// 「17th」「2nd」「23rd」里的日。后缀得和数字相符：11、12、13 是 th，不是 11st。
+/// Day of month in "17th", "2nd", "23rd". The suffix must match the number: 11, 12, 13 take th, not 11st.
 fn ordinal_day(w: &str) -> Option<&str> {
     let (digits, suffix) = w.split_at_checked(w.len().checked_sub(2)?)?;
     if digits.is_empty() || digits.len() > 2 || !digits.chars().all(|c| c.is_ascii_digit()) {
@@ -908,28 +908,28 @@ fn day_digits(w: &str) -> Option<&str> {
     }
 }
 
-/// 没照规则 3 写、但说得清是哪一天（或哪个月）的日期（#688）。
+/// A date not written per rule 3 but whose day (or month) is clear (#688).
 ///
-/// 合同、公告里的日期多半这么写，模型常常照抄；从前这些值全被当成「不是日期」丢掉。
-/// 收两类，精度随写了几位——只写到月的就是月，不替它补一个日：
-/// - 月份写成名字的：`March 17, 2020`、`17 March 2020`、`Mar. 17 2020`、`March 2020`。
-///   名字由 chrono 的 `%B` / `%b` 认（整名或三个字母的缩写，不分大小写）
-/// - 年在前的数字：`2020/03/17`、`2020.3.17`、`2020年3月17日`、`2020年3月`
+/// Dates in contracts and notices are often written this way, and the model often copies them; before, these values were all dropped as "not a date".
+/// Two kinds are accepted, with precision following the digits written: a date written only to the month is a month, and no day is filled in:
+/// - Month written as a name: `March 17, 2020`, `17 March 2020`, `Mar. 17 2020`, `March 2020`.
+///   Names are recognized by chrono's `%B` / `%b` (the full name or the three-letter abbreviation, case-insensitive)
+/// - Year-first numbers: `2020/03/17`, `2020.3.17`, and Chinese-style year/month/day forms (`2020 year 3 month 17 day`, `2020 year 3 month`)
 ///
-/// **日、月都是数字而年不在前的不收**：`03/04/2020` 是三月四日还是四月三日，写法本身说
-/// 不清，猜错一次就是一个错的截止日。
+/// **Dates where day and month are both numbers and the year is not first are not accepted**: `03/04/2020` is March 4 or April 3, and the form itself cannot say which;
+/// guessing wrong once gives a wrong deadline.
 pub fn written_date(s: &str) -> Option<(NaiveDate, &'static str)> {
     let s = s.trim();
     if let Some(found) = year_first_date(s) {
         return found;
     }
-    // 月份写成名字的：句点（缩写后面那个）与逗号只是标点
+    // Month written as a name: the period (after an abbreviation) and commas are just punctuation
     let words: Vec<&str> = s
         .split(|c: char| c.is_whitespace() || c == ',' || c == '.')
         .filter(|w| !w.is_empty())
         .collect();
     let is_number = |w: &str| w.chars().all(|c| c.is_ascii_digit());
-    // 日可以带序数后缀（March 17th、2nd March）；月名不带
+    // The day may carry an ordinal suffix (March 17th, 2nd March); the month name does not
     let (day, month, year) = match words.as_slice() {
         [m, d, y] if !is_number(m) && day_digits(d).is_some() && is_number(y) => {
             (day_digits(d), *m, *y)
@@ -943,7 +943,7 @@ pub fn written_date(s: &str) -> Option<(NaiveDate, &'static str)> {
     if year.len() != 4 || day.is_some_and(|d| d.len() > 2) {
         return None;
     }
-    // 美联社写法把九月缩成四个字母的「Sept.」，chrono 的 `%b` 只认三个字母
+    // The AP style shortens September to the four letters "Sept."; chrono's `%b` recognizes only three letters
     let month = if month.eq_ignore_ascii_case("sept") {
         "Sep"
     } else {
@@ -961,8 +961,8 @@ pub fn written_date(s: &str) -> Option<(NaiveDate, &'static str)> {
     }
 }
 
-/// 年在前的数字日期。外层 `None` = 不是这种写法，交给下一种；`Some(None)` = 是这种写法
-/// 但不是真实的日子
+/// Year-first numeric dates. Outer `None` = not this form, pass to the next form; `Some(None)` = this form,
+/// but not a real day
 fn year_first_date(s: &str) -> Option<Option<(NaiveDate, &'static str)>> {
     let marked = s.contains('年');
     let separated = s.contains(['/', '.']) && !s.contains(char::is_whitespace);
@@ -978,7 +978,7 @@ fn year_first_date(s: &str) -> Option<Option<(NaiveDate, &'static str)>> {
         return None;
     }
     if parts.first().is_none_or(|y| y.len() != 4) {
-        // 年不在前：日月顺序说不清，不交给别的写法去猜
+        // Year not first: the day-month order cannot be determined, so do not hand it to another form to guess
         return Some(None);
     }
     let number = |p: &str| p.parse::<u32>().ok();
@@ -987,11 +987,11 @@ fn year_first_date(s: &str) -> Option<Option<(NaiveDate, &'static str)>> {
         [m, d] if m.len() <= 2 && d.len() <= 2 => {
             NaiveDate::from_ymd_opt(year, number(m)?, number(d)?).map(|date| (date, "day"))
         }
-        // 只到月：写了「年」「月」才算（`2020/03` 太像别的东西）
+        // Only to the month: accepted only when "year" and "month" are written (`2020/03` looks too much like other things)
         [m] if marked && s.ends_with('月') && m.len() <= 2 => {
             NaiveDate::from_ymd_opt(year, number(m)?, 1).map(|date| (date, "month"))
         }
-        // 只到年：「1982年」。写了「年」才算，光秃秃的 `1982` 归 parse_time
+        // Only to the year: "1982 year". Counts only with the year marker; a bare `1982` goes to parse_time
         [] if marked && s.ends_with('年') => {
             NaiveDate::from_ymd_opt(year, 1, 1).map(|date| (date, "year"))
         }
@@ -999,8 +999,8 @@ fn year_first_date(s: &str) -> Option<Option<(NaiveDate, &'static str)>> {
     })
 }
 
-/// 钟点后面的时区：`Z` 或 `±HH[:]MM` / `±HH`。返回 (钟点, 相对 UTC 的偏移)；
-/// 没有时区返回 None——调用方据此只记那一天
+/// The timezone after the clock time: `Z` or `±HH[:]MM` / `±HH`. Returns (clock time, offset from UTC);
+/// no timezone returns None — the caller then records only the day
 fn split_zone(clock: &str) -> Option<(&str, chrono::Duration)> {
     if let Some(c) = clock.strip_suffix(['Z', 'z']) {
         return Some((c, chrono::Duration::zero()));
@@ -1022,8 +1022,8 @@ fn split_zone(clock: &str) -> Option<(&str, chrono::Duration)> {
 mod tests {
     use super::*;
 
-    /// #690：思考过程里的大括号不能把 JSON 的起止带偏。不切掉标记，"第一个 `{`" 的起点
-    /// 会提前到思考过程里；代码围栏与前后的废话同样不算数
+    /// #690: braces inside thinking text must not skew the start and end of the JSON. Without stripping the markers, the start of "the first `{`"
+    /// would move earlier into the thinking; code fences and surrounding chatter likewise do not count
     #[test]
     fn json_block_ignores_a_think_block_and_a_fence_before_the_json() {
         let raw = "先想想 {\"a\": 1，再回答。\n</think>{\"entities\":[{\"name\":\"张三\"}]}";
@@ -1036,7 +1036,7 @@ mod tests {
         assert!(json_block("no json here").is_err());
     }
 
-    /// 括号出现在字符串里不算结构——`"a[b"` 不是一个开括号；断在字符串中间的那一截不可用
+    /// Brackets inside strings are not structure: `"a[b"` is not an open bracket; a piece cut mid-string is unusable
     #[test]
     fn brackets_inside_strings_are_not_structure() {
         assert_eq!(
@@ -1149,7 +1149,7 @@ mod tests {
 
     #[test]
     fn a_quantity_is_the_whole_string_or_nothing() {
-        // 整体就是一个量：符号、量级词、千分位都读得动
+        // The whole is one quantity: sign, magnitude word, thousands separators all readable
         assert_eq!(parse_quantity("$5 billion"), Some((5e9, Some("$".into()))));
         assert_eq!(
             parse_quantity("€1.5 million"),
@@ -1159,7 +1159,7 @@ mod tests {
         assert_eq!(parse_quantity("3.5 million"), Some((3.5e6, None)));
         assert_eq!(parse_quantity("35,000"), Some((35000.0, None)));
         assert_eq!(parse_quantity("  42 "), Some((42.0, None)));
-        // 币种：符号、ISO 码、中英文单词，统一成符号；量级：英文全写与中文千万亿
+        // Currency: symbol, ISO code, English and Chinese words, unified to a symbol; magnitude: English spelled out and Chinese thousand, ten-thousand, hundred-million
         assert_eq!(
             parse_quantity("EUR 30 million"),
             Some((3e7, Some("€".into())))
@@ -1179,7 +1179,7 @@ mod tests {
         );
         assert_eq!(parse_quantity("3000万元"), Some((3e7, Some("¥".into()))));
         assert_eq!(parse_quantity("1.5亿"), Some((1.5e8, None)));
-        // 乘过量级的数收成整数：9.2 亿不是 919999999.9999999
+        // A number multiplied by a magnitude is collapsed to an integer: 9.2 hundred-million is not 919999999.9999999
         assert_eq!(
             parse_quantity("9.2亿元"),
             Some((920000000.0, Some("¥".into())))
@@ -1189,15 +1189,15 @@ mod tests {
             Some((2500000000.0, Some("$".into())))
         );
 
-        // 尾巴上还有实词：含义不再只是那个数，宁可当实体也不当量
+        // A content word still at the tail: the meaning is no longer just that number, so better a thing than a quantity
         assert_eq!(parse_quantity("900 million weekly active users"), None);
         assert_eq!(parse_quantity("2025 Atlantic hurricane season"), None);
         assert_eq!(parse_quantity("$10 billion investment"), None);
         assert_eq!(parse_quantity("8GW data center"), None);
-        // 单字母后缀不认：3M 是一家公司，读成三百万就把一个真实体吃掉了
+        // Single-letter suffixes not recognized: 3M is a company, and reading it as three million would swallow a real entity
         assert_eq!(parse_quantity("3M"), None);
         assert_eq!(parse_quantity("5k"), None);
-        // 两个记号撞一起，不是量
+        // Two tokens colliding is not a quantity
         assert_eq!(parse_quantity("$5%"), None);
         assert_eq!(parse_quantity(""), None);
         assert_eq!(parse_quantity("杭州"), None);
@@ -1205,8 +1205,8 @@ mod tests {
 
     #[test]
     fn a_declared_number_reads_past_the_unit() {
-        // 属性已经声明了 datatype = number，问的是「那个数是多少」。
-        // 卡住过的两条都在这里
+        // The attribute already declares datatype = number, and the question is "what is that number".
+        // The two cases that once got stuck are both here
         assert_eq!(
             parse_leading_quantity("1,250 people"),
             Some((1250.0, Some("people".into())))
@@ -1223,13 +1223,13 @@ mod tests {
             parse_leading_quantity("900 million weekly active users"),
             Some((9e8, Some("weekly".into())))
         );
-        // 整体就是量的仍走严的那套：单位是 `$`，不是 `billion`
+        // A whole that is a quantity still takes the strict path: the unit is `$`, not `billion`
         assert_eq!(
             parse_leading_quantity("$5 billion"),
             Some((5e9, Some("$".into())))
         );
-        // 开头不是数就还是不认
-        // 币种在尾巴上也认；认不出的词才落到「单位是第一个词」
+        // If the start is not a number, it is still not recognized
+        // Currency is also accepted at the tail; only words that cannot be recognized fall through to "the unit is the first word"
         assert_eq!(
             parse_leading_quantity("30 million euros in cash"),
             Some((3e7, Some("€".into())))
@@ -1245,7 +1245,7 @@ mod tests {
         assert_eq!(parse_leading_quantity("about ten"), None);
         assert_eq!(parse_leading_quantity(""), None);
 
-        // **严的那套一点没松**：它要判「是不是一个东西」，判错会吃掉真实体
+        // **The strict path is not loosened at all**: it must judge "is this one thing", and a wrong judgement would swallow a real entity
         assert_eq!(parse_quantity("1,250 people"), None);
         assert_eq!(parse_quantity("2025 Atlantic hurricane season"), None);
     }
@@ -1253,8 +1253,8 @@ mod tests {
     #[test]
     fn a_number_attribute_takes_a_written_quantity() {
         use serde_json::json;
-        // 采纳属性时按 datatype 换算，量也要换得动——否则 `$5 billion`
-        // 会一路「换不动」，事实永远拿不到谓词
+        // When adopting an attribute, convert by datatype; the quantity must also convert, otherwise `$5 billion`
+        // would keep failing to convert, and the fact would never get its predicate
         assert_eq!(
             normalize_attr_value("number", &json!("$5 billion")),
             Some(json!(5e9))
@@ -1267,7 +1267,7 @@ mod tests {
             normalize_attr_value("number", &json!("52%")),
             Some(json!(52.0))
         );
-        // 排版过的负号是 U+2212（维基百科、排版出来的 PDF 都这么写），读法同 `-`
+        // A typeset minus sign is U+2212 (Wikipedia, typeset PDFs all write it this way); read the same as `-`
         assert_eq!(
             normalize_attr_value("number", &json!("−3.2%")),
             Some(json!(-3.2))
@@ -1280,7 +1280,7 @@ mod tests {
             attribute_value("number", Some("万元"), &json!("−2.3亿元")),
             Some(json!(-23000.0))
         );
-        // 原来就认的两种写法不受影响
+        // The two forms already recognized before are unaffected
         assert_eq!(
             normalize_attr_value("number", &json!("35,000")),
             Some(json!(35000.0))
@@ -1293,7 +1293,7 @@ mod tests {
         assert_eq!(parse_time("2024").unwrap().1, "year");
         assert_eq!(parse_time("2024-07").unwrap().1, "month");
         assert_eq!(parse_time("2024-07-15").unwrap().1, "day");
-        // 带时区的钟点：到分、到时、到秒，值截到那一位，偏移换回 UTC
+        // A clock time with timezone: to the minute, to the hour, to the second; the value is truncated to that place, and the offset is converted back to UTC
         let (t, p) = parse_time("2026-06-01T14:32Z").unwrap();
         assert_eq!(
             (t.to_rfc3339(), p),
@@ -1305,7 +1305,7 @@ mod tests {
             (t.to_rfc3339(), p),
             ("2026-06-01T06:32:07+00:00".to_string(), "second")
         );
-        // 没时区的钟点不是时刻：只记那一天
+        // A clock time without a timezone is not a moment: only the day is recorded
         let (t, p) = parse_time("2026-06-01T14:32").unwrap();
         assert_eq!(
             (t.to_rfc3339(), p),
@@ -1314,9 +1314,9 @@ mod tests {
         assert!(parse_time("null").is_none());
         assert!(parse_time("").is_none());
         assert!(parse_time("下个月").is_none());
-        // 契约格式之外的写法不归它：工具参数里的「August 2024」不猜
+        // Forms outside the contract format are not its job: "August 2024" in tool arguments is not guessed
         assert!(parse_time("June 23, 2020").is_none());
-        // 读模型回复的那一个收写出来的日期（#688），精度随写了几位
+        // Reading the one model-reply form that writes a date (#688), with precision following how many digits were written
         let (t, p) = read_time("June 23, 2020").unwrap();
         assert_eq!(
             (t.to_rfc3339(), p),
@@ -1327,7 +1327,7 @@ mod tests {
         assert!(read_time("03/04/2020").is_none());
     }
 
-    /// 合同与公告里的日期写法（#688）：说得清是哪天的都收成规则 3 的样子，说不清的不猜
+    /// Date forms in contracts and notices (#688): those whose day is clear are converted to rule 3's form; those that cannot be determined are not guessed
     #[test]
     fn a_written_date_is_read_only_when_its_form_says_which_day() {
         use serde_json::json;
@@ -1359,18 +1359,18 @@ mod tests {
         ] {
             assert_eq!(day(written), Some(json!(iso)), "{written}");
         }
-        // 只写到月的是月，不补日
+        // A date written only to the month stays a month; no day is filled in
         for written in ["March 2020", "Mar. 2020", "2020年3月"] {
             assert_eq!(day(written), Some(json!("2020-03")), "{written}");
         }
-        // 已经照规则 3 写的原样留着
+        // Already in rule 3's form: keep as is
         assert_eq!(day("2020-03-17"), Some(json!("2020-03-17")));
         assert_eq!(day("2020"), Some(json!("2020")));
-        // 日月都是数字、年不在前：说不清是几月几号
+        // Day and month both numbers, year not first: cannot tell which month and day
         for ambiguous in ["03/04/2020", "3.4.2020", "04-03-2020", "3/4/20"] {
             assert_eq!(day(ambiguous), None, "{ambiguous}");
         }
-        // 不是日期，或不是一个真实的日子
+        // Not a date, or not a real day
         for not_a_date in [
             "45 days after the Trigger Date",
             "Q3 2020",
@@ -1384,7 +1384,7 @@ mod tests {
         ] {
             assert_eq!(day(not_a_date), None, "{not_a_date}");
         }
-        // 区间端点读的是同一个解析
+        // Range endpoints are read by the same parser
         assert_eq!(
             read_time("17 Mar 2020").map(|(t, p)| (t.date_naive().to_string(), p)),
             Some(("2020-03-17".to_string(), "day"))
@@ -1459,7 +1459,7 @@ mod tests {
         assert_eq!(v[1].confidence, None);
     }
 
-    /// 形状好的回复不算修补过，裁决与 `parse_adjudication` 一字不差
+    /// A well-formed reply is not counted as repaired: the verdict is identical to `parse_adjudication`
     #[test]
     fn a_well_formed_reply_is_not_repaired() {
         let raw = "{\"verdicts\":[{\"i\":0,\"verdict\":\"same\",\"confidence\":0.92,\"why\":\"one line\"}]}";
@@ -1473,8 +1473,8 @@ mod tests {
         assert_eq!(plain[0].why, v[0].why);
     }
 
-    /// 模型在引号里的理由中间直接换行（gemini-3.5-flash 经网关就这么写）：
-    /// serde 报 control character；修补后整批照读，换行留在理由里，标记修补过
+    /// The model writes a line break directly inside the quoted reason (gemini-3.5-flash through the gateway writes it this way):
+    /// serde reports a control character; after repair the batch is read as usual, the line break stays in the reason, and it is marked as repaired
     #[test]
     fn a_raw_newline_inside_a_reason_string_is_repaired() {
         let raw = "```json\n{\"verdicts\":[\n  {\"i\":0,\"verdict\":\"different\",\"confidence\":0.9,\n   \"reason\":\"Rule 2: a version is not the series.\nRecord A is Claude 3, Record B is the family.\",\n   \"why\":\"a version\nis not the series\"},\n  {\"i\":1,\"verdict\":\"same\",\"confidence\":0.8,\"why\":\"tab\there\"}\n]}\n```";
@@ -1488,11 +1488,11 @@ mod tests {
         assert_eq!(v[0].verdict, "different");
         assert_eq!(v[0].why.as_deref(), Some("a version\nis not the series"));
         assert_eq!(v[1].why.as_deref(), Some("tab\there"));
-        // 直接走 `parse_adjudication` 也一样读得出来
+        // Calling `parse_adjudication` directly reads it the same way
         assert_eq!(parse_adjudication(raw).unwrap().len(), 2);
     }
 
-    /// 转义只碰字符串里的：引号外的换行是合法空白；`\"` 不结束字符串；已转义的 `\\n` 不动
+    /// Escaping touches only what is inside strings: a line break outside quotes is legal whitespace; `"` does not end a string; an already-escaped `\n` is left alone
     #[test]
     fn only_control_characters_inside_strings_are_escaped() {
         let text =
@@ -1517,7 +1517,7 @@ mod tests {
             normalize_attr_value("number", &json!("35,000")),
             Some(json!(35000.0))
         );
-        // JSON 里的整数也落成同一种数：`42` 与 "42" 解出来是同一个值
+        // Integers in JSON also become the same kind of number: `42` and "42" parse to the same value
         assert_eq!(
             normalize_attr_value("number", &json!(42)),
             Some(json!(42.0))
@@ -1539,7 +1539,7 @@ mod tests {
         assert_eq!(normalize_attr_value("text", &json!([1])), None);
     }
 
-    /// 财报表里括号里的数是负数：从前整格读不出来，这个值就丢了
+    /// In financial tables a number in parentheses is negative: before, the whole cell was unreadable and the value was lost
     #[test]
     fn an_accounting_negative_is_read_as_negative() {
         use serde_json::json;
@@ -1551,13 +1551,13 @@ mod tests {
             attribute_value("number", Some("万元"), &json!("(350)万元")),
             Some(json!(-350.0))
         );
-        // 括号里不是数、括号前不是货币的，照旧读不出
+        // Parenthesized text that is not a number, or not preceded by a currency, is still unreadable
         assert_eq!(n("(see note 4)"), None);
         assert_eq!(n("Q3 (12)"), None);
-        // 括号后面跟着别的数：括号是编号或年份，不是负号
+        // A number following in parentheses: the parentheses are numbering or a year, not a minus sign
         assert_eq!(n("(1) 1,200 employees"), None);
         assert_eq!(n("(2024) 500"), None);
-        // 宾语判定不跟着变：点了名的「(1984)」仍是一个东西
+        // Object judgement does not change with this: a named "(1984)" is still a thing
         assert!(!literal_object("(1984)", true));
     }
 }
@@ -1567,7 +1567,7 @@ mod a_number_is_one_number {
     use super::normalize_attr_value;
     use serde_json::json;
 
-    /// 模型写 `65` 还是 "65%"，落下来都是同一个数——不然同一条边上会记成冲突
+    /// Whether the model writes `65` or "65%", both come out as the same number; otherwise one edge would record a conflict
     #[test]
     fn a_number_is_one_number_however_it_is_written() {
         let a = normalize_attr_value("number", &json!(65)).unwrap();
@@ -1588,7 +1588,7 @@ mod an_attribute_value_is_read_in_its_declared_unit {
         attribute_value(datatype, unit, &json!(raw))
     }
 
-    /// 公司简介里最平常的几句：值照原文写，落到属性上要是那个数、那一天
+    /// The most ordinary sentences in company profiles: the value is kept as written, and on the attribute it should be that number and that day
     #[test]
     fn plain_company_figures_are_read() {
         assert_eq!(
@@ -1604,7 +1604,7 @@ mod an_attribute_value_is_read_in_its_declared_unit {
             value("number", Some("万元"), "50000000元"),
             Some(json!(5000.0))
         );
-        // 光秃秃的数就是声明单位下的数
+        // A bare number is a number in the declared unit
         assert_eq!(value("number", Some("万元"), "5000"), Some(json!(5000.0)));
         assert_eq!(value("number", Some("人"), "约350名"), Some(json!(350.0)));
         assert_eq!(
@@ -1615,11 +1615,11 @@ mod an_attribute_value_is_read_in_its_declared_unit {
             value("number", Some("people"), "About 350 people"),
             Some(json!(350.0))
         );
-        // 只写到年的日期按年
+        // A date written only to the year is by year
         assert_eq!(value("date", None, "1982年"), Some(json!("1982")));
     }
 
-    /// 财报的单位常把币种写在量级前面：「USD million」「€ million」，同「million dollars」
+    /// Financial-report units often put the currency before the magnitude: "USD million" or "€ million", same as "million dollars"
     #[test]
     fn a_unit_with_its_currency_first_is_still_read_in_millions() {
         assert_eq!(
@@ -1637,7 +1637,7 @@ mod an_attribute_value_is_read_in_its_declared_unit {
         );
     }
 
-    /// 数后面写了人数的词，那就是一个个数出来的人，落到「万人」上要除下来
+    /// A number followed by a word for people is a count of people, so on "ten-thousand people" it must be divided down
     #[test]
     fn a_counted_figure_is_read_into_a_larger_unit() {
         assert_eq!(value("number", Some("万人"), "12,000人"), Some(json!(1.2)));
@@ -1653,7 +1653,7 @@ mod an_attribute_value_is_read_in_its_declared_unit {
         assert_eq!(value("number", Some("万人"), "1.2"), Some(json!(1.2)));
     }
 
-    /// 换不了的不换：货币对不上、读不出数的，宁缺勿脏
+    /// Those that cannot be converted are not converted: currency mismatch, or a number that cannot be read; prefer missing to dirty
     #[test]
     fn what_cannot_be_read_is_not_written() {
         assert_eq!(value("number", Some("万元"), "5000万美元"), None);
@@ -1662,7 +1662,7 @@ mod an_attribute_value_is_read_in_its_declared_unit {
         assert_eq!(value("bool", None, "尚未上市"), None);
     }
 
-    /// 中文财务文本的金额多用全角的「￥」，与「¥」是同一个符号
+    /// Amounts in Chinese financial text often use the full-width yen sign (U+FFE5), the same symbol as "¥"
     #[test]
     fn a_full_width_yen_sign_is_read_as_the_currency() {
         assert_eq!(value("number", None, "￥5,000万"), Some(json!(5e7)));
@@ -1691,7 +1691,7 @@ mod an_attribute_value_is_read_in_its_declared_unit {
         ] {
             assert!(literal_object(v, true), "{v}");
         }
-        // 光秃秃的数：没点名的是值，点了名的多半是个东西（《1984》、360）
+        // A bare number: an unnamed one is a value; a named one is most likely a thing ("1984" the novel, 360)
         assert!(literal_object("1200", false));
         assert!(!literal_object("1984", true));
         for name in ["3M", "7天", "2023年底", "星河科技", "董事长兼总经理", "K2"] {

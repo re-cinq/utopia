@@ -1,17 +1,17 @@
-//! 开放抽取（0044 第 1 刀，#729）：模型读一块，用**文档自己的话**写下它陈述了什么。
+//! Open extraction (0044 first slice, #729): the model reads a block and writes down, in **the document's own words**, what it states.
 //!
-//! 与 lib.rs 里带本体的契约不同，这条路的提示词里**没有类型清单、没有关系清单、
-//! 没有文档日期**：关系短语照原文写（"acquired"、"修建"），时间照原文的字抄
-//! （"去年冬天"），不算日期、不归一。本体是之后套上去的视图，不是抽取时的筛子。
-//! 提示词里唯一逐块变化的是正文、开头与已知实体，所以系统消息是一个常量——
-//! 前缀缓存能命中的就是它。
+//! Unlike the contract in lib.rs, which carries an ontology, this path's prompt has **no type list, no relation list,
+//! and no document date**: relation phrases are kept as written in the source ("acquired", "build"), and time is copied as the words in the text
+//! ("last winter"), not converted to dates or normalized. The ontology is a view applied afterwards, not a filter at extraction time.
+//! The only part of the prompt that changes per block is the body, the opening and the known entities, so the system message is a constant:
+//! that is what the prefix cache hits.
 //!
-//! 回复是紧凑 JSON——数组、短键——因为一块的输出动辄上百条，冗长的键名烧的是
-//! max_tokens，截断一次丢的是整块的后半。但**陈述指东西用名字，引文每条自己抄一遍**，
-//! 不编号：编号版在一块密集的财报上测过，deepseek-v4-flash 把 id 串了位（"NVIDIA has
-//! reached AI"、"tokens are tokens"，原文说的是 "AI has reached its inflection point"），
-//! 同一块的两次回复编号还不一致；原型的名字 + 逐条引文版 333 条里 0 条编造。
-//! 多花的 token 买的是不串位。
+//! The reply is compact JSON: arrays and short keys. A block's output often runs to hundreds of items, and long key names burn
+//! max_tokens, and a truncation loses the second half of the block. But **statements refer to things by name, and each quote is copied on its own**,
+//! and nothing is numbered. The numbered version was tested on a dense financial report, where deepseek-v4-flash shifted ids ("NVIDIA has
+//! reached AI", "tokens are tokens", where the source says "AI has reached its inflection point"),
+//! and two replies for the same block numbered differently. The name + per-quote prototype fabricated 0 of 333 items.
+//! The extra tokens buy freedom from shifted ids.
 //!
 //! ```json
 //! {"e": [["Harbor Bridge", "bridge", 1], ["farmland", "land", 0]],
@@ -19,25 +19,25 @@
 //!  "n": [["Brightway Builders", "Brightway", "Brightway Builders, known locally as Brightway, is based in Port Ellen."]]}
 //! ```
 //!
-//! - `e`：`[名字或描述, 种类词, named]`。陈述提到的每样东西都在这里列一次，用的正是
-//!   陈述里写的那个名字。named = 1 是原文点了名的东西（人、组织、产品、地点、文件、
-//!   法律、事件），0 是只描述了的东西（"the northern wing"、"farmland"）。名字不带引用语
-//!   （"the Harbor Treaty signed on May 3, 1998" 叫 "Harbor Treaty"），也不带数字
-//!   （"about 40 hectares of farmland" 是 "farmland" 加一条 `area` = "about 40 hectares"）。
-//!   没有 id。
-//! - `s`：`[引文, 主语名, 短语, 宾语名或 null, 字面值或 null, 限定词对象或 null, 何时或 null,
-//!   何时终止或 null]`。引文在第一格：模型先抄下原句，再从那句写陈述（先引后述）。主语与宾语是 `e` 里（或提示词已知清单里）的名字，拼写一模
-//!   一样。宾语与字面值恰有一个（解析层不裁，两个都给调用方看）。一句话里超过两方参与、
-//!   或者链接带着数额、头衔、条件、比较时，主要的一对进主宾，其余进限定词，键是原文里
-//!   说明其角色的一两个词，值是列出的东西的名字或原文的话。何时/终止照原文的字抄，
-//!   从不计算。引文是陈述它的那一句，逐字抄。
-//! - `n`：`[e 里列的名字, 这一段用的另一个名字, 引文]`。只收原文真写了的名字。
+//! - `e`: `[name or description, kind word, named]`. Every thing a statement mentions is listed here once, using exactly
+//!   the name the statement uses. named = 1 is a thing the source names (person, organization, product, place, document,
+//!   law, event); 0 is a thing only described ("the northern wing", "farmland"). A name carries no quotation or
+//!   qualifier ("the Harbor Treaty signed on May 3, 1998" is called "Harbor Treaty"), and no number
+//!   ("about 40 hectares of farmland" is "farmland" plus an `area` = "about 40 hectares").
+//!   No id.
+//! - `s`: `[quote, subject name, phrase, object name or null, literal value or null, qualifiers object or null, when or null,
+//!   ended or null]`. The quote goes in the first cell: the model copies the sentence first, then writes the statement from it (quote first, then restate). The subject and object are names in `e` (or the known list in the prompt), spelled exactly
+//!   as written. Exactly one of object and literal value is set (the parser does not decide; both are passed to the caller). When more than two parties take part in a sentence,
+//!   or the link carries an amount, title, condition or comparison, the main pair goes into subject and object, the rest into qualifiers, keyed by
+//!   one or two words from the source that state their role, and valued by the names of the things listed or the source's words. when/ended are copied from the source's words,
+//!   never computed. The quote is the sentence that states it, copied verbatim.
+//! - `n`: `[name listed in e, another name used in this passage, quote]`. Only names the source actually writes are collected.
 //!
-//! 主语、宾语的名字对不对得上 `e`（或已知清单）**这里不查**，交给服务端——那边手里有
-//! 已知实体的句柄与库里的名字，这里只有字。
+//! Whether subject and object names match `e` (or the known list) is **not checked here**; it is left to the server, which has
+//! the known entity handles and the library's names; here there are only words.
 //!
-//! 解析是逐项宽容的：一条坏记录计入 [`OpenExtraction::skipped`]，不毁掉整块；调用方
-//! **必须**把这个数报出去——不报就是一次静默丢弃（#108 那类错）。
+//! Parsing is lenient per item: a bad record counts toward [`OpenExtraction::skipped`] and does not ruin the block; the caller
+//! **must** report that count; not reporting it is a silent drop (the kind of bug in #108).
 
 use std::collections::HashSet;
 
@@ -52,9 +52,9 @@ use crate::{
 pub struct OpenEntity {
     /// the name the statements use for it, exactly as listed
     pub name: String,
-    /// 原文说它是个什么，两三个词。不校验、不入本体
+    /// What the source says it is, in two or three words. Not validated, not added to the ontology
     pub kind: String,
-    /// 原文点了名（true）还是只描述了（false）
+    /// Whether the source names it (true) or only describes it (false)
     pub named: bool,
     /// where it stood in the reply's `e` array; a malformed or repeated neighbour is dropped
     pub raw_index: usize,
@@ -108,8 +108,8 @@ pub struct OpenExtraction {
     pub truncated: bool,
 }
 
-/// 系统消息。规则 1–8 是原型上测过的措辞，改写成紧凑数组；例子是中性的，不出自任何
-/// 测量语料。**没有**本体、关系清单、文档日期——这条路的全部意义就在这三个「没有」
+/// System message. Rules 1–8 are wording tested on the prototype, rewritten as compact arrays; the examples are neutral and come from no
+/// measured corpus. There is **no** ontology, no relation list, no document date: the whole point of this path lies in these three "no"s
 const OPEN_SYSTEM: &str = "\
 You read one passage of a document and write down what it states, in the passage's own words. \
 Output one JSON object and nothing else, shaped like this:\n\
@@ -213,8 +213,8 @@ $2 million on March 4, 2011.\" gives:\n\
  \"n\": [],\n\
  \"t\": []}";
 
-/// 表格的读法，只在这一段里有表格时才进系统消息（见 [`has_table`]）：没有表格的段落
-/// 用不上它，而它占系统消息的一成不到
+/// The table-reading rule is included in the system message only when this passage has a table (see [`has_table`]): a passage without a table
+/// does not need it, and it takes up less than a tenth of the system message
 const OPEN_TABLE_RULES: &str = "\
  In a \
 table, a cell is a statement about its row's thing whose phrase is the column heading and \
@@ -229,8 +229,8 @@ heading gives (\"In millions\") is a qualifier on each such statement. Otherwise
 the thing its first column (or its name, title or ID column) names, not the table or the \
 sheet. Leave out cells whose column heading is not in the passage.";
 
-/// 这一段里有没有表格：Markdown 的竖线、HTML 的单元格、制表符，或者一行里用成串空格
-/// 隔开的三栏以上。宁可多认：认错了只是多带一段规则，和从前一样
+/// Whether this passage has a table: Markdown pipes, HTML cells, tabs, or three or more columns separated by runs of spaces
+/// on one line. Better to over-detect: a false positive only adds an extra rule paragraph, as before
 fn has_table(passage: &str) -> bool {
     let lower = passage.to_ascii_lowercase();
     passage.contains('|')
@@ -247,7 +247,7 @@ fn has_table(passage: &str) -> bool {
         })
 }
 
-/// 这一段的系统消息：规则不变，只有表格的那几句按段落带或不带
+/// System message for this passage: the rules are unchanged; only the table sentences are included or left out per passage
 fn system_for(passage: &str) -> String {
     let table = if has_table(passage) {
         format!(" {OPEN_TABLE_RULES}")
@@ -257,17 +257,17 @@ fn system_for(passage: &str) -> String {
     OPEN_SYSTEM.replace("{TABLE}", &table)
 }
 
-/// 构造开放抽取的两条消息：常量系统消息 + `Document:` / 开头 / 已知实体 / `Passage:`。
+/// Build the two open-extraction messages: constant system message + `Document:` / opening / known entities / `Passage:`.
 ///
-/// 没有文档日期、没有类型与关系清单、没有属性——这些都不进提示词。开头与已知实体
-/// 只说明这一段从哪来（模型被告知不从它们里面抽东西）。
+/// No document date, no type or relation list, no attributes: none of these go into the prompt. The opening and known entities
+/// only say where this passage comes from (the model is told not to extract from them).
 pub fn build_open_messages(
     filename: &str,
     known: &[KnownEntity],
     opening: Option<&str>,
     chunk_text: &str,
 ) -> Vec<ChatMessage> {
-    // 已知实体紧挨着正文：服从性靠位置，理由见 lib.rs 里 known_block 的注释
+    // Known entities sit right next to the body: compliance relies on position; see the known_block comment in lib.rs for why
     let user = format!(
         "Document: {filename}\n{}{}\nPassage:\n{chunk_text}",
         opening_block(opening),
@@ -285,10 +285,10 @@ pub fn build_open_messages(
     ]
 }
 
-/// 「本文档已经认下的实体」的开放版：`- <name> (<kind>)`，句柄不给模型看——这条路
-/// 陈述里写的是名字，模型照这里的拼写写，对回哪个实体由服务端拿名字去查。lib.rs
-/// 那版的指令讲的是 subject_ref/object_ref 与「给它同样的类型」，都是带本体那条路的
-/// 字段，这里没有。预算与截断规则同那版（句柄不显示，所以不计入）
+/// The open version of "entities this document has already recognized": `- <name> (<kind>)`; handles are not shown to the model. This path
+/// statements write names, and the model writes them with the spelling shown here; the server then looks up which entity the name refers to.
+/// The instructions in lib.rs's version discuss subject_ref/object_ref and "give it the same type", which are fields of the path that carries an ontology; there are none here.
+/// Budget and truncation rules are the same as that version (handles are not shown, so they do not count)
 fn known_block(known: &[KnownEntity]) -> String {
     if known.is_empty() {
         return String::new();
@@ -321,23 +321,23 @@ fn known_block(known: &[KnownEntity]) -> String {
     )
 }
 
-/// 截断的回复从第一个 `{` 取到**结尾**，交给修补自己退到最后一个完整条目。
+/// A truncated reply is taken from the first `{` to the **end**, and the repair step itself backs up to the last complete entry.
 ///
-/// `json_block` 取的是第一个 `{` 到最后一个 `}`，对紧凑回复这一刀切错两回：`}` 只在
-/// 限定词对象与结尾出现，截断的回复要么一个 `}` 都没有（它报「没有 JSON」，修补
-/// 根本没机会跑），要么最后一个 `}` 是半路某条陈述的限定词（它把后面完整的条目
-/// 一并切掉）。围栏与思考过程的切法与它共用
+/// `json_block` takes the first `{` to the last `}`, which cuts wrongly twice for a compact reply: `}` appears only in
+/// qualifier objects and at the end, and a truncated reply either has no `}` at all (it reports "no JSON", and repair
+/// never gets a chance to run), or its last `}` is the qualifier of some statement midway (which cuts off the complete entries after it).
+/// Code fences and thinking text are split off the same way.
 fn json_tail(raw: &str) -> Option<&str> {
     let text = json_text(raw);
     text.find('{').map(|s| &text[s..])
 }
 
-/// 紧凑格式的截断修补：退到**最后一个完整的数组或对象**的结尾再把括号补齐。
+/// Repair of a truncated compact reply: back up to the end of the **last complete array or object** and close the brackets.
 ///
-/// lib.rs 的 `repair_truncated` 只认 `}` 作为回退点——那边每条记录都是对象，以 `}`
-/// 结尾。这里每条记录是数组，限定词全是 null 的回复里可能一个 `}` 都没有，只认 `}`
-/// 就是整块作废。所以回退点是最后一个 `]` 或 `}`，谁靠后用谁；括号是否在字符串里
-/// 由 `close_brackets` 判断
+/// lib.rs's `repair_truncated` accepts only `}` as the fallback point, since there every record is an object ending in `}`.
+/// Here each record is an array, and a reply where all qualifiers are null may have no `}` at all; accepting only `}`
+/// would void the whole block. So the fallback point is the last `]` or `}`, whichever is later; whether a bracket is inside a string
+/// is decided by `close_brackets`
 pub(crate) fn repair_truncated_compact(json: &str) -> Option<String> {
     let mut cut = json.len();
     for _ in 0..64 {
@@ -352,24 +352,24 @@ pub(crate) fn repair_truncated_compact(json: &str) -> Option<String> {
     None
 }
 
-/// 不合法的回复逐条读（整体解不开时才走这里）。返回 `(各类条目, 写坏的条数)`；一条
-/// 都读不出来是 None。
+/// Read an invalid reply entry by entry (only when the whole cannot be parsed). Returns `(entries by kind, count of bad entries written)`; if
+/// no entry can be read, it is None.
 ///
-/// 从前整体解不开就当回复被截断，退到最后一个能补齐括号的位置，之后的全丢。可模型写坏
-/// 的多半不是结尾：`e` 没关就写起了 `s`，或者 `s` 的结尾少一个 `]`——回复正常结束，坏
-/// 在中间。坏在三分之一处，后面三分之二（十几条陈述、别名、文档的日期）就都没了，而
-/// 这一块照样记成抽完（bench README，2026-09-28）。
+/// Previously, if the whole could not be parsed, the reply was treated as truncated: back up to the last place where brackets could be closed, and drop everything after. But what the model writes wrongly
+/// is usually not at the end: `e` was not closed and `s` started, or `s` is missing a `]` at its end. The reply ends normally, but the damage is
+/// in the middle. Damage at one-third means the remaining two-thirds (a dozen-plus statements, aliases, the document's dates) are all lost, while
+/// the block is still recorded as extracted (bench README, 2026-09-28).
 ///
-/// 这里不要求整体合法：顺着文本走，`"e"`、`"s"`、`"n"`、`"t"` 后面跟着 `: [` 就是换了
-/// 一类；每遇到一个 `[`，取到与它配平的那个括号，单独解。解得开、第一格不是数组、该有的
-/// 格数之后也没有数组的，是一条。格数之内的数组是某一格写错了类型：与整体读得开时一样，
-/// 只是那一格作废，条目照收（`parse_entity` 等）。格数之后出现数组，是这一条少了 `]`、
-/// 把后面的条目套了进去——它写坏了，从它的下一个字符接着找，套在里面的完整条目照样读得
-/// 出来。第一格就是数组的，分不清是一列条目还是写坏的一条，也进去读。写在 `e` 里的八格
-/// 条目是陈述，归到 `s`。真被截断的回复，最后那条配不平，自然不收，与从前一样
+/// Whole-reply validity is not required here: walk the text, and a `"e"`, `"s"`, `"n"` or `"t"` followed by `: [` marks the start of a
+/// kind; each `[` is read on its own up to its matching bracket. An array that parses, whose first cell is not an array, and which lacks
+/// a cell count after which no array appears, is one entry. An array within the cell count means one cell has the wrong type: as when the whole reads fine,
+/// only that cell is void and the entry is still kept (`parse_entity` etc.). An array appearing after the cell count means this entry is missing its `]` and
+/// has swallowed the following entries; it is broken, so search from its next character on, and the complete entries nested inside are still readable.
+/// An array whose first cell is an array cannot be told apart as a list of entries or a broken entry, so it is read too. An eight-cell entry written in `e`
+/// is a statement and is filed under `s`. For a truly truncated reply, the last entry does not balance and is naturally not kept, as before
 fn salvage(text: &str) -> Option<(Value, usize)> {
     let bytes = text.as_bytes();
-    // 字符串的结尾（`i` 在开头的引号上）：返回结尾引号之后的位置；没有结尾就是 None
+    // End of the string (`i` is on the opening quote): return the position after the closing quote; no end means None
     let string_end = |mut i: usize| -> Option<usize> {
         i += 1;
         while i < bytes.len() {
@@ -381,7 +381,7 @@ fn salvage(text: &str) -> Option<(Value, usize)> {
         }
         None
     };
-    // 与 `i` 上的 `[` 配平的括号的位置
+    // Position of the bracket matching the `[` at `i`
     let balanced_end = |start: usize| -> Option<usize> {
         let (mut i, mut depth) = (start, 0usize);
         while i < bytes.len() {
@@ -442,7 +442,7 @@ fn salvage(text: &str) -> Option<(Value, usize)> {
                     }
                     (Some((end, _)), None) => i = end + 1,
                     (None, _) => {
-                        // 配得平却解不开（或套着别的条目）才算写坏；配不平的是结尾被截断
+                        // Only counts as broken if it balances but fails to parse (or nests other entries); unbalanced means the ending was truncated
                         if section.is_some() && balanced_end(i).is_some() {
                             broken += 1;
                         }
@@ -463,8 +463,8 @@ fn salvage(text: &str) -> Option<(Value, usize)> {
     ))
 }
 
-/// 一条该有几格：`e` 三格（写在 `e` 里的陈述八格），`s` 八格，`n` 三格，`t` 五格。
-/// 逐条读时用它分开「一格写错了类型」和「这一条套进了后面的条目」（见 `salvage`）
+/// Cells per entry: `e` three (a statement written in `e`: eight), `s` eight, `n` three, `t` five.
+/// Used when reading entry by entry to tell "one cell has the wrong type" apart from "this entry swallowed the following entries" (see `salvage`)
 fn slots(section: usize, item: &[Value]) -> usize {
     match section {
         0 if statement_shaped(item) => 8,
@@ -474,12 +474,12 @@ fn slots(section: usize, item: &[Value]) -> usize {
     }
 }
 
-/// 陈述的形状：至少八格、前三格是字符串（引文、主语、短语）
+/// Statement shape: at least eight cells, the first three are strings (quote, subject, phrase)
 fn statement_shaped(item: &[Value]) -> bool {
     item.len() >= 8 && item[..3].iter().all(Value::is_string)
 }
 
-/// 顶层某个键下的数组；缺了或不是数组就当空——那不是一条坏记录，是整段没这一类
+/// Array under a top-level key; missing or not an array counts as empty: that is not a bad record, it means the whole section has no entries of this kind
 fn items<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value
         .get(key)
@@ -487,7 +487,7 @@ fn items<'a>(value: &'a Value, key: &str) -> &'a [Value] {
         .map_or(&[], Vec::as_slice)
 }
 
-/// 第 i 格的非空字符串（去掉首尾空白）——缺一不可的格子用它
+/// Non-empty string in cell i (trimmed of leading and trailing whitespace): used for cells that must not be missing
 fn text_at(arr: &[Value], i: usize) -> Option<&str> {
     arr.get(i)?
         .as_str()
@@ -495,8 +495,8 @@ fn text_at(arr: &[Value], i: usize) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// 可选的文字格：字符串去首尾空白；null、空串与放错的类型都是 None——那一格放错了
-/// 东西不算整条坏，坏的只是那一格
+/// Optional text cell: string trimmed; null, empty string, and wrong type are None. A cell with the wrong type
+/// does not make the whole record bad, only that cell
 fn opt_text(v: &Value) -> Option<String> {
     v.as_str()
         .map(str::trim)
@@ -504,8 +504,8 @@ fn opt_text(v: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// 字面值照原样：字符串去首尾空白；模型偶尔把数字写成 JSON 数字，照它的写法转回文本。
-/// 限定词的值走同一条规则
+/// Literal value as is: string trimmed; the model sometimes writes a number as a JSON number, which is turned back into text as written.
+/// Qualifier values follow the same rule
 fn literal(v: &Value) -> Option<String> {
     match v {
         Value::Number(n) => Some(n.to_string()),
@@ -513,8 +513,8 @@ fn literal(v: &Value) -> Option<String> {
     }
 }
 
-/// 限定词：对象里值为字符串或数字的那些；键去首尾空白，空键与别的类型悄悄丢；
-/// 不是对象当作没有限定词
+/// Qualifiers: those values in the object that are strings or numbers; keys trimmed; empty keys and other types are dropped silently;
+/// a non-object counts as no qualifiers
 fn qualifiers(v: &Value) -> Vec<(String, String)> {
     v.as_object()
         .map(|m| {
@@ -528,8 +528,8 @@ fn qualifiers(v: &Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// 去重键：首尾空白去掉、内部空白折成一个、小写。"Harbor  Bridge" 与 "harbor bridge"
-/// 是同一条
+/// Dedup key: leading and trailing whitespace removed, internal whitespace collapsed to one, lowercased. "Harbor  Bridge" and "harbor bridge"
+/// are the same
 fn name_key(name: &str) -> String {
     name.split_whitespace()
         .collect::<Vec<_>>()
@@ -537,7 +537,7 @@ fn name_key(name: &str) -> String {
         .to_lowercase()
 }
 
-/// `[name, kind, named]`：name 缺不得；kind 缺了是空串；named 缺了当点了名
+/// `[name, kind, named]`: name cannot be missing; a missing kind is an empty string; a missing named counts as named
 fn parse_entity(arr: &[Value]) -> Option<OpenEntity> {
     let name = text_at(arr, 0)?.to_string();
     let kind = arr
@@ -559,9 +559,9 @@ fn parse_entity(arr: &[Value]) -> Option<OpenEntity> {
     })
 }
 
-/// `[quote, subject, phrase, object, value, qualifiers, when, ended]`。八格都得在：短了的
-/// 多半是截断修补切出来的半条，引文都没有，收下也没法核对。主语与短语缺不得；其余格
-/// 放错了类型只是那一格为 None。宾语与字面值同时有则两个都留给调用方
+/// `[quote, subject, phrase, object, value, qualifiers, when, ended]`. All eight cells must be present: a short one
+/// is usually a half entry cut from a truncation repair, with no quote, and cannot be verified, so it is not kept. Subject and phrase cannot be missing; other cells
+/// with the wrong type are None for that cell only. If object and value are both present, both are kept for the caller
 fn parse_statement(arr: &[Value]) -> Option<OpenStatement> {
     if arr.len() < 8 {
         return None;
@@ -593,14 +593,14 @@ fn parse_name(arr: &[Value]) -> Option<OpenName> {
     })
 }
 
-/// **一条坏记录不该毁掉一整块**（同 lib.rs 的 `parse_response`）。
+/// **One bad record must not ruin a whole block** (same as `parse_response` in lib.rs).
 ///
-/// 先取 JSON 块解成 `Value`（截断就先退到最后一个完整条目补齐括号，并标 `truncated`），
-/// 再逐项宽容地解：形状不对的条目计入 `skipped`，好的照收。`e` 里重名（去空白、
-/// 不分大小写）留第一个，其余计入 `skipped`。主语、宾语的名字不在这里对回 `e`
+/// First take the JSON block and parse it into `Value` (if truncated, back up to the last complete entry, close the brackets, and mark `truncated`),
+/// then parse item by item leniently: entries of the wrong shape are counted in `skipped`, good ones kept. Duplicate names in `e` (ignoring whitespace
+/// and case) keep the first; the rest count in `skipped`. Subject and object names are not matched back to `e` here
 pub fn parse_open_response(raw: &str) -> anyhow::Result<OpenExtraction> {
-    // 先按常规取块（第一个 `{` 到最后一个 `}`）：解得开就是完整回复，结尾之后
-    // 哪怕跟着废话也不算截断。解不开才从第一个 `{` 取到结尾逐条读（见 `salvage`）
+    // First take the block normally (from the first `{` to the last `}`): if it parses, it is a complete reply, and trailing
+    // chatter after the end is not truncation. Only when it fails to parse, take from the first `{` to the end and read entry by entry (see `salvage`)
     let block = json_block(raw)
         .and_then(|b| serde_json::from_str::<Value>(&b).map_err(anyhow::Error::from));
     let mut skipped = 0usize;
@@ -609,7 +609,7 @@ pub fn parse_open_response(raw: &str) -> anyhow::Result<OpenExtraction> {
         Err(e) => {
             let (v, broken) = json_tail(raw)
                 .and_then(salvage)
-                // 一条都读不出来才是真解析失败
+                // Only if not a single entry can be read is it a real parse failure
                 .ok_or_else(|| anyhow::anyhow!("Failed to parse open extraction JSON: {e}"))?;
             skipped = broken;
             (v, true)
@@ -651,14 +651,14 @@ pub fn parse_open_response(raw: &str) -> anyhow::Result<OpenExtraction> {
     Ok(out)
 }
 
-/// 宾语写成了一个值的，改回值；返回挪了的那些宾语，调用方各记一笔（`object_is_value`）。
+/// An object written as a value is moved back to the value; returns the objects that were moved, and the caller records each one (`object_is_value`).
 ///
-/// 规则 2 和表格规则说值写进 value，模型照样会把「成立于 2015年3月12日」「注册资本为
-/// 5000万元」、表格里的「待审核」写进宾语。签名于是成了两样东西之间的关系，对不上任何
-/// 属性。这里只挪格子，原文的字一个不改；挪完以后没有陈述再指着、也不是别名的那个
-/// 「东西」从 `e` 里拿掉，免得建出一个叫「2015年3月12日」的实体。
+/// Rules 2 and the table rule say values go into value, but the model still writes "established on 2015-03-12", "registered capital of
+/// 50 million yuan", and "pending review" from a table into the object. The signature then becomes a relation between two things, matching no
+/// attribute. This only moves cells; not a single character of the source is changed. After moving, a "thing" that no statement points to
+/// and that is not an alias is removed from `e`, so no entity called "2015-03-12" gets created.
 ///
-/// 只给模型的回复用：推送来的陈述是客户端的契约，它写成宾语的就是宾语
+/// Used only for the model's reply: statements pushed in are the client's contract, and what it writes as an object stays an object
 pub fn values_are_not_things(x: &mut OpenExtraction) -> Vec<String> {
     let listed: std::collections::HashMap<String, (bool, String)> = x
         .entities
@@ -673,9 +673,9 @@ pub fn values_are_not_things(x: &mut OpenExtraction) -> Vec<String> {
         let (named, kind) = listed
             .get(&name_key(object))
             .map_or((false, ""), |(n, k)| (*n, k.as_str()));
-        // 表格里的一格：种类词就是列名、又写成以列名为短语的宾语，模型自己说了这是那一列
-        // 的值。点了名的只在名字里带数字时才算（编号、型号）；只看表格行，散文里点了名的
-        // 「Model 3」照旧是东西
+        // A cell in a table: the kind word is the column name, and it is written as an object whose phrase is the column name; the model itself says this is the value
+        // of that column. A named thing counts only when the name contains a digit (number, model); a named thing seen only in table rows, in prose
+        // "Model 3" remains a thing
         let a_cell = kind == name_key(&s.phrase)
             && !kind.is_empty()
             && s.quote.as_deref().is_some_and(has_table)
@@ -709,7 +709,7 @@ mod tests {
         "The city council awarded the paving contract to Brightway Builders for $2 million on March 4, 2011.";
     const LEASE: &str = "Nebula (formerly Starlight Labs) leased the northern wing from Harbor Estates from 2010 until the end of 2019.";
 
-    /// 一份完整的紧凑回复：本块列出的与已知清单里的名字、两种限定词、起止时间、别名
+    /// A complete compact reply: the names listed in this block and in the known list, two kinds of qualifiers, start and end times, aliases
     const FULL: &str = r#"{"e": [["city council", "council", 0], ["paving contract", "contract", 0],
            ["Brightway Builders", "builders", 1], ["northern wing", "wing", 0]],
      "s": [["The city council awarded the paving contract to Brightway Builders for $2 million on March 4, 2011.",
@@ -720,7 +720,7 @@ mod tests {
             "paving contract", "worth", null, "$2 million", null, null, null]],
      "n": [["Nebula Technologies Inc.", "Starlight Labs", "Nebula (formerly Starlight Labs) leased the northern wing from Harbor Estates from 2010 until the end of 2019."]]}"#;
 
-    /// serde_json 的对象按键排序（没开 preserve_order），限定词的顺序不承载意义
+    /// serde_json objects sort keys (preserve_order is off); qualifier order carries no meaning
     fn by_key(mut q: Vec<(String, String)>) -> Vec<(String, String)> {
         q.sort_by(|a, b| a.0.cmp(&b.0));
         q
@@ -789,7 +789,7 @@ mod tests {
         assert_eq!(x.names[0].quote.as_deref(), Some(LEASE));
     }
 
-    /// 截在 `n` 数组中间：`s` 之前的全留下，`truncated` 标出来
+    /// Cut in the middle of `n`: everything before `s` is kept, `truncated` marked
     #[test]
     fn a_cut_off_reply_keeps_what_was_complete() {
         let marker = "\"n\": [[\"Nebula Technologies Inc.\", \"Starl";
@@ -803,8 +803,8 @@ mod tests {
         assert_eq!(x.skipped, 0);
     }
 
-    /// 截在一条陈述的限定词之后：那半条配不平，不收成一条只有引文的陈述。它不算写坏
-    /// 的条目：少了它是因为回复被截断，`truncated` 已经说了
+    /// Cut after a statement's qualifiers: that half entry does not balance, and is not kept as a statement with only a quote. It is not counted as a bad entry
+    /// as bad: it is missing only because the reply was truncated, which `truncated` already says
     #[test]
     fn a_half_statement_at_the_cut_is_not_kept() {
         let raw = r#"{"e": [["A", "thing", 1]],
@@ -815,8 +815,8 @@ mod tests {
         assert_eq!(x.skipped, 0);
     }
 
-    /// `e` 没关就写起了 `s`（回复正常结束，坏在三分之一处）：从前退到坏处之前，后面的
-    /// 陈述、别名全丢，这一块只剩写进 `e` 里的那一条。逐条读，一条不少
+    /// `e` not closed and `s` started (the reply ends normally, damage at one-third): before, it backed up to before the damage and everything after
+    /// (statements, aliases) was lost, leaving only the one entry written into `e`. Read entry by entry, none are missing
     #[test]
     fn statements_written_after_an_unclosed_list_are_all_read() {
         let raw = r#"```json
@@ -846,8 +846,8 @@ mod tests {
         assert_eq!(x.skipped, 0);
     }
 
-    /// `s` 的结尾少写一个 `]`：陈述都在，从前丢的是它后面的 `n` 与 `t`——文档的日期
-    /// 没了，这一篇里数着「今天」的时间就都没处数
+    /// `s` missing one `]` at its end: the statements all remain; before, what was lost was `n` and `t` after it, the document's dates
+    /// were gone, and in this passage the time references counting "today" had nothing to count with
     #[test]
     fn what_follows_a_miswritten_bracket_is_still_read() {
         let raw = r#"{"e": [["码表", "产品", 1]],
@@ -862,7 +862,7 @@ mod tests {
         assert_eq!(x.skipped, 0);
     }
 
-    /// 一条写坏了（对象少了 `}`）只丢这一条，计数；前后的照收
+    /// One broken entry (object missing `}`) loses only that entry, counted; the ones before and after are kept
     #[test]
     fn one_miswritten_item_costs_only_itself() {
         let raw = r#"{"e": [["A", "thing", 1]],
@@ -882,7 +882,7 @@ mod tests {
         assert_eq!(x.skipped, 1);
     }
 
-    /// 一条少了结尾的 `]`，把下一条套了进去：套着别的条目的不是一条，里面那条照收
+    /// An entry missing its closing `]` swallowed the next one: a block nesting other entries is not an entry; the one inside is kept
     #[test]
     fn an_item_that_swallowed_the_next_one_gives_the_next_one_back() {
         let raw = r#"{"e": [["A", "thing", 1]],
@@ -900,12 +900,12 @@ mod tests {
         assert_eq!(x.skipped, 1);
     }
 
-    /// 一格写错了类型（实体的 kind 写成数组、限定词写成一对对的数组）只丢那一格，与整体
-    /// 读得开时一样。逐条读从前整条丢掉，还把那一格里的数组当成一条：kind 里的
-    /// `["company", "org"]` 读成了一个叫 company 的实体，Acme 却没了
+    /// A cell with the wrong type (kind written as an array in an entity, qualifiers written as an array of pairs) loses only that cell, as when
+    /// the whole reads fine. Entry-by-entry reading used to drop the whole entry and read the array in that cell as an entry: the kind
+    /// `["company", "org"]` was read as an entity named company, and Acme disappeared
     #[test]
     fn a_slot_of_the_wrong_type_costs_only_that_slot_when_read_item_by_item() {
-        // `e` 少了结尾的 `]`：整体解不开，逐条读
+        // `e` missing its closing `]`: the whole does not parse, read entry by entry
         let raw = r#"{"e": [["Acme", ["company", "org"], 1], ["Brightway", "builder", 1],
 "s": [["Lin joined Acme as CEO.", "Lin", "joined", "Acme", null, [["role", "CEO"]], null, null],
 ["Lin left Acme.", "Lin", "left", "Acme", null, null, null, null]],
@@ -931,9 +931,9 @@ mod tests {
         assert_eq!(x.skipped, 0);
     }
 
-    /// 同一批条目，一份整体合法，一份只少了关 `e` 的 `]`：两份读出来的一样。条目里有写错
-    /// 类型的格子（kind、named、宾语、字面值、限定词、时间、别名的引文），也有本来就该
-    /// 跳过的（只有七格的陈述）
+    /// The same batch of entries, one whole and valid, the other missing only the `]` that closes `e`: both read the same. The entries contain cells of the wrong
+    /// type (kind, named, object, literal value, qualifiers, time, alias quotes), and also ones that should be skipped
+    /// (statements with only seven cells)
     #[test]
     fn a_reply_read_item_by_item_reads_what_the_whole_reply_reads() {
         let e =
@@ -965,8 +965,8 @@ mod tests {
         assert_eq!(w.skipped, 1, "the seven-slot statement, in both");
     }
 
-    /// 限定词全是 null 的回复里一个 `}` 都没有：只认 `}` 的修补会把整块作废，
-    /// 这里退到最后一个完整的 `]`
+    /// In a reply where all qualifiers are null there is not a single `}`: a repair that accepts only `}` would void the whole block,
+    /// so this backs up to the last complete `]`
     #[test]
     fn a_cut_off_reply_without_any_closing_brace_is_still_repaired() {
         let raw = r#"{"e": [["A", "thing", 1]],
@@ -979,13 +979,13 @@ mod tests {
         assert_eq!(x.skipped, 0);
     }
 
-    /// 连一个完整条目都没有时仍然报失败——容错不是把空结果说成成功
+    /// Still report failure when there is not even one complete entry: tolerance must not turn an empty result into success
     #[test]
     fn a_reply_with_nothing_complete_still_fails() {
         assert!(parse_open_response(r#"{"e": [["a", "b"#).is_err());
     }
 
-    /// 七格的陈述是坏条目：跳过并计数，八格的照收
+    /// A seven-cell statement is a bad entry: skipped and counted; eight-cell ones are kept
     #[test]
     fn a_statement_with_seven_slots_is_skipped_and_counted() {
         let raw = r#"{"e": [["A", "thing", 1]],
@@ -998,7 +998,7 @@ mod tests {
         assert!(!x.truncated);
     }
 
-    /// 字面值写成 JSON 数字也照它的写法收成文本
+    /// A literal value written as a JSON number is also kept as text, as written
     #[test]
     fn a_number_in_the_value_slot_becomes_text() {
         let raw = r#"{"e": [["a", "k", 1]],
@@ -1010,7 +1010,7 @@ mod tests {
         assert_eq!(x.skipped, 0);
     }
 
-    /// `e` 里重名（去首尾空白、内部空白折一、不分大小写）留第一个，其余计入 skipped
+    /// Duplicate names in `e` (trim leading and trailing whitespace, collapse internal whitespace to one, ignore case) keep the first; the rest count toward skipped
     #[test]
     fn a_duplicate_entity_name_keeps_the_first_and_is_counted() {
         let raw = r#"{"e": [["Harbor Bridge", "bridge", 1], [" harbor   bridge ", "span", 0],
@@ -1024,8 +1024,8 @@ mod tests {
         assert_eq!(x.skipped, 2);
     }
 
-    /// 坏条目逐个计数：没名字的实体、不是数组的实体、没主语的陈述、空短语的陈述、
-    /// 少一格的陈述、不是数组的陈述、没别名的 n、实体格放了对象的 n、实体名为空的 n
+    /// Bad entries are counted one by one: entities without a name, entities that are not arrays, statements without a subject, statements with an empty phrase,
+    /// statements with one cell missing, statements that are not arrays, n without an alias, n with an object in the entity cell, n with an empty entity name
     #[test]
     fn malformed_items_are_counted_not_fatal() {
         let raw = r#"{"e": [["A", "thing", 1], [""], [5, "x"], "not an array", []],
@@ -1043,8 +1043,8 @@ mod tests {
         assert!(!x.truncated);
     }
 
-    /// 可选格放错了类型只是那一格为 None，整条照收：宾语放数字、时间放数组、终止放
-    /// 对象、引文放数字、字面值放布尔、限定词放字符串
+    /// A wrong-type optional cell only makes that cell None, and the whole record is kept: object given a number, time given an array, ended given an
+    /// object, quote given a number, literal value given a boolean, qualifiers given a string
     #[test]
     fn a_wrong_type_in_an_optional_slot_is_null_not_malformed() {
         let raw = r#"{"e": [["A", "thing", 1]],
@@ -1061,7 +1061,7 @@ mod tests {
         assert_eq!(x.skipped, 0);
     }
 
-    /// 限定词：字符串是名字或原文，数字照写法转文本，其余类型与空键悄悄丢
+    /// Qualifiers: a string is a name or the source text, a number is turned into text as written, and other types and empty keys are dropped silently
     #[test]
     fn qualifiers_take_strings_and_numbers_and_drop_the_rest() {
         let raw = r#"{"e": [["a", "k", 1]],
@@ -1079,7 +1079,7 @@ mod tests {
         assert_eq!(x.skipped, 0);
     }
 
-    /// 每个字符串都去首尾空白：名字、种类、主语、短语、宾语、时间、引文、限定词的键与值
+    /// Every string is trimmed of leading and trailing whitespace: names, kinds, subject, phrase, object, time, quote, and qualifier keys and values
     #[test]
     fn every_string_is_trimmed() {
         let raw = r#"{"e": [["  A  ", " thing ", 1]],
@@ -1101,7 +1101,7 @@ mod tests {
         assert_eq!(x.names[0].quote.as_deref(), Some("A is B."));
     }
 
-    /// 宾语与字面值同时有：照收，两个都给调用方看，这里不裁
+    /// Object and literal value both present: kept, both passed to the caller; not decided here
     #[test]
     fn a_statement_with_both_object_and_value_is_passed_through() {
         let raw = r#"{"e": [["A", "thing", 1], ["B", "thing", 1]],
@@ -1113,8 +1113,8 @@ mod tests {
         assert_eq!(x.skipped, 0);
     }
 
-    /// 值被列成东西写进了宾语：挪回值，那样「东西」不再列着。真东西（杭州）、散文里点了名
-    /// 的（Model 3，种类词恰好是短语）、被当成主语用着的（2020年）都不动
+    /// A value that was written into the object as a thing is moved back to value, so the "thing" is no longer listed. Real things (Hangzhou), named things in prose
+    /// (Model 3, where the kind word happens to be the phrase), and things used as a subject (the year 2020) are not touched
     #[test]
     fn a_value_written_as_an_object_becomes_the_value() {
         let raw = r#"{"e": [["星河科技", "公司", 1], ["2015年3月12日", "日期", 1],
@@ -1132,8 +1132,8 @@ mod tests {
         assert_eq!(names, vec!["星河科技", "杭州", "Model 3", "2020年"]);
     }
 
-    /// 实测的需求表（#987）：一格被列成没点名的东西、种类词就是列名，再写成以列名为
-    /// 短语的宾语。那是这一格的值；点了名的、种类词和短语不同的照旧是宾语
+    /// Measured requirements table (#987): a cell listed as an unnamed thing, whose kind word is the column name, written as an object with the column name as
+    /// phrase. That is the value of this cell; named ones, or ones whose kind word and phrase differ, remain objects
     #[test]
     fn a_table_cell_listed_as_a_thing_becomes_the_value() {
         let row = "| 修改体重时App出现bug | 待审核 | P1 | 个人资料 | 张伟 |";
@@ -1164,12 +1164,12 @@ mod tests {
                 (Some("张伟"), None),
             ]
         );
-        // 挪成值的格子不再列着，免得建出一个叫 REQ-0019 的孤立实体
+        // A cell moved to a value is no longer listed, so no isolated entity called REQ-0019 is created
         let names: Vec<&str> = x.entities.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["修改体重时App出现bug", "个人资料", "张伟"]);
     }
 
-    /// named 认 1/0 与 true/false，缺了当点了名；kind 缺了是空串
+    /// named accepts 1/0 and true/false; if missing it counts as named; a missing kind is an empty string
     #[test]
     fn named_takes_numbers_and_booleans_and_defaults_to_true() {
         let raw = r#"{"e": [["a", "k", 1], ["b", "k", 0], ["c", "k", true],
@@ -1181,7 +1181,7 @@ mod tests {
         assert_eq!(x.skipped, 0);
     }
 
-    /// 围栏与前后废话照旧容忍（走的是同一个 json_block）
+    /// Code fences and surrounding chatter are still tolerated (same as json_block)
     #[test]
     fn a_fenced_reply_parses() {
         let raw = "Here you go:\n```json\n{\"e\": [[\"a\", \"k\", 1]], \"s\": [], \"n\": []}\n```";
@@ -1198,8 +1198,8 @@ mod tests {
         }
     }
 
-    /// 提示词里没有文档日期、没有类型与关系清单、没有编号与句柄；有文件名、开头、
-    /// 已知名字与正文，并且按这个顺序
+    /// The prompt has no document date, no type or relation list, no numbering or handles; it has the file name, the opening, the
+    /// known names and the body, in that order
     #[test]
     fn the_table_rules_ride_only_with_a_passage_that_has_a_table() {
         let plain = "The council met on March 4, 2011. It awarded the paving contract.";
@@ -1248,8 +1248,8 @@ mod tests {
             assert!(!s.contains("k1"), "句柄不给模型看: {s}");
         }
         assert!(system.contains("Never compute, convert or normalise a date"));
-        // 0064：文档自己说到的日期由这一块报上来（`t`），时间词只进 when / ended；
-        // 提示词里仍然没有文档日期，也不让模型算
+        // 0064: dates the document itself states are reported by this block (`t`); time words go only into when / ended;
+        // the prompt still has no document date, and the model is not asked to calculate any
         assert!(
             system.contains("\"t\" lists the dates the passage states about the document itself")
         );
@@ -1277,7 +1277,7 @@ mod tests {
         assert!(user.ends_with("Nebula leased the northern wing."));
     }
 
-    /// 第一块：没有开头也没有已知实体，两段都不出现
+    /// First block: no opening and no known entities, so neither section appears
     #[test]
     fn the_first_chunk_carries_neither_opening_nor_known_block() {
         let msgs = build_open_messages("a.txt", &[], None, "text");

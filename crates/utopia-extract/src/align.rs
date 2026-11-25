@@ -1,24 +1,24 @@
-//! 种类词绑定到类（0044 决定 3–4 的第一步）：类型化图谱是从开放图谱按签名的绑定算出来的，
-//! 而种类词——开放抽取写下的「它是个什么」——是最简单的签名：一个词对一个类，或者
-//! 对不上。绑定按库缓存、按词复用，所以代价随不同的说法增长，不随文档增长。
+//! Kind words bind to classes (first step of 0044 decisions 3–4): the typed graph is derived from the open graph by signature binding,
+//! and a kind word (what open extraction writes as "what it is") is the simplest signature: one word to one class, or
+//! no match. Bindings are cached per library and reused per word, so the cost grows with distinct phrasings, not with documents.
 //!
-//! 对齐读来源（决定 3）：每个词带着文档里见过的拼写、这一类东西的例子（名字）和它们
-//! 参与的关系短语进提示词，模型判的是「**每一个**这种东西都是这个类的实例吗」。类可以
-//! 比词宽（面包房是组织），不能比词窄、也不能只是沾边（合同不是「文件」，如果类的定义
-//! 说文件是一个 file）。角色词、描述词、一词两义都答 null。候选类的定义照库里的写法给
-//! （中文或英文都行），答案里的键照抄。
+//! Alignment reads the source (decision 3): each word goes into the prompt with the spellings seen in documents, examples of the class (names), and its
+//! relation phrases; the model judges whether **every** such thing is an instance of the class. A class may
+//! be broader than the word (a bakery is an organization), but not narrower, and not merely related (a contract is not a "file", if the class definition
+//! says a file is a `file`). Role words, descriptive words and words with two senses answer null. Candidate class definitions are given as written in the library
+//! (Chinese or English both work), and answer keys are copied verbatim.
 //!
-//! 回复是紧凑 JSON：`{"b": [[id, "key" | null]]}`。解析逐项宽容：坏的一对计数、不毁掉
-//! 整批；键不在那一项的候选里、id 不在批里、同一个 id 的第二次都算坏；截断的回复退到
-//! 最后一个完整的对。没答到的 id 就是没答到——调用方按 id 对账，缺席是「再问」，
-//! 不是 null。
+//! The reply is compact JSON: `{"b": [[id, "key" | null]]}`. Parsing is lenient per item: a bad pair is counted, not allowed to ruin
+//! the whole batch; a key not among that item's candidates, an id not in the batch, or a second answer for the same id all count as bad; a truncated reply falls back to
+//! the last complete pair. An id that was not answered is simply unanswered: the caller reconciles by id, and absence means "ask again",
+//! not null.
 //!
-//! **形状也宽容**：模型（实测 DeepSeek-V3.2）并不总照样例写。它会把整段答成按 id
-//! 作键的对象（`{"0": null, "1": "organization"}`），会把键包进单元素数组
-//! （`{"0": ["organization"], "4": [null]}`），也会把 `b` 写成对象、把一对写成
-//! `{"id": 0, "key": ...}`、或者不要外层对象只给数组。这些说的都是同一件事，读法
-//! 只有一种；温度为零时同一段提示词回来的形状还是同一个，读不出就是每一轮都读不出——
-//! 一个库连着十二篇文档一个词都没绑上，就是这么来的。读不出的键与 id 算坏项，不当缺席。
+//! **The shape is lenient too**: the model (tested with DeepSeek-V3.2) does not always follow the example. It may answer the whole thing as an object keyed by id
+//! (`{"0": null, "1": "organization"}`), wrap the key in a single-element array
+//! (`{"0": ["organization"], "4": [null]}`), write `b` as an object, or write a pair as
+//! `{"id": 0, "key": ...}`, or drop the outer object and give just an array. These all mean the same thing, so there is one reading
+//! only; at temperature zero the same prompt returns the same shape, so an unreadable shape is unreadable every round,
+//! which is how one library went twelve documents without binding a single word. Unreadable keys and ids count as bad items, not as absence.
 
 use std::collections::{HashMap, HashSet};
 
@@ -27,7 +27,7 @@ use utopia_llm::ChatMessage;
 
 use crate::{json_block, json_text, open::repair_truncated_compact};
 
-/// 一个候选类：键照抄进答案；标签与定义是模型判断的依据，照库里的语言给
+/// A candidate class: the key is copied into the answer; the label and definition are what the model judges by, given in the library's language
 #[derive(Debug, Clone, Copy)]
 pub struct ClassCandidate<'a> {
     pub key: &'a str,
@@ -35,13 +35,13 @@ pub struct ClassCandidate<'a> {
     pub description: &'a str,
 }
 
-/// 一个待绑定的种类词签名：词、它在文档里的样子、这一类东西的例子与短语、候选类
+/// A kind-word signature to bind: the word, how it looks in documents, examples and phrases of the class, and the candidate classes
 #[derive(Debug, Clone)]
 pub struct KindWordItem<'a> {
     pub id: i64,
     /// the normalised kind word ("company")
     pub kind_word: &'a str,
-    /// spellings seen in documents ("Company", "company", "公司")
+    /// spellings seen in documents ("Company", "company", "Companies")
     pub spellings: &'a [String],
     /// example entity names of this kind ("Brightway Builders", "Harbor Estates")
     pub examples: &'a [String],
@@ -50,15 +50,15 @@ pub struct KindWordItem<'a> {
     pub candidates: Vec<ClassCandidate<'a>>,
 }
 
-/// 模型对一项的裁决：Some = 那个候选的键（从候选里抄的，不是模型写的）；None = 不绑
+/// The model's verdict on one item: Some = that candidate's key (copied from the candidates, not written by the model); None = do not bind
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KindWordChoice {
     pub id: i64,
     pub key: Option<String>,
 }
 
-/// 系统消息。例子是中性的（面包房、桥、镇议会），不出自任何测量语料；规则 1 的
-/// 「每一个这种东西」是整条路的判据，宽可以、窄不行、沾边不行
+/// System message. The examples are neutral (bakery, bridge, town council) and come from no measured corpus; the rule 1
+/// "every such thing" criterion is the test for the whole path: broader is fine, narrower is not, merely related is not
 const KIND_WORD_SYSTEM: &str = "\
 You bind the words documents use for kinds of things to the classes of a knowledge base's \
 ontology. Each numbered item is one kind word as the documents wrote it: the word, the \
@@ -92,13 +92,13 @@ documents: things that \"were founded by\" and \"are based in\" are organization
 5. Never invent a key, never answer with a label or a word of your own, and never choose for \
 an item a key that is not among its candidates. One pair per item, every item answered.";
 
-/// 构造两条消息：常量系统消息 + 用户消息。类的定义表一批只写一遍，按第一次出现的次序；
-/// 每项：id、词、拼写、例子、短语、候选的键（次序照给的，第二票倒着给就倒着列）。
-/// 空清单写 `(none)`，模型知道那一栏存在但这次没有证据。
+/// Build two messages: a constant system message plus a user message. The class definition table is written once per batch, in order of first appearance;
+/// each item: id, word, spellings, examples, phrases, and candidate keys (in the order given, so a second vote with reversed order is listed reversed).
+/// An empty list is written as `(none)`, so the model knows the field exists but has no evidence this time.
 ///
-/// 从前每项下面各列一遍候选的定义：一批二十个词、每个十条候选，同一张表写二十遍，
-/// 一个词一百四十多 token 里一百二是它（bench README，2026-09-29）。与
-/// `phrase_align::build_phrase_messages` 同一条理由
+/// Earlier, each item listed the candidate definitions again: a batch of twenty words with ten candidates each wrote the same table twenty times,
+/// and 120 of the 140-odd tokens per word were that table (bench README, 2026-09-29). Same
+/// reasoning as `phrase_align::build_phrase_messages`
 pub fn build_kind_word_messages(items: &[KindWordItem<'_>]) -> Vec<ChatMessage> {
     let mut glossary: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -139,7 +139,7 @@ pub fn build_kind_word_messages(items: &[KindWordItem<'_>]) -> Vec<ChatMessage> 
     ]
 }
 
-/// `"a", "b", "c"`；空清单是 `(none)`。带引号是因为名字里可能有逗号
+/// `"a", "b", "c"`; an empty list is `(none)`. Quoted because names may contain commas
 fn quoted_list(values: &[String]) -> String {
     if values.is_empty() {
         return "(none)".to_string();
@@ -151,7 +151,7 @@ fn quoted_list(values: &[String]) -> String {
         .join(", ")
 }
 
-/// `- key: label — description`。标签与键相同就不重复；定义为空就不写破折号
+/// `- key: label — description`. Omit the label if it equals the key; omit the dash if the definition is empty
 fn candidate_line(c: &ClassCandidate<'_>) -> String {
     let key = c.key.trim();
     let mut line = format!("- {key}");
@@ -166,12 +166,12 @@ fn candidate_line(c: &ClassCandidate<'_>) -> String {
     line
 }
 
-/// 逐项宽容地解回复。返回（裁决，坏项数）。
+/// Parse the reply leniently, item by item. Returns (verdicts, bad item count).
 ///
-/// 一对坏在：不是数组、不足两格、id 不是整数、id 不在这批里、键不是 null 也不是
-/// 字符串、键不在那一项的候选里、同一个 id 已经答过（留第一次）。键先按原样对候选，
-/// 对不上再不分大小写对——对上了写回的是候选自己的键，不是模型写的那个。
-/// 截断的回复先退到最后一个完整的对；连一对都没有才报错
+/// A pair is bad if it is not an array, has fewer than two cells, has a non-integer id, an id not in this batch, or a key that is neither null nor
+/// a string, a key not among that item's candidates, or an id already answered (the first is kept). The key is first matched to the candidates as written,
+/// then matched case-insensitively; when it matches, the candidate's own key is written back, not the one the model wrote.
+/// A truncated reply first falls back to the last complete pair; it is an error only if there is no complete pair at all
 pub fn parse_kind_word_response(
     raw: &str,
     items: &[KindWordItem<'_>],
@@ -190,10 +190,10 @@ pub fn parse_kind_word_response(
     Ok((choices, malformed))
 }
 
-/// 先按常规取块（第一个 `{` 到最后一个 `}`）；解不开才从第一个 `{` 取到结尾去修补。
-/// 取块与修补的分工同 `open.rs`：紧凑回复里 `}` 只在结尾出现，截断的回复要么没有 `}`，
-/// 要么最后一个 `}` 不是结尾。回复不要外层对象、直接给数组的，取第一个 `[` 到最后
-/// 一个 `]`——只在文字本身以 `[` 开头时这么读，别把对象里的一对当成整段
+/// First take the block normally (from the first `{` to the last `}`); only if that fails to parse, take from the first `{` to the end and repair it.
+/// The split between block extraction and repair matches `open.rs`: in a compact reply `}` appears only at the end; a truncated reply either has no `}`,
+/// or its last `}` is not the end. A reply with no outer object that gives an array directly takes the first `[` through the last
+/// `]`, but only when the text itself starts with `[`; do not read a pair inside an object as the whole reply
 pub(crate) fn parse_value(raw: &str) -> anyhow::Result<Value> {
     let text = json_text(raw).trim();
     if text.starts_with('[') {
@@ -219,12 +219,12 @@ pub(crate) fn parse_value(raw: &str) -> anyhow::Result<Value> {
     }
 }
 
-/// 回复里的每一条答案：（id，键）两个原始值，形状还没验。
+/// Each answer in the reply: two raw values (id, key), shape not yet validated.
 ///
-/// 认四种写法，说的都是「这个 id 选了这个键」：`{"b": [[id, key]]}`（样例）、
-/// `{"b": {"id": key}}`、没有 `b` 的顶层对象 `{"id": key}`、顶层数组 `[[id, key]]`；
-/// 数组里的一条也可以是 `{"id": .., "key": ..}`。`b` 在就只看 `b`，顶层别的键是
-/// 模型的旁白，不是答案。缺了 `b` 又不是对象或数组的，一条都没有
+/// Four forms are accepted, all meaning "this id chose this key": `{"b": [[id, key]]}` (the example),
+/// `{"b": {"id": key}}`, a top-level object without `b` `{"id": key}`, a top-level array `[[id, key]]`;
+/// an entry in an array may also be `{"id": .., "key": ..}`. If `b` is present only `b` is read; other top-level keys are
+/// the model's commentary, not answers. If `b` is missing and the value is neither an object nor an array, there are no answers
 fn answers(value: &Value) -> Vec<(Value, Value)> {
     let listed = value.get("b").unwrap_or(value);
     match listed {
@@ -251,9 +251,9 @@ fn answers(value: &Value) -> Vec<(Value, Value)> {
     }
 }
 
-/// 一条答案：id 得是这批里的，键得是 null 或候选里的一个（数组里包着的也算，
-/// `["organization"]`、`[null]`、`["organization", "机构 — 定义"]` 是模型的另几种写法，
-/// 不是另一种答案）
+/// An answer: the id must be in this batch, and the key must be null or one of the candidates (wrapped in an array also counts,
+/// `["organization"]`, `[null]`, `["organization", "Organization — definition"]`, these are other ways the model writes it,
+/// not a different answer)
 fn parse_pair(
     id: &Value,
     key: &Value,
@@ -269,10 +269,10 @@ fn parse_pair(
     Some(KindWordChoice { id, key })
 }
 
-/// 数组里的第一个值：模型会把键包进数组，后面有时跟着那个候选的标签与定义
-/// （`["organization", "机构 — 研究院、研究所……"]`），前面有时又抄一遍 id
-/// （`{"0": [0, "organization"]}`）——抄的 id 跳过。后面跟的若是**另一个候选的键**，
-/// 那是两个答案，不是一个——None，调用方算坏。空数组也是 None；不是数组的原样
+/// The first value in the array: the model wraps the key in an array, sometimes followed by that candidate's label and definition
+/// (`["organization", "Organization — research institutes, ..."]`), and sometimes repeats the id first
+/// (`{"0": [0, "organization"]}`); a repeated id is skipped. If what follows is **another candidate's key**,
+/// that is two answers, not one: None, and the caller counts it as bad. An empty array is also None; a non-array is returned as is
 fn unwrapped<'v>(item: &KindWordItem<'_>, id: i64, v: &'v Value) -> Option<&'v Value> {
     match v {
         Value::Array(list) => {
@@ -291,7 +291,7 @@ fn unwrapped<'v>(item: &KindWordItem<'_>, id: i64, v: &'v Value) -> Option<&'v V
     }
 }
 
-/// id 是 JSON 整数；模型偶尔把它写成字符串，照数字读
+/// The id is a JSON integer; the model occasionally writes it as a string, which is read as a number
 pub(crate) fn item_id(v: &Value) -> Option<i64> {
     match v {
         Value::Number(n) => n.as_i64(),
@@ -300,8 +300,8 @@ pub(crate) fn item_id(v: &Value) -> Option<i64> {
     }
 }
 
-/// 模型写的键对回这一项的候选：先原样，再不分大小写（只在唯一命中时）；返回的是
-/// 候选自己的键。空串与不在候选里的都是 None，由调用方计入坏项
+/// Match the model's key to this item's candidates: first as written, then case-insensitively (only on a unique hit); returns
+/// the candidate's own key. An empty string or a key not among the candidates is None, which the caller counts as bad
 fn candidate_key(item: &KindWordItem<'_>, written: &str) -> Option<String> {
     let written = written.trim();
     if written.is_empty() {
@@ -325,7 +325,7 @@ mod tests {
         values.iter().map(|s| s.to_string()).collect()
     }
 
-    /// 三项：公司（应绑组织）、参与者（角色词，应 null）、桥（候选里有结构）
+    /// Three items: company (should bind to organization), participant (a role word, should be null), bridge (the candidates include a structure)
     struct Fixture {
         company_spellings: Vec<String>,
         company_examples: Vec<String>,
@@ -419,7 +419,7 @@ mod tests {
         );
     }
 
-    /// 围栏与前后废话照旧容忍（走的是同一个 json_block）
+    /// Code fences and surrounding chatter are still tolerated (same json_block path)
     #[test]
     fn a_fenced_reply_parses() {
         let f = Fixture::new();
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(choices.len(), 3);
     }
 
-    /// 键不在那一项的候选里就是坏项：别的项有这个候选也不算
+    /// A key not among that item's candidates is a bad item; another item having that candidate does not count
     #[test]
     fn a_key_not_among_the_items_candidates_is_malformed() {
         let f = Fixture::new();
@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(choices, vec![choice(12, Some("organization"))]);
     }
 
-    /// 截在第三对的键中间：前两对留下，第三项缺席（不是 null，也不算坏）
+    /// Cut in the middle of the third pair's key: the first two pairs stay, the third item is absent (not null, and not bad)
     #[test]
     fn a_truncated_reply_is_repaired_to_the_last_complete_pair() {
         let f = Fixture::new();
@@ -465,7 +465,7 @@ mod tests {
         );
     }
 
-    /// 截在一对的 id 之后（`[14`）：退到上一个完整的 `]`
+    /// Cut after a pair's id (`[14`): fall back to the previous complete `]`
     #[test]
     fn a_reply_cut_inside_a_pair_keeps_the_pairs_before_it() {
         let f = Fixture::new();
@@ -476,7 +476,7 @@ mod tests {
         assert_eq!(choices.len(), 2);
     }
 
-    /// 连一对都没有时仍然报失败——容错不是把空结果说成成功
+    /// Still report failure when there is no pair at all: tolerance must not turn an empty result into success
     #[test]
     fn a_reply_with_nothing_complete_still_fails() {
         let f = Fixture::new();
@@ -485,8 +485,8 @@ mod tests {
         assert!(parse_kind_word_response("no json here", &items).is_err());
     }
 
-    /// `b` 是空的：一项都没答，不是坏项。没有 `b`、键又不是 id 的：那是读不出的答案，
-    /// 算坏项——从前这种回复算「一项都没答」，一个库十几轮下来什么痕迹都不留
+    /// `b` is empty: no item answered, not a bad item. No `b` and keys that are not ids: that is an unreadable answer,
+    /// counted as bad. Previously this kind of reply counted as "nothing answered", and a library left no trace over a dozen rounds
     #[test]
     fn a_reply_without_pairs_gives_no_choices() {
         let f = Fixture::new();
@@ -502,8 +502,8 @@ mod tests {
         assert_eq!(malformed, 1);
     }
 
-    /// DeepSeek-V3.2 实测的写法：整段是按 id 作键的对象，没有 `b`。这就是 bench 里
-    /// 「12 篇文档 type_id 全空」的回复——它解出来必须和样例形状一模一样
+    /// Form observed with DeepSeek-V3.2: the whole reply is an object keyed by id, with no `b`. This is the bench
+    /// reply where "12 documents, all type_ids empty" came from; it must parse to exactly the same shape as the example
     #[test]
     fn an_id_keyed_object_is_read_as_the_pair_list() {
         let f = Fixture::new();
@@ -519,14 +519,14 @@ mod tests {
                 choice(14, Some("structure")),
             ]
         );
-        // `b` 下面是对象而不是数组：一样读
+        // `b` holds an object rather than an array: read it the same way
         let raw = r#"{"b": {"12": "organization", "13": null}}"#;
         let (choices, malformed) = parse_kind_word_response(raw, &items).unwrap();
         assert_eq!(malformed, 0);
         assert_eq!(choices.len(), 2);
     }
 
-    /// 同一个模型的另一种写法：键包在单元素数组里。空数组与两个键不是一个答案
+    /// Another form from the same model: the key wrapped in a single-element array. An empty array and two keys are not one answer
     #[test]
     fn a_key_wrapped_in_a_one_element_array_is_unwrapped() {
         let f = Fixture::new();
@@ -542,7 +542,7 @@ mod tests {
         let (choices, malformed) = parse_kind_word_response(raw, &items).unwrap();
         assert_eq!(malformed, 1, "两个键不是一个答案");
         assert!(choices.is_empty());
-        // 值里先抄一遍 id 再给键：`{"0": [0, "organization"]}`
+        // The value repeats the id before the key: `{"0": [0, "organization"]}`
         let raw = r#"{"12": [12, "organization"], "13": [13, null]}"#;
         let (choices, malformed) = parse_kind_word_response(raw, &items).unwrap();
         assert_eq!(malformed, 0);
@@ -550,7 +550,7 @@ mod tests {
             choices,
             vec![choice(12, Some("organization")), choice(13, None)]
         );
-        // 键后面跟着候选行（标签与定义）：那是抄了一遍候选，不是第二个答案
+        // The key is followed by a candidate line (label and definition): that is a repeated candidate, not a second answer
         let raw = r#"{"12": ["organization", "Organization — An organized group of people"], "13": [null, "no candidate fits"]}"#;
         let (choices, malformed) = parse_kind_word_response(raw, &items).unwrap();
         assert_eq!(malformed, 0);
@@ -560,7 +560,7 @@ mod tests {
         );
     }
 
-    /// 一对写成对象、或者整段不要外层对象只给数组：照读
+    /// A pair written as an object, or the whole reply given as a bare array without an outer object: read as is
     #[test]
     fn object_pairs_and_a_bare_array_parse() {
         let f = Fixture::new();
@@ -584,7 +584,7 @@ mod tests {
         );
     }
 
-    /// 同一个 id 答了两次：留第一次，第二次计入坏项
+    /// The same id answered twice: keep the first, count the second as bad
     #[test]
     fn a_duplicate_id_keeps_the_first() {
         let f = Fixture::new();
@@ -595,8 +595,8 @@ mod tests {
         assert_eq!(malformed, 2);
     }
 
-    /// 坏项逐个计数：不是数组、只有一格、键是数字、键是空串、id 是对象；
-    /// id 写成字符串照数字读
+    /// Bad items are counted one by one: not an array, only one cell, key is a number, key is an empty string, id is an object;
+    /// an id written as a string is read as a number
     #[test]
     fn malformed_pairs_are_counted_not_fatal() {
         let f = Fixture::new();
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(choices, vec![choice(12, Some("organization"))]);
     }
 
-    /// 键的大小写写错了：对回候选自己的键；首尾空白也去掉
+    /// Key with wrong case: matched back to the candidate's own key; leading and trailing whitespace is also trimmed
     #[test]
     fn a_key_in_the_wrong_case_is_read_back_as_the_candidates_key() {
         let f = Fixture::new();
@@ -624,8 +624,8 @@ mod tests {
         );
     }
 
-    /// 提示词列出每一项的 id、词、拼写、例子、短语、候选键与定义，并带着「每一个
-    /// 这种东西」的判据；空清单写 `(none)`
+    /// The prompt lists each item's id, word, spellings, examples, phrases, candidate keys and definitions, and carries the "every
+    /// such thing" criterion; an empty list is written as `(none)`
     #[test]
     fn the_prompt_lists_every_item_and_carries_the_rule() {
         let f = Fixture::new();
@@ -677,7 +677,7 @@ mod tests {
         assert!(!user.ends_with('\n'));
     }
 
-    /// 标签与键相同不重复；定义为空不写破折号；没有候选写 `(none)`
+    /// Label equal to key is not repeated; empty definition has no dash; no candidates is written as `(none)`
     #[test]
     fn a_candidate_line_omits_what_is_empty() {
         let f = Fixture::new();
@@ -711,7 +711,7 @@ mod tests {
         assert!(user.ends_with("Candidates: (none)"));
     }
 
-    /// 提示词的例子是中性的：不出现任何测量语料的名字
+    /// The prompt's examples are neutral: no names from any measured corpus appear
     #[test]
     fn the_prompt_names_no_benchmark_corpus() {
         let f = Fixture::new();

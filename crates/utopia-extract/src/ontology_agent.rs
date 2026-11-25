@@ -1,20 +1,20 @@
-//! 本体代理的一次提案调用（0061 决定 2）。
+//! One proposal call of the ontology agent (0061 decision 2).
 //!
-//! 输入是开放图谱里本体接不住的形状——对齐判成「无」或「判不定」的签名（短语 × 两端的类，
-//! 带例句与引文）和绑不到类的类别词（带例名）——外加现在的本体（类与属性的定义、定义域、值域）
-//! 和库的能力问题。问的是：**加上哪几个类、哪几条属性，这些形状就接得住、这些问题就答得了**。
-//! 每条提案带一份写给对齐器看的定义、它会绑上的形状、它服务的问题；本体里已经有的属性接得住
-//! 的形状写在 `existing` 里，不另提。代理只提，不写本体（0012：本体是人签的契约）。
+//! Input is the shape the open graph has that the ontology cannot hold: signatures the aligner judged "none" or "undecided" (phrase × the two ends' classes,
+//! with example sentences and quotes), and kind words that bind to no class (with example names), plus the current ontology (class and attribute definitions, domains, ranges)
+//! and the library's capability questions. The question is: **which classes and which attributes, once added, let these shapes be held and these questions be answered**.
+//! Each proposal carries a definition written for the aligner, the shapes it will bind, and the questions it serves; shapes that attributes already in the ontology can hold
+//! are recorded in `existing` and not proposed again. The agent only proposes; it does not write the ontology (0012: the ontology is a contract signed by people).
 //!
-//! 回复是紧凑 JSON，解析同 phrase_align：坏的一条计数、不毁掉整批；键不合法、形状 id 不在批里
-//! 都算坏。
+//! Replies are compact JSON, parsed as in phrase_align: a bad item is counted and does not ruin the batch; an illegal key or a shape id not in the batch
+//! both count as bad.
 
 use crate::align::parse_value;
 use serde_json::Value;
 use std::collections::HashSet;
 use utopia_llm::ChatMessage;
 
-/// 一条对齐接不住的签名
+/// A signature the alignment cannot hold
 #[derive(Debug, Clone)]
 pub struct OpenSignature<'a> {
     pub id: i64,
@@ -27,7 +27,7 @@ pub struct OpenSignature<'a> {
     pub quotes: &'a [String],
 }
 
-/// 一个绑不到类的类别词
+/// A kind word that binds to no class
 #[derive(Debug, Clone)]
 pub struct OpenKindWord<'a> {
     pub id: i64,
@@ -37,19 +37,19 @@ pub struct OpenKindWord<'a> {
     pub phrases: &'a [String],
 }
 
-/// 本体现状：类与属性，照库里的语言给
+/// Current ontology: classes and attributes, in the library's language
 #[derive(Debug, Clone, Default)]
 pub struct Glossary<'a> {
     /// (key, label, description)
     pub classes: Vec<(&'a str, &'a str, &'a str)>,
     /// (key, label, kind, domains, ranges, description)
     pub properties: Vec<GlossaryProperty<'a>>,
-    /// 这一批用不上、只报个名字的属性：(key, label)。模型要知道它们存在，才不会重提；
-    /// 定义只给结构对得上、或按向量最近的那些（同对齐的短名单，0044 决定 3 的成本教训）
+    /// Attributes in this batch that are not used, only named: (key, label). The model needs to know they exist so it does not propose them again;
+    /// definitions are given only for those that match the structure or are nearest by vector (same shortlist as alignment, 0044 decision 3's cost lesson)
     pub others: Vec<(&'a str, &'a str)>,
 }
 
-/// 词表里的一条属性：(key, label, kind, domains, ranges, description)
+/// An attribute in the vocabulary: (key, label, kind, domains, ranges, description)
 pub type GlossaryProperty<'a> = (
     &'a str,
     &'a str,
@@ -59,14 +59,14 @@ pub type GlossaryProperty<'a> = (
     &'a str,
 );
 
-/// 一条能力问题
+/// A capability question
 #[derive(Debug, Clone)]
 pub struct QuestionItem<'a> {
     pub id: i64,
     pub text: &'a str,
 }
 
-/// 代理提的一条元素
+/// An element proposed by the agent
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proposal {
     /// class | property
@@ -74,26 +74,26 @@ pub struct Proposal {
     pub key: String,
     pub label: String,
     pub definition: String,
-    /// 属性：宾语是值（attribute）还是实体（relation）
+    /// Attribute: is the object a value (attribute) or an entity (relation)
     pub value: bool,
-    /// 值属性的数据类型：number | date | text | bool
+    /// Data type of a value attribute: number | date | text | bool
     pub datatype: Option<String>,
-    /// 属性的定义域 / 值域，或类的父类：类键，可以是本体里的，也可以是这一批里刚提的
+    /// Domain / range of an attribute, or a class's parent: a class key, which may be in the ontology or newly proposed in this batch
     pub domains: Vec<String>,
     pub ranges: Vec<String>,
     pub parents: Vec<String>,
-    /// 它会绑上的签名 id 与类别词 id（本批内的）
+    /// The signature ids and kind-word ids it will bind (within this batch)
     pub signatures: Vec<i64>,
     pub kind_words: Vec<i64>,
-    /// 它服务的问题 id
+    /// The question id it serves
     pub questions: Vec<i64>,
 }
 
-/// 「本体里已经有」：现有属性或类的键，与它接得住的形状
+/// "Already in the ontology": the existing attribute or class key, and the shapes it can hold
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Existing {
     pub key: String,
-    /// forward | reverse：形状的主语是不是属性的主语。类别词对类的没有方向
+    /// forward | reverse: whether the shape's subject is the attribute's subject. A kind word to a class has no direction
     pub direction: Option<String>,
     pub signatures: Vec<i64>,
     pub kind_words: Vec<i64>,
@@ -103,9 +103,9 @@ pub struct Existing {
 pub struct ProposalReply {
     pub proposals: Vec<Proposal>,
     pub existing: Vec<Existing>,
-    /// 读不出的项数
+    /// Count of unreadable items
     pub malformed: usize,
-    /// 每个坏项为什么坏：测量台数它们，日志里也看得见
+    /// Why each bad item is bad: the bench counts them, and they are visible in the logs
     pub reasons: Vec<String>,
 }
 
@@ -156,8 +156,8 @@ pub fn build_proposal_messages(
     questions: &[QuestionItem<'_>],
     ontology_lang: &str,
 ) -> Vec<ChatMessage> {
-    // 标签与定义按库的 ontology_lang 写（0004 决定 3、5），不跟文档、本体或这段英文指令：
-    // zh 的库读英文文档、装英文包，照样写中文。写给模型看的是 "Chinese"，它认得懂，未必认得懂 "zh"
+    // Labels and definitions are written in the language set by the library's ontology_lang (0004 decisions 3, 5), not following the document, the ontology or this English instruction:
+    // a zh library reads English documents and installs English packs, and still writes Chinese. The model is shown "Chinese", which it understands; it may not understand "zh"
     let language = if ontology_lang == "zh" {
         "Chinese"
     } else {
@@ -300,7 +300,7 @@ fn valid_key(k: &str) -> bool {
         && k.chars().next().is_some_and(|c| c.is_ascii_lowercase())
 }
 
-/// 读回复。`signature_ids` / `kind_word_ids` / `question_ids` 是这一批里合法的 id：答案里指向别处的算坏项
+/// Read the reply. `signature_ids` / `kind_word_ids` / `question_ids` are the legal ids in this batch: an answer pointing elsewhere counts as bad
 pub fn parse_proposal_response(
     raw: &str,
     signature_ids: &HashSet<i64>,
@@ -379,7 +379,7 @@ pub fn parse_proposal_response(
             reply.bad(format!("a shape or question id outside the batch: {key}"));
             continue;
         };
-        // 什么形状都不绑的提案不是从图谱里长出来的：不收
+        // A proposal that binds no shape did not grow out of the graph: not accepted
         if signatures.is_empty() && kind_words.is_empty() {
             reply.bad(format!("binds no shape: {key}"));
             continue;

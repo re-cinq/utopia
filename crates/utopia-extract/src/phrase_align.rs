@@ -1,29 +1,29 @@
-//! 关系短语按签名绑到属性（0044 决定 3 的第二片）。签名 = 短语 × 主语的类 × 宾语的类
-//! （宾语是字面值时记「值」）。一个库里 distinct 的签名比陈述少得多，每条只判一次，绑定按
-//! 库缓存、按签名复用。
+//! Binds relation phrases to properties by signature (second slice of 0044 decision 3). Signature = phrase × subject's class × object's class
+//! (a literal object is recorded as "value"). A library has far fewer distinct signatures than statements; each is judged once, and bindings are
+//! cached per library and reused per signature.
 //!
-//! 对齐读来源（决定 3）：每条签名带着它下面的几条陈述和各自的引文进提示词，模型判的是
-//! 「**每一条**这个签名下的陈述都在陈述这个属性吗」，还要说方向：forward 是陈述的主语
-//! 就是属性的主语，reverse 是反过来（「owns」绑到 subsidiary_of）。属性可以比短语宽
-//! （「opened a plant in」是 located_in），不能比短语窄、不能只是沾边（「announced the
-//! acquisition of」不是 acquired）；只报告、只评价的短语（said、is expected to）答 null；
-//! 值不是属性量的东西也答 null（股数不是营收）。候选属性的定义、定义域、值域照库里的
-//! 写法给，答案里的键照抄。
+//! Alignment reads the source (decision 3): each signature goes into the prompt with the few statements under it and their quotes, and the model judges
+//! whether **every** statement under this signature states this property. It must also say the direction: forward means the statement's subject
+//! is the property's subject; reverse is the opposite ("owns" bound to subsidiary_of). A property may be broader than the phrase
+//! ("opened a plant in" is located_in), but not narrower, and not merely related ("announced the
+//! acquisition of" is not acquired); phrases that only report or evaluate (said, is expected to) answer null;
+//! a value that is not the property's kind of quantity also answers null (share count is not revenue). Candidate properties' definitions, domains and ranges are given as written in the library,
+//! and answer keys are copied verbatim.
 //!
-//! 回复是紧凑 JSON：`{"b": [[id, "key" | null, "forward" | "reverse" | null, marks]]}`。第四格
-//! 只对状态属性有意义（#966）：一条只说了一刻的陈述，那一刻标的是状态的开始（start）、
-//! 结束（end）还是都不是（none）；事件、恒常、不绑都答 null，旧的三格写法照样读（marks
-//! 缺席）。解析同类别词那边：坏的一条计数、不毁掉整批；键不在候选里、id 不在批里、绑了
-//! 却没方向、状态属性下 marks 写了却认不出、同一个 id 的第二次都算坏；事件与恒常不读第四格，
-//! 写了什么都不算坏。没答到的 id 是「再问」，不是 null。
+//! The reply is compact JSON: `{"b": [[id, "key" | null, "forward" | "reverse" | null, marks]]}`. The fourth cell
+//! only means something for state properties (#966): a statement that states a single moment marks whether that moment is the start of the state (start),
+//! its end (end), or neither (none). Events, eternal facts and non-bindings answer null, and the old three-cell form is still read (marks
+//! absent). Parsing is like the kind-word side: a bad item is counted and does not ruin the batch; a key not among the candidates, an id not in the batch, a binding without
+//! a direction, marks written under a state property but not recognized, or a second answer for the same id all count as bad. Events and eternal facts do not read the fourth cell,
+//! and anything written there is not bad. An unanswered id means "ask again", not null.
 //!
-//! **形状也宽容**（同类别词那边的教训）：模型（实测 DeepSeek-V3.2）并不总照样例写。它会
-//! 把整段答成按 id 作键的对象（`{"0": ["headquartered_in", "forward"], "1": null}`），
-//! 会把一条写成 `{"id": 0, "key": ..., "direction": ...}`，会把 `b` 写成对象、不要外层
-//! 对象只给数组、或在值里先抄一遍 id。这些说的都是同一件事，读法只有一种；温度为零时
-//! 同一段提示词回来的形状还是同一个，读不出就是每一轮都读不出——从前这种回复解出来是
-//! 「零条、零坏」，调用方当成「有一票没答到」静静跳过，没有日志也不再问。读不出的键与
-//! id 算坏项，不当缺席。
+//! **The shape is lenient too** (a lesson from the kind-word side): the model (tested with DeepSeek-V3.2) does not always follow the example. It may
+//! answer the whole thing as an object keyed by id (`{"0": ["headquartered_in", "forward"], "1": null}`),
+//! write an item as `{"id": 0, "key": ..., "direction": ...}`, write `b` as an object, and
+//! drop the outer object and give only an array, or repeat the id first in the value. These all mean the same thing, so there is one reading only; at temperature zero
+//! the same prompt returns the same shape, so an unreadable reply is unreadable every round: such a reply used to parse as "zero items, zero bad", and the caller
+//! silently skipped it as "one vote unanswered", with no log and no retry. Unreadable keys and
+//! ids count as bad items, not as absence.
 
 use std::collections::{HashMap, HashSet};
 
@@ -32,26 +32,26 @@ use utopia_llm::ChatMessage;
 
 use crate::align::{item_id, parse_value};
 
-/// 一个候选属性：键照抄进答案；其余是模型判断的依据，照库里的语言给
+/// A candidate property: the key is copied into the answer; the rest is what the model judges by, given in the library's language
 #[derive(Debug, Clone)]
 pub struct PropertyCandidate<'a> {
     pub key: &'a str,
     pub label: &'a str,
     pub description: &'a str,
-    /// relation（两样东西之间）或 attribute（宾语是值）
+    /// relation (between two things) or attribute (the object is a value)
     pub kind: &'a str,
-    /// state / event / eternal（0031）：只有状态有「一刻标哪一端」这个问题（#966）
+    /// state / event / eternal (0031): only states have the question of "which end this moment marks" (#966)
     pub temporal: &'a str,
-    /// 定义域、值域的类键；空表示没声明
+    /// Class keys of domains and ranges; empty means none declared
     pub domains: Vec<&'a str>,
     pub ranges: Vec<&'a str>,
-    /// 这条候选是经继承命中的：声明在祖先上，签名的类是它的子类。把依据写给模型看，
-    /// 不然它对着一条 domain 是 legal_entity 的属性和一个 organization 的主语会答 null
-    /// （#807：只在代码里放宽候选是不够的，模型得看见继承的依据）
+    /// This candidate matched through inheritance: declared on an ancestor, and the signature's class is its subclass. The basis is shown to the model,
+    /// otherwise for a property with domain legal_entity and an organization subject it would answer null
+    /// (#807: widening candidates in code alone is not enough; the model must see the basis of inheritance)
     pub via: Vec<String>,
 }
 
-/// 一条待绑定的签名：短语、两端的类、例句与引文、候选属性
+/// A signature to bind: phrase, the classes at both ends, example sentences and quotes, candidate properties
 #[derive(Debug, Clone)]
 pub struct PhraseItem<'a> {
     pub id: i64,
@@ -67,28 +67,28 @@ pub struct PhraseItem<'a> {
     pub examples: &'a [String],
     pub quotes: &'a [String],
     pub candidates: Vec<PropertyCandidate<'a>>,
-    /// 结构上也对得上、但没进短名单的键：模型在批里的属性表里看见了它、选了它，照样算票——
-    /// 短名单是省 token 的手段，不是限制
+    /// A key that also matches structurally but was not in the shortlist: if the model saw it in the batch's property table and chose it, it still counts as a vote,
+    /// since the shortlist is a way to save tokens, not a limit
     pub also_allowed: Vec<&'a str>,
 }
 
-/// 模型对一条签名的裁决：Some = (候选的键, 方向)；None = 不绑
+/// The model's verdict on one signature: Some = (candidate key, direction); None = do not bind
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhraseChoice {
     pub id: i64,
     pub property: Option<(String, Direction)>,
-    /// 绑到状态属性时，一条只说了一刻的陈述那一刻标哪一端（#966）；没答或不适用是 None
+    /// When bound to a state property, a statement that states only one moment marks which end that moment is (#966); no answer or not applicable is None
     pub marks: Option<Marks>,
 }
 
-/// 一刻在状态上标的是哪一端（`phrase_bindings.marks`，#966）
+/// Which end a moment marks on a state (`phrase_bindings.marks`, #966)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Marks {
-    /// joined、was appointed、took over：状态从这一刻起
+    /// joined, was appointed, took over: the state starts from this moment
     Start,
-    /// left、resigned from：状态到这一刻为止
+    /// left, resigned from: the state ends at this moment
     End,
-    /// 只是那时成立：不算类型化行
+    /// only true at that time: not a typed row
     Neither,
 }
 
@@ -126,7 +126,7 @@ impl Direction {
     }
 }
 
-/// 系统消息。例子是中性的，不出自任何测量语料；规则 1 的「每一条」是整条路的判据。
+/// System message. The examples are neutral and come from no measured corpus; the rule 1 "every" is the criterion for the whole path.
 /// Reply slots use placeholders: a local model copied the old example's 12/13/14
 /// into a batch numbered 0/1/2, leaving every signature unanswered (#1321).
 const PHRASE_SYSTEM: &str = "\
@@ -195,10 +195,10 @@ pub fn candidate_line(c: &PropertyCandidate<'_>) -> String {
     line
 }
 
-/// 构造两条消息：常量系统消息 + 逐项的用户消息。每项：id、短语、两端的类、例句与引文、候选。
-/// 候选属性表在一批里只写一遍（Properties），每项只列它的候选键；从前每项都带整张表
-/// （最多 60 条、各带定义），12 项一批就是三万多 token，一轮跑下来对齐占了八成的用量
-/// （bench README，2026-09-24）。「按继承对上」是项与候选之间的事，写在项的键后面
+/// Build two messages: a constant system message + a per-item user message. Each item: id, phrase, classes at both ends, example sentences and quotes, candidates.
+/// The candidate property table is written once per batch (Properties), and each item lists only its candidate keys; earlier each item carried the whole table
+/// (up to 60 entries, each with a definition); 12 items per batch was over 30,000 tokens, and alignment took 80% of a run's usage
+/// (bench README, 2026-09-24). "Matched by inheritance" is a matter between an item and a candidate, written after the item's key
 pub fn build_phrase_messages(items: &[PhraseItem<'_>]) -> Vec<ChatMessage> {
     let mut glossary: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -265,14 +265,14 @@ pub fn build_phrase_messages(items: &[PhraseItem<'_>]) -> Vec<ChatMessage> {
     ]
 }
 
-/// 解析回复：`(裁决, 坏项数)`。同一个 id 只收第一次；没答到的 id 不出现。
+/// Parse the reply: `(verdicts, bad item count)`. Only the first answer per id is kept; an id not answered does not appear.
 pub fn parse_phrase_response(
     raw: &str,
     items: &[PhraseItem<'_>],
 ) -> anyhow::Result<(Vec<PhraseChoice>, usize)> {
     let value = parse_value(raw)?;
     let by_id: HashMap<i64, &PhraseItem<'_>> = items.iter().map(|i| (i.id, i)).collect();
-    // 批里描述过的属性各是什么时间语义：只有状态读第四格
+    // What time semantics each property described in the batch has: only states read the fourth cell
     let temporal: HashMap<&str, &str> = items
         .iter()
         .flat_map(|i| i.candidates.iter().map(|c| (c.key.trim(), c.temporal)))
@@ -289,15 +289,15 @@ pub fn parse_phrase_response(
     Ok((choices, malformed))
 }
 
-/// 回复里的每一条答案：（id，键，方向，marks）四个原始值，形状还没验。marks 在第四格或
-/// `marks` 字段里，缺席就是 null（旧的三格写法照样读）。
+/// Each answer in the reply: four raw values (id, key, direction, marks), shape not yet validated. marks is in the fourth cell or the
+/// `marks` field; if absent, it is null (the old three-cell form is still read).
 ///
-/// 认这几种写法，说的都是「这个 id 选了这个键、这个方向」：`{"b": [[id, key, dir]]}`
-/// （样例）、`{"b": {"id": [key, dir]}}`、没有 `b` 的顶层对象 `{"id": [key, dir]}`、
-/// 顶层数组 `[[id, key, dir]]`；一条也可以写成 `{"id": .., "key": .., "direction": ..}`，
-/// 按 id 作键时值也可以是 `{"key": .., "direction": ..}`、`null`（不绑）或先抄一遍 id 的
-/// `[id, key, dir]`。`b` 在就只看 `b`，顶层别的键是模型的旁白，不是答案。缺了 `b` 又
-/// 不是对象或数组的，一条都没有
+/// Four forms are accepted, all meaning "this id chose this key and this direction": `{"b": [[id, key, dir]]}`
+/// (the example), `{"b": {"id": [key, dir]}}`, a top-level object without `b` `{"id": [key, dir]}`,
+/// a top-level array `[[id, key, dir]]`; an entry may also be written `{"id": .., "key": .., "direction": ..}`,
+/// and with id as key the value may also be `{"key": .., "direction": ..}`, `null` (not bound), or `[id, key, dir]` repeating the id first.
+/// If `b` is present only `b` is read; other top-level keys are the model's commentary, not answers. If `b` is missing and
+/// the value is neither an object nor an array, there are no answers
 fn answers(value: &Value) -> Vec<(Value, Value, Value, Value)> {
     let listed = value.get("b").unwrap_or(value);
     match listed {
@@ -325,7 +325,7 @@ fn answers(value: &Value) -> Vec<(Value, Value, Value, Value)> {
             .map(|(id, v)| {
                 let (key, direction, marks) = match v {
                     Value::Array(list) => {
-                        // 值里先抄一遍 id 再给键：`{"0": [0, "headquartered_in", "forward"]}`
+                        // The value repeats the id before the key and direction: `{"0": [0, "headquartered_in", "forward"]}`
                         let copied = list
                             .first()
                             .and_then(item_id)
@@ -343,9 +343,9 @@ fn answers(value: &Value) -> Vec<(Value, Value, Value, Value)> {
     }
 }
 
-/// `[key, dir, marks]` 的三格；只有一格就没有方向（null 的答案常只写一格），没有第三格
-/// 就没有 marks。空数组是「什么都没写」，读成 null 键会把没答到说成不绑——留成对象，
-/// 调用方算坏
+/// Three cells `[key, dir, marks]`; with only one cell there is no direction (a null answer often gives only one cell); without a third cell
+/// there are no marks. An empty array means "nothing written", and reading it as a null key would call an unanswered item "not bound": keep it as an object,
+/// the caller counts it as bad
 fn key_direction_marks(list: &[Value]) -> (Value, Value, Value) {
     match list {
         [] => (Value::Array(Vec::new()), Value::Null, Value::Null),
@@ -355,8 +355,8 @@ fn key_direction_marks(list: &[Value]) -> (Value, Value, Value) {
     }
 }
 
-/// 一条写成对象时的三个字段：键叫 key / property / p，方向叫 direction / dir / d，
-/// 一刻标哪一端叫 marks / m
+/// The three fields of an entry written as an object: the key is key / property / p, the direction is direction / dir / d,
+/// and which end a moment marks is marks / m
 fn fields(map: &serde_json::Map<String, Value>) -> (Value, Value, Value) {
     let pick = |names: &[&str]| {
         names
@@ -372,10 +372,10 @@ fn fields(map: &serde_json::Map<String, Value>) -> (Value, Value, Value) {
     )
 }
 
-/// 一条答案：id 得是这批里的；键是 null（不绑）或候选里的一个，绑了就得有方向，方向
-/// 不认识算坏。键包在数组里的（`["headquartered_in", "forward"]` 塞在第二格）照样读，
-/// 方向与 marks 从数组里取。marks 只在绑到状态属性时读：null 或缺席是没说，写了却认不出
-/// 算坏；事件、恒常（或批里没描述过的键）不读这一格，写了什么都忽略
+/// An answer: id must be in this batch; key is null (not bound) or one of the candidates; if bound, a direction is needed, and an unrecognized direction
+/// counts as bad. A key wrapped in an array (`["headquartered_in", "forward"]` placed in the second cell) is still read,
+/// with direction and marks taken from the array. Marks are read only when bound to a state property: null or absent means not stated; written but unrecognized
+/// counts as bad; events and eternal facts (or keys not described in the batch) do not read this cell, and whatever is written is ignored
 fn parse_answer(
     id: &Value,
     key: &Value,
@@ -427,7 +427,7 @@ fn parse_answer(
     })
 }
 
-/// 模型写的键对回这一项的候选：先原样，再不分大小写（只在唯一命中时）
+/// Match the model's key to this item's candidates: as written first, then case-insensitively (only on a unique hit)
 fn candidate_key(item: &PhraseItem<'_>, written: &str) -> Option<String> {
     let written = written.trim();
     if written.is_empty() {
@@ -447,8 +447,8 @@ fn candidate_key(item: &PhraseItem<'_>, written: &str) -> Option<String> {
     if let Some(first) = hits.next() {
         return hits.next().is_none().then(|| first.to_string());
     }
-    // 键是 `p569` 这种代号时模型十有八九答标签（"dateOfBirth"）：第一次真跑里一半的签名
-    // 因此判成坏票（bench README，2026-09-24）。标签唯一对上就认它的键；对上两个不认
+    // When the key is a code like `p569`, the model very likely answers with the label ("dateOfBirth"): in the first real run half of the signatures
+    // were therefore judged bad votes (bench README, 2026-09-24). If the label matches uniquely, accept its key; if it matches two, do not accept
     let folded = fold(written);
     let mut by_label = item
         .candidates
@@ -459,7 +459,7 @@ fn candidate_key(item: &PhraseItem<'_>, written: &str) -> Option<String> {
     by_label.next().is_none().then(|| first.to_string())
 }
 
-/// 标签比较用的折叠：大小写、空格、下划线、连字符都不算
+/// Case-folding for label comparison: case, spaces, underscores, and hyphens are all ignored
 pub fn fold(s: &str) -> String {
     s.chars()
         .filter(|c| !c.is_whitespace() && *c != '_' && *c != '-')
@@ -629,7 +629,7 @@ mod tests {
         assert!(user.contains("· object: value ·"), "{user}");
     }
 
-    /// 绑上带方向；null 不绑；键照候选抄回；绑了没方向、键不在候选里、id 不在批里都算坏
+    /// Bind with a direction; null does not bind; the key is copied back from the candidates; bound without a direction, a key not among the candidates, or an id not in the batch all count as bad
     #[test]
     fn triples_parse_and_bad_ones_are_counted() {
         let examples = strings(&[]);
@@ -675,7 +675,7 @@ mod tests {
                 },
             ]
         );
-        // 2：键不在候选里；3：绑了没方向；9：id 不在批里；0 的第二次
+        // 2: key not among candidates; 3: bound without direction; 9: id not in batch; second answer for 0
         assert_eq!(malformed, 4);
     }
 
@@ -715,7 +715,7 @@ mod tests {
         assert_eq!(choices[0].id, 0);
     }
 
-    /// 三条签名：owns（应反向绑 subsidiary_of）、said（应 null）、revenue（值）
+    /// Three signatures: owns (should bind reversed to subsidiary_of), said (should be null), revenue (a value)
     fn three_items<'a>(examples: &'a [String], quotes: &'a [String]) -> Vec<PhraseItem<'a>> {
         let mk = |id: i64, phrase: &'static str, value: bool| PhraseItem {
             id,
@@ -759,8 +759,8 @@ mod tests {
         }
     }
 
-    /// 第四格说一刻标状态的哪一端（#966）：四格数组、对象的 marks 字段、按 id 作键的写法都读；
-    /// 缺席或 null 是没说；不绑的不带；写了却认不出的算坏项
+    /// The fourth cell says which end a moment marks on a state (#966): the four-cell array, the object's marks field, and the keyed-by-id form are all read;
+    /// absent or null means not stated; not-bound ones carry none; written but unrecognized ones count as bad
     #[test]
     fn the_fourth_value_says_which_end_a_moment_marks() {
         let (examples, quotes) = (strings(&[]), strings(&[]));
@@ -795,8 +795,8 @@ mod tests {
         assert_eq!(malformed, 1, "an unreadable marks is a bad answer");
     }
 
-    /// 事件与恒常不读第四格：写了认不出的值不算坏项，写了认得出的也不带。状态属性下
-    /// 认不出照样算坏
+    /// Events and eternal facts do not read the fourth cell: an unrecognized value written there is not a bad item, and a recognized one is not kept. Under a state property
+    /// an unrecognized one still counts as bad
     #[test]
     fn an_event_property_does_not_read_the_fourth_value() {
         let (examples, quotes) = (strings(&[]), strings(&[]));
@@ -824,7 +824,7 @@ mod tests {
         );
     }
 
-    /// 提示词说出每条属性是不是状态，以及第四格怎么答
+    /// The prompt states whether each property is a state, and how to answer the fourth cell
     #[test]
     fn the_prompt_says_which_properties_are_states_and_asks_for_the_fourth_value() {
         let (examples, quotes) = (strings(&[]), strings(&[]));
@@ -847,8 +847,8 @@ mod tests {
         );
     }
 
-    /// 类别词那边实测的写法搬到短语上：整段是按 id 作键的对象，没有 `b`，值是
-    /// `[key, dir]`。解出来必须和样例形状一模一样
+    /// Form observed with the kind-word side, moved to phrases: the whole reply is an object keyed by id, with no `b`, and the value is
+    /// `[key, dir]`. It must parse to exactly the same shape as the example
     #[test]
     fn an_id_keyed_object_with_pairs_is_read_as_the_triple_list() {
         let (examples, quotes) = (strings(&[]), strings(&[]));
@@ -864,12 +864,12 @@ mod tests {
                 bound(2, "revenue", Direction::Forward),
             ]
         );
-        // 不绑的写成裸 null 或只有一格；绑了却只有一格是没方向，算坏
+        // Not bound is written as a bare null or with one cell; bound with only one cell means no direction, which counts as bad
         let raw = r#"{"0": ["subsidiary_of"], "1": null, "2": [null]}"#;
         let (choices, malformed) = parse_phrase_response(raw, &items).unwrap();
         assert_eq!(malformed, 1, "bound without a direction");
         assert_eq!(choices, vec![unbound(1), unbound(2)]);
-        // 值里先抄一遍 id 再给键与方向
+        // Repeat the id in the value before the key and direction
         let raw = r#"{"0": [0, "subsidiary_of", "reverse"], "1": [1, null, null]}"#;
         let (choices, malformed) = parse_phrase_response(raw, &items).unwrap();
         assert_eq!(malformed, 0);
@@ -877,14 +877,14 @@ mod tests {
             choices,
             vec![bound(0, "subsidiary_of", Direction::Reverse), unbound(1)]
         );
-        // 空数组不是一个答案
+        // An empty array is not an answer
         let raw = r#"{"0": [], "1": [null]}"#;
         let (choices, malformed) = parse_phrase_response(raw, &items).unwrap();
         assert_eq!(malformed, 1);
         assert_eq!(choices, vec![unbound(1)]);
     }
 
-    /// 按 id 作键、值是对象：`{"key": .., "direction": ..}`，字段名的几种别名都认
+    /// Keyed by id with an object value: `{"key": .., "direction": ..}`; several aliases of field names are accepted
     #[test]
     fn an_id_keyed_object_with_object_values_parses() {
         let (examples, quotes) = (strings(&[]), strings(&[]));
@@ -902,7 +902,7 @@ mod tests {
         );
     }
 
-    /// `b` 下面是对象而不是数组：一样读；`b` 在就只看 `b`，顶层别的键是旁白
+    /// An object under `b` rather than an array: read the same way; if `b` is present only `b` is read, other top-level keys are commentary
     #[test]
     fn b_as_an_object_parses_and_other_top_level_keys_are_ignored() {
         let (examples, quotes) = (strings(&[]), strings(&[]));
@@ -920,7 +920,7 @@ mod tests {
         assert_eq!(choices, vec![bound(0, "subsidiary_of", Direction::Reverse)]);
     }
 
-    /// 数组里的一条写成对象、或整段不要外层对象只给数组：照读
+    /// An entry in an array written as an object, or the whole reply given as a bare array without an outer object: read as is
     #[test]
     fn object_triples_and_a_bare_array_parse() {
         let (examples, quotes) = (strings(&[]), strings(&[]));
@@ -946,7 +946,7 @@ mod tests {
                 bound(2, "revenue", Direction::Forward)
             ]
         );
-        // 样例形状里第二格又包了一层：`[id, [key, dir]]`
+        // In the sample shape the second cell is wrapped one more level: `[id, [key, dir]]`
         let raw = r#"{"b": [[0, ["subsidiary_of", "reverse"]], [1, [null]]]}"#;
         let (choices, malformed) = parse_phrase_response(raw, &items).unwrap();
         assert_eq!(malformed, 0);
@@ -956,8 +956,8 @@ mod tests {
         );
     }
 
-    /// `b` 是空的：一项都没答，不是坏项。没有 `b`、键又不是 id 的：那是读不出的答案，
-    /// 算坏项——从前这种回复算「一项都没答」，调用方静静跳过，什么痕迹都不留
+    /// `b` is empty: no item answered, not a bad item. No `b` and keys that are not ids: that is an unreadable answer,
+    /// counted as bad. Previously this kind of reply counted as "nothing answered" and the caller skipped it silently, leaving no trace
     #[test]
     fn an_empty_b_answers_nothing_but_an_unreadable_reply_is_malformed() {
         let (examples, quotes) = (strings(&[]), strings(&[]));
@@ -971,7 +971,7 @@ mod tests {
         let (choices, malformed) = parse_phrase_response(raw, &items).unwrap();
         assert!(choices.is_empty());
         assert_eq!(malformed, 2);
-        // `b` 是标量：一条都没有
+        // `b` is a scalar: no entries at all
         let (choices, malformed) = parse_phrase_response(r#"{"b": 1}"#, &items).unwrap();
         assert!(choices.is_empty());
         assert_eq!(malformed, 0);
