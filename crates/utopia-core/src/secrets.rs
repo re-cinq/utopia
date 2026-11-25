@@ -1,20 +1,20 @@
-//! 凭据静态加密（封印）。
+//! Encryption at rest for credentials (sealing).
 //!
-//! 库里存的 LLM API key、问数连接串、来源配置里的 token、api 来源的推送密钥，从前都是
-//! 明文——能读到库（或一份备份）的人就拿到了全部外部凭据。现在这些值在落库前用
-//! AES-256-GCM 封印，密钥不在库里：环境变量 `UTOPIA_SECRET_KEY`，或数据目录下
-//! 首次启动生成的 `secret.key`。威胁模型是「库泄漏 ≠ 凭据泄漏」：一份 pg_dump、一个
-//! 只读库账号，拿到的是密文。能同时读到数据目录和库的人（登上了服务器）不在此列——
-//! 那是服务器访问控制的事。
+//! The LLM API keys, question-answering connection strings, tokens in source configs, and push secrets of api sources stored in the database used to be
+//! plaintext: anyone who can read the database (or a backup) gets all external credentials. Now these values are sealed with
+//! AES-256-GCM before being written, and the key is not in the database: the environment variable `UTOPIA_SECRET_KEY`, or the
+//! `secret.key` generated on first start in the data directory. The threat model is "a database leak is not a credential leak": a pg_dump or a
+//! read-only database account yields only ciphertext. Someone who can read both the data directory and the database (who has gotten onto the server) is not covered here:
+//! that is a matter of server access control.
 //!
-//! **格式**：`enc:v1:` + base64(nonce(12) ‖ 密文+tag)。没有前缀的值按明文读（升级前
-//! 落库的旧行），启动时 [`crate::secrets`] 的调用方（store 的 backfill）把它们补封。
-//! 封印幂等：已封印的值再封一次原样返回，读路径与写路径都不必先判断。
+//! **Format**: `enc:v1:` + base64(nonce(12) ‖ ciphertext+tag). Values without the prefix are read as plaintext (rows written
+//! before the upgrade); at startup the callers of [`crate::secrets`] (the store's backfill) seal them.
+//! Sealing is idempotent: sealing an already sealed value again returns it unchanged, so neither the read nor the write path needs to check first.
 //!
-//! **一个进程一把钥匙**：服务启动时 [`init`] 一次；没初始化时 [`seal`] 原样返回、
-//! [`open`] 只认明文——单元测试与没有服务的工具走这条。
+//! **One key per process**: [`init`] is called once when the service starts; when not initialized, [`seal`] returns its input unchanged and
+//! [`open`] only accepts plaintext. Unit tests and tools without a service take this path.
 //!
-//! 密钥轮换不在这一版：换钥匙 = 用旧钥匙读出、新钥匙写回，是一次显式的迁移。
+//! Key rotation is not in this version: changing the key = read out with the old key, write back with the new, an explicit migration.
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};
@@ -27,7 +27,7 @@ const NONCE_LEN: usize = 12;
 
 static SEALER: OnceLock<Aes256Gcm> = OnceLock::new();
 
-/// 装钥匙。只认第一次；再调返回 false，钥匙不变
+/// Install the key. Only the first call counts; later calls return false and the key does not change
 pub fn init(key: [u8; 32]) -> bool {
     SEALER
         .set(Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key)))
@@ -38,12 +38,12 @@ pub fn is_ready() -> bool {
     SEALER.get().is_some()
 }
 
-/// 生一把新钥匙（CSPRNG 32 字节）
+/// Generate a new key (32 bytes from a CSPRNG)
 pub fn generate_key() -> [u8; 32] {
     Aes256Gcm::generate_key(OsRng).into()
 }
 
-/// 钥匙的文本形态：64 位十六进制或 44 位 base64，都收
+/// Text form of the key: 64 hex characters or 44 base64 characters, both accepted
 pub fn parse_key(text: &str) -> Option<[u8; 32]> {
     let t = text.trim();
     let bytes: Vec<u8> = if t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -65,7 +65,7 @@ pub fn is_sealed(stored: &str) -> bool {
     stored.starts_with(PREFIX)
 }
 
-/// 封印。幂等：已封印的原样返回；没装钥匙时原样返回（明文落库，和从前一样）
+/// Seal. Idempotent: an already sealed value is returned as is; with no key installed it is returned as is (stored in plaintext, as before)
 pub fn seal(plain: &str) -> String {
     if is_sealed(plain) {
         return plain.to_string();
@@ -82,8 +82,8 @@ pub fn seal(plain: &str) -> String {
     format!("{PREFIX}{}", B64.encode(bytes))
 }
 
-/// 开封。没有前缀的按明文原样返回（升级前的旧行）；有前缀而钥匙不对或被改过，报错——
-/// 静默回一段乱码会让下游拿它去调外部接口，错得更远
+/// Open. A value without the prefix is returned as plaintext (old rows from before the upgrade); with the prefix but a wrong key or a tampered value, it errors:
+/// silently returning garbage would make downstream feed it to external APIs, failing much further away
 pub fn open(stored: &str) -> anyhow::Result<String> {
     let Some(body) = stored.strip_prefix(PREFIX) else {
         return Ok(stored.to_string());
@@ -112,7 +112,7 @@ pub fn open_opt(stored: Option<&str>) -> anyhow::Result<Option<String>> {
     stored.map(open).transpose()
 }
 
-/// 把 JSON 对象里给定键的字符串值封印（就地）。非字符串值不动
+/// Seal the string values of the given keys in a JSON object (in place). Non-string values are left alone
 pub fn seal_json_keys(value: &mut serde_json::Value, keys: &[&str]) {
     if let Some(obj) = value.as_object_mut() {
         for key in keys {
@@ -124,7 +124,7 @@ pub fn seal_json_keys(value: &mut serde_json::Value, keys: &[&str]) {
     }
 }
 
-/// [`seal_json_keys`] 的反向
+/// The inverse of [`seal_json_keys`]
 pub fn open_json_keys(value: &mut serde_json::Value, keys: &[&str]) -> anyhow::Result<()> {
     if let Some(obj) = value.as_object_mut() {
         for key in keys {
@@ -142,7 +142,7 @@ mod tests {
     use super::*;
 
     fn ready() {
-        // 测试二进制里只装一次；后面的测试拿同一把
+        // Only installed once in the test binary; later tests share the same key
         let _ = init([7u8; 32]);
     }
 

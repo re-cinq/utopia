@@ -1,15 +1,15 @@
-//! 进 `TEXT` 列之前的文本整理。
+//! Text cleanup before it goes into a `TEXT` column.
 //!
-//! Postgres 的 `TEXT` 不收 0x00：一插就报 `invalid byte sequence for encoding "UTF8": 0x00`，
-//! 事务回滚，坏的只是几个字节，丢的是整篇文档或整条记忆。正文进 `chunks.text` 有两条路，
-//! 两条都要剥：解析出来的文档正文（#611 / #630），和 `remember` 工具写下的记忆
-//! （#665——JSON 里 U+0000 的转义是合法的，`serde_json` 解回来就是 NUL）。
+//! Postgres `TEXT` does not accept 0x00: inserting it fails with `invalid byte sequence for encoding "UTF8": 0x00`,
+//! the transaction rolls back, and only a few bytes are bad while a whole document or a whole memory is lost. Text reaches `chunks.text` by two paths,
+//! and both must be stripped: parsed document bodies (#611 / #630), and memories written by the `remember` tool
+//! (#665: the `\u0000` escape in JSON is legal, and `serde_json` decodes it back to NUL).
 
 use std::borrow::Cow;
 
-/// 把 NUL（`\0`）剥掉。
+/// Strip NUL (`\0`).
 ///
-/// 绝大多数文本一个 NUL 都没有，那时原样借用，不为每篇正文复制一整份。
+/// The vast majority of text contains no NUL at all; in that case it is borrowed as is, rather than copying a whole copy for every document body.
 pub fn without_nul(text: &str) -> Cow<'_, str> {
     if text.contains('\0') {
         Cow::Owned(text.replace('\0', ""))

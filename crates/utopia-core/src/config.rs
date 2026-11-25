@@ -4,51 +4,51 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
-/// 全局配置。来源优先级：环境变量（前缀 `UTOPIA_`）> 默认值。
-/// `.env` 文件由二进制入口通过 dotenvy 预加载进环境变量。
+/// Global configuration. Precedence: environment variables (prefix `UTOPIA_`) > defaults.
+/// The `.env` file is preloaded into the environment by the binary entry point via dotenvy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub database_url: String,
-    /// 跑迁移用的连接串。迁移要建表建触发器，运行时不需要那些权限——分开之后
-    /// 应用可以用一个只读写业务表、对台账只增不改的受限角色连库。
-    /// 不设则回落到 `database_url`：既有部署无需改动即可照常升级。
+    /// Connection string for running migrations. Migrations create tables and triggers, which the runtime does not need permissions for, so splitting them off
+    /// lets the app connect with a restricted role that can read and write business tables but only appends to the ledger, never updates it.
+    /// Unset falls back to `database_url`, so existing deployments upgrade without changes.
     pub migration_url: Option<String>,
     pub bind_addr: String,
-    /// JWT 签名密钥。留空则首次启动时自动生成并存进 deployment_settings——
-    /// 要求部署者手填一个随机串，现实中的结果是默认值原样上生产。
-    /// 显式给出时优先于库里那条：密钥轮换与多实例显式对齐走这条路。
+    /// JWT signing key. If empty, a key is generated on first start and stored in deployment_settings.
+    /// Requiring the deployer to fill in a random string means in practice the default value ends up in production as is.
+    /// When given explicitly it takes precedence over the one stored in the database: this is the path for key rotation and explicit alignment across instances.
     pub jwt_secret: Option<String>,
-    /// 凭据封印钥匙（32 字节，64 位十六进制或 base64）。留空则用数据目录下的
-    /// `secret.key`，首次启动生成。**钥匙不进库**：库泄漏不等于凭据泄漏，是静态加密
-    /// 的全部意义；备份数据目录时把它一起带走，没有它库里的凭据读不出来。
+    /// Credential sealing key (32 bytes, 64 hex chars or base64). If empty, the `secret.key` in the data directory is used,
+    /// generated on first start. **The key is not stored in the database:** a database leak is not a credential leak, which is the whole point of encryption at rest;
+    /// when backing up the data directory, take it along. Without it the credentials in the database cannot be read.
     pub secret_key: Option<String>,
-    /// 前端构建产物目录；存在时由服务端托管 SPA（history fallback）。
+    /// Frontend build output directory; when present the server serves the SPA (history fallback).
     pub web_dist: String,
-    /// 数据目录：原始文件（files/）与 Tantivy 索引（index/）。
+    /// Data directory: raw files (files/) and the Tantivy index (index/).
     pub data_dir: String,
-    /// 一个分块的预算（cl100k token）。是个旋钮而不是常量，因为它要能被量：
-    /// 结构（表头跟着走）与大小是两件事，召回台子得能只动一个。`UTOPIA_CHUNK_TOKENS`
+    /// Token budget per chunk (cl100k tokens). It is a knob rather than a constant, because it has to be measurable:
+    /// structure (headers follow along) and size are two different things, and the recall bench must be able to change only one. `UTOPIA_CHUNK_TOKENS`
     pub chunk_tokens: usize,
-    /// 抽取的提示词里带不带「这篇文档前面的分块已经认下的实体」（`known`）。缺省带。
-    /// 也是个为了量而设的旋钮（#588）：分块并发调模型之后，后面的块看不到前面的块认下了
-    /// 什么；关掉它跑一轮召回台子，就是那种情形下的输出。只动提示词——落库时按名字认回
-    /// 前面分块的实体照旧。`UTOPIA_EXTRACT_KNOWN_IN_PROMPT`
+    /// Whether the extraction prompt includes "entities already recognized by earlier chunks of this document" (`known`). On by default.
+    /// Also a knob for measuring (#588): after chunks call the model concurrently, later chunks cannot see what earlier chunks recognized;
+    /// turning it off and running a recall bench round gives the output for that case. It only changes the prompt; when writing to the database, entities are still matched to earlier chunks by name.
+    /// `UTOPIA_EXTRACT_KNOWN_IN_PROMPT`
     pub extract_known_in_prompt: bool,
-    /// 数据库连接池上限。缺省 32，与 worker 并发的缺省对齐——池子小于并发时
-    /// 症状是请求变慢而不是任何一处说"池子不够"，所以它必须可调。
+    /// Database connection pool cap. Default 32, aligned with the default worker concurrency: when the pool is smaller than concurrency,
+    /// the symptom is slower requests, not any single place saying "pool too small", so it must be tunable.
     pub db_max_connections: Option<u32>,
-    /// 强制给会话 cookie 打 Secure。缺省 false：由请求的 X-Forwarded-Proto 判定，
-    /// 走 TLS 才打。只有代理不发那个头时才需要在这里强制打开。
+    /// Forces the Secure flag on the session cookie. Default false: it is decided by the request's X-Forwarded-Proto header,
+    /// set only when over TLS. Only needs to be forced on here when the proxy does not send that header.
     pub cookie_secure: bool,
-    /// 是否开放注册。false 时仅首个用户（引导部署）可注册，其余需管理员开放。
+    /// Whether registration is open. When false, only the first user (bootstrap deployment) can register; others need an admin to open it.
     pub open_registration: bool,
-    /// 能不能用密码登录、注册。关掉之后只走单点登录（配合
-    /// `UTOPIA_OIDC_ALLOWED_DOMAINS` 自动开户）；打开就是身份提供方出事时的后门。
+    /// Whether password login and registration are allowed. When off, only single sign-on is used (together with
+    /// `UTOPIA_OIDC_ALLOWED_DOMAINS` for auto-provisioning); when on, it is a backdoor for when the identity provider goes down.
     /// `UTOPIA_PASSWORD_LOGIN`
     pub password_login: bool,
-    /// 被取代的分块把向量留几天。缺省不设：向量一直留着（0019 开放问题②），as-of 的
-    /// 向量检索倒回多久都找得到。设了之后每天清一次，行与正文不动。取值收在 1 到 3650
-    /// 之间（`retention::window`）。`UTOPIA_SUPERSEDED_VECTOR_DAYS`
+    /// Superseded chunks keep their vectors for a few days. Default unset: vectors are kept forever (0019 open question ②), so as-of
+    /// vector search can look back as far as needed. When set, it is cleaned once a day; rows and bodies stay. Value must be between 1 and 3650
+    /// (`retention::window`). `UTOPIA_SUPERSEDED_VECTOR_DAYS`
     pub superseded_vector_days: Option<i64>,
 }
 
@@ -82,20 +82,20 @@ impl AppConfig {
     }
 }
 
-/// 值为空的环境变量按**没设**处理（#343）。
+/// Environment variables with an empty value are treated as **unset** (#343).
 ///
-/// 容器编排里 `UTOPIA_X: ${UTOPIA_X:-}` 这种写法，在变量没设时传进容器的是空串，
-/// 不是「不传」。Figment 照单全收，于是 `Option<String>` 拿到 `Some("")`、`String`
-/// 字段被空串盖掉默认值、`bool` 与数字字段连反序列化都过不去。
+/// In container orchestration, a form like `UTOPIA_X: ${UTOPIA_X:-}` passes an empty string into the container when the variable is unset,
+/// not "not passed". Figment accepts it as is, so `Option<String>` gets `Some("")`, `String`
+/// fields get their default overwritten by the empty string, and `bool` and numeric fields fail even to deserialize.
 ///
-/// 判断放在读环境变量这一层，而不是各个取值点：空串对这里的每一个字段都不是合法值，
-/// 逐个字段加守卫只会漏掉下一个加进来的字段——`jwt_secret` 和 `secret_key` 各自守着，
-/// `migration_url` 就是漏掉的那个，症状是空串交给 sqlx 报 "relative URL without a
-/// base"，照 README 快速开始起的部署第一步就退出。同一件事 `init-app-role.sh` 里
-/// 用 `[ -z ]` 判过了，Rust 这侧缺的就是它。
+/// The check lives at the env-variable read layer, not at each use site: an empty string is not a valid value for any of these fields.
+/// Guarding field by field only misses the next field added — `jwt_secret` and `secret_key` each guard themselves,
+/// and `migration_url` is the one that was missed. The symptom is the empty string handed to sqlx, which reports "relative URL without a
+/// base", and a deployment started by following the README quick start exits at the first step. `init-app-role.sh` already
+/// checks this with `[ -z ]`; the Rust side was missing it.
 fn blank_is_unset(env: Env) -> Env {
-    // iter() 给的是剥掉前缀、转成小写之后的键；filter 拿到的是剥掉前缀、
-    // 还没转小写的那个，所以这里按不分大小写比。
+    // iter() gives keys with the prefix stripped and lowercased; filter gets the key with the prefix stripped but not yet lowercased,
+    // so this compares case-insensitively.
     let blank: Vec<String> = env
         .iter()
         .filter(|(_, value)| value.trim().is_empty())
@@ -109,23 +109,23 @@ fn blank_is_unset(env: Env) -> Env {
 }
 
 impl AppConfig {
-    /// 迁移连接串：未单独配置时用运行时那一个。
+    /// Migration connection string: when not configured separately, the runtime one is used.
     pub fn migration_url(&self) -> &str {
         self.migration_url.as_deref().unwrap_or(&self.database_url)
     }
 }
 
 #[cfg(test)]
-// Jail 的闭包必须返回 figment::Result，那个 Err 变体的大小不由我们定
+// The Jail closure must return figment::Result; the size of that Err variant is not ours to decide.
 #[allow(clippy::result_large_err)]
 mod tests {
     use super::AppConfig;
     use figment::Jail;
 
-    /// #343：`docker-compose.yml` 里 `UTOPIA_MIGRATION_URL: ${UTOPIA_MIGRATION_URL:-}`
-    /// 在变量没设时传进容器的是**空串**而不是「不传」。空串盖掉回落之后
-    /// `migration_url()` 返回 ""，sqlx 报 "relative URL without a base"，
-    /// 照 README 快速开始起的部署第一步就退出。
+    /// #343: when `UTOPIA_MIGRATION_URL: ${UTOPIA_MIGRATION_URL:-}` in `docker-compose.yml`
+    /// is unset, it passes an **empty string** into the container, not "not passed". After the empty string overrides the fallback,
+    /// `migration_url()` returns "", sqlx reports "relative URL without a base",
+    /// and a deployment started by following the README quick start exits at the first step.
     #[test]
     fn a_blank_migration_url_falls_back_to_the_database_url() {
         Jail::expect_with(|jail| {
@@ -138,7 +138,7 @@ mod tests {
         });
     }
 
-    /// 只有空白也算空：`UTOPIA_MIGRATION_URL=" "` 同样不是连接串。
+    /// Whitespace only also counts as empty: `UTOPIA_MIGRATION_URL=" "` is likewise not a connection string.
     #[test]
     fn whitespace_counts_as_blank() {
         Jail::expect_with(|jail| {
@@ -150,7 +150,7 @@ mod tests {
         });
     }
 
-    /// 真给了值就照旧生效——这一条是拦着上面那个过滤越界的。
+    /// When a real value is given it still takes effect as before. This one guards against the filter above overreaching.
     #[test]
     fn a_migration_url_that_is_set_still_wins() {
         Jail::expect_with(|jail| {
@@ -166,7 +166,7 @@ mod tests {
         });
     }
 
-    /// 空串不止坑 `Option<String>`：`String` 字段没有回落可言，空串直接盖掉默认值。
+    /// Empty strings do more than trip `Option<String>`: a `String` field has no fallback, so the empty string overwrites the default.
     #[test]
     fn a_blank_string_field_keeps_its_default() {
         Jail::expect_with(|jail| {
@@ -182,8 +182,8 @@ mod tests {
         });
     }
 
-    /// 非字符串字段更早一步：空串连反序列化都过不去，`load()` 直接报错，
-    /// 而报的是 figment 的类型错误，看不出是哪个环境变量传空了。
+    /// Non-string fields fail even earlier: an empty string fails deserialization, and `load()` returns an error directly,
+    /// reporting a figment type error, which does not show which environment variable was set to empty.
     #[test]
     fn a_blank_typed_field_does_not_break_loading() {
         Jail::expect_with(|jail| {
@@ -198,7 +198,7 @@ mod tests {
         });
     }
 
-    /// 同上的反面：给了值仍然解析。
+    /// The converse of the above: when a value is given, it still parses.
     #[test]
     fn a_typed_field_that_is_set_still_parses() {
         Jail::expect_with(|jail| {
