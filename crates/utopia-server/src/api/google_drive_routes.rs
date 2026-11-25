@@ -1,16 +1,16 @@
-//! Google Drive 来源的连接与选文件夹（0074）。
+//! Google Drive source connection and folder selection (0074).
 //!
-//! **连接由来源的编辑者本人完成。** 他在来源设置里点「连接」，我们记下一次流程
-//! （state、PKCE verifier、是谁、哪个来源），把他送到 Google 的同意页；回调时这个
-//! 浏览器里的会话必须还是他，而且他对那个库还得是 Editor。不核对的话，有人可以
-//! 自己发起一次流程，再诱使别人点完同意——别人的 Drive 就接进了他的来源。
+//! **The connection is made by the source's editor himself.** He clicks "Connect" in the source settings; we record one flow
+//! (state, PKCE verifier, who, which source), and send him to Google's consent page; on callback the
+//! browser session must still be his, and he must still be an Editor of that database. Without this check, someone could
+//! start a flow themselves, then trick someone else into finishing consent -- that person's Drive would be hooked into the source.
 //!
-//! **连上之后，文件夹只由连上的那个人选。** 读的是他的 Drive，库里任何人都看得见同步进来的
-//! 东西：别的编辑者能浏览、能选，就等于能把他没打算交出来的文件夹拉进库里。所以回调记下
-//! `connected_by`，浏览与选择只认这个人；他不再是编辑者时，同步停下来让人重连。
+//! **Once connected, only the person who connected chooses the folders.** The reads come from his Drive, and anyone in the database can see what is synced in:
+//! if other editors could browse or pick, they could pull into the database any folder he never meant to hand over. So the callback records
+//! `connected_by`, and browsing and selecting honor only this person; if he is no longer an editor, sync stops and asks someone to reconnect.
 //!
-//! 刷新令牌只进不出：存进来源配置的 `refresh_token`（封印），文件夹浏览器的请求
-//! 在服务器上拿它换访问令牌，浏览器从头到尾拿不到任何一枚 Google 令牌。
+//! The refresh token goes in but never out: it is stored in the source config as `refresh_token` (sealed), and the folder browser's requests
+//! exchange it on the server for an access token, so the browser never receives any Google token.
 
 use axum::extract::{Path, Query, State};
 use axum::response::Html;
@@ -29,14 +29,14 @@ use crate::error::{ApiErr, ApiResult};
 use crate::google_drive::{self, Drive, FolderEntry, OAuthConfig};
 use crate::state::AppState;
 
-/// 一次连接流程能活多久：同意页上停十分钟还没点完，就当放弃了
+/// How long a connection flow lives: if he has not finished on the consent page within ten minutes, it is abandoned
 const FLOW_TTL_SECS: u64 = 600;
-/// 同时在途的连接流程上限，理由同 SSO：每一次 `connect` 都落一行
+/// Cap on concurrent in-flight connection flows, same reasoning as SSO: every `connect` writes a row
 const MAX_PENDING_FLOWS: i64 = 1000;
-/// 一个人同时在途的上限：没有它，一个编辑者连点就能占满上面那个总数，十分钟里谁都连不上
+/// Cap on in-flight flows per person: without it, one editor clicking repeatedly could fill the total above, and nobody could connect for ten minutes
 const MAX_PENDING_FLOWS_PER_USER: i64 = 5;
-/// 连接这件事落在配置里的几个键。只由连接、断开两条路由写；断开时连同文件夹一起删，
-/// 下一个连上的人从头选
+/// The connection is recorded in a few keys in the config. Written only by the connect and disconnect routes; disconnect deletes them together with the folders,
+/// so the next person to connect starts selecting from scratch
 const CONNECTION_KEYS: &[&str] = &[
     "refresh_token",
     "account_email",
@@ -45,7 +45,7 @@ const CONNECTION_KEYS: &[&str] = &[
     "connected_by_name",
     "folders",
 ];
-/// 一个来源最多选多少个文件夹。选得更多的，选它们共同的上级
+/// Maximum number of folders one source can select. For more, select their common ancestor instead.
 const MAX_FOLDERS: usize = 50;
 
 fn configured() -> Result<OAuthConfig, AppError> {
@@ -57,7 +57,7 @@ fn configured() -> Result<OAuthConfig, AppError> {
     })
 }
 
-/// 取一条 Google Drive 来源，确认它属于路径上的这个库
+/// Load a Google Drive source and confirm it belongs to the database on this path
 async fn drive_source(state: &AppState, kb_id: Uuid, source_id: Uuid) -> Result<Source, AppError> {
     let source = utopia_store::sources::get(&state.pool, source_id).await?;
     if source.kb_id != kb_id || SourceKind::parse(&source.kind) != Some(SourceKind::GoogleDrive) {
@@ -66,7 +66,7 @@ async fn drive_source(state: &AppState, kb_id: Uuid, source_id: Uuid) -> Result<
     Ok(source)
 }
 
-/// 这个来源连着的 Drive 是不是这个人的：浏览与选文件夹只认他（0074 决定 5）
+/// Whether the Drive this source is connected to is this person's: browsing and folder selection honor only him (0074 decision 5)
 fn require_connector(source: &Source, user_id: Uuid) -> Result<(), AppError> {
     if google_drive::connected_by(&source.config) == Some(user_id) {
         return Ok(());
@@ -77,8 +77,8 @@ fn require_connector(source: &Source, user_id: Uuid) -> Result<(), AppError> {
     })
 }
 
-/// 别人连着的来源不能直接重连：一点就会换掉他的 Drive、丢掉他选的文件夹。
-/// 要换人，先断开（断开会问一句，说清是谁的 Drive），再由新的人来连
+/// A source connected by someone else cannot be reconnected directly: one click would swap out his Drive and drop the folders he selected.
+/// To change the person, disconnect first (the disconnect asks, stating whose Drive it is), then the new person connects
 fn refuse_someone_elses_connection(source: &Source, user_id: Uuid) -> Result<(), AppError> {
     match google_drive::connected_by(&source.config) {
         Some(connector) if connector != user_id => Err(AppError::CodedForbidden {
@@ -89,8 +89,8 @@ fn refuse_someone_elses_connection(source: &Source, user_id: Uuid) -> Result<(),
     }
 }
 
-/// 同一个 Google 账号是不是还连着别的来源。Google 撤销一枚刷新令牌，撤的是这个人对
-/// 我们这个客户端的整份授权，他别的 Drive 来源会一起失效；还有别的在用就不撤
+/// Whether the same Google account is still connected to other sources. Google revokes a refresh token by revoking the person's whole grant to our
+/// client, so his other Drive sources would fail together; revoke only if something else is still using it
 pub(super) async fn grant_still_used(
     pool: &sqlx::PgPool,
     source_id: Uuid,
@@ -107,20 +107,20 @@ pub(super) async fn grant_still_used(
     .await
 }
 
-/// 重连之后还是不是同一个 Google 账号。邮箱不分大小写；有一边不知道就当换了：
-/// 换了账号，上一个账号里选的文件夹不能照着新账号去读
+/// Whether the Google account is still the same one after reconnecting. Emails are case-insensitive; if either side is unknown, treat it as changed:
+/// on a changed account, the folders selected under the previous account must not be read with the new account
 pub(super) fn same_account(previous: Option<&str>, now: Option<&str>) -> bool {
     matches!((previous, now), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b))
 }
 
-/// 重连之后作废不作废上一份授权：两边的账号都知道、而且不是同一个时才作废。
-/// 有一边不知道，就可能是同一个账号——作废会连刚换来的新令牌一起作废（0074 决定 5）
+/// Whether to revoke the previous grant after reconnecting: only when both accounts are known and differ.
+/// If either side is unknown it may be the same account -- revoking would also invalidate the new token just obtained (0074 decision 5)
 pub(super) fn revokes_previous(previous: Option<&str>, now: Option<&str>) -> bool {
     previous.is_some() && now.is_some() && !same_account(previous, now)
 }
 
-/// 请 Google 作废一枚刷新令牌，除非同一个账号还连着别的来源（[`grant_still_used`]）。
-/// 不知道是哪个账号就不作废。失败只记一笔：库里已经没有它了
+/// Ask Google to revoke a refresh token, unless the same account is still connected to another source ([`grant_still_used`]).
+/// If the account is not known, do not revoke. A failure is logged once: the database no longer has it
 async fn revoke_unless_still_used(
     pool: &sqlx::PgPool,
     source_id: Uuid,
@@ -147,7 +147,7 @@ async fn revoke_unless_still_used(
     Ok(())
 }
 
-/// 落一次连接流程。总数与这个人的在途数都在同一条插入里判，满了就不插，回 `None`
+/// Record one connection flow. The total and this person's in-flight count are both checked in the same insert; when full, nothing is inserted and `None` is returned
 pub(super) async fn record_flow(
     pool: &sqlx::PgPool,
     user_id: Uuid,
@@ -176,12 +176,12 @@ pub(super) async fn record_flow(
     Ok((inserted.rows_affected() == 1).then_some((flow_state, verifier)))
 }
 
-/// 界面据此决定要不要提供这种来源的连接按钮
+/// The UI decides from this whether to show a connect button for this kind of source
 pub async fn status(AuthUser(_): AuthUser) -> Json<Value> {
     Json(json!({ "enabled": google_drive::oauth_config().is_some() }))
 }
 
-/// 开始一次连接：回给界面一个 Google 同意页的地址，界面在弹窗里打开它
+/// Start a connection: return the UI a Google consent-page address, which the UI opens in a popup
 pub async fn connect(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -211,7 +211,7 @@ pub async fn connect(
         ("state", flow_state.as_str()),
         ("code_challenge", challenge.as_str()),
         ("code_challenge_method", "S256"),
-        // 刷新令牌只在 offline + 每次都请同意时才保证发：重连一个撤过授权的来源也一样
+        // The refresh token is guaranteed only with offline + consent requested every time: reconnecting a source whose grant was revoked behaves the same way
         ("access_type", "offline"),
         ("prompt", "consent"),
         ("include_granted_scopes", "false"),
@@ -223,12 +223,12 @@ pub async fn connect(
 pub struct Callback {
     code: Option<String>,
     state: Option<String>,
-    /// 人在同意页点了取消
+    /// The person clicked cancel on the consent page
     error: Option<String>,
 }
 
-/// 回调落在弹窗里：成功与失败都回一张不带脚本的小页面。界面那头在轮询来源，
-/// 看见 `account_email` 出现就关掉弹窗
+/// The callback lands in the popup: on success and failure alike it returns a small page without scripts. The UI side polls the source,
+/// and closes the popup once `account_email` appears
 pub async fn callback(
     State(state): State<AppState>,
     user: Result<AuthUser, ApiErr>,
@@ -268,7 +268,7 @@ pub(super) async fn finish(
             None => ("invalid", "callback without code or state".into()),
         });
     };
-    // 一次性：先删后用，同一个 state 第二次到就什么都取不出来
+    // One-shot: delete first, then use; a second arrival of the same state gets nothing back
     let flow: Option<(String, Uuid, Uuid)> = sqlx::query_as(
         "DELETE FROM google_drive_flows WHERE state = $1 AND expires_at > now()
          RETURNING verifier, user_id, source_id",
@@ -289,7 +289,7 @@ pub(super) async fn finish(
     let source = utopia_store::sources::get(&state.pool, source_id)
         .await
         .map_err(|e| ("invalid", format!("source: {e}")))?;
-    // 发起之后的这几分钟里权限可能被收回了
+    // In the minutes since initiation, the permission may have been revoked
     require_kb(state, &user, source.kb_id, Role::Editor)
         .await
         .map_err(|_| {
@@ -298,7 +298,7 @@ pub(super) async fn finish(
                 "user is no longer an editor of the knowledge base".to_string(),
             )
         })?;
-    // 同意页上的这几分钟里，别人可能先连上了
+    // In the minutes on the consent page, someone else may have connected first
     refuse_someone_elses_connection(&source, user.id).map_err(|_| {
         (
             "taken",
@@ -323,16 +323,16 @@ pub(super) async fn finish(
 
     let previous_token = source.config["refresh_token"].as_str();
     let previous_account = source.config["account_email"].as_str();
-    // 连上的人换了一个 Google 账号：上一个账号里选的文件夹不留，它的授权在没别人用时作废。
-    // 同一个账号绝不作废——Google 作废的是整份授权，刚换来的新令牌也会跟着失效
+    // The person connecting switched to another Google account: folders selected under the previous account are dropped, and its grant is revoked if nobody else is using it.
+    // The same account is never revoked -- Google revokes the whole grant, and the newly obtained token would be invalidated with it
     let changed = !same_account(previous_account, grant.account_email.as_deref());
     let grant_keys = json!({
         "refresh_token": grant.refresh_token,
         "account_email": grant.account_email,
-        // 列表里看不见令牌，界面凭这一项知道「连上了」：没验证过的邮箱不显示，不能拿它当标志
+        // The token is not visible in the list; the UI knows "connected" from this field: unverified emails are not shown and must not be used as the flag
         "connected_at": chrono::Utc::now().to_rfc3339(),
         "connected_by": user.id,
-        // 断开前问一句时说清是谁的 Drive；库的成员列表只给管理员，编辑者那边查不到名字
+        // When asking before disconnecting, state whose Drive it is; the database's member list is admin-only, so editors cannot look up the name
         "connected_by_name": user.display_name,
     });
     let dropped: &[&str] = if changed { &["folders"] } else { &[] };
@@ -346,7 +346,7 @@ pub(super) async fn finish(
             .map_err(|e| ("unavailable", format!("checking the previous grant: {e}")))?;
     }
     state.emit_source(source.kb_id);
-    // 审计不落令牌，只记连上的是哪个 Google 账号
+    // Audit does not store tokens; it records only which Google account was connected
     let _ = utopia_store::audit::record(
         &state.pool,
         Some(source.kb_id),
@@ -360,7 +360,7 @@ pub(super) async fn finish(
     Ok(())
 }
 
-/// 断开：删掉刷新令牌与选的文件夹，再按 [`revoke_unless_still_used`] 请 Google 作废
+/// Disconnect: delete the refresh token and selected folders, then ask Google to revoke via [`revoke_unless_still_used`]
 pub async fn disconnect(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -395,11 +395,11 @@ pub async fn disconnect(
 
 #[derive(Deserialize)]
 pub struct FoldersQuery {
-    /// 不给 = 第一层（我的云端硬盘、与我共享、各个共享云端硬盘）
+    /// No value given = top level (My Drive, shared with me, each shared drive)
     parent: Option<String>,
 }
 
-/// 文件夹浏览器：以连上的那个人的身份列子文件夹，只给他本人看
+/// Folder browser: lists subfolders as the person who connected, visible only to him
 pub async fn folders(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -440,8 +440,8 @@ pub struct SelectBody {
     folders: Vec<FolderEntry>,
 }
 
-/// 存下选中的文件夹，并立即同步一次。只有连上的那个人能选。换了文件夹，上一批里
-/// 不在新范围内的文档会在这一轮被标成「不在来源中」，删不删由人决定，与别的来源一样
+/// Save the selected folders and sync once immediately. Only the person who connected can select. When the folder changes, documents from the previous batch
+/// that fall outside the new scope are marked "not in source" in this round; whether to delete them is up to a human, as with other sources
 pub async fn select(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -485,7 +485,7 @@ pub async fn select(
     Ok(Json(json!({ "source": updated.without_secrets() })))
 }
 
-/// 一张小页面，不带脚本。字符串都是这里写死的，不拼任何请求里来的东西
+/// A small page with no script. The strings are hardcoded here; nothing from the request is concatenated in
 fn page(title: &str, body: &str) -> Html<String> {
     Html(format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title>\

@@ -19,14 +19,14 @@ pub struct CreateKbReq {
     pub description: Option<String>,
     #[serde(default)]
     pub visibility: Option<String>,
-    /// 预置本体包的 id，按给定顺序装。空 = 只有十个种子。
+    /// IDs of preset ontology packs, installed in the given order. Empty = only the ten seeds.
     ///
-    /// **顺序有意义**：第一个包的类会认领同名的种子类（它们没有 IRI），
-    /// 后面的包撞名时查对齐表。schema.org 放第一个，别的包才对得上。
+    /// **Order matters:** the first pack's classes claim same-named seed classes (they have no IRI),
+    /// and later packs that collide look up the alignment table. schema.org goes first so the others line up.
     #[serde(default)]
     pub ontology_packs: Vec<String>,
-    /// 场景包的 id（0073）：按业务场景预置的类、属性和能力问题，走编辑器的路建出来。
-    /// 排在标准包之后装，撞键的跳过
+    /// Scenario packs (0073): classes, properties and capability questions preset for business scenarios, built through the editor's path.
+    /// Installed after the standard packs; colliding keys are skipped
     #[serde(default)]
     pub scenario_packs: Vec<String>,
 }
@@ -36,35 +36,35 @@ pub struct UpdateKbReq {
     pub name: Option<String>,
     pub description: Option<String>,
     pub visibility: Option<String>,
-    /// 自动扩本体开关（缺省开；关掉不影响"留意"，只是变成你点一下的提案）
+    /// Automatic ontology expansion switch (on by default; turning it off does not stop "watching", it only turns it into a proposal you click through)
     #[serde(default)]
     pub auto_extend_ontology: Option<bool>,
-    /// 本体语言（`en` | `zh`）：跟语料走，不跟界面走。见 docs/decisions/0004
+    /// Ontology language (`en` | `zh`): follows the corpus, not the UI. See docs/decisions/0004
     #[serde(default)]
     pub ontology_lang: Option<String>,
-    /// 物化推理开关（缺省关）。见 docs/decisions/0002 R1
+    /// Materialized inference switch (off by default). See docs/decisions/0002 R1
     #[serde(default)]
     pub materialize_inferences: Option<bool>,
-    /// 多久重推一次（分钟）。事实持续在变，只靠手点会让派生一直是缺的
+    /// How often to re-derive, in minutes. Facts keep changing, and relying only on manual clicks leaves derivations permanently stale
     #[serde(default)]
     pub inference_interval_minutes: Option<i32>,
-    /// 抽取结束自动排一轮类型消解（缺省开）。见 docs/decisions/0016 C2
+    /// Queue a round of type resolution automatically when extraction finishes (on by default). See docs/decisions/0016 C2
     #[serde(default)]
     pub auto_type_resolution: Option<bool>,
-    /// 治理开关（缺省关）：开着，agent 按先进先出过等人的重复对，先读台账再裁；
-    /// 打开那一刻就排一轮，关掉后任务在两簇之间看到就停。见 docs/decisions/0025
+    /// Governance switch (off by default): when on, the agent works through waiting duplicate pairs first-in-first-out and reads the ledger before ruling;
+    /// turning it on queues a round right away, and turning it off makes the task stop at the next boundary between two clusters. See docs/decisions/0025
     #[serde(default)]
     pub governance: Option<bool>,
-    /// 人写的数据约定（「测试单不算数」这类 schema 里没有的规则），问数与探索的
-    /// 提示词都读它。探索生成的描述在另一个字段，PATCH 不了。见 #570
+    /// Human-written data conventions (rules like "test tickets don't count" that are not in the schema); the data-question and exploration
+    /// prompts both read it. Exploration-generated descriptions live in another field and cannot be PATCHed. See #570
     #[serde(default)]
     pub data_conventions: Option<String>,
 }
 
-/// 用户可见的 KB 列表（restricted 库仅矩阵成员与系统管理员可见）。
+/// KB list visible to the user (restricted libraries are visible only to matrix members and system admins).
 ///
-/// 读令牌也能列（#1243）：客户端建库之前先按名字找，免得每跑一次建一个同名库。
-/// 限定过 `kb_ids` 的令牌只看得见它列着的那几个
+/// Read tokens can list too (#1243): a client looks up by name before creating a library, so it does not create a same-named library on every run.
+/// A token scoped by `kb_ids` sees only the libraries it lists
 pub async fn list(
     State(state): State<AppState>,
     caller: SessionOrToken,
@@ -79,9 +79,9 @@ pub async fn list(
     Ok(Json(list))
 }
 
-/// 建库：部署管理员（工作区 Admin+ 或系统管理员）。创建者自动进入矩阵为 admin。
+/// Create a library: deployment admin (workspace Admin+ or system admin). The creator is automatically added to the matrix as admin.
 ///
-/// 写令牌也能建（0014 决定 6）：以发令牌的人的身份，角色要求一点没松
+/// Write tokens can create too (0014 decision 6): as the person who issued the token, role requirements are not loosened at all
 pub async fn create(
     State(state): State<AppState>,
     caller: SessionOrToken,
@@ -99,8 +99,8 @@ pub async fn create(
     if !matches!(kind, "knowledge" | "memory") {
         return Err(AppError::Validation("kind must be 'knowledge' or 'memory'".into()).into());
     }
-    // 建库是部署管理动作（入口在 System settings）：系统管理员或工作区 Admin+。
-    // 用户自建库前端默认 restricted，不污染全员切换器；General 由系统初建保持 open
+    // Creating a library is a deployment admin action (entry point is System settings): system admin or workspace Admin+.
+    // The frontend defaults user-created libraries to restricted, so they do not pollute the everyone-switcher; General is created open by the system
     let ws_role =
         utopia_store::workspaces::require_role(&state.pool, user.id, workspace_id, Role::Viewer)
             .await?;
@@ -136,7 +136,7 @@ pub async fn create(
         .await?;
     install_packs(&state, kb.id, user.id, token_id, &req.ontology_packs).await?;
     let kb = utopia_store::kbs::get(&state.pool, kb.id).await?;
-    // 场景包排在标准包之后：它的类键撞上标准包的就让给标准包，声明还能指向它们（0073）
+    // Scenario packs come after the standard packs: a class key that collides with a standard pack yields to it, while declarations can still point at them (0073)
     let scenarios = crate::scenario_packs::install(
         &state,
         kb.id,
@@ -152,7 +152,7 @@ pub async fn create(
     Ok(Json(kb))
 }
 
-/// 我的知识库全景（账户层）：可见库 + 我的角色 + 加入信息 + 概览统计。
+/// My knowledge-base overview (account level): visible libraries + my role + join info + overview stats.
 pub async fn my_kbs(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -189,8 +189,8 @@ async fn kb_with_role(
     utopia_store::access::require_kb(&state.pool, user, kb_id, min).await
 }
 
-/// 详情附带调用者在本库的角色：前端据此门控破坏性操作（重建/删除）的入口，
-/// 不必让用户点到底才吃 403。
+/// The detail includes the caller's role in this library: the frontend uses it to gate entry points for destructive operations (rebuild/delete),
+/// so users do not have to click all the way in to hit a 403.
 pub async fn get_one(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -203,7 +203,7 @@ pub async fn get_one(
     Ok(Json(body))
 }
 
-/// 库设置（名称/描述/可见性）：库 admin 起步。
+/// Library settings (name/description/visibility): library admin to start.
 pub async fn update(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -226,12 +226,12 @@ pub async fn update(
         req.data_conventions.as_deref().map(str::trim),
     )
     .await?;
-    // 打开开关就自动开始处理：排一轮，同库已排着的不重复
+    // Turning the switch on starts processing right away: queue a round; one already queued for this library is not duplicated
     if req.governance == Some(true) {
         utopia_store::jobs::enqueue_unless_queued(&state.pool, "govern", json!({ "kb_id": id }))
             .await?;
     }
-    // 审计只记不阻断
+    // Audit records only, never blocks
     let _ = utopia_store::audit::record(
         &state.pool,
         Some(id),
@@ -239,7 +239,7 @@ pub async fn update(
         "kb.updated",
         "kb",
         Some(id),
-        // 约定改了要留痕：那段文字进每一次问数的提示词，谁什么时候改过得查得到
+        // A convention change must leave a trace: the text goes into every data-question prompt, so who changed it and when must be traceable
         json!({
             "name": req.name,
             "visibility": req.visibility,
@@ -258,7 +258,7 @@ pub async fn delete(
 ) -> ApiResult<Json<serde_json::Value>> {
     let kb = kb_with_role(&state, &user, id, Role::Admin).await?;
     utopia_store::kbs::delete(&state.pool, id).await?;
-    // kb_id 置 NULL：库已级联删除，事件留在部署层（actor 与库名在 detail）
+    // kb_id set to NULL: the library was already cascade-deleted, so the event stays at the deployment level (actor and library name are in detail)
     let _ = utopia_store::audit::record(
         &state.pool,
         None,
@@ -272,10 +272,10 @@ pub async fn delete(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 这个库走到哪一步了（#313）：四个页面的空状态共用同一个判断。
+/// How far this library has got (#313): the empty states on all four pages share one check.
 ///
-/// Viewer 起步——看得见这个库的人都该知道它是空的还是在跑。回的全是布尔与
-/// 计数，模型那一项只说配没配，所以不需要工作区 admin 那道门。
+/// Viewer to start: anyone who can see this library should know whether it is empty or running. The returns are all booleans and
+/// counts; the model item only says whether it is configured, so the workspace admin gate is not needed.
 pub async fn readiness(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -286,7 +286,7 @@ pub async fn readiness(
 }
 
 // ---------------------------------------------------------------------------
-// KB 成员矩阵（库自己的 Settings → Members）
+// KB member matrix (the library's own Settings → Members)
 // ---------------------------------------------------------------------------
 
 pub async fn members(
@@ -346,15 +346,15 @@ pub async fn remove_member(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 库级审计日志（Admin 起步；纯审计展示）。
+/// Library-level audit log (Admin to start; pure audit display).
 #[derive(Deserialize)]
 pub struct AuditQuery {
-    /// 动作前缀。`entity.` 捞出 entity.retyped / entity.renamed 一族
+    /// Action prefix. `entity.` pulls in the entity.retyped / entity.renamed family
     #[serde(default)]
     pub action: Option<String>,
     #[serde(default)]
     pub actor: Option<Uuid>,
-    /// 含起点、不含终点，与半开区间的惯例一致
+    /// The start is included and the end is not, matching the half-open interval convention
     #[serde(default)]
     pub since: Option<String>,
     #[serde(default)]
@@ -365,7 +365,7 @@ pub struct AuditQuery {
     pub offset: Option<i64>,
 }
 
-/// 日期参数：按天给（`2026-08-30`）或 RFC3339 都收。
+/// Date parameters: accepts either a day (`2026-08-30`) or RFC3339.
 fn parse_day(raw: Option<&str>) -> Result<Option<chrono::DateTime<chrono::Utc>>, AppError> {
     let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
@@ -378,8 +378,8 @@ fn parse_day(raw: Option<&str>) -> Result<Option<chrono::DateTime<chrono::Utc>>,
         .map_err(|_| AppError::invalid("bad_date", "expected YYYY-MM-DD or RFC3339"))
 }
 
-/// 审计台账。**分页 + 筛选**——从前是固定最近 100 条，而台账是合规材料，
-/// 「只看得到最近一百条」等于查不了历史。
+/// Audit ledger. **Paging and filtering**: it used to be a fixed latest 100 entries, and the ledger is compliance material,
+/// so "only the latest hundred visible" meant history could not be queried.
 pub async fn audit_log(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -401,29 +401,29 @@ pub async fn audit_log(
         offset,
     )
     .await?;
-    // 下拉按这个库实际发生过的动作填，而不是一份硬编码清单——
-    // 后者会列出一堆这个库从来没有过的选项
+    // The dropdown is filled with the actions this library has actually seen, not a hard-coded list:
+    // the latter would list many options this library never had
     let actions = utopia_store::audit::actions_for_kb(&state.pool, id).await?;
     Ok(Json(
         json!({ "events": events, "total": total, "actions": actions }),
     ))
 }
-/// 建库时装选中的本体包。
+/// Install the selected ontology packs when creating a library.
 ///
-/// 从前这里要先跑一次 `ensure_default_ontology`：包里的类要认领同名的种子类
-/// （`schema:Organization` 接管 `organization`），而认领的前提是那一行已经存在。
-/// **现在没有种子可认领了**——0009 删掉内置实体类、0010 与 `#125` 删掉种子关系、
-/// 0011 把 `mapped_to` 搬去语义层之后，播种函数本身也退场了。包直接落进空库。
+/// This used to need `ensure_default_ontology` run first: a pack's classes must claim same-named seed classes (`schema:Organization` takes over `organization`),
+/// and claiming requires that row to already exist.
+/// **Now there are no seeds to claim**: after 0009 removed the built-in entity classes, 0010 and `#125` removed the seed relations, and
+/// 0011 moved `mapped_to` to the semantic layer, the seeding function itself retired too. Packs land directly in an empty library.
 ///
-/// **一个包失败不回滚已装的**：本体是加法，装了一半的库仍然可用，
-/// 而回滚要撤已经建好的类——那正是 0008 决定不做导入撤销的理由。
-/// 失败信息里带上是哪个包，让人知道从哪补。
+/// **A failing pack does not roll back the ones already installed**: the ontology is additive, and a half-installed library still works,
+/// while a rollback would have to remove the classes already created, which is exactly why 0008 decided against import undo.
+/// The error message names the failing pack, so people know where to resume.
 ///
-/// 没有默认包（#580）：注册建的 General 库与对话框里新建的库都空着起步，
-/// 装哪个包是建库的人选的。
-/// 只被 `create_kb` 调（0062 的前提）：新库没有事实就没有违规可对账，
-/// 所以这里不像 `apply_import` 那样做基线 + 判据对账。哪天它被复用到
-/// 既有库上，这条注释就不再成立——先把对账补上再复用
+/// No default pack (#580): a General library created at registration and a library created in the dialog both start empty,
+/// and which pack to install is chosen by the person creating the library.
+/// Only called by `create_kb` (a precondition of 0062): a new library has no facts, so there are no violations to reconcile,
+/// which is why it skips the baseline + criteria reconciliation that `apply_import` does. If this is ever reused on
+/// an existing library, this comment stops holding: add the reconciliation first, then reuse it
 pub(super) async fn install_packs(
     state: &AppState,
     kb_id: Uuid,
@@ -445,8 +445,8 @@ pub(super) async fn install_packs(
             .await
             .map_err(|e| AppError::Other(anyhow::anyhow!("装本体包 {} 失败：{e}", pack.id)))?;
     }
-    // 第二遍：跨包的 domain / range。包是挨个装的，先装的看不见后装的类——
-    // W3C Org 的 headOf 要等 FOAF 的 Agent（#222）。只装一个包时没有"别的包"
+    // Second pass: cross-pack domain / range. Packs are installed one at a time, so an earlier pack cannot see classes from later ones:
+    // W3C Org's headOf needs FOAF's Agent (#222). With only one pack installed there is no "other pack"
     if packs.len() > 1 {
         for (pack, bytes) in &packs {
             let (d, r) =
@@ -461,8 +461,8 @@ pub(super) async fn install_packs(
     Ok(())
 }
 
-/// 场景包清单（0073），给建库界面：两种语言的名字都给，界面按自己的语言挑；
-/// 装进库时按库的 `ontology_lang` 挑
+/// Scenario pack list (0073) for the creation UI: names in both languages are given, and the UI picks the one in its language;
+/// when installed into a library, it is picked by the library's `ontology_lang`
 pub async fn list_scenario_packs(AuthUser(_): AuthUser) -> ApiResult<Json<serde_json::Value>> {
     let packs: Vec<_> = crate::scenario_packs::PACKS
         .iter()
@@ -480,7 +480,7 @@ pub async fn list_scenario_packs(AuthUser(_): AuthUser) -> ApiResult<Json<serde_
     Ok(Json(json!({ "packs": packs })))
 }
 
-/// 可选的本体包清单，给建库界面。不需要登录之外的权限——它是静态数据。
+/// Optional ontology pack list for the creation UI. Needs nothing beyond being logged in: it is static data.
 pub async fn list_packs(AuthUser(_): AuthUser) -> ApiResult<Json<serde_json::Value>> {
     let packs: Vec<_> = crate::ontology_packs::PACKS
         .iter()

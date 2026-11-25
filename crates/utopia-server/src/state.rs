@@ -6,13 +6,13 @@ use utopia_core::config::AppConfig;
 use utopia_search::SearchIndex;
 use uuid::Uuid;
 
-/// 服务内事件（SSE 推送给前端做局部刷新）。
+/// In-service event (SSE pushed to the frontend for partial refresh).
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct AppEvent {
-    /// None = 不属于任何库。告警的角标是跨库的，而系统级告警根本没有库
+    /// None = belongs to no KB. The alert badge spans KBs, and system-level alerts have no KB at all
     pub kb_id: Option<Uuid>,
-    /// document = 文档摄入/抽取状态变化；review = 审核队列变化；
-    /// alert = 告警中心有变动
+    /// document = document ingest/extraction status changed; review = review queue changed;
+    /// alert = the alert center has changed
     pub kind: &'static str,
     pub document_id: Option<Uuid>,
 }
@@ -22,35 +22,35 @@ pub struct AppState {
     pub pool: PgPool,
     pub jwt_secret: String,
     pub search: Arc<SearchIndex>,
-    /// Charter（内置文档）内存索引：chat 的 search_docs 工具用
+    /// In-memory index of the Charter (built-in documents): used by the chat's search_docs tool
     pub docs: Arc<utopia_search::DocsIndex>,
-    /// 原始文件字节的存取接缝（内容寻址，key = sha256）；当前实现为本地磁盘
+    /// Seam for storing and fetching raw file bytes (content-addressed, key = sha256); the current implementation is local disk
     pub blob: Arc<dyn crate::blob::BlobStore>,
     pub open_registration: bool,
     pub password_login: bool,
-    /// 强制 Secure cookie（配置项）；未强制时按请求的 X-Forwarded-Proto 逐次判定
+    /// Force Secure cookies (config option); when not forced, judged per request from the X-Forwarded-Proto header
     pub cookie_secure: bool,
-    /// 分块预算，见 `AppConfig::chunk_tokens`
+    /// Chunk budget, see `AppConfig::chunk_tokens`
     pub chunk_tokens: usize,
-    /// 见 `AppConfig::extract_known_in_prompt`
+    /// See `AppConfig::extract_known_in_prompt`
     pub extract_known_in_prompt: bool,
-    /// worker 并发数：调度循环每轮热读——系统设置改动即时生效
+    /// Worker concurrency: the scheduling loop re-reads it on every round, so a system settings change takes effect at once
     pub worker_concurrency: Arc<std::sync::atomic::AtomicUsize>,
-    /// 各工作区的对话客户端。端点报过的上下文窗口记在客户端上，留着它下一轮才记得（#964）
+    /// Chat clients per workspace. The context window an endpoint reported is recorded on the client, so keeping the client lets the next round remember it (#964)
     pub chat_clients: Arc<crate::llm_util::ConversationClients>,
-    /// 按模型的并发闸门：后台任务调 LLM 前取许可。限额存库，改完即时生效
+    /// Concurrency gates per model: background tasks take a permit before calling the LLM. Limits are stored in the DB and take effect at once when changed
     pub model_gates: Arc<crate::llm_util::ModelGates>,
     pub events: broadcast::Sender<AppEvent>,
-    /// 正在生成的回答，按会话查。**刷新页面之后还能接上**（见 `live`）
+    /// Answers currently being generated, looked up by session. **Can still be reattached after a page refresh** (see `live`)
     pub live: Arc<crate::live::Registry>,
-    /// 表的 owner 的连接串：迁移身份与运行身份分开时才有（`UTOPIA_MIGRATION_URL`）。
-    /// 运行期只有建向量索引用它，用完即关（`vector_index::build_as_owner`，#1120）
+    /// Connection string of the table owner: only exists when the migration identity and the runtime identity are separate (`UTOPIA_MIGRATION_URL`).
+    /// At runtime only building the vector index uses it, and it is closed as soon as it is done (`vector_index::build_as_owner`, #1120)
     pub owner_database_url: Option<String>,
 }
 
 impl AppState {
-    /// `jwt_secret` 由入口解析：环境变量给了就是它，否则是库里那条（首启时生成）。
-    /// 不从 cfg 里取，是因为到这一步它必须已经是确定的一个值，而不是 Option。
+    /// `jwt_secret` is resolved by the entry point: if the environment variable is set, that is it; otherwise it is the one in the DB (generated on first start).
+    /// It is not taken from cfg, because by this point it must already be a definite value, not an Option.
     pub fn new(
         pool: PgPool,
         cfg: &AppConfig,
@@ -71,10 +71,10 @@ impl AppState {
             cookie_secure: cfg.cookie_secure,
             chunk_tokens: cfg.chunk_tokens,
             extract_known_in_prompt: cfg.extract_known_in_prompt,
-            // 与 `deployment_settings.worker_concurrency` 的列缺省保持一致（迁移 0011）：
-            // access::worker_concurrency 的「行不存在」兜底是 64，main.rs 的「函数本身
-            // 报错」兜底也是 64——这是**服务起来后第一次读这个值之前**的值，写错了
-            // 就意味着服务启动那一小会儿跑的是迁移 0011 想避免的并发不足。
+            // Matches the column default of `deployment_settings.worker_concurrency` (migration 0011):
+            // access::worker_concurrency falls back to 64 when the row is missing, and main.rs falls back to 64 when
+            // the function itself errors. This is the value used **before the first read after the service starts**; if it is wrong,
+            // the service runs at the reduced concurrency that migration 0011 was meant to avoid, for the short window after startup.
             worker_concurrency: Arc::new(std::sync::atomic::AtomicUsize::new(64)),
             chat_clients: Arc::new(crate::llm_util::ConversationClients::default()),
             model_gates: Arc::new(crate::llm_util::ModelGates::default()),
@@ -84,7 +84,7 @@ impl AppState {
         }
     }
 
-    /// 无订阅者时 send 返回 Err——正常情况，静默忽略。
+    /// When there are no subscribers, send returns Err: normal, silently ignored.
     pub fn emit_document(&self, kb_id: Uuid, document_id: Uuid) {
         let _ = self.events.send(AppEvent {
             kb_id: Some(kb_id),
@@ -101,8 +101,8 @@ impl AppState {
         });
     }
 
-    /// 一句记忆抽出了等人点头的事实（0015）。对话里那张确认卡按这个刷新——
-    /// 抽取是异步的，卡片只能在任务完成时长出来，而不是在助手回话的那一刻
+    /// A memory extraction produced facts waiting for a nod (0015). The confirmation card in the conversation refreshes on this:
+    /// extraction is asynchronous, so the card can appear only when the task completes, not at the moment the assistant replies
     pub fn emit_pending(&self, kb_id: Uuid) {
         let _ = self.events.send(AppEvent {
             kb_id: Some(kb_id),
@@ -111,8 +111,8 @@ impl AppState {
         });
     }
 
-    /// 图变了。推理往图里加过边之后要发一次——它不经过文档管道，
-    /// 而 `document` 那条事件是文档管道专用的
+    /// The graph changed. After reasoning adds edges to the graph, fire this once: it does not go through the document pipeline,
+    /// while the `document` event is for the document pipeline only
     pub fn emit_graph(&self, kb_id: Uuid) {
         let _ = self.events.send(AppEvent {
             kb_id: Some(kb_id),
@@ -129,11 +129,11 @@ impl AppState {
         });
     }
 
-    /// 告警有变动。**不带任何数据，也不判权限**——收到的人一律重取列表，
-    /// 而"谁能看见什么"在列表查询里判且只判一次。
+    /// Alerts changed. **Carries no data and does not check permissions**: whoever receives it refetches the list,
+    /// and "who can see what" is decided once, in the list query.
     ///
-    /// 代价是没权限的人也会被叫醒重取一次，拿到的仍是空。换来的是推送这条路上
-    /// 一行权限逻辑都没有，不存在"推送和列表判得不一样"这种漏。
+    /// The cost is that someone without permission also gets woken to refetch once, and still gets an empty list. What it buys is that the push path
+    /// has no permission logic at all, so there is no way for push and list to decide differently.
     pub fn emit_alert(&self) {
         let _ = self.events.send(AppEvent {
             kb_id: None,

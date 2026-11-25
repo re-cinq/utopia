@@ -1,7 +1,7 @@
-//! 实体消解攒批裁决任务：消费审核队列中 stage=adjudicating 的灰区对。
-//! 先查裁决缓存，缓存未命中的攒成一批（一次 LLM 调用裁多对）；
-//! 高置信 same → 自动合并（可回滚），高置信 different → 自动保持分开，
-//! 其余转人工。未配模型时全部转人工——本任务失败或缺席都不影响抽取与查询。
+//! Batched entity-resolution adjudication task: consumes gray-zone pairs in stage=adjudicating from the review queue.
+//! Checks the adjudication cache first; cache misses are batched into one LLM call that adjudicates several pairs;
+//! high-confidence same -> merged automatically (reversible), high-confidence different -> kept apart automatically,
+//! everything else goes to a human. Without a configured model everything goes to a human; this task failing or being absent never affects extraction or querying.
 
 use crate::governance::{look_again, Look};
 use crate::llm_util;
@@ -17,15 +17,15 @@ use uuid::Uuid;
 const BATCH_SIZE: i64 = 12;
 const AUTO_CONF: f32 = 0.8;
 const MAX_ROUNDS: usize = 20;
-/// 缓存键：类型 + 双方名字 + 事实摘要 + 先例（与实体 id 无关——重传文档不重复付费）。
-/// **先例也进键**：答案随先例变（0025 说的正是这个，治理那一路因此干脆不用缓存）；
-/// 人又裁了一笔，键就变，旧答案自然作废，不必去清
+/// Cache key: type + both names + fact digest + precedents (independent of entity ids, so re-uploading a document does not pay twice).
+/// **Precedents are part of the key too**: the answer changes with precedents (0025 says exactly this, which is why the governance path skips the cache altogether);
+/// when a human adjudicates another one the key changes and the old answer is naturally invalidated, no cleanup needed
 fn pair_key(item: &ReviewItem, precedents: &[String]) -> String {
     let side = |s: &utopia_core::models::ReviewSide| {
         format!(
             "{}|{}|{}",
             s.name.to_lowercase(),
-            // 没判出类型的一侧照样要能缓存（0009）
+            // A side whose type was not determined must still be cacheable (0009)
             s.type_label.as_deref().unwrap_or("untyped"),
             s.top_facts.join(";")
         )
@@ -42,8 +42,8 @@ pub(crate) fn seed_measurement_cache_key(item: &ReviewItem, precedents: &[String
     pair_key(item, precedents)
 }
 
-/// 攒批没定的对要不要带工具再看一遍（0028）：没判决或把握不到线；硬规则拦得住的不看
-/// （大类不同、版本尾巴、含名字的一句话——再看也改不了规则）；有撤回的不看，那是人的事
+/// Whether a pair the batch left undecided gets a second look with tools (0028): no verdict or confidence below the bar; pairs the hard rules already stop are not re-checked
+/// (different major categories, version suffixes, one-sentence name mentions: a second look cannot change the rule); retracted pairs are not re-checked, that is the human's call
 fn wants_another_look(
     item: &ReviewItem,
     p: &gov::Precedents,
@@ -61,12 +61,12 @@ fn wants_another_look(
     unsettled && !ruled && p.reverts.is_empty()
 }
 
-/// 名字向量召回提的对（0041 第 2 刀）：两个**不同的字符串**因相近而被放到一起。
-/// 「因相似而提议」和「因同名而提议」是两种证据强度，不该用同一根线自动合：批量裁决只看
-/// 名字和几条事实，测量台上它把「张伟」并进了「财务部总监张伟」（0.85，过了线）。所以这类
-/// 对的 same 一律走带工具的第二眼——它能读两边的事实与原文再定；different 与 unsure
-/// 照旧，分开是安全的方向。不看 `ruled` 与撤回：那两条是「再看也改不了」的省事，这里要的
-/// 恰恰是再看
+/// Pairs proposed by name-vector recall (0041, second cut): two **different strings** were put together because they are similar.
+/// "Proposed for similarity" and "proposed for an identical name" are different evidence strengths and must not share one auto-merge line: batch adjudication only sees
+/// the names and a few facts; on the measurement bench it merged "Zhang Wei" into "finance director Zhang Wei" (0.85, over the line). So for this kind of
+/// pair, same always goes through a second look with tools, which can read both sides' facts and source text before deciding; different and unsure
+/// stay as they are, since keeping apart is the safe direction. Do not skip on `ruled` or retraction: those two are shortcuts for "a second look cannot change it"; but here the point is
+/// exactly the second look.
 fn similarity_proposed(item: &ReviewItem) -> bool {
     utopia_core::review_reasons::similarity_proposed(item.reason.as_deref())
 }
@@ -80,25 +80,25 @@ fn needs_second_look(
     wants_another_look(item, p, same, conf) || !batch_verdict_may_apply(item, same)
 }
 
-/// 攒批那一眼的看法能不能不经第二眼就落地。名字向量提的对说 same 不能：第二眼没跑成
-/// （预算用完、模型出错）就上交给人，不照攒批的看法合，也不把那个看法记进缓存——记了
-/// 之后这一对每次再来都从缓存直接合，第二眼永远轮不到（#889 评审）
+/// Whether the batch's first-look verdict can be applied without a second look. For pairs proposed by name vectors, saying same is not enough: if the second look did not run
+/// (budget used up, model error), it goes to a human: it is not merged on the batch's verdict and that verdict is not cached, since once cached
+/// every later encounter of the pair would merge straight from cache and the second look would never happen (#889 review)
 pub(crate) fn batch_verdict_may_apply(item: &ReviewItem, same: Option<bool>) -> bool {
     !(similarity_proposed(item) && same == Some(true))
 }
 
-/// 第二眼没跑成时上交的理由
+/// Reason given when the second look did not run and the pair is escalated
 pub(crate) const SECOND_LOOK_UNAVAILABLE: &str = "escalate_unsure|second_look_unavailable";
 
-/// 一次裁决落地成了什么：第二层的行按它记 applied 还是 proposed
+/// What an adjudication became once applied: the second-tier row records applied or proposed based on it
 enum Outcome {
     Merged(Uuid),
     Kept,
     Escalated,
 }
 
-/// 第二层看过的一对，记一行 `agent_decisions`（0028）：轨迹、问题、花的调用都在里面。
-/// 预算按这些行算，Agent 队列也从这里读——治理开没开，机器去看过的都看得见
+/// A pair the second tier reviewed gets one `agent_decisions` row (0028): trace, question and the calls spent are all in it.
+/// The budget is counted from these rows and the agent queue also reads from here: whether governance is on or not, everything the machine looked at is visible
 async fn record_look(
     state: &AppState,
     kb_id: Uuid,
@@ -139,20 +139,20 @@ async fn record_look(
     Ok(())
 }
 
-/// 同一个库的裁决一次只跑一个（与 `ontology_index::PER_KB` 同一套理由）。
+/// Only one adjudication runs per knowledge base at a time (same reasoning as `ontology_index::PER_KB`).
 ///
-/// 入队去重只挡得住「还排着队的」；一批文档陆续抽完时，后一个入队时前一个
-/// 已经是 `running`，于是七个任务同时跑同一个库。它们各自 `pending_adjudications`
-/// 拿到**同一批**待裁项：模型调用翻七倍，而两个任务对同一对下判断时，第二个
-/// 撞 `agent_decisions_open_idx` 唯一索引直接失败（2026-09-08 实测：七个任务里
-/// 两个这样挂掉）。
+/// Enqueue deduplication only blocks jobs that are still queued; when a batch of documents finishes extracting one after another, a later job is enqueued while the earlier one
+/// is already `running`, so seven jobs run on the same knowledge base at once. Each of them reads `pending_adjudications`
+/// and gets the **same batch** of pending items: model calls multiply by seven, and when two jobs reach a verdict on the same pair, the second one
+/// hits the `agent_decisions_open_idx` unique index and fails (observed 2026-09-08: among seven jobs,
+/// two failed this way).
 ///
-/// **等而不是跳过**：后到的等前一个跑完再进，进来时重新查一遍待裁项，
-/// 通常只剩前一个读完之后才新增的那几对。
+/// **Wait, do not skip**: a late arrival waits for the earlier one to finish before entering, and re-queries the pending items on entry,
+/// which usually leaves only the pairs added after the earlier one read them.
 static PER_KB: LazyLock<Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(Default::default);
 
-/// 一批的名字：第一对的两个名字。日志里认得出是哪一批就够了，整批的名字太长
+/// A batch's name: the two names of its first pair. Enough to tell which batch is which in logs; the full list of names would be too long
 pub(crate) fn batch_name(pairs: &[utopia_extract::AdjudicationPair]) -> String {
     match pairs.first() {
         Some(p) => format!("{} / {}", p.left.name, p.right.name),
@@ -181,7 +181,7 @@ pub async fn adjudicate_entities(state: &AppState, kb_id: Uuid) -> anyhow::Resul
         .unwrap_or_default();
 
     let Some(client) = client else {
-        // 无模型可用：全部转人工，任务本身成功结束
+        // No model available: everything goes to a human and the task itself finishes successfully
         let items =
             utopia_store::resolution::pending_adjudications(&state.pool, kb_id, 500).await?;
         for item in items {
@@ -191,7 +191,7 @@ pub async fn adjudicate_entities(state: &AppState, kb_id: Uuid) -> anyhow::Resul
         state.emit_review(kb_id);
         return Ok(());
     };
-    // 第二层的行都挂在这一次任务上
+    // Second-tier rows all hang off this one task run
     let run_id = Uuid::now_v7();
 
     for _ in 0..MAX_ROUNDS {
@@ -201,8 +201,8 @@ pub async fn adjudicate_entities(state: &AppState, kb_id: Uuid) -> anyhow::Resul
             break;
         }
 
-        // 第一层：裁决缓存。先例（人在这个库里对这些名字做过什么，连同他们写的理由）
-        // 先取出来：它既进提示词也进缓存键
+        // Tier one: adjudication cache. Precedents (what humans did in this knowledge base for these names, along with the reasons they wrote)
+        // are fetched first: they go into both the prompt and the cache key
         let mut to_ask: Vec<(ReviewItem, String, gov::Precedents, Vec<String>)> = Vec::new();
         for item in items {
             let p = gov::precedents_for(&state.pool, kb_id, &item).await?;
@@ -219,7 +219,7 @@ pub async fn adjudicate_entities(state: &AppState, kb_id: Uuid) -> anyhow::Resul
             continue;
         }
 
-        // 第二层：攒批 LLM 裁决
+        // Tier two: batched LLM adjudication
         let pairs: Vec<utopia_extract::AdjudicationPair> = to_ask
             .iter()
             .map(
@@ -250,9 +250,9 @@ pub async fn adjudicate_entities(state: &AppState, kb_id: Uuid) -> anyhow::Resul
             )
             .collect();
         let messages = utopia_extract::build_adjudication_messages(&pairs);
-        // 调用/解析失败 → 任务按退避重试；重试耗尽后行停留在队列里，人工仍可定夺
+        // Call/parse failure -> the job retries with backoff; once retries are exhausted the rows stay in the queue, where a human can still decide
         let reply = {
-            // 第二眼会再取同一个模型的许可；攒批调用结束就还，否则限额为 1 时会等自己。
+            // The second look acquires the same model's permit again; the batch call releases it when done, otherwise with a limit of 1 it would wait on itself.
             let _permit = match settings.as_ref() {
                 Some(s) => llm_util::acquire_chat(state, s).await,
                 None => None,
@@ -261,7 +261,7 @@ pub async fn adjudicate_entities(state: &AppState, kb_id: Uuid) -> anyhow::Resul
         };
         let (verdicts, repaired) = utopia_extract::parse_adjudication_repairing(&reply)?;
         if repaired {
-            // 模型在引号里的理由中间直接换行：修补后照读，但记下是哪一批（#894/#895 同款）
+            // The model broke a line in the middle of a quoted reason: it is read as-is after patching, but the batch is logged (same as #894/#895)
             tracing::warn!(
                 %kb_id,
                 pairs = pairs.len(),
@@ -281,8 +281,8 @@ pub async fn adjudicate_entities(state: &AppState, kb_id: Uuid) -> anyhow::Resul
                         _ => None,
                     };
                     let conf = v.confidence.unwrap_or(0.5).clamp(0.0, 1.0);
-                    // 第二层（0028）：攒批没定的，带工具再看一遍再落地。预算用完或
-                    // 循环没跑成就照攒批的看法办
+                    // Tier two (0028): what the batch left undecided gets a second look with tools before it is applied. If the budget runs out or
+                    // the loop did not run, the batch's verdict stands
                     if needs_second_look(item, p, same, conf) {
                         let earlier = Look::from_batch(same, conf, v.why.clone());
                         if let Some(look) = look_again(
@@ -317,7 +317,7 @@ pub async fn adjudicate_entities(state: &AppState, kb_id: Uuid) -> anyhow::Resul
                                 )
                                 .await?
                             } else {
-                                // 问了一个问题，或看了没结论：留给人，卡片上带着建议与问题
+                                // It asked a question, or looked and reached no conclusion: left for a human, with the suggestion and question on the card
                                 utopia_store::resolution::escalate_review(
                                     &state.pool,
                                     item.id,
@@ -329,7 +329,7 @@ pub async fn adjudicate_entities(state: &AppState, kb_id: Uuid) -> anyhow::Resul
                             record_look(state, kb_id, run_id, item, p, &look, &outcome).await?;
                             continue;
                         }
-                        // 第二眼没跑成：相似提的 same 不能照攒批的看法合，也不进缓存
+                        // The second look did not run: a same for a similar-name pair must not merge on the batch's verdict, and it is not cached
                         if !batch_verdict_may_apply(item, same) {
                             utopia_store::resolution::escalate_review(
                                 &state.pool,
@@ -370,7 +370,7 @@ pub async fn adjudicate_entities(state: &AppState, kb_id: Uuid) -> anyhow::Resul
                 }
             }
         }
-        // 本轮裁决落库完毕，推给前端刷新审核队列
+        // This round's verdicts are all persisted; push to the frontend to refresh the review queue
         state.emit_review(kb_id);
     }
     Ok(())
@@ -386,13 +386,13 @@ async fn apply_verdict(
     via: &str,
     why: Option<&str>,
 ) -> anyhow::Result<Outcome> {
-    // 有把握就动手，不再抽一成给人（0026 修订）：队列里等人的，只剩机器拿不准、
-    // 或闸门说合了会送出图外、会推翻来源身份声明的那些
+    // Act when confident, no longer skim 10% off for a human (0026 revision): what is left waiting for a human in the queue is only what the machine is unsure about,
+    // or what the gate says would leave the graph or overturn a source's identity claim
     let outcome = match same {
         Some(true) if conf >= AUTO_CONF => {
-            // 执行闸门（0027）：合并会立刻送出图外的东西——违规、派生、答案——留给人，
-            // 身份来源也留给人（0071），把握再高也不动手。人看到的是留下的原因，
-            // 不是「裁决器没把握」
+            // Execution gate (0027): merges that would immediately leave the graph (violations, derivations, answers) are left for a human,
+            // and identity sources are also left for a human (0071), however confident. A human sees the reason it was left,
+            // not "the adjudicator was not confident"
             if let Some(hold) = utopia_store::execution_gate::hold_for_merge(
                 &state.pool,
                 kb_id,
@@ -431,7 +431,7 @@ async fn apply_verdict(
                         &reason,
                     )
                     .await?;
-                    // 决策台账：AI 自动合并（actor 为空 = 系统）
+                    // Decision ledger: AI automatic merge (empty actor = system)
                     let _ = utopia_store::audit::record_opt(
                         &state.pool,
                         Some(kb_id),
@@ -442,15 +442,15 @@ async fn apply_verdict(
                         serde_json::json!({
                             "left": item.left.name, "right": item.right.name,
                             "score": item.score, "confidence": conf, "via": via,
-                            // 模型的一句理由也留下：机器的行不是先例（0025 决定 1），
-                            // 但人看 Decisions 时该看得见它凭什么
+                            // Keep the model's one-line reason too: machine rows are not precedents (0025 decision 1),
+                            // but a human looking at Decisions should be able to see what it is based on
                             "why": why,
                         }),
                     )
                     .await;
                     Outcome::Merged(merge_id)
                 }
-                // 同批次连锁合并可能已吞掉其中一方：转人工而不是让任务失败
+                // A chained merge within the same batch may already have absorbed one side: hand over to a human instead of failing the task
                 Err(AppError::Conflict(_)) | Err(AppError::NotFound) => {
                     utopia_store::resolution::escalate_review(
                         &state.pool,
@@ -624,7 +624,7 @@ mod tests {
         }
     }
 
-    /// 名字向量提的对：批量说 same 再有把握也要第二眼；说 different / unsure 照旧
+    /// Pairs proposed by name vectors: batch saying same still needs a second look, however confident; different / unsure stay as they are
     #[test]
     fn a_similarity_proposed_same_always_gets_the_second_look() {
         let p = gov::Precedents::default();
@@ -638,7 +638,7 @@ mod tests {
         assert!(needs_second_look(&it, &p, None, 0.5), "没定的本来就要再看");
     }
 
-    /// 第二眼没跑成时：相似提的 same 不落地也不进缓存；其余照攒批的看法办
+    /// When the second look did not run: a same from a similar-name proposal is not applied nor cached; the rest follow the batch's verdict
     #[test]
     fn a_similarity_proposed_same_never_applies_on_the_batch_verdict_alone() {
         assert!(!batch_verdict_may_apply(
@@ -660,7 +660,7 @@ mod tests {
         ));
     }
 
-    /// 同名家族的对不受影响：够线就照旧自动落地
+    /// Pairs from same-name families are unaffected: if they clear the bar they are still auto-applied as before
     #[test]
     fn a_same_name_pair_keeps_the_old_rule() {
         let p = gov::Precedents::default();

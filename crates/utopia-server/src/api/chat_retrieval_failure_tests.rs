@@ -1,4 +1,4 @@
-//! 两种检索失败要各说各的原因，底层诊断只能留在服务端。
+//! Two kinds of retrieval failure each need to state their own cause; the low-level diagnostics stay on the server.
 use super::*;
 
 #[tokio::test]
@@ -28,7 +28,7 @@ async fn mapping_and_document_retrieval_failures_have_distinct_safe_codes() -> a
             utopia_store::datasources::mount(&f.pool, f.kb, id).await?;
             Some(id)
         } else {
-            // 真正走向量检索，让分块查询失败，不能只验证手工构造的错误帧。
+            // Actually go through vector retrieval and make the chunked query fail; do not only verify hand-built error frames.
             sqlx::query(
                 "UPDATE llm_settings SET embed_base_url=chat_base_url, embed_model='test-embed'
                  WHERE workspace_id=(SELECT workspace_id FROM knowledge_bases WHERE id=$1)",
@@ -45,8 +45,8 @@ async fn mapping_and_document_retrieval_failures_have_distinct_safe_codes() -> a
                 .await;
             None
         };
-        // 只给本夹具的连接遮住对应表，让真实查询因缺列而失败。
-        // 不改共享表、权限或生产查询，也不会干扰并行测试。
+        // Hide the corresponding table only on this fixture's connection, so the real query fails on a missing column.
+        // Do not change shared tables, permissions or production queries, and do not interfere with parallel tests.
         let pool = sqlx::postgres::PgPoolOptions::new()
             .after_connect(move |connection, _| {
                 Box::pin(async move {

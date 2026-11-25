@@ -1,12 +1,12 @@
-//! 本体的向量索引：把类、关系、属性的 `label + description` 嵌成向量。
+//! Vector index for the ontology: embeds the `label + description` of classes, relations and properties as vectors.
 //!
-//! 它服务的不是某一个功能，而是所有要问"这个说法对应本体里的哪一个"的地方：
-//! 本体提案（今天把 1949 个 key 全量内联，且只有 key 没有描述）、谓词消解、
-//! 类型消解。检索出候选之后再交给模型裁决，提示词才与本体规模脱钩。
+//! It serves not one feature but every place that has to ask "which entry in the ontology does this phrase correspond to":
+//! ontology proposals (today all 1949 keys are inlined in full, and only the keys, without descriptions), predicate resolution,
+//! and type resolution. Only after candidates are retrieved are they handed to the model to decide, which is what decouples the prompt size from the ontology size.
 //!
-//! **自愈，不挂钩子。** 填充按"当时嵌的原文与模型名跟现在对不对得上"来判，
-//! 所以任何改了描述的写入点都不需要记得通知这里——漏挂一个钩子会悄悄烂掉，
-//! 而对比原文不会。
+//! **Self-healing, no hooks.** Backfill decides by checking whether "the text that was embedded then and the model name match what is there now",
+//! so any write point that changes a description does not need to remember to notify here: a missing hook rots silently,
+//! while comparing the original text does not.
 
 use crate::{llm_util, AppState};
 use futures_util::{stream, StreamExt};
@@ -15,15 +15,15 @@ use std::sync::{Arc, LazyLock, Mutex};
 use utopia_store::ontology::TypeToEmbed;
 use uuid::Uuid;
 
-/// 同一个库的补齐一次只跑一个（#282）。
+/// Backfill for the same KB runs only one at a time (#282).
 ///
-/// 建库装三个包，每个包各排一个 `embed_ontology` 任务，worker 并发 64，三个任务
-/// 同时起跑、同时读到同一批 3752 个待嵌条目、各嵌一遍：嵌入调用翻三倍，
-/// 而结果一模一样。所以按库排队：后到的等前一个跑完再进，进来时再查一遍待嵌，
-/// 通常只剩前一个读完集合之后才装进来的那几条。**等而不是跳过**——跳过的话，
-/// 前一个没看见的条目要等下一次不知何时的补齐。
+/// Creating a KB installs three packs, and each queues its own `embed_ontology` job; with worker concurrency 64, the three jobs
+/// start at once, read the same batch of 3752 pending entries, and each embeds them: embedding calls triple while the result is identical.
+/// So jobs are queued per KB: a later one waits for the earlier one to finish before entering, and on entry checks the pending set again,
+/// usually only the few entries that were installed after the earlier one read the set remain. **Wait rather than skip**: skipping would mean
+/// entries the earlier one did not see wait for some later backfill at an unknown time.
 ///
-/// 表不清理：一个库一把锁，条目数以库计，几十上百把锁不值得为它加一轮回收。
+/// The table is not cleaned up: one lock per KB, and the entry count is per KB, so adding a reclaim round for dozens or hundreds of locks is not worth it.
 static PER_KB: LazyLock<Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(Default::default);
 
@@ -36,46 +36,46 @@ fn lock_for(kb_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
-/// 一次送多少条去嵌入。
+/// How many entries to send for embedding at once.
 ///
-/// **64 是实测站得住的那个数。** 曾经改成 16，理由是拿合成短文本量出来的
-/// "每条更快"——而真实的类文本平均 151 字符，那组数据不作数。改小之后请求数
-/// 翻四倍、每个都付约 2.5 秒固定开销，整体吞吐反而掉了一半。
+/// **64 is the number measured to hold up.** It was once reduced to 16 on the reasoning of "faster per entry", measured on synthetic short text;
+/// but real class text averages 151 characters, so that data did not count. After the reduction, the request count
+/// quadrupled, each paying a fixed overhead of about 2.5 seconds, and overall throughput dropped by half.
 ///
-/// 换批大小之前先拿**真实的 `embedded_text`** 去量，别拿造出来的短句。
+/// Before changing the batch size, measure with the **real `embedded_text`**, not with made-up short sentences.
 const BATCH: usize = 64;
-/// 同时在飞的嵌入批数上限。
+/// Maximum number of embedding batches in flight at the same time.
 ///
-/// **关键不是快，是不能把闸门占死。** 这是个后台补齐任务，而嵌入模型的并发闸门
-/// （`model_concurrency`，缺省 10）是全局共享的——文档分块入库也要走它。
+/// **The point is not speed; it is not to hog the gate.** This is a background backfill job, and the embedding model's concurrency gate
+/// (`model_concurrency`, default 10) is shared globally: document chunk ingestion goes through it too.
 ///
-/// 从前这里串行，一次一张许可证、每批之间释放，文档处理插得进来。改成
-/// `join_all` 一次挂 31 个批次之后，它变成一个常驻的 10 深队列，每个批次握着
-/// 许可证 60 秒：**5 篇文档全卡在 `embedding` 状态，抽取 15 分钟零进展**。
-/// 不是 API 挂了，是这个任务把共享资源占满了。
+/// It used to be serial, one permit at a time, released between batches, so document processing could slip in. After it was changed to
+/// `join_all` with 31 batches at once, it became a standing 10-deep queue, each batch holding
+/// a permit for 60 seconds: **five documents all stuck in the `embedding` state, with extraction making no progress for 15 minutes**.
+/// The API was not down; this job had simply filled the shared resource.
 ///
-/// 所以这里的上限必须**明显小于**闸门，给别的活留出位置。4 是实测能跑满
-/// 吞吐又留有余量的：4 个 16 条并发，墙钟 18.5 秒（串行要 50 秒）。
+/// Hence the cap here must be **clearly smaller** than the gate, leaving room for other work. Four is the value measured to saturate throughput
+/// with margin to spare: four concurrent batches of 16 entries, wall clock 18.5 seconds (serial would take 50 seconds).
 const EMBED_JOBS: usize = 4;
 
-/// 把这个库里陈掉的本体向量补齐。没配嵌入模型就直接返回 `Ok(0)`——
-/// 检索是增强，不该拦住没配模型的部署。
+/// Fill in the stale ontology vectors in this KB. If no embedding model is configured, return `Ok(0)` directly:
+/// retrieval is an enhancement and should not block a deployment that has no model.
 pub async fn refresh(state: &AppState, kb_id: Uuid) -> anyhow::Result<usize> {
     refresh_scoped(state, kb_id, None).await
 }
 
-/// 只补一半。调用方清楚自己要哪一半时用它——类型消解只用类，
-/// 等关系嵌完是白等。补漏的那一半有后台任务兜着。
+/// Backfills only half. Callers who know which half they want use this: type resolution uses only classes,
+/// so waiting for relations to finish embedding would be wasted time. The gap-filling half is covered by a background job.
 pub async fn refresh_scoped(
     state: &AppState,
     kb_id: Uuid,
     only: Option<utopia_store::ontology::TypeKind>,
 ) -> anyhow::Result<usize> {
-    // 同库串行：见 PER_KB。锁在这个 future 里一直握到函数返回
+    // Serial within the same KB: see PER_KB. The lock is held in this future until the function returns
     let lock = lock_for(kb_id);
     let _serial = lock.lock().await;
-    // 库可能已经被删了——任务是导入时排的，中间隔着几分钟。
-    // 这不是失败，是没事可做；当成错误的话它还要重试三次才放弃
+    // The KB may already have been deleted: the job was queued at import time, minutes earlier.
+    // This is not a failure, just nothing to do; if treated as an error it would retry three times before giving up
     let Ok(kb) = utopia_store::kbs::get(&state.pool, kb_id).await else {
         return Ok(0);
     };
@@ -84,7 +84,7 @@ pub async fn refresh_scoped(
     };
     let (Some(client), Some(model)) = (
         llm_util::embed_client(&settings),
-        // 取拥有的一份:下面那些 future 要把 settings 挪进 Arc,借着它就动不了了
+        // Take an owned copy: the futures below move settings into an Arc, and borrowing it would no longer be possible
         settings.embed_model.clone(),
     ) else {
         return Ok(0);
@@ -97,7 +97,7 @@ pub async fn refresh_scoped(
     }
     let mut done = 0usize;
     let mut failed = 0usize;
-    // **全部用拥有的数据**：这些 future 要跨 await 被并发驱动，借用过不了 Send 边界
+    // **All owned data**: these futures are driven concurrently across await points, and a borrow cannot satisfy the Send bound
     let client = std::sync::Arc::new(client);
     let model = std::sync::Arc::new(model);
     let settings = std::sync::Arc::new(settings);
@@ -108,8 +108,8 @@ pub async fn refresh_scoped(
             let texts: Vec<String> = batch.iter().map(|t| t.text.clone()).collect();
             let _permit = llm_util::acquire_embed(state, &settings).await;
             let vectors = client.embed(&texts).await?;
-            // 数量对不上就整批放弃：按位置配对，错位会把 person 的向量写到
-            // organization 上，而这种错一旦落库就再也看不出来了
+            // If the counts do not match, abandon the whole batch: pairing is by position, and a misalignment would write person's vector onto
+            // organization, and once that is committed the error can never be detected again
             if vectors.len() != batch.len() {
                 anyhow::bail!("嵌入返回 {} 条，送去的是 {} 条", vectors.len(), batch.len());
             }
@@ -120,8 +120,8 @@ pub async fn refresh_scoped(
         }
     }))
     .buffer_unordered(EMBED_JOBS);
-    // **一批失败不拖垮其余**：这是补齐任务，缺的下一轮自愈（判据是"当时嵌的
-    // 原文对不对得上"，不是时间戳）。整个 bail 掉等于把已经嵌好的也白跑一遍
+    // **One failed batch does not sink the rest**: this is a backfill job, and what is missing is healed next round (the criterion is "the
+    // original text embedded then still matches", not a timestamp). Bailing the whole thing would waste a rerun of what was already embedded
     while let Some(r) = jobs.next().await {
         match r {
             Ok(n) => done += n,
@@ -131,22 +131,22 @@ pub async fn refresh_scoped(
             }
         }
     }
-    // **失败数要出现在这一行。** 从前它只报补齐了多少,于是 24 批全挂的那次
-    // 日志照样写着"已补齐",看日志的人以为没事
+    // **The failure count must appear on this line.** Before, it only reported how many were backfilled, so in a run where all 24 batches failed,
+    // the log still said "backfilled", and whoever read the log thought all was well
     if failed > 0 {
         tracing::warn!(%kb_id, count = done, failed, "本体向量补了一部分，其余留给下一轮");
-        // 「留给下一轮」得真有下一轮：从前这里照样报成功，没人再排它，缺向量的属性就一直缺
-        // （对齐的短名单退回全部候选，台子等到超时）。报错让任务按预算重试
+        // "Left for the next round" requires a next round to exist: before, this also reported success, no one queued it again, and properties missing vectors stayed missing
+        // (alignment's shortlist fell back to all candidates, and the stage timed out). Returning an error lets the job retry within its budget
         anyhow::bail!("{failed} batches of ontology vectors failed; the job retries");
     }
     tracing::info!(%kb_id, count = done, "本体向量已补齐");
     Ok(done)
 }
 
-/// 一批说法各自最像本体里的哪几个关系/属性。
+/// For a batch of phrases, which relations/properties in the ontology each phrase most resembles.
 ///
-/// **一次嵌完再逐个查库**，不是每个说法各发一次嵌入请求：本体提案一轮要处理
-/// 十几到几十个说法，逐个发就是十几到几十次往返。
+/// **Embed all of them first, then query the DB one at a time**, rather than sending one embedding request per phrase: an ontology proposal round handles
+/// a dozen to several dozen phrases, and sending them one by one would be a dozen to several dozen round trips.
 pub async fn nearest_for_each(
     state: &AppState,
     kb_id: Uuid,
@@ -194,21 +194,21 @@ pub async fn nearest_for_each(
     Ok(out)
 }
 
-/// 检索的是本体的哪一半。
+/// Which half of the ontology the search covers.
 ///
-/// **必须分开。** 类进 `entity_types`、关系与属性进 `relation_types`，两边的
-/// 描述写的是完全不同的东西（"什么样的实体属于这里" vs "这条断言说了什么"）。
-/// 拿一个词表外的类名去关系里检索，回来的一定是勉强相关的关系。
+/// **Must be kept apart.** Classes go in `entity_types`, relations and properties in `relation_types`, and the descriptions of the two
+/// describe completely different things ("what kind of entity belongs here" vs "what this assertion says").
+/// Searching the relations with a class name that is outside the vocabulary returns relations that are only loosely related, guaranteed.
 #[derive(Debug, Clone, Copy)]
 pub enum Target {
-    /// 整段索引（label + 描述）。长画像走这一路
+    /// Full-text index (label + description). Long profiles go this way
     Class,
-    /// **只有 label 的索引**（见 `entity_types.label_embedding`）。短说法（`district. place`）走这一路。
-    /// 短说法比整段索引会被同义反复的类接管——`Map` 那一行的描述就是
-    /// "A map."，赢在长度不在语义
+    /// **Label-only index** (see `entity_types.label_embedding`). Short phrases (`district. place`) go this way.
+    /// Short phrases get taken over by a tautological class more readily than by the full index: the description of the `Map` entry is just
+    /// "A map.", winning on length rather than meaning
     ClassLabel,
-    /// `Some("attribute")` 只找属性、`Some("relation")` 只找关系、`None` 都找。
-    /// 字面值宾语的事实要的是属性，实体宾语的要的是关系
+    /// `Some("attribute")` finds only properties, `Some("relation")` only relations, `None` finds both.
+    /// A fact with a literal object wants a property; one with an entity object wants a relation
     Predicate(Option<&'static str>),
 }
 
@@ -216,20 +216,20 @@ pub enum Target {
 mod tests {
     use super::*;
 
-    /// 同一个库的两次补齐排队，不同库互不相干。守的是 #282 的那条：三个包排的
-    /// 三个任务不能同时读同一批待嵌条目
+    /// Queued backfills for the same KB are serialized; different KBs are independent. This guards the #282 rule that the three jobs
+    /// queued by three packs must not read the same batch of pending entries at once
     #[tokio::test]
     async fn refreshes_of_one_base_take_turns() {
         let a = Uuid::now_v7();
         let b = Uuid::now_v7();
         let first = lock_for(a);
         let held = first.lock().await;
-        // 同库：第二个拿不到
+        // Same KB: the second one does not get the lock
         assert!(
             lock_for(a).try_lock().is_err(),
             "同一个库的第二次补齐应当排队"
         );
-        // 别的库：不受影响
+        // Other KBs: unaffected
         assert!(lock_for(b).try_lock().is_ok(), "别的库不该被这把锁挡住");
         drop(held);
         assert!(lock_for(a).try_lock().is_ok(), "前一个放开后下一个才进");

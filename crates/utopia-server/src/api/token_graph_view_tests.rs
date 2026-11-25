@@ -1,4 +1,4 @@
-//! 个人令牌读得了图视图（0014 决定 7）：总览与邻域。人的角色是上限，`kb_ids` 再往下压
+//! Personal tokens can read the graph view (0014 decision 7): overview and neighborhood. The person's role is the ceiling, and `kb_ids` narrows it further
 use crate::state::AppState;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -10,7 +10,7 @@ struct Fixture {
     pool: sqlx::PgPool,
     app: axum::Router,
     org: Uuid,
-    /// 库 viewer
+    /// Database viewer
     viewer: Uuid,
     kb: Uuid,
     entity: Uuid,
@@ -71,7 +71,7 @@ impl Fixture {
             .1
     }
 
-    /// 两条图读各回什么状态码
+    /// What status code each of the two graph reads returns
     async fn graph_statuses(&self, token: &str) -> anyhow::Result<[StatusCode; 2]> {
         let (kb, entity) = (self.kb, self.entity);
         let mut statuses = [StatusCode::OK; 2];

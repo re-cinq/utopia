@@ -153,7 +153,7 @@ async fn human_conflict_dates_and_settlement_commit_with_the_actor() -> anyhow::
              WHERE c.id=$1 AND a.action='conflict.retime_new'")
             .bind(conflict).fetch_one(&pool).await?;
         assert_eq!((resolution.as_str(), actor, &detail["new_from_precision"]), ("retimed_new", editor, &json!("month")));
-        // 实体历史把重定时那一行记在人头上，不记给引擎
+        // Entity history records the reschedule line against the person, not against the engine
         let subject: Uuid = sqlx::query_scalar("SELECT subject_id FROM facts WHERE id=$1")
             .bind(new).fetch_one(&pool).await?;
         let retimed: Uuid = sqlx::query_scalar("SELECT id FROM facts WHERE supersedes=$1 AND invalidated_at IS NULL")

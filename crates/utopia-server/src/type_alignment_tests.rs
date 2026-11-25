@@ -36,9 +36,9 @@ async fn reply(State(m): State<Model>, Json(body): Json<Value>) -> axum::respons
     )
         .into_response()
 }
-/// 脚本里放这个字符串，对话端点就回 OpenAI 余额耗尽的 429
+/// Put this string in the script and the conversation endpoint returns the 429 for an exhausted OpenAI balance
 const OUT_OF_CREDIT: &str = "out_of_credit";
-/// 嵌入端点一直坏着：只有配了嵌入模型的测试会走到这里
+/// The embedding endpoint is broken throughout: only tests that configure an embedding model reach this
 async fn embeddings_down() -> impl IntoResponse {
     (
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -181,8 +181,8 @@ fn vote(class: Option<&str>) -> Value {
     json!({"b":[[0,class]]})
 }
 
-/// 本体向量还在补时类别词对齐不动手：编辑器建了类先排 `embed_ontology` 再排这个任务，
-/// 候选类按向量检索，没向量的类检索不到。它给自己排一份半分钟后的，补齐收尾后照常判
+/// While ontology vectors are still being filled in, category-word alignment does not act: when the editor creates a class it queues `embed_ontology` first and then this job,
+/// candidate classes are retrieved by vector, and a class with no vector cannot be retrieved. The job queues itself one for half a minute later, and once backfill finishes it judges as usual
 #[tokio::test]
 async fn kind_word_alignment_waits_while_the_ontology_index_is_refreshing() -> anyhow::Result<()> {
     let Some(f) = Fx::new(vec![vote(Some("organization")), vote(Some("organization"))]).await?
@@ -707,8 +707,8 @@ mod review_locks {
     }
 }
 
-/// bench 里「12 篇文档 type_id 全空」的回复：DeepSeek-V3.2 把整段答成按 id 作键的对象，
-/// 第二票还把键包进单元素数组。两票都得读出来，词才绑得上
+/// The reply that gave "all 12 documents have empty type_id" in the bench: DeepSeek-V3.2 answered the whole thing as an object keyed by id,
+/// and the second vote wrapped the keys in a single-element array. Both votes must be read for the words to bind
 #[tokio::test]
 async fn an_id_keyed_reply_still_binds_the_kind_word() -> anyhow::Result<()> {
     let Some(f) = Fx::new(vec![
@@ -735,8 +735,8 @@ async fn an_id_keyed_reply_still_binds_the_kind_word() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 读不出的回复不再是「一项都没答」然后没了：这一轮不下结论，任务自己再排一份
-/// （带 reask），排够 MAX_REASK 次就停，等下一篇文档或本体改动。
+/// A reply that cannot be read is no longer dropped as "nothing answered": this round reaches no conclusion, and the job queues itself another attempt
+/// (with reask), and stops once it has queued MAX_REASK attempts, waiting for the next document or ontology change.
 #[tokio::test]
 async fn an_unreadable_reply_is_asked_again_a_bounded_number_of_times() -> anyhow::Result<()> {
     let Some(f) = Fx::new(vec![
@@ -758,7 +758,7 @@ async fn an_unreadable_reply_is_asked_again_a_bounded_number_of_times() -> anyho
     .bind(f.kb.to_string())
     .fetch_all(&f.pool)
     .await?;
-    // 还要再问一轮：短语对齐先不排，两端的类还没定
+    // Another round of questions is needed: phrase alignment is not queued yet, since the classes on both ends are not settled
     let phrases_queued_early: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM jobs WHERE kind='align_phrases' AND payload->>'kb_id'=$1",
     )
@@ -769,7 +769,7 @@ async fn an_unreadable_reply_is_asked_again_a_bounded_number_of_times() -> anyho
         .bind(f.kb.to_string())
         .execute(&f.pool)
         .await?;
-    // 已经是最后一次自己排的：不再排
+    // This is already the last self-queued attempt: do not queue another
     align_types_reasking(&f.state, f.kb, MAX_REASK).await?;
     let after: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM jobs WHERE kind='align_types' AND payload->>'kb_id'=$1",
@@ -777,7 +777,7 @@ async fn an_unreadable_reply_is_asked_again_a_bounded_number_of_times() -> anyho
     .bind(f.kb.to_string())
     .fetch_one(&f.pool)
     .await?;
-    // 这是最后一轮：短语对齐现在排
+    // This is the last round: phrase alignment is queued now
     let phrases_queued_late: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM jobs WHERE kind='align_phrases' AND payload->>'kb_id'=$1",
     )
@@ -799,8 +799,8 @@ async fn an_unreadable_reply_is_asked_again_a_bounded_number_of_times() -> anyho
     Ok(())
 }
 
-/// #795：模型还在答的时候类的定义改了。两票读的都是旧定义，它们的答案不能当成对新定义
-/// 的判定留下来；下一轮要拿新定义再问，问完之后输入没变就不再问
+/// #795: a class's definition changed while the model was still answering. Both votes read the old definition, and their answers must not be kept as a verdict
+/// on the new one; the next round asks again with the new definition, and once asked, it is not asked again if the input has not changed
 #[tokio::test]
 async fn an_edit_during_the_model_request_is_asked_again() -> anyhow::Result<()> {
     let Some(f) = Fx::new(vec![
@@ -888,7 +888,7 @@ async fn clear_jobs(f: &Fx) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 父边的增删不碰 `updated_at`，时间戳看不见它；指纹里有祖先闭包，看得见
+/// Adding or removing parent edges does not touch `updated_at`, so the timestamp cannot see it; the fingerprint includes the ancestor closure, so it can
 #[tokio::test]
 async fn a_parent_edge_makes_an_agent_binding_stale() -> anyhow::Result<()> {
     let Some(f) = Fx::new(vec![
@@ -937,7 +937,7 @@ async fn a_parent_edge_makes_an_agent_binding_stale() -> anyhow::Result<()> {
     run
 }
 
-/// 这一列出现之前代理判的行没有指纹：各重判一次，之后不再问
+/// Rows judged by the agent before this column existed have no fingerprint: each is judged again once, and not asked again after that
 #[tokio::test]
 async fn rows_without_a_basis_are_decided_again_once() -> anyhow::Result<()> {
     let Some(f) = Fx::new(vec![vote(Some("organization")), vote(Some("organization"))]).await?
@@ -962,8 +962,8 @@ async fn rows_without_a_basis_are_decided_again_once() -> anyhow::Result<()> {
     run
 }
 
-/// 过期的词这一轮问了却没问出结论（端点一直报错、回复读不出）：走有上限的延时再问，
-/// 不能因为「还过期」立刻再排——那样一个永久报错的端点会让任务一轮接一轮地跑
+/// An expired word that was asked this round without reaching a conclusion (the endpoint kept erroring, or the reply could not be read): it is asked again after a capped delay,
+/// and must not be requeued immediately just because it has "expired"; otherwise an endpoint that always errors would keep the job running round after round
 #[tokio::test]
 async fn a_stale_word_whose_batch_fails_takes_the_bounded_reask() -> anyhow::Result<()> {
     let Some(f) = Fx::new(vec![
@@ -992,8 +992,8 @@ async fn a_stale_word_whose_batch_fails_takes_the_bounded_reask() -> anyhow::Res
     run
 }
 
-/// 嵌入端点一直坏着：检索退回整表，小库照样绑得上（#894 修过的「整库没有类型」不能回来）；
-/// 一直坏下去候选不变、指纹不变，也不会每轮再问一遍
+/// The embedding endpoint is broken throughout: retrieval falls back to the whole table, and small KBs still bind (the "whole KB has no types" bug fixed in #894 must not come back);
+/// if it stays broken, the candidates and fingerprint do not change, so it is not asked again every round either
 #[tokio::test]
 async fn a_retrieval_error_falls_back_to_the_whole_class_list() -> anyhow::Result<()> {
     let Some(f) = Fx::new(vec![vote(Some("organization")), vote(Some("organization"))]).await?
@@ -1009,7 +1009,7 @@ async fn a_retrieval_error_falls_back_to_the_whole_class_list() -> anyhow::Resul
             .await?
             .and_then(|s| s.chat_base_url)
             .expect("fixture endpoint");
-        // upsert 整行覆盖（只有密钥传 None 才保留旧值），对话端点得原样再给一次
+        // upsert overwrites the whole row (only a key that passes None keeps the old value), so the conversation endpoint must be given the same value again
         utopia_store::settings::upsert(
             &f.pool,
             ws,
@@ -1043,7 +1043,7 @@ async fn a_retrieval_error_falls_back_to_the_whole_class_list() -> anyhow::Resul
     run
 }
 
-/// 余额空了（#1360）：第一个欠费 429 让整轮带着类型失败，不按「这一批留到下次」再排一份
+/// Balance exhausted (#1360): the first overdue 429 fails the whole round with its types, instead of queuing a new batch to be "left for next time"
 #[tokio::test]
 async fn an_empty_balance_fails_the_run_instead_of_queueing_another() -> anyhow::Result<()> {
     let Some(f) = Fx::new(vec![json!(OUT_OF_CREDIT)]).await? else {

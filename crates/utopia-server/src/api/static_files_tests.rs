@@ -1,19 +1,19 @@
-//! 构建产物那一段的契约（#614 / #616）。不连库：`with_static_files` 不带 state。
+//! Contract for the built-asset part (#614 / #616). No database: `with_static_files` takes no state.
 //!
-//! 这段代码破过两次，两次都是同一个形状——**一条路的失败被另一条路的成功语义
-//! 盖住了**。第一次是缺文件回首页（浏览器按模块脚本解析一张网页，白屏）；
-//! 第二次是缺文件的 404 也被扣上 `immutable`，于是「这个文件不存在」被浏览器
-//! 记一年，而资源名带哈希，下一次部署请求的正是那个刚被记下的名字。
+//! This code has broken twice, both times with the same shape: **one path's failure was hidden by another path's success semantics**.
+//! The first time, a missing file fell back to the home page (the browser parsed a web page as a module script, leaving a blank screen);
+//! the second time, a missing file's 404 was also tagged `immutable`, so "this file does not exist" was
+//! cached by the browser for a year, while asset names carry a hash and the next deploy requests exactly the name just cached.
 //!
-//! 所以这里逐条钉的是**状态码、Content-Type 与缓存指示三者一起**：少看一样，
-//! 上面两次都能溜过去。
+//! So what is pinned here, one assertion at a time, is **the status code, Content-Type and cache directive together**: leave out any one of them,
+//! and both of the above slip through.
 use super::with_static_files;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use tower::ServiceExt;
 
-/// 一个最小的 dist：一张首页，一个带哈希名的产物。
+/// A minimal dist: one home page and one artifact with a hashed name.
 fn dist() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(
@@ -62,9 +62,9 @@ async fn a_hashed_asset_is_served_and_may_be_kept_for_a_year() {
     );
 }
 
-/// **缺掉的产物是 404，而且那条 404 不许被存起来。**
-/// 回首页会白屏（#616）；把 404 存一年，则下一次部署的新哈希在那台机器上
-/// 一年拿不到——两条都要守，所以两个断言都在这里。
+/// **A missing artifact is a 404, and that 404 must never be stored.**
+/// Returning the home page gives a blank screen (#616); caching the 404 for a year means the next deploy's new hash cannot be fetched on that machine
+/// for a year. Both must be guarded, which is why both assertions live here.
 #[tokio::test]
 async fn a_missing_asset_is_a_404_that_nobody_keeps() {
     let (status, ctype, cache) = get("/assets/app-00000000.js").await;
@@ -73,7 +73,7 @@ async fn a_missing_asset_is_a_404_that_nobody_keeps() {
     assert_eq!(cache.as_deref(), Some("no-cache"));
 }
 
-/// 页面路由刷新拿首页——history fallback 还在，这一条是上面那条的对照。
+/// A page-route refresh gets the home page: the history fallback is still there; this is the control for the one above.
 #[tokio::test]
 async fn a_page_route_still_gets_the_index() {
     for path in ["/", "/graph", "/kb/anything/deep"] {

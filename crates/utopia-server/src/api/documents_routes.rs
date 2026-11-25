@@ -16,7 +16,7 @@ use crate::state::AppState;
 
 #[derive(Deserialize)]
 pub struct UploadQuery {
-    /// 目标 folder 来源：上传直接归入该文件夹（仅 kind=folder 接受上传）
+    /// Target folder source: uploads go straight into that folder (only kind=folder accepts uploads)
     #[serde(default)]
     pub source: Option<Uuid>,
 }
@@ -266,7 +266,7 @@ pub async fn by_external_id(
     Ok((StatusCode::OK, Json(body)).into_response())
 }
 
-/// 批量上传（multipart，可多文件）。重复内容（同 KB 同 sha256）跳过。
+/// Batch upload (multipart, several files allowed). Duplicate content (same sha256 in the same KB) is skipped.
 pub async fn upload(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -348,16 +348,16 @@ pub async fn upload(
 
 #[derive(serde::Deserialize)]
 pub struct DocsQuery {
-    /// 来源作用域：缺省 = 全部；`none` = 没有来源的；否则一个来源 id
+    /// Source scope: default = all; `none` = documents with no source; otherwise a source id
     #[serde(default)]
     pub source: Option<String>,
-    /// 文件名包含
+    /// Filename contains
     #[serde(default)]
     pub q: Option<String>,
-    /// 抽取状态：none | queued | extracting | done | failed
+    /// Extraction status: none | queued | extracting | done | failed
     #[serde(default)]
     pub graph: Option<String>,
-    /// `deleted` = 「已删除」视图：只列墓碑（#268）。缺省 = 活着的
+    /// `deleted` = the "deleted" view: lists tombstones only (#268). Default = live ones
     #[serde(default)]
     pub state: Option<String>,
     #[serde(default)]
@@ -366,10 +366,10 @@ pub struct DocsQuery {
     pub offset: Option<i64>,
 }
 
-/// 文库一页。
+/// One page of the library.
 ///
-/// **改成服务端筛选与分页**：从前一次取回整库、前端切片。27 篇没事，两万篇会把
-/// 整张表打进浏览器；而客户端筛选还有个更隐蔽的毛病——它只筛得到已经拿下来的那些。
+/// **Changed to server-side filtering and paging**: previously the whole library was fetched and the front end sliced it. 27 documents is fine; 20,000 would push
+/// the whole table into the browser. Client-side filtering also has a more hidden flaw: it can only filter what has already been fetched.
 pub async fn list(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -391,10 +391,10 @@ pub async fn list(
     Ok(Json(page))
 }
 
-/// `None` = 全部，`Some(None)` = 没有来源的，`Some(Some(id))` = 某个来源。
+/// `None` = all, `Some(None)` = documents with no source, `Some(Some(id))` = one source.
 ///
-/// 认不出的字符串当成「全部」而不是报错：这个参数来自界面上的一次点击，
-/// 而一次点击不该把整页变成一条错误。
+/// An unrecognised string is treated as "all" rather than an error: this parameter comes from one click in the UI,
+/// and one click should not turn the whole page into an error.
 fn parse_scope(raw: Option<&str>) -> Option<Option<Uuid>> {
     match raw {
         None | Some("") => None,
@@ -403,10 +403,10 @@ fn parse_scope(raw: Option<&str>) -> Option<Option<Uuid>> {
     }
 }
 
-/// 一键重试这个作用域里全部抽取失败的文档。
+/// One-click retry of every extraction failure in this scope.
 ///
-/// **存在的理由是一条条点太慢**：一个来源里五篇失败就是点五次，而失败往往是
-/// 成批的（模型端点断了一阵，那段时间进来的全挂）。
+/// **The reason it exists is that retrying one at a time is too slow**: five failures in one source means five clicks, and failures tend to come
+/// in batches (the model endpoint went down for a while, and everything that came in during that time failed).
 pub async fn retry_failed(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -417,8 +417,8 @@ pub async fn retry_failed(
     let ids =
         utopia_store::documents::failed_ids(&state.pool, kb_id, parse_scope(q.source.as_deref()))
             .await?;
-    // 逐个入队而不是一条 SQL 批量改状态：排队本身有别的动作（解雇在跑的任务、
-    // 清增量标记），那些在 `queue_extraction_one` 里，绕过它会留下半截状态
+    // Enqueue one by one rather than as one SQL batch status update: queueing has other side effects (cancelling running jobs,
+    // clearing incremental markers), which live in `queue_extraction_one`; bypassing it would leave a half-done state
     let mut queued = 0usize;
     for id in &ids {
         if utopia_store::documents::queue_extraction_one(&state.pool, *id)
@@ -434,7 +434,7 @@ pub async fn retry_failed(
     Ok(Json(json!({ "queued": queued, "found": ids.len() })))
 }
 
-/// 文档详情 + 全部分块（文档查看器用）。
+/// Document detail + all chunks (for the document viewer).
 pub async fn detail(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -446,7 +446,7 @@ pub async fn detail(
     Ok(Json(json!({ "document": doc, "chunks": chunks })))
 }
 
-/// 反向证据链：文档各分块抽出的事实（文档查看器右栏）。
+/// Reverse evidence chain: facts extracted from the document's chunks (right column of the document viewer).
 pub async fn extractions(
     State(state): State<AppState>,
     reader: SessionOrToken,
@@ -466,7 +466,7 @@ pub async fn delete(
     let doc = utopia_store::documents::get(&state.pool, id).await?;
     utopia_store::access::require_kb(&state.pool, &user, doc.kb_id, Role::Editor).await?;
 
-    // 墓碑，不是减法（#268）：文档、分块、证据、原始文件都留着；只作废没有别的出处的事实
+    // Tombstone, not subtraction (#268): the document, chunks, evidence and raw file are all kept; only facts with no other source are voided
     let report = utopia_store::documents::delete(&state.pool, doc.kb_id, id, Some(user.id)).await?;
     let search = state.search.clone();
     let did = id.to_string();
@@ -474,7 +474,7 @@ pub async fn delete(
         .await
         .map_err(|e| AppError::Other(e.into()))?
         .map_err(AppError::Other)?;
-    // 前提作废了，靠它推出来的派生随之失效——不等下一次定时重推
+    // The premise is voided, so derivations built on it become invalid too, without waiting for the next scheduled re-derivation
     settle_derivations(&state, doc.kb_id).await?;
     let _ = utopia_store::audit::record(
         &state.pool,
@@ -498,8 +498,8 @@ pub async fn delete(
     })))
 }
 
-/// 撤销删除：文档、分块、这次作废的事实原路复活，索引重建。
-/// 同步撞见墓碑与同内容重传走的是同一个 store 函数，这里只是人按的那一条路
+/// Undo a deletion: the document, chunks and the facts voided this time come back as they were, and the index is rebuilt.
+/// Sync hitting a tombstone and a same-content re-upload take the same store function; this is just the route a person presses
 pub async fn restore(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -524,9 +524,9 @@ pub async fn restore(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 真删（#268 下半）：内容抹掉，不可撤销，只对已删除的文档开放，库管理员才能按。
-/// 库里先记账（purged_at），再删文件：删文件失败只是漏一份孤儿原文，反过来则是
-/// 库说「还能恢复」而原文已经没了
+/// Real delete (#268, second half): content is wiped and irreversible; only open for deleted documents, and only library admins can press it.
+/// The library records it first (purged_at), then deletes the file: if the file delete fails, only an orphaned raw file is left; the other way round
+/// would leave the library saying "still recoverable" when the raw file is already gone
 pub async fn purge(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -560,7 +560,7 @@ pub async fn purge(
     ))
 }
 
-/// 复活的文档回到全文索引：分块的正文一直都在，只是重写一遍索引条目
+/// A revived document returns to the full-text index: its chunk text was always there, only the index entries are rewritten
 pub async fn reindex(state: &AppState, doc: &Document) -> utopia_core::AppResult<()> {
     let chunks =
         utopia_store::documents::chunks_in_document(&state.pool, doc.kb_id, doc.id).await?;
@@ -577,7 +577,7 @@ pub async fn reindex(state: &AppState, doc: &Document) -> utopia_core::AppResult
     Ok(())
 }
 
-/// 前提变了就重推一遍，让派生跟上——开关关着的库不推。删除、撤销、同步复活三条路共用
+/// If the premise changed, re-derive so derivations catch up; libraries with the switch off do not derive. Delete, undo and sync-revive all share this
 pub(crate) async fn settle_derivations(
     state: &AppState,
     kb_id: Uuid,
@@ -589,7 +589,7 @@ pub(crate) async fn settle_derivations(
     Ok(())
 }
 
-/// 重新处理（解析器升级/失败重试）。
+/// Reprocess (parser upgrade / retry after failure).
 pub async fn reprocess(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -611,12 +611,12 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 只认开头独立的完整日期行，不把正文里提到的事件日期当作文档日期（#610）。
+/// Only recognise a complete date line that stands alone at the start; do not take event dates mentioned in the body as the document date (#610).
 ///
-/// 顺序：**文件名 → 正文首行**。文件名是 multipart 解析时一定有的；
-/// 公告、备案一类的语料通常按日期命名，是正文里写「2024年2月29日 公告」还是
-/// 文件名叫「2024-02-29_gaoshu.txt」，对读的人来说是一个东西，但只有文件名
-/// 这条路在 multipart 落库之前就拍得到。日期格式与正文保持一致（ISO 或中文全形）。
+/// Order: **filename, then first line of the body**. The filename is always present when multipart is parsed;
+/// corpus items such as announcements and filings are usually named by date, and whether the body says "29 February 2024 notice" or
+/// the filename is "2024-02-29_gaoshu.txt" is the same thing to the reader, but only the filename
+/// route can be read before the multipart record is stored. Date formats match the body (ISO or full-width Chinese).
 fn content_time(filename: &str, bytes: &[u8]) -> Option<chrono::DateTime<chrono::Utc>> {
     if !is_text_extension(filename) {
         return None;
@@ -625,12 +625,12 @@ fn content_time(filename: &str, bytes: &[u8]) -> Option<chrono::DateTime<chrono:
     if let Some(day) = parse_filename_date(stem) {
         return Some(day.and_hms_opt(0, 0, 0)?.and_utc());
     }
-    // 只解码头部 4 KiB：日期行只认开头。PDF、Word 这类格式要读日期时，在各自的解析器里
-    // 读它们自己的元数据，不在这里猜
+    // Only decode the first 4 KiB of the header: date lines are only recognised at the start. For formats like PDF and Word that need a date, read
+    // their own metadata in their own parsers; do not guess here
     const HEADER_BYTES: usize = 4096;
     let text = utopia_ingest::decode_text(&bytes[..bytes.len().min(HEADER_BYTES)]);
     let header = if bytes.len() > HEADER_BYTES {
-        // 截断的半行可能在日期后还有文字，不能把它误当独立日期行。
+        // A truncated half-line may have text after the date, and must not be mistaken for a standalone date line.
         text.rsplit_once('\n')?.0
     } else {
         &text
@@ -651,12 +651,12 @@ fn content_time(filename: &str, bytes: &[u8]) -> Option<chrono::DateTime<chrono:
     let day = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
         .or_else(|_| chrono::NaiveDate::parse_from_str(date, "%Y年%m月%d日"))
         .ok()?;
-    // 与项目已有日精度约定一致：UTC 零点是存储约定，不猜作者所在时区。
+    // Consistent with the project's existing day-precision convention: UTC midnight is the storage convention; we do not guess the author's timezone.
     Some(day.and_hms_opt(0, 0, 0)?.and_utc())
 }
 
-/// 文本类的扩展名：只对 `txt` / `md` / `markdown` 试日期解析。
-/// PDF / Word 等格式要读日期时，在各自的解析器里读它们自己的元数据（#610 决定 2）。
+/// Text-type extensions: only try date parsing for `txt` / `md` / `markdown`.
+/// For PDF / Word and similar formats that need a date, read their own metadata in their own parsers (#610 decision 2).
 fn is_text_extension(filename: &str) -> bool {
     let Some(ext) = std::path::Path::new(filename)
         .extension()
@@ -669,25 +669,25 @@ fn is_text_extension(filename: &str) -> bool {
         .any(|known| ext.eq_ignore_ascii_case(known))
 }
 
-/// 解析主名前缀里的 ISO `YYYY-MM-DD` 或中文 `YYYY年M月D日`。
+/// Parse the ISO `YYYY-MM-DD` or the Chinese form `YYYY年M月D日` in the main name's prefix.
 ///
-/// 不依赖 `regex` 库：手工走一遍就够，错误形态也清楚。
-///  严格匹配：`%Y` 是 4 位数字，`%m` / `%d` 是 1-2 位（与正文解析一致，`chrono`
-///  会拒掉像 `2023-02-29` 这种不可能的日期，但接受 `2024-2-9` 与 `2024-02-09`）。
+/// Does not depend on the `regex` crate: a hand-written scan is enough, and the failure modes are clear.
+///  Strict match: `%Y` is 4 digits, `%m` / `%d` are 1-2 digits (consistent with body parsing; `chrono`
+///  rejects impossible dates such as `2023-02-29`, but accepts `2024-2-9` and `2024-02-09`).
 fn parse_filename_date(stem: &str) -> Option<chrono::NaiveDate> {
     let bytes = stem.as_bytes();
-    // 头 4 位必须是数字；这一关漏过去 `chrono` 也会拒，但提前失败省一次分配
+    // The first 4 characters must be digits; `chrono` would also reject this if it slipped past, but failing early saves an allocation
     if bytes.len() < 4 || !bytes[..4].iter().all(u8::is_ascii_digit) {
         return None;
     }
-    // ISO：`YYYY-MM-DD` 或 `YYYY-M-D`，至少 8 个字符位
+    // ISO: `YYYY-MM-DD` or `YYYY-M-D`, at least 8 characters
     if bytes.len() >= 8 && bytes[4] == b'-' {
-        // 找到下一处分隔（位置 5+），可以是 `-` 或别的字符（停止位）
+        // Find the next separator (position 5+), which can be `-` or another character (stop position)
         let after_year = 5;
         let month_end = find_ascii_digit_end(bytes, after_year);
-        // 月份 1-2 位数字
+        // Month: 1-2 digits
         let month_str = std::str::from_utf8(&bytes[after_year..month_end]).ok()?;
-        // 月份后必须是 `-`
+        // After the month there must be `-`
         if month_end >= bytes.len() || bytes[month_end] != b'-' {
             return None;
         }
@@ -700,7 +700,7 @@ fn parse_filename_date(stem: &str) -> Option<chrono::NaiveDate> {
         )
         .ok();
     }
-    // 中文：`YYYY年M月D日`，年号后必须是 `年`
+    // Chinese form: `YYYY年M月D日`; the `年` must follow the year
     let year_str = std::str::from_utf8(&bytes[..4]).ok()?;
     let after_year = 4;
     let rest = stem.get(after_year..)?;
@@ -718,7 +718,7 @@ fn parse_filename_date(stem: &str) -> Option<chrono::NaiveDate> {
     .ok()
 }
 
-/// 从 `start` 起往后读 1-2 位 ASCII 数字，返回 (数字字符串, 剩余的字符串)。
+/// Starting from `start`, read 1-2 ASCII digits and return (digit string, remaining string).
 fn read_ascii_digits(s: &str) -> Option<(&str, &str)> {
     let end = s
         .as_bytes()
@@ -732,8 +732,8 @@ fn read_ascii_digits(s: &str) -> Option<(&str, &str)> {
     Some((&s[..end], &s[end..]))
 }
 
-/// 从 `start` 起往后走 ASCII 数字，返回第一个非数字字符的位置（闭区间右开）。
-/// 全部到尾部也允许：返回 `bytes.len()`。
+/// Starting from `start`, walk forward over ASCII digits and return the position of the first non-digit (closed-open interval).
+/// Running to the end is also allowed: returns `bytes.len()`.
 fn find_ascii_digit_end(bytes: &[u8], start: usize) -> usize {
     let mut i = start;
     while i < bytes.len() && bytes[i].is_ascii_digit() {
@@ -746,9 +746,9 @@ fn find_ascii_digit_end(bytes: &[u8], start: usize) -> usize {
 #[path = "documents_routes_tests.rs"]
 mod tests;
 
-/// 抽取丢弃信号：哪些事实抽出来了却没能落地。整库一次取回——按
-/// (文档 × 原因 × 具体对象) 聚合后行数很小，Library 既算总数又展开详情，
-/// 不必逐行发请求。
+/// Extraction drop signal: facts that were extracted but could not be landed. Fetched for the whole library in one go: after
+/// aggregation by (document × reason × specific object) the row count is small, and the Library both counts totals and expands details,
+/// so it does not need a request per row.
 pub async fn extraction_drops(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,

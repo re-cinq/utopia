@@ -1,9 +1,9 @@
-//! GitLab 项目文件来源（gitlab.com）：默认分支头的一棵文件树，一条路径一篇文档，与
-//! [`crate::github_repo`] 同一个形状（#1327）。同步在 `ingest_sources`；这里只放不联网的那一半。
+//! GitLab project file source (gitlab.com): a file tree at the default branch head, one document per path, with the same shape as
+//! [`crate::github_repo`] (#1327). Sync runs in `ingest_sources`; this file only holds the half that makes no network calls.
 //!
-//! 与 GitHub 不同的三处：树是分页的（keyset，每页至多 100 条，没有 `truncated`）；树条目
-//! 有 blob SHA 却没有大小，于是大小上限要等 `HEAD` 文件拿到 `X-Gitlab-Size` 才判得了；
-//! 提交时间带毫秒，落库前截到秒（0013）。
+//! Three differences from GitHub: the tree is paginated (keyset, at most 100 entries per page, no `truncated`); tree entries
+//! have a blob SHA but no size, so the size cap can only be checked once the `HEAD` file gets `X-Gitlab-Size`;
+//! commit times carry milliseconds, which are truncated to seconds before storing (0013).
 
 use chrono::{DateTime, SubsecRound as _, Utc};
 use serde::Deserialize;
@@ -11,17 +11,17 @@ use std::collections::HashSet;
 
 use crate::github_repo::FileFilter;
 
-/// 一棵树最多翻这么多页（每页 100 条）。翻不完就当树被截断：本轮照收列出来的文件，
-/// 但不判「不在来源中」——缺席可能只是还没列到，与 GitHub 的 `truncated` 同一个处理
+/// A tree is paged through at most this many times (100 entries per page). If paging does not finish, the tree counts as truncated: this round still takes the files listed,
+/// but does not judge "not in source", since absence may only mean not listed yet, handled the same way as GitHub's `truncated`
 pub const MAX_TREE_PAGES: usize = 100;
 
-/// 空文件的 git blob SHA 是固定的。树里没有大小，靠它在问大小之前就把空文件挡掉；不挡的话，
-/// 空文件从不落库，每一轮都要为它白发一次 `HEAD`
+/// The git blob SHA of an empty file is fixed. The tree carries no size, so use it to drop empty files before asking for sizes; without this filter,
+/// empty files are never stored, and every round would waste a `HEAD` request on them
 pub const EMPTY_BLOB: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TreeEntry {
-    /// git blob SHA，与 GitHub 树里的 `sha` 是同一个值
+    /// git blob SHA, the same value as `sha` in a GitHub tree
     pub id: String,
     pub path: String,
     #[serde(rename = "type")]
@@ -29,8 +29,8 @@ pub struct TreeEntry {
     pub mode: String,
 }
 
-/// 按路径排序、同一 blob 只留第一条，与 [`crate::github_repo::choose`] 一致。大小此时还不知道，
-/// 由同步在 `HEAD` 之后再判
+/// Sorted by path, keeping only the first entry per blob, consistent with [`crate::github_repo::choose`]. Size is not known yet at this point;
+/// sync checks it after `HEAD`
 pub fn choose(entries: Vec<TreeEntry>, filter: &FileFilter) -> Vec<TreeEntry> {
     let mut entries: Vec<_> = entries
         .into_iter()
@@ -42,8 +42,8 @@ pub fn choose(entries: Vec<TreeEntry>, filter: &FileFilter) -> Vec<TreeEntry> {
     entries
 }
 
-/// `Link` 头里 `rel="next"` 的那一页。只认与 API 同源的地址：这个地址是响应给的，
-/// 照单全收就等于让对方决定我们带着令牌去访问哪里
+/// The page given by `rel="next"` in the `Link` header. Accepts only addresses from the same origin as the API: the address comes from the response,
+/// and accepting it blindly would let the other side decide where we send our token
 pub fn next_page(link: Option<&str>, api_base: &reqwest::Url) -> Option<reqwest::Url> {
     link?.split(',').find_map(|part| {
         let (target, params) = part.split_once(';')?;
@@ -56,7 +56,7 @@ pub fn next_page(link: Option<&str>, api_base: &reqwest::Url) -> Option<reqwest:
     })
 }
 
-/// `committed_date` 形如 `2026-10-05T14:30:00.000+00:00`，截到秒
+/// `committed_date` looks like `2026-10-05T14:30:00.000+00:00`, truncated to seconds
 pub fn commit_time(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .ok()

@@ -1,15 +1,15 @@
-//! 整库导出为 RDF（0020）。
+//! Full-database export as RDF (0020).
 //!
-//! **边查边发**：一页事实序列化完就把攒下的字节送出去，不在内存里拼出整份文件。
-//! 一个十万条事实的库正是最需要导出的那种库，也正是「先拼成一个 String」会
-//! 把服务打死的那种库。
+//! **Send as you query**: once a page of facts is serialized, the accumulated bytes are sent out; the whole file is never assembled in memory.
+//! A database of a hundred thousand facts is exactly the kind that most needs exporting, and also exactly the kind where
+//! "first assemble one String" would kill the service.
 //!
-//! **同一份快照**：体检、词汇表与每一页查询跑在同一条只读 REPEATABLE READ
-//! 事务里。若每页各自拿一条连接，词汇表发完之后才提交的规则会在派生页里
-//! 留下一条指向它的 `wasGeneratedBy`——图里就出现没有本体的引用。
+//! **One snapshot**: the health check, the vocabulary and every per-page query run in the same read-only REPEATABLE READ
+//! transaction. If each page took its own connection, a rule committed after the vocabulary was sent would leave
+//! a `wasGeneratedBy` pointing at it in a derived page -- a reference to an ontology that does not exist would appear in the graph.
 //!
-//! 中途出错只能截断——HTTP 头早就发出去了。所以错误进日志，而客户端拿到的是
-//! 一份短了一截的文件；这比先攒后发要好，那种做法在同样的库上根本发不出来。
+//! An error midway can only truncate: the HTTP headers have already gone out. So the error goes to the log, and the client gets
+//! a file cut short; this is better than assemble-then-send, which cannot be served at all on the same database.
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
@@ -27,10 +27,10 @@ use crate::state::AppState;
 
 #[derive(Deserialize)]
 pub struct ExportQuery {
-    /// `turtle`（缺省）或 `jsonld`
+    /// `turtle` (default) or `jsonld`
     #[serde(default)]
     pub format: Option<String>,
-    /// 造 IRI 用的对外地址。不给就用 URN——稳定，且不假装自己知道部署在哪
+    /// Public base address used to mint IRIs. If not given, a URN is used -- stable, and it does not pretend to know where it is deployed.
     #[serde(default)]
     pub base: Option<String>,
 }
@@ -47,10 +47,10 @@ pub async fn export(
     })?;
     let names = Names::new(kb_id, q.base.as_deref()).map_err(AppError::Validation)?;
 
-    // 导出是一次「整个库离开这台机器」的动作，台账要记下（0014 的同一条理由）；
-    // 令牌导出的还要记下是哪一枚（0014 决定 7）。
-    // 必须在快照事务之前写完并放掉连接：下面那条事务一占就是整个流的时长，
-    // 占着它再回头要连接，会把最小池（两条）上的并发导出互相饿死
+    // Export is an action that takes the **whole database off this machine**: the ledger must record it (same reasoning as 0014);
+    // for a token export, also record which token (0014 decision 7).
+    // It must finish writing and release the connection before the snapshot transaction: the transaction below holds one for the whole stream's duration,
+    // and holding it while going back for another connection would starve concurrent exports on the smallest pool (two connections) of each other
     let _ = utopia_store::audit::record(
         &state.pool,
         Some(kb_id),
@@ -65,19 +65,19 @@ pub async fn export(
     )
     .await;
 
-    // 整份导出占一条连接上的只读 REPEATABLE READ 事务：下面的预检与流里
-    // 每一页查询读同一个快照，事务活到流结束
+    // The whole export holds one connection in a read-only REPEATABLE READ transaction: the preflight below and every page query in the stream
+    // read the same snapshot, and the transaction lives until the stream ends
     let mut tx = state.pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
         .await?;
 
-    // 出处链越库一律拒导（0070 挡新行，这里挡存量坏行）：宁可不发一个字节，
-    // 也不能把别库的对象安上本库的 IRI——那份文件看着完整、实则悬空。
-    // 在流开始之前拦下：客户端拿到的是确定性的错误，不是一截断掉的文件
+    // Provenance chains that cross databases are always refused (0070 blocks new rows, here we block existing bad rows): better to send not a single byte
+    // than attach another database's objects to this database's IRIs -- the file would look complete but dangle.
+    // Stop this before the stream starts: the client gets a deterministic error, not a truncated file
     utopia_store::export::provenance_integrity(&mut tx, kb_id).await?;
-    // 认知状态同一条纪律（0062）：越库引用、词表以外的存储值、以及 open
-    // 违规上解不开的判据，都在发第一个字节之前拦下
+    // Same discipline for epistemic state (0062): cross-database references, stored values outside the vocabulary, and criteria that open
+    // violations cannot resolve are all stopped before the first byte is sent
     utopia_store::export::contest_integrity(&mut tx, kb_id).await?;
 
     let stream = async_stream::try_stream! {
@@ -117,8 +117,8 @@ pub async fn export(
             yield axum::body::Bytes::from(buf.take());
         }
 
-        // 现行三元组按「导出这一刻」判定，整份文件用同一个 now：
-        // 边发边取当前时间的话，同一份文件的前后两半会按两个不同的现在写
+        // Current triples are judged as of the moment of export; the whole file uses one now:
+        // if the current time were fetched per chunk, the first and second halves of the same file would be written with two different nows
         let now = chrono::Utc::now();
         let mut after = None;
         loop {
@@ -142,7 +142,7 @@ pub async fn export(
             yield axum::body::Bytes::from(buf.take());
         }
 
-        // 认知状态（0062）：争议与违规都指着事实的 IRI，放在事实与派生之后
+        // Epistemic state (0062): disputes and violations point at fact IRIs, so they come after facts and derivations
         let mut after = None;
         loop {
             let page = utopia_store::export::fact_conflicts_page(&mut tx, kb_id, after).await.map_err(io)?;
@@ -192,14 +192,14 @@ pub async fn export(
         .into_response())
 }
 
-/// 库里出的错在流中间只能变成 io 错误——响应头已经发出去了，改不了状态码。
+/// An error from the database mid-stream can only become an io error -- the response headers have already been sent, so the status code cannot be changed.
 fn io(e: AppError) -> std::io::Error {
     tracing::error!(error = %e, "导出中断");
     std::io::Error::other(e.to_string())
 }
 
-/// 文件名用的短名。ASCII 之外的字符不进 Content-Disposition 的 filename，
-/// 中文库名会在那里变成一串问号
+/// Short name used for the file name. Non-ASCII characters do not go into the Content-Disposition filename,
+/// so a database name in Chinese would turn into a string of question marks there
 fn slug(name: &str) -> String {
     let mut out: String = name
         .chars()

@@ -1,6 +1,6 @@
-//! 长对话（#964）：真处理函数、真库，端点是照脚本回话的假模型，不花钱也不分词。
+//! Long conversations (#964): real handler and real library; the endpoint is a fake model that replies from a script, with no cost and no tokenising.
 //!
-//! 每条测试看的是发给模型的请求：历史裁到多少、问题在不在、往返丢没丢、重发了几次。
+//! Each test looks at the requests sent to the model: how much history was trimmed, whether the question is still there, whether the round-trip was dropped, and how many times it was resent.
 use super::*;
 
 const REFUSAL: &str = r#"{"error":{"code":"context_length_exceeded","message":"maximum context length is 4096 tokens; request has 12000 tokens"}}"#;
@@ -71,7 +71,7 @@ async fn long_history_is_bounded_before_the_first_request() -> anyhow::Result<()
     assert!(!requests[0].to_string().contains("question 0"));
     assert!(requests[0].to_string().contains("question 9"));
     preserves_question(&requests[0], "current question");
-    // 裁的是这一次发出去的，落库的对话一条不少
+    // What gets trimmed is what was sent this time; the stored conversation loses nothing
     let count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM conversation_messages WHERE conversation_id=$1")
             .bind(id)
@@ -113,8 +113,8 @@ async fn overflow_trims_once_and_the_next_turn_remembers_the_window() -> anyhow:
     assert!(sse.contains("event: done"), "{sse}");
     let requests = f.requests();
     assert_eq!(requests.len(), 5);
-    // 端点说窗口是 4096 token：预算是它的一半，2048 字。最新那段问答加上「question 5」
-    // 那段装得下，再加「question 4」那段就超了
+    // The endpoint says the window is 4096 tokens: the budget is half of it, 2048 characters. The latest question-and-answer pair plus "question 5"
+    // fits, but adding the "question 4" pair would exceed it
     assert!(history_chars(&requests[3], "next question") <= 2048);
     let sent = requests[3].to_string();
     assert!(
@@ -122,7 +122,7 @@ async fn overflow_trims_once_and_the_next_turn_remembers_the_window() -> anyhow:
         "{sent}"
     );
     preserves_question(&requests[3], "next question");
-    // 换了模型、换了工作区，都不能继承这次拒绝
+    // Switching models or switching workspaces must not inherit this rejection
     let ws: Uuid = sqlx::query_scalar("SELECT workspace_id FROM knowledge_bases WHERE id=$1")
         .bind(f.kb)
         .fetch_one(&f.pool)
@@ -255,13 +255,13 @@ async fn even_an_oversized_current_question_is_never_cut() -> anyhow::Result<()>
     let sse = f.ask(&question).await?;
     assert!(sse.contains("context_too_long"), "{sse}");
     let requests = f.requests();
-    // 没有历史可丢，同一个请求不再发第二遍
+    // There is no history to trim, so the same request is not sent a second time
     assert_eq!(requests.len(), 1);
     preserves_question(&requests[0], &question);
     f.cleanup().await
 }
 
-/// 上一轮的往返：读了两份文档，各 `chars` 字
+/// The round-trip of the previous turn: two documents were read, each `chars` characters
 fn two_documents(chars: usize) -> serde_json::Value {
     serde_json::json!([
         {"role":"assistant","content":null,"tool_calls":[
@@ -272,7 +272,7 @@ fn two_documents(chars: usize) -> serde_json::Value {
     ])
 }
 
-/// 一段落库的问答，回答带着 `two_documents` 的往返
+/// A stored question-and-answer pair; the answer carries the round-trip of `two_documents`
 async fn seed_turn(f: &Fx, chars: usize) -> anyhow::Result<Uuid> {
     let id = utopia_store::conversations::create(&f.pool, f.kb, f.user.id, "context test").await?;
     utopia_store::conversations::append_message(
@@ -297,8 +297,8 @@ async fn seed_turn(f: &Fx, chars: usize) -> anyhow::Result<Uuid> {
     Ok(id)
 }
 
-/// 上一轮读了两份文档，往返 48,000 字。追问「短一点」时往返被丢，上一轮的问答都还在；
-/// 往返装得下的时候照旧发
+/// The previous turn read two documents with a 48,000-character round-trip. On the follow-up "say it shorter" the round-trip is dropped and the earlier Q&A pairs all remain;
+/// when the round-trip fits, it is still sent as before
 #[tokio::test]
 async fn an_evidence_heavy_turn_still_leaves_its_question_and_answer_for_the_follow_up(
 ) -> anyhow::Result<()> {

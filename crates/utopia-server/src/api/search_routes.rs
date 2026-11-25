@@ -10,7 +10,7 @@ use crate::error::ApiResult;
 use crate::retrieval;
 use crate::state::AppState;
 
-/// 不认识的字段答 422：悄悄忽略一个拼错的过滤条件，调用方会以为它生效了
+/// Unrecognised fields answer 422: silently ignoring a misspelt filter would make the caller think it took effect
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchReq {
@@ -19,18 +19,18 @@ pub struct SearchReq {
     pub top_k: Option<usize>,
     #[serde(default)]
     pub offset: usize,
-    /// 记录轴（0019）：按**那一刻库里有的东西**检索。YYYY-MM-DD 或 RFC3339。
-    /// 命中的是当时活着的块、当时还没被删的文档
+    /// Record axis (0019): search by **what the library held at that moment**. YYYY-MM-DD or RFC3339.
+    /// Hits are the chunks alive at that time and the documents not yet deleted at that time
     #[serde(default)]
     pub as_of: Option<String>,
-    /// 只检索本库这个来源的文档；别的库的来源答 404
+    /// Search only this library's documents from this source; sources from another library answer 404
     #[serde(default)]
     pub source_id: Option<Uuid>,
-    /// 只检索 `external_id` 以它开头的文档。identity 是推送来源里的，所以要 `source_id`
-    /// 且它是推送来源，否则 422
+    /// Search only documents whose `external_id` starts with it. identity comes from a push source, so it needs `source_id`
+    /// and it must be a push source, otherwise 422
     #[serde(default)]
     pub external_id_prefix: Option<String>,
-    /// 这次检索算不算「用过」（RC-003）：默认算。探测、评测、健康检查传 false，不留痕
+    /// Whether this search counts as "used" (RC-003): by default it does. Probes, evaluations and health checks pass false and leave no trace
     #[serde(default = "record_by_default")]
     pub record: bool,
 }

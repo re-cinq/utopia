@@ -1,39 +1,39 @@
-//! 图谱答出来的回答点得开原句（#935）。
+//! The answer the graph produces must let the reader open the sentence behind each citation (#935).
 //!
-//! 四个图谱工具（entity_facts、neighbors、timeline、paths_between）在对话里给每条显示出来
-//! 的事实印上它第一条有效证据的 `[n]`，证据块登进这一轮的来源清单，与检索结果共用一套号。
-//! 这里钉住：
+//! The four graph tools (entity_facts, neighbors, timeline, paths_between) each print, in the conversation, every fact they show
+//! with the `[n]` of the fact's first valid evidence block; that block is registered in this turn's source list and shares one numbering with retrieval results.
+//! Pinned down here:
 //!
-//! - 每个工具的号都指向那条事实的证据块；几条证据时取最早那篇文档的
-//! - 同一块在一轮里只有一个号，换一个工具再印还是它
-//! - 证据只在已删文档里的事实不带号；`as_of` 回到删除之前，它又带上号
-//! - 派生事实那一行不带号，它的前提各带各的
-//! - MCP 的文字一字不改，来源清单是空的（号码对没有清单的调用方没有意义）
-//! - 整条对话：工具印的号随 `sources` 帧发出去、跟着回答落库，模型读到的事实行带着号
-//! - 号打开的是那句话（#968 的后续）：条目带着块里说出这条事实的引文，一块被引几句就记
-//!   几句；块被新版本取代后换成仍有效的那一块，`as_of` 回到取代之前又是原来那块
-//! - 检索和图谱工具在一轮里共用一个号：图谱引到检索登过的块，号不变、补上那句话；只补了
-//!   引文、条数没变，来源帧也再发一次
-//! - 原句里没有的日期在行上说出来（#970）：时间线推出来的终点写出关上它的那一行、带那一行
-//!   的号（那一行没有有效证据时不带号，清单里也不多一条），人改过的区间写出修正备注、不带号；
-//!   本行的号照旧。对话与 MCP 一样（MCP 不带号），规则 4 说推出的终点引关它的那一行，两种
-//!   日期都不归到本行的原句
+//! - Each tool's number points to that fact's evidence block; with several pieces of evidence, the earliest document's block is used
+//! - The same block has only one number in a turn; printed again by another tool, it keeps that number
+//! - A fact whose evidence exists only in a deleted document carries no number; with `as_of` back before the deletion, it carries one again
+//! - The derived-fact line carries no number; its premises each carry their own
+//! - MCP text is unchanged by one character, and its source list is empty (numbers are meaningless to callers without a list)
+//! - Whole conversation: the numbers printed by the tools go out with the `sources` frame and are saved with the answer; the fact lines the model reads carry the numbers
+//! - A number opens the sentence itself (follow-up to #968): the entry carries the quote from the block that states this fact; a block cited several times records each sentence;
+//!   when the block is replaced by a new version, the number switches to the still-valid block; with `as_of` back before the replacement it is the original block again
+//! - Retrieval and graph tools share one number in a turn: a graph citation of a block retrieval already registered keeps its number and gains the sentence
+//!   only the quote was added and the entry count is unchanged, so the sources frame is still sent again
+//! - A date not in the original sentence is stated on the line (#970): a timeline end point inferred from the line that closes it is written out with that line's number
+//!   (if that line has no valid evidence, it carries no number and adds no entry to the list); a range a person edited is written out with a correction note and no number;
+//!   this line's own number is unchanged. Chat and MCP behave the same (MCP carries no numbers): rule 4 says the inferred end point cites the line that closes it, and neither
+//!   date is attributed to this line's original sentence
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failing without `UTOPIA_DATABASE_URL`. It creates and drops its own database, never touching an existing one.
 use super::*;
 use crate::api::tools::{dispatch, ToolCtx, ToolSink};
 
 struct Seed {
-    /// 张三 leads Aurora 的两条证据：早的那篇（charter）与晚的那篇（recap）
+    /// Two pieces of evidence that 张三 leads Aurora: the earlier document (charter) and the later one (recap)
     charter: Uuid,
     recap: Uuid,
-    /// 李四 leads Aurora 的证据
+    /// Evidence that 李四 leads Aurora
     handover: Uuid,
-    /// 王五 advises Aurora 的唯一证据，在一篇删掉的文档里
+    /// The only evidence that 王五 advises Aurora, in a deleted document
     deleted: Uuid,
 }
 
-/// 一个项目、三个人、四篇文档（一篇已删），外加一条对称规则推出来的事实
+/// One project, three people, four documents (one deleted), plus a fact inferred by a symmetric rule
 async fn seed(pool: &sqlx::PgPool, kb: Uuid) -> anyhow::Result<Seed> {
     let id = Uuid::now_v7;
     let (person, project, leads, advises, works_with, rule) = (id(), id(), id(), id(), id(), id());
@@ -41,7 +41,7 @@ async fn seed(pool: &sqlx::PgPool, kb: Uuid) -> anyhow::Result<Seed> {
     let (d_charter, d_recap, d_handover, d_deleted) = (id(), id(), id(), id());
     let (charter, recap, handover, deleted) = (id(), id(), id(), id());
     let (f_zhang, f_li, f_wang, f_pair, derived) = (id(), id(), id(), id(), id());
-    // 插进去的只有本地生成的 UUID 和写死的日期
+    // Only locally generated UUIDs and fixed dates are inserted
     sqlx::raw_sql(&format!(
         r#"
         INSERT INTO entity_types(id,kb_id,key,label) VALUES
@@ -108,7 +108,7 @@ fn ctx(f: &Fx, via_token: Option<Uuid>) -> ToolCtx<'_> {
     }
 }
 
-/// 一段文字里的引用号：`[3]` 算，置信度 `[90%]` 和 `[rule: …]` 不算
+/// A citation number in a text: `[3]` counts, while confidence `[90%]` and `[rule: …]` do not
 fn marks(text: &str) -> Vec<usize> {
     text.match_indices('[')
         .filter_map(|(at, _)| {
@@ -119,7 +119,7 @@ fn marks(text: &str) -> Vec<usize> {
         .collect()
 }
 
-/// 含 `needle` 的那一行。neighbors 把一组的几项写在同一行、用 ` · ` 隔开，取的是那一项
+/// The line containing `needle`. neighbors writes the items of a group on one line separated by ` · `; this takes that item
 fn line<'t>(text: &'t str, needle: &str) -> &'t str {
     text.lines()
         .flat_map(|l| l.split(" · "))
@@ -127,7 +127,7 @@ fn line<'t>(text: &'t str, needle: &str) -> &'t str {
         .unwrap_or_else(|| panic!("no line with {needle:?} in:\n{text}"))
 }
 
-/// 号 `n` 在清单里登的是哪一块
+/// Which block source number `n` registered in the list
 fn chunk_of(sink: &ToolSink, n: usize) -> Uuid {
     sink.sources[n - 1]["chunk_id"]
         .as_str()
@@ -176,7 +176,7 @@ async fn each_graph_tool_cites_the_first_live_evidence_of_each_fact() -> anyhow:
             "one number per fact: the later evidence is not listed"
         );
 
-        // 同一块同一个号：换一个工具再印，清单不长
+        // Same block, same number: printed again by another tool, the list does not grow
         let near = dispatch(
             &chat,
             &mut sink,
@@ -205,7 +205,7 @@ async fn each_graph_tool_cites_the_first_live_evidence_of_each_fact() -> anyhow:
             "{}",
             dated.text
         );
-        // 路径的每一跳是一条事实，各带各的号：王五那一跳的证据在删掉的文档里，不带
+        // Each hop of the path is a fact with its own number: the evidence for 王五's hop is in the deleted document, so it carries none
         let path = dispatch(
             &chat,
             &mut sink,
@@ -222,7 +222,7 @@ async fn each_graph_tool_cites_the_first_live_evidence_of_each_fact() -> anyhow:
             sink.sources
         );
 
-        // 派生那一行不带号；它的前提（张三 works with 李四）带着自己的号
+        // The derived line carries no number; its premise (张三 works with 李四) carries its own
         let li_facts = dispatch(
             &chat,
             &mut sink,
@@ -236,7 +236,7 @@ async fn each_graph_tool_cites_the_first_live_evidence_of_each_fact() -> anyhow:
         assert_eq!(premise.len(), 1, "{}", li_facts.text);
         assert_eq!(chunk_of(&sink, premise[0]), s.charter);
 
-        // 回到删除之前：那篇文档当时还在，王五的事实带上号
+        // Back to before the deletion: that document was still there, so 王五's fact carries a number
         let mut before = ToolSink::default();
         let then = dispatch(
             &chat,
@@ -249,7 +249,7 @@ async fn each_graph_tool_cites_the_first_live_evidence_of_each_fact() -> anyhow:
         assert_eq!(wang.len(), 1, "{}", then.text);
         assert_eq!(chunk_of(&before, wang[0]), s.deleted);
 
-        // MCP：文字与对话里去掉号之后一字不差，清单是空的
+        // MCP: the text is identical to the conversation's once the numbers are removed, and the source list is empty
         let mcp = ctx(&f, Some(Uuid::now_v7()));
         for (tool, args) in [
             ("entity_facts", json!({"entity": "Project Aurora"})),
@@ -292,7 +292,7 @@ async fn a_graph_answer_publishes_and_stores_its_sources() -> anyhow::Result<()>
         let sse = f.ask("Who leads Project Aurora?").await?;
         assert!(sse.contains("event: done"), "{sse}");
 
-        // `sources` 帧：两块证据，按印出来的顺序编号
+        // `sources` frame: two blocks, numbered in the order printed
         let published: Vec<serde_json::Value> = sse
             .split("\n\n")
             .filter(|frame| frame.lines().any(|l| l == "event: sources"))
@@ -310,7 +310,7 @@ async fn a_graph_answer_publishes_and_stores_its_sources() -> anyhow::Result<()>
         assert!(chunks.contains(&s.charter.to_string().as_str()), "{last}");
         assert!(chunks.contains(&s.handover.to_string().as_str()), "{last}");
 
-        // 落库的回答带着同一张清单，重开会话时号码照样点得开
+        // The saved answer carries the same list; the numbers still open when the session is reopened
         let stored: serde_json::Value = sqlx::query_scalar(
             "SELECT m.sources FROM conversation_messages m
                JOIN conversations c ON c.id = m.conversation_id
@@ -321,7 +321,7 @@ async fn a_graph_answer_publishes_and_stores_its_sources() -> anyhow::Result<()>
         .await?;
         assert_eq!(&stored, last);
 
-        // 模型读到的事实行带着号：置信度后面跟着它
+        // The fact lines the model reads carry the number: it follows the confidence
         let requests = f.requests();
         let sent = requests[1]["messages"].to_string();
         assert!(sent.contains("Li Si") && sent.contains("%] ["), "{sent}");
@@ -332,7 +332,7 @@ async fn a_graph_answer_publishes_and_stores_its_sources() -> anyhow::Result<()>
     run
 }
 
-/// 号 `n` 那一条带着的引文
+/// The quote carried by number `n`'s entry
 fn quotes_of(sink: &ToolSink, n: usize) -> Vec<String> {
     sink.sources[n - 1]["quotes"]
         .as_array()
@@ -344,7 +344,7 @@ fn quotes_of(sink: &ToolSink, n: usize) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 种子里还在的几篇文档进全文索引：检索要找得到它们
+/// Documents still in the seed that go into the full-text index: retrieval must be able to find them
 async fn index_seed(f: &Fx) -> anyhow::Result<()> {
     let rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
         "SELECT c.document_id, c.id, c.text FROM chunks c JOIN documents d ON d.id = c.document_id
@@ -368,8 +368,8 @@ async fn index_seed(f: &Fx) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 号打开的是说出这条事实的那一句：条目带着引文，同一块两条事实两句都在；块被取代后
-/// 换成仍有效的那一块和它那一句，`as_of` 回到取代之前又是原来的
+/// A number opens the sentence that states this fact: the entry carries the quote, and both sentences are there when one block holds two facts; after the block is replaced
+/// it switches to the still-valid block and its sentence; with `as_of` back before the replacement it is the original again
 #[tokio::test]
 async fn a_graph_number_opens_the_sentence_it_was_read_from() -> anyhow::Result<()> {
     let Some(f) = fixture(Scripted::new(vec![])).await? else {
@@ -384,7 +384,7 @@ async fn a_graph_number_opens_the_sentence_it_was_read_from() -> anyhow::Result<
         .bind(f.kb)
         .fetch_one(&f.pool)
         .await?;
-        // 章程那一块说了两句，张三的两条事实各从一句读出来
+        // The charter block has two sentences; 张三's two facts are each read from one sentence
         sqlx::query("UPDATE chunks SET text = $2 WHERE id = $1")
             .bind(s.charter)
             .bind("Zhang San leads Project Aurora from 2023-01-10. Zhang San works with Li Si.")
@@ -406,7 +406,7 @@ async fn a_graph_number_opens_the_sentence_it_was_read_from() -> anyhow::Result<
         )
         .await
         .text;
-        // 张三 works with 李四有两行：断言的那行带号，规则推出来的那行（`[rule:`）不带
+        // 张三 works with 李四 has two lines: the asserted line carries a number, the rule-derived line (`[rule:`) does not
         let works_line = text
             .lines()
             .flat_map(|l| l.split(" · "))
@@ -426,7 +426,7 @@ async fn a_graph_number_opens_the_sentence_it_was_read_from() -> anyhow::Result<
             "both sentences the chunk was cited for"
         );
 
-        // 章程那一块被新版本取代：张三领 Aurora 那一条换成仍有效的回顾那一块、那一句
+        // The charter block is replaced by a new version: 张三 leads Aurora switches to the still-valid recap block and its sentence
         sqlx::query("UPDATE chunks SET superseded_at = now() WHERE id = $1")
             .bind(s.charter)
             .execute(&f.pool)
@@ -446,7 +446,7 @@ async fn a_graph_number_opens_the_sentence_it_was_read_from() -> anyhow::Result<
             quotes_of(&now, zhang[0]),
             ["Zhang San led Project Aurora until the handover."]
         );
-        // 回到取代之前：那时章程那一块还是现行的
+        // Back before the replacement: the charter block was still the current one then
         let mut then = ToolSink::default();
         let text = dispatch(
             &chat,
@@ -462,7 +462,7 @@ async fn a_graph_number_opens_the_sentence_it_was_read_from() -> anyhow::Result<
             quotes_of(&then, zhang[0]),
             ["Zhang San leads Project Aurora from 2023-01-10."]
         );
-        // MCP 没有来源清单，也就没有引文
+        // MCP has no source list, so there are no quotes
         let mut empty = ToolSink::default();
         dispatch(
             &ctx(&f, Some(Uuid::now_v7())),
@@ -479,8 +479,8 @@ async fn a_graph_number_opens_the_sentence_it_was_read_from() -> anyhow::Result<
     run
 }
 
-/// 一轮里检索和图谱工具共用一个号：检索先登了交接备忘录那一块，图谱引到它时号不变，
-/// 条目补上李四那句话；反过来也一样，检索不另起一个号，引文留着
+/// In one turn, retrieval and graph tools share one number: retrieval registered the handover memo block first, and when the graph cites it the number is unchanged,
+/// with 李四's sentence added to the entry; the reverse also holds: retrieval does not start a new number, and the quote is kept
 #[tokio::test]
 async fn a_search_and_a_graph_tool_share_one_number() -> anyhow::Result<()> {
     let Some(f) = fixture(Scripted::new(vec![])).await? else {
@@ -570,8 +570,8 @@ async fn a_search_and_a_graph_tool_share_one_number() -> anyhow::Result<()> {
     run
 }
 
-/// 整条对话：检索登了三块，图谱再引其中两块，只补了引文、条数没变——来源帧照样再发
-/// 一次，存下的与最后一帧一致
+/// Whole conversation: retrieval registered three blocks and the graph cites two of them again; only the quotes are added, the entry count does not change, and the sources frame is still sent again
+/// once, and what is stored matches the last frame
 #[tokio::test]
 async fn a_quote_added_to_a_search_hit_is_published() -> anyhow::Result<()> {
     let Some(f) = fixture(Scripted::new(vec![
@@ -624,10 +624,10 @@ async fn a_quote_added_to_a_search_hit_is_published() -> anyhow::Result<()> {
     run
 }
 
-/// #970 的两处：周七 2025-09-01 接手，时间线把李四那一段关在那天；人把张三的起点从章程的
-/// 2023-01-10 改成 2023-02-01。两行的号仍打开它们读出来的原句，而原句里没有这两个日期，
-/// 所以行上说出日期从哪来。周七那篇删掉以后，关上李四那段的那一行没有有效证据：行上照旧
-/// 写出是他接手，不带号
+/// Two parts of #970: 周七 took over on 2025-09-01, and the timeline closes 李四's segment on that day; a person changed 张三's start from the charter's
+/// 2023-01-10 to 2023-02-01. The numbers of both lines still open the sentences they were read from, and those sentences do not contain these two dates,
+/// so the line states where the dates came from. After 周七's document is deleted, the line that closes 李四's segment has no valid evidence: the line still
+/// states that he took over, with no number
 #[tokio::test]
 async fn a_fact_line_says_when_a_date_is_not_the_passages() -> anyhow::Result<()> {
     let Some(f) = fixture(Scripted::new(vec![])).await? else {
@@ -662,7 +662,7 @@ async fn a_fact_line_says_when_a_date_is_not_the_passages() -> anyhow::Result<()
         let (zhang, li) = (row_of("Zhang San").await?, row_of("Li Si").await?);
         let (zhou, d_update, update, zhou_fact) =
             (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        // 插进去的只有本地生成的 UUID 和写死的日期
+        // Only locally generated UUIDs and fixed dates are inserted
         sqlx::raw_sql(&format!(
             r#"
             INSERT INTO entities(id,kb_id,type_id,canonical_name,created_at) VALUES
@@ -682,9 +682,9 @@ async fn a_fact_line_says_when_a_date_is_not_the_passages() -> anyhow::Result<()
         ))
         .execute(&f.pool)
         .await?;
-        // 一个项目同时只有一个 lead：对账把李四那一段关在周七接手那天
+        // A project has only one lead at a time: reconciliation closes 李四's segment on the day 周七 took over
         utopia_store::temporal::reconcile_moved_facts(&f.pool, f.kb, &[li, zhou_fact]).await?;
-        // 人改张三的起点，终点照旧；审计记在被改的那一行上（PATCH /facts/{id} 同一条路）
+        // A person changes 张三's start; the end stays; the audit is recorded on the changed line (the same path as PATCH /facts/{id})
         let day = |s: &str| s.parse::<chrono::DateTime<chrono::Utc>>().unwrap();
         utopia_store::temporal::correct_interval(
             &f.pool,
@@ -730,16 +730,16 @@ async fn a_fact_line_says_when_a_date_is_not_the_passages() -> anyhow::Result<()
                 li_line.contains("2024-07-05 → 2025-09-01, superseded by Zhou Qi ["),
                 "{tool}: {text}"
             );
-            // 李四那一行也写着周七（关它的是他），所以按周七那一行自己的区间找
+            // 李四's line also says 周七 (he closed it), so it is found by its own range within 周七's line
             let zhou_line = line(&text, "2025-09-01 → now)");
             assert!(zhou_line.contains("Zhou Qi"), "{tool}: {text}");
-            // 本行的号照旧：打开的仍是那条事实读出来的原句。关上李四那段的号打开周七接手的
-            // 那一块，那里写着 2025-09-01；周七自己那一行也是它，同一块只有一个号。备注不进清单
+            // This line's number is unchanged: it still opens the sentence this fact was read from. The number that closes 李四's segment opens
+            // the block where 2025-09-01 is written; 周七's own line is that block too, so the block has only one number. The note is not added to the list
             let (z, l, q) = (marks(zhang_line), marks(li_line), marks(zhou_line));
             assert_eq!((z.len(), l.len(), q.len()), (1, 2, 1), "{tool}: {text}");
             assert_eq!(chunk_of(&sink, z[0]), s.charter, "{tool}");
             assert_eq!(chunk_of(&sink, l[0]), update, "{tool}: the closing fact's passage");
-            // 那一条带着周七那句原话（#968 的后续）：号打开的就是写着 2025-09-01 的那句
+            // That entry carries 周七's original words (follow-up to #968): the number opens the sentence with 2025-09-01
             assert_eq!(
                 quotes_of(&sink, l[0]),
                 ["Zhou Qi leads Project Aurora from 2025-09-01."],
@@ -766,7 +766,7 @@ async fn a_fact_line_says_when_a_date_is_not_the_passages() -> anyhow::Result<()
             path.contains("2024-07-05 → 2025-09-01, superseded by Zhou Qi ["),
             "{path}"
         );
-        // 路径上被人改过的那条边（#976 的评审）：同样只说被改的那一端
+        // The edge on the path that a person changed (review of #976): again only the changed end is stated
         let path = dispatch(
             &chat,
             &mut sink,
@@ -782,7 +782,7 @@ async fn a_fact_line_says_when_a_date_is_not_the_passages() -> anyhow::Result<()
             "{path}"
         );
 
-        // MCP 的文字带着同样的标记：它们是这一行的事实，不是引用
+        // MCP text carries the same markers: they are this line's facts, not citations
         let mcp = ctx(&f, Some(Uuid::now_v7()));
         let plain = dispatch(
             &mcp,
@@ -799,8 +799,8 @@ async fn a_fact_line_says_when_a_date_is_not_the_passages() -> anyhow::Result<()
         );
         assert!(marks(&plain).is_empty(), "{plain}");
 
-        // 规则 4：推出的终点引关它的那一行；推出的与人改的日期都不归到本行的原句，没标记的
-        // 那个日期仍是
+        // Rule 4: an inferred end point cites the line that closes it; neither the inferred date nor the person-edited date is attributed to this line's original sentence, and the untagged
+        // date is still the original sentence's date
         assert!(
             SYSTEM_PROMPT.contains("An end written `superseded by X [m]`")
                 && SYSTEM_PROMPT.contains("cite [m] for that end, never the line's own [n]")
@@ -809,7 +809,7 @@ async fn a_fact_line_says_when_a_date_is_not_the_passages() -> anyhow::Result<()
             "{SYSTEM_PROMPT}"
         );
 
-        // 张三再改一次，这回改终点（#976 的评审）：两端都是人改的，备注取最近那一次
+        // 张三 is changed again, this time the end (review of #976): both ends are person-edited, and the note takes the most recent change
         let zhang_now = row_of("Zhang San").await?;
         utopia_store::temporal::correct_interval(
             &f.pool,
@@ -850,8 +850,8 @@ async fn a_fact_line_says_when_a_date_is_not_the_passages() -> anyhow::Result<()
             "{text}"
         );
 
-        // 关上李四那段的那一行没有有效证据了（周七那篇删了，#986 的评审）：行上照旧写出是
-        // 谁接手，只是不带号，清单里也不多一条；本行的号照旧打开交接那篇
+        // The line that closes 李四's segment no longer has valid evidence (周七's document was deleted, review of #986): the line still states who took over,
+        // but carries no number and adds nothing to the list; this line's number still opens the handover document
         sqlx::query("UPDATE documents SET deleted_at = now() WHERE id = $1")
             .bind(d_update)
             .execute(&f.pool)

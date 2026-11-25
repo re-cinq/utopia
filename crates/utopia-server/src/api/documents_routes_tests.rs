@@ -50,13 +50,13 @@ fn only_a_complete_opening_dateline_sets_the_date() {
     }
 }
 
-/// #610：文件名里的日期和正文一样，但要排在前面——公告语料通常按日期命名，
-/// multipart 解析时这条信息已经在那儿了；正文里写「2024年2月29日 公告」还是
-/// 文件名叫「2024-02-29_gaoshu.txt」，对读的人来说是一个东西。
+/// #610: the date in the filename matches the body but must come first, since announcement corpora are usually named by date:
+/// by the time multipart parsing runs, the body already says "29 Feb 2024 notice" or the file is named "2024-02-29_gaoshu.txt";
+/// to the reader, these are one and the same thing.
 ///
-/// 日期格式与正文一致：ISO `YYYY-MM-DD` 或中文 `YYYY年M月D日`（月/日 1-2 位都行，
-/// 输出一律是规范化的两位数）。文件名后跟任意内容（包括完全没有后跟），
-/// 只要日期在主名开头就算。
+/// The date format matches the body: ISO `YYYY-MM-DD` or Chinese `YYYY年M月D日` (month and day may be 1 or 2 digits,
+/// the output is always normalized to two digits). Anything may follow the date in the filename (or nothing at all)
+/// as long as the date starts the base name.
 #[test]
 fn a_filename_with_a_leading_date_sets_the_date_even_when_body_has_none() {
     let expected = "2024-02-29T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
@@ -66,7 +66,7 @@ fn a_filename_with_a_leading_date_sets_the_date_even_when_body_has_none() {
         "2024-02-29_filing.txt",
         "2024-02-29.md",
         "2024-02-29.markdown",
-        "2024-02-29 some filing.txt", // 后跟空格分隔
+        "2024-02-29 some filing.txt", // followed by a space separator
     ] {
         assert_eq!(
             content_time(filename, b""),
@@ -74,10 +74,10 @@ fn a_filename_with_a_leading_date_sets_the_date_even_when_body_has_none() {
             "filename {filename:?}"
         );
     }
-    // ISO 月/日 1 位 → 标准化为 2 位
+    // ISO month/day with 1 digit → normalized to 2 digits
     let expected_0209 = "2024-02-09T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
     assert_eq!(content_time("2024-2-9 filing.md", b""), Some(expected_0209));
-    // 中文
+    // Chinese
     for filename in ["2024年2月29日.txt", "2024年02月29日_公告.md"] {
         assert_eq!(
             content_time(filename, b""),
@@ -85,7 +85,7 @@ fn a_filename_with_a_leading_date_sets_the_date_even_when_body_has_none() {
             "filename {filename:?}"
         );
     }
-    // 中文月/日 1 位 → 标准化为 2 位
+    // Chinese month/day with 1 digit → normalized to 2 digits
     let expected_0209 = "2024-02-09T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
     assert_eq!(
         content_time("2024年2月9日 公告.markdown", b""),
@@ -93,8 +93,8 @@ fn a_filename_with_a_leading_date_sets_the_date_even_when_body_has_none() {
     );
 }
 
-/// 文件名没日期时，回到正文找：与正文解析路径完全一致（`#610` 的「文件名优先，
-/// 正文兜底」）
+/// No date in the filename: fall back to the body, exactly as the body parsing path does (`#610`'s "filename first,
+/// body as fallback")
 #[test]
 fn a_filename_without_a_date_falls_back_to_body() {
     let expected = "2024-02-29T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
@@ -103,52 +103,52 @@ fn a_filename_without_a_date_falls_back_to_body() {
         content_time("filing.txt", b"2024-02-29\nAnnouncement"),
         Some(expected)
     );
-    // 中文 in body
+    // Chinese in body
     assert_eq!(
         content_time("filing.md", "（2024年2月29日）\n公告".as_bytes()),
         Some(expected)
     );
-    // Filename 无日期，正文也无日期 → 全部 None
+    // Filename has no date, body has no date either → all None
     assert_eq!(content_time("filing.txt", b""), None);
     assert_eq!(content_time("filing.txt", b"Announcement"), None);
 }
 
-/// 模糊/部分/无日期：全走 None（与正文那条路径同一套规矩）
+/// Vague/partial/no date: all None (same rules as the body path)
 #[test]
 fn a_partial_or_ambiguous_filename_does_not_match() {
-    // 不是 4 位数年份开头
+    // Does not start with a 4-digit year
     for filename in [
-        "24-02-29.txt",     // 年份只有 2 位
-        "abcd-02-29.txt",   // 年份是字母
-        "  2024-02-29.txt", // 开头有空格
+        "24-02-29.txt",     // year has only 2 digits
+        "abcd-02-29.txt",   // year is letters
+        "  2024-02-29.txt", // leading space
     ] {
         assert_eq!(content_time(filename, b""), None, "filename {filename:?}");
     }
-    // 日期格式对但数字超出范围（chrono 拒）
+    // date format correct but digits out of range (rejected by chrono)
     for filename in [
-        "2023-02-29.txt", // 2023 不是闰年
-        "2024-13-01.txt", // 月份 13
-        "2024-02-30.txt", // 2 月 30 日
+        "2023-02-29.txt", // 2023 is not a leap year
+        "2024-13-01.txt", // month 13
+        "2024-02-30.txt", // Feb 30
         "2024年13月01日.txt",
     ] {
         assert_eq!(content_time(filename, b""), None, "filename {filename:?}");
     }
-    // 中文格式部分缺
+    // Chinese format partially missing
     for filename in [
-        "2024年.txt",      // 缺月日
-        "2024年2月.txt",   // 缺日
-        "2024年2月29.txt", // 缺日字
+        "2024年.txt",      // missing month and day
+        "2024年2月.txt",   // missing day
+        "2024年2月29.txt", // missing the day suffix
     ] {
         assert_eq!(content_time(filename, b""), None, "filename {filename:?}");
     }
 }
 
-/// 文件名 vs 正文优先级：文件名日期早于正文日期时，**用文件名的**
-/// （announcement corpus 多半以日期命名）。
+/// Filename vs body priority: when the filename date is earlier than the body date, **the filename's date is used**
+/// (announcement corpora are mostly named by date).
 #[test]
 fn filename_date_wins_over_body_date() {
     let filename_date = "2024-02-29T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
-    // 正文是另一个日期；文件名日期优先
+    // The body has a different date; the filename date wins
     assert_eq!(
         content_time("2024-02-29_filing.txt", b"2025-12-31\nOld announcement"),
         Some(filename_date)
@@ -782,23 +782,23 @@ async fn failed_upload_queue_rolls_back_creation_and_restoration() -> anyhow::Re
     result
 }
 
-/// `#610`：文件名里有日期时，日期来自文件名而不是正文——这一档要把
-/// `content_time` 走文件名优先的路径整条接到数据库层（不只是单测）。
+/// `#610`: when the filename has a date, the date comes from the filename rather than the body; this tier must
+/// carry the `content_time` filename-first path all the way into the database layer (not just the unit test).
 ///
-/// 这里只挂纯文本的三种情形：ISO 文件名、中文文件名、ISO 文件名 + 中文正文。
-/// 它们都对得上 `content_time` 单测，但落库之后 `doc_time` 与 `doc_time_source`
-/// 必须一起被设成对应值，不能再回到「正文解析失败 → 全 None」。
+/// Only the three plain-text cases are covered here: ISO filename, Chinese filename, ISO filename + Chinese body.
+/// They all match the `content_time` unit tests, but after storing, `doc_time` and `doc_time_source`
+/// must also be set to the matching values, and must not fall back to "body parse failed → all None".
 #[tokio::test]
 async fn a_filename_with_a_date_drives_doc_time_when_body_has_none() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
         return Ok(());
     };
     let files = [
-        // ISO 文件名 + 正文无日期
+        // ISO filename + no date in body
         ("2024-02-29_filing.txt", "First announcement"),
-        // 中文文件名 + 正文无日期
+        // Chinese filename + no date in body
         ("2025年3月1日_公告.md", "第二次公告"),
-        // ISO 文件名 + 中文正文
+        // ISO filename + Chinese body
         (
             "2026-06-15_meeting.markdown",
             "（2027年1月1日）\nthis header date must not win over the filename",
@@ -843,7 +843,7 @@ async fn fallback_restore_and_other_ingest_dates_do_not_change() -> anyhow::Resu
     assert_eq!(status, StatusCode::OK, "{response}");
     let docs = f.created_docs(&response).await?;
     assert_eq!(docs.len(), 3);
-    // 上传时刻不是文档的日期（0045 决定 3，#714）：没有日期就是没有日期
+    // Upload time is not the document's date (0045 decision 3, #714): no date means no date
     for doc in &docs {
         assert_eq!(doc.doc_time_source, "none");
         assert_eq!(doc.doc_time, None);

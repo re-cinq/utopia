@@ -1,5 +1,5 @@
-//! GitHub 仓库文件来源：默认分支头的一棵文件树，一条路径一篇文档。
-//! 同步在 `ingest_sources`；这里只放不联网的那一半，于是单测得动。
+//! GitHub repository file source: a file tree at the head of the default branch, one document per path.
+//! Sync happens in `ingest_sources`; this file holds only the half that does not touch the network, so it can be unit-tested.
 
 use serde::Deserialize;
 use sha1::Digest as _;
@@ -22,7 +22,7 @@ pub struct TreeResponse {
     pub truncated: bool,
 }
 
-/// 哪条路径收、收多大的文件。只收 markdown 是为了不把整个代码仓当语料倒进来。
+/// Which paths are collected and how large the files can be. Only markdown is collected, so the whole code repo is not dumped in as corpus.
 pub struct FileFilter {
     include: Vec<glob::Pattern>,
     exclude: Vec<glob::Pattern>,
@@ -31,7 +31,7 @@ pub struct FileFilter {
 
 impl FileFilter {
     pub fn from_config(config: &serde_json::Value) -> anyhow::Result<Self> {
-        // 配置给了这一列就整列替换默认值
+        // If the config gives this column, replace the default entirely
         let compile = |key: &str, defaults: &[&str]| -> anyhow::Result<Vec<glob::Pattern>> {
             let list: Vec<&str> = match config[key].as_array() {
                 Some(a) => a.iter().filter_map(|v| v.as_str()).collect(),
@@ -58,28 +58,28 @@ impl FileFilter {
         self.path_ok(&e.path, &e.kind, &e.mode) && e.size.is_some_and(|s| self.size_ok(s))
     }
 
-    /// 只看树条目本身就能判的那一半。GitLab 的树不带大小（#1327），大小要另问一次，
-    /// 所以两半分开
+    /// Only the half that can be judged from the tree entry itself. GitLab's tree carries no size (#1327), so the size is asked for separately,
+    /// which is why the two halves are split
     pub(crate) fn path_ok(&self, path: &str, kind: &str, mode: &str) -> bool {
         let opts = glob::MatchOptions {
             case_sensitive: true,
             require_literal_separator: true,
             require_literal_leading_dot: false,
         };
-        // 子模块是 commit、目录是 tree，符号链接指向别处——都不是文件本体
+        // Submodules are commits and directories are trees, and symlinks point elsewhere -- none of them are file bodies themselves
         kind == "blob"
             && mode != "120000"
             && self.include.iter().any(|p| p.matches_with(path, opts))
             && !self.exclude.iter().any(|p| p.matches_with(path, opts))
     }
 
-    /// 空文件成不了文档（`ingest_item` 对空字节什么也不建），收进来就每轮都得重取一遍
+    /// An empty file cannot become a document (`ingest_item` creates nothing for empty bytes), so admitting it would refetch it every round
     pub(crate) fn size_ok(&self, size: i64) -> bool {
         size > 0 && size <= self.max_file_bytes
     }
 }
 
-/// 按路径排序、同一 blob 只留第一条：相同文件在几个路径出现时，文档不该在路径之间横跳。
+/// Sort by path, keep only the first entry per blob: when the same file appears at several paths, the document should not hop between paths.
 pub fn choose(entries: Vec<TreeEntry>, filter: &FileFilter) -> Vec<TreeEntry> {
     let mut entries: Vec<_> = entries.into_iter().filter(|e| filter.eligible(e)).collect();
     entries.sort_by(|a, b| a.path.cmp(&b.path));
@@ -88,8 +88,8 @@ pub fn choose(entries: Vec<TreeEntry>, filter: &FileFilter) -> Vec<TreeEntry> {
     entries
 }
 
-/// git 里一个 blob 的 SHA-1（先喂 `blob <字节数>\0` 再喂正文）。树里给的就是这个值，
-/// 拿已存的字节算一遍就知道没变，不必再下文件。
+/// A blob's SHA-1 in git (feed `blob <byte count>\0` first, then the body). The tree gives this value;
+/// computing it over the stored bytes shows it is unchanged, without downloading the file again.
 pub fn git_blob_sha(bytes: &[u8]) -> String {
     let mut h = sha1::Sha1::new();
     h.update(format!("blob {}\0", bytes.len()).as_bytes());

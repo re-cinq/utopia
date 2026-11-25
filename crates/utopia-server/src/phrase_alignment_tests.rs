@@ -1,6 +1,6 @@
-//! 一条短语判定的生命周期（0053，#807，#795）：候选经继承命中、父边增删让判定过期、
-//! 无候选与超限各自落库、端点类换了旧行不再循环、请求途中的编辑留下可见的过期、
-//! 人的判定不被覆盖。模型是脚本化的 HTTP 端点，库是真的 PostgreSQL。
+//! Lifecycle of a phrase judgment (0053, #807, #795): a candidate hits through inheritance, parent-edge add/remove makes a judgment stale,
+//! no-candidate and over-limit outcomes are each persisted, a class change leaves old rows that no longer loop, and an edit made mid-request leaves visible staleness,
+//! and a person's judgment is not overwritten. The model is a scripted HTTP endpoint; the database is a real PostgreSQL.
 use super::*;
 use anyhow::Context as _;
 use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
@@ -15,12 +15,12 @@ struct Model {
     hold: Arc<std::sync::atomic::AtomicBool>,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
-    /// 嵌入端点被叫了几次：短名单该不该嵌签名（#1097）看的是这个数
+    /// How many times the embedding endpoint was called: whether the shortlist should embed signatures (#1097) is judged by this count
     embeds: Arc<std::sync::atomic::AtomicUsize>,
-    /// 嵌入端点回余额耗尽（#1360）
+    /// The embedding endpoint replies with balance exhausted (#1360)
     embeds_broke: Arc<std::sync::atomic::AtomicBool>,
 }
-/// 脚本里放这个字符串，对话端点就回 OpenAI 余额耗尽的 429
+/// Put this string in the script and the chat endpoint returns the OpenAI balance-exhausted 429
 const OUT_OF_CREDIT: &str = "out_of_credit";
 fn out_of_credit() -> axum::response::Response {
     let body = json!({"error": {"message": "You have no credits remaining.",
@@ -55,8 +55,8 @@ async fn reply(State(m): State<Model>, Json(body): Json<Value>) -> axum::respons
         .into_response()
 }
 
-/// 脚本化的嵌入端点：每段文字一个由字节算出的四维向量。只要求确定、条数对得上——
-/// 这里测的是「向量有没有」，不是近不近
+/// Scripted embedding endpoint: one four-dimensional vector per text, computed from the bytes. It only requires determinism and that the count matches --
+/// what this tests is "whether a vector exists", not whether it is close
 async fn embed(State(m): State<Model>, Json(body): Json<Value>) -> axum::response::Response {
     m.embeds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     if m.embeds_broke.load(std::sync::atomic::Ordering::SeqCst) {
@@ -103,8 +103,8 @@ struct Fx {
 }
 
 impl Fx {
-    /// 一个库：legal_entity ⊃ organization，place；属性 based_in 声明在 legal_entity → place；
-    /// Acme（organization）—based in→ London（place）一条开放陈述
+    /// A database: legal_entity ⊃ organization, place; property based_in declared on legal_entity -> place;
+    /// Acme (organization) -based in-> London (place): one open statement
     async fn new() -> anyhow::Result<Option<Self>> {
         let Some(url) = utopia_store::test_db::url() else {
             return Ok(None);
@@ -202,8 +202,8 @@ impl Fx {
     fn script(&self, replies: Vec<Value>) {
         *self.model.replies.lock().unwrap() = replies;
     }
-    /// 给工作区配上嵌入模型（同一个脚本化端点）。缺省不配：多数场景测的是结构候选，
-    /// 配了嵌入会让本体向量补齐与短名单掺进来
+    /// Configure an embedding model for the workspace (same scripted endpoint). Not configured by default: most scenarios test structural candidates, and
+    /// configuring embeddings would mix ontology vector backfill and the shortlist into them
     async fn enable_embeddings(&self) -> anyhow::Result<()> {
         let settings = utopia_store::settings::get(&self.pool, self.ws)
             .await?
@@ -223,7 +223,7 @@ impl Fx {
         .await?;
         Ok(())
     }
-    /// 这个库的一个编辑：走 API 处理函数要有人
+    /// An edit to this database: going through the API handler needs someone
     async fn editor(&self) -> anyhow::Result<utopia_core::models::User> {
         let id = Uuid::now_v7();
         sqlx::query(
@@ -249,7 +249,7 @@ impl Fx {
             created_at: chrono::Utc::now(),
         })
     }
-    /// 这个库排着的任务，按先后
+    /// The tasks queued for this database, in order
     async fn queued(&self) -> anyhow::Result<Vec<String>> {
         Ok(sqlx::query_scalar(
             "SELECT kind FROM jobs WHERE status='queued' AND payload->>'kb_id'=$1 ORDER BY run_at, id",
@@ -258,7 +258,7 @@ impl Fx {
         .fetch_all(&self.pool)
         .await?)
     }
-    /// 一条关系/属性有没有向量，以及嵌的是哪段字
+    /// Whether a relation/property has a vector, and which text segment was embedded
     async fn vector_of(&self, id: Uuid) -> anyhow::Result<(bool, Option<String>)> {
         Ok(sqlx::query_as(
             "SELECT embedding IS NOT NULL, embedded_text FROM relation_types WHERE id=$1",
@@ -287,7 +287,7 @@ impl Fx {
         anyhow::ensure!(!all.is_empty(), "no binding");
         Ok(all.remove(0))
     }
-    /// 这条签名落库时记的原因（`votes.reason`）：结构性结果不问模型，原因写在票里
+    /// The reason recorded when this signature was persisted (`votes.reason`): structural results do not ask a model, the reason is written on the vote
     async fn reason(&self) -> anyhow::Result<Option<String>> {
         Ok(sqlx::query_scalar("SELECT votes->>'reason' FROM phrase_bindings WHERE kb_id=$1 ORDER BY decided_at DESC LIMIT 1")
             .bind(self.kb)
@@ -297,7 +297,7 @@ impl Fx {
     async fn typed(&self) -> anyhow::Result<i64> {
         Ok(materialize::count(&self.pool, self.kb).await?)
     }
-    /// 这一轮结束后有没有再排一次对齐：收敛的判据
+    /// After this round finishes, whether alignment was queued again: the criterion for convergence
     async fn requeued(&self) -> anyhow::Result<bool> {
         let n: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM jobs WHERE kind='align_phrases' AND status='queued' AND payload->>'kb_id'=$1",
@@ -330,12 +330,12 @@ impl Fx {
 fn vote(key: Option<&str>, dir: Option<&str>) -> Value {
     marked(key, dir, key.map(|_| "none"))
 }
-/// 一票带第四格：based_in 是状态，绑上它的票要说只带一个日期的陈述那个日期标什么（#966）。
-/// 夹具里的陈述没有日期，平常答 none
+/// One vote carries a fourth slot: based_in is a state, so a vote binding it must say which end the date of a statement carrying only one date is labelled (#966).
+/// Statements in the fixture have no dates, so it normally answers none
 fn marked(key: Option<&str>, dir: Option<&str>, marks: Option<&str>) -> Value {
     json!({"b":[[0, key, dir, marks]]})
 }
-/// 两票之后对齐还会问一次「这种形状还蕴含什么」（0044 决定 3 第五片）：脚本里答「没有」
+/// After two votes alignment asks once more "what else does this shape entail" (0044 decision 3, fifth slice): the script answers "none"
 fn nothing_implied() -> Value {
     json!({"i":[[0,null,null]]})
 }
@@ -523,8 +523,8 @@ async fn an_inapplicable_direction_chosen_by_a_person_is_preserved() -> anyhow::
     run
 }
 
-/// 类别词对齐还排着时短语对齐不动手：两端的类还没定，判了也是重判。它给自己排一份半分钟
-/// 后的，类别词对齐收尾后照常判
+/// While category-word alignment is still queued, phrase alignment does not act: the classes at both ends are not settled yet, and a judgment now would be re-judged. It queues one for itself half a minute
+/// later, and judges as usual once category-word alignment finishes
 #[tokio::test]
 async fn phrase_alignment_waits_while_a_kind_word_round_is_pending() -> anyhow::Result<()> {
     let Some(f) = Fx::new().await? else {
@@ -685,7 +685,7 @@ async fn overflow_is_recorded_for_a_person_and_recovers_when_candidates_shrink(
         return Ok(());
     };
     let run = async {
-        // 61 条不声明域/值域的关系：哪一端都接受，加上 based_in 共 62 > 60
+        // 61 relations that declare no domain/range: either end is accepted, plus based_in makes 62 > 60
         for i in 0..61 {
             sqlx::query("INSERT INTO relation_types(id,kb_id,key,label,kind,temporal) VALUES($1,$2,$3,$3,'relation','state')")
                 .bind(Uuid::now_v7()).bind(f.kb).bind(format!("filler_{i}")).execute(&f.pool).await?;
@@ -711,9 +711,9 @@ async fn overflow_is_recorded_for_a_person_and_recovers_when_candidates_shrink(
     run
 }
 
-/// 属性还都没有向量时，短名单不嵌签名（#1097）：嵌了最近邻也是空，模型照样看全部结构
-/// 候选。从前一个没跑过 `embed_ontology` 的库每轮把候选多的签名全送去嵌入，一条也用不上。
-/// 属性有了向量，同一条签名照常嵌、照常开短名单
+/// While the properties have no vectors yet, the shortlist does not embed signatures (#1097): embedding them would find no neighbors, and the model still sees all the structural
+/// candidates. Previously a database that never ran `embed_ontology` sent every signature with many candidates off to embed each round, and none of it was used.
+/// Once properties have vectors, the same signature is embedded as usual and the shortlist opens
 #[tokio::test]
 async fn signatures_are_not_embedded_while_no_property_has_a_vector() -> anyhow::Result<()> {
     let Some(f) = Fx::new().await? else {
@@ -721,7 +721,7 @@ async fn signatures_are_not_embedded_while_no_property_has_a_vector() -> anyhow:
     };
     let run = async {
         f.enable_embeddings().await?;
-        // 12 条不声明域/值域的关系，加上 based_in 共 13 > SHORTLIST：这条签名要开短名单
+        // 12 relations declaring no domain/range, plus based_in, make 13 > SHORTLIST: this signature opens the shortlist
         for i in 0..12 {
             sqlx::query("INSERT INTO relation_types(id,kb_id,key,label,kind,temporal) VALUES($1,$2,$3,$3,'relation','state')")
                 .bind(Uuid::now_v7()).bind(f.kb).bind(format!("filler_{i}")).execute(&f.pool).await?;
@@ -749,9 +749,9 @@ async fn signatures_are_not_embedded_while_no_property_has_a_vector() -> anyhow:
     run
 }
 
-/// 余额空了（#1360）：签名嵌入或对话的第一个欠费 429 让整轮带着类型失败，任务失败一次、
-/// 告警响起。从前它按「这一批留到下次」记，任务照样 done，马上再排一份，同一个 429 每几秒
-/// 来一遍，直到有人充值
+/// Balance ran out (#1360): the first overdraft 429 from signature embedding or chat fails the whole round with a typed error, the task fails once,
+/// and the alert fires. Previously it was recorded as "this batch waits until next time", the task still said done, a new one was queued at once, and the same 429 came back every few seconds,
+/// until someone topped up
 #[tokio::test]
 async fn an_empty_balance_fails_the_run_instead_of_queueing_another() -> anyhow::Result<()> {
     let Some(f) = Fx::new().await? else {
@@ -759,7 +759,7 @@ async fn an_empty_balance_fails_the_run_instead_of_queueing_another() -> anyhow:
     };
     let run = async {
         f.enable_embeddings().await?;
-        // 13 > SHORTLIST 条候选、属性都有向量：这条签名要嵌入
+        // 13 > SHORTLIST candidates, and properties all have vectors: this signature gets embedded
         for i in 0..12 {
             sqlx::query("INSERT INTO relation_types(id,kb_id,key,label,kind,temporal) VALUES($1,$2,$3,$3,'relation','state')")
                 .bind(Uuid::now_v7()).bind(f.kb).bind(format!("filler_{i}")).execute(&f.pool).await?;
@@ -792,8 +792,8 @@ async fn an_empty_balance_fails_the_run_instead_of_queueing_another() -> anyhow:
     run
 }
 
-/// 签名的向量存下来（#1097）：库没变，第二轮一次嵌入也不叫，也不再问模型。换了嵌入模型，
-/// 旧向量与新的属性向量不在一个空间里，重嵌一次，旧模型的行删掉
+/// Store the signature's vector (#1097): if the database has not changed, the second round calls no embedding and asks the model nothing. If the embedding model changed,
+/// old vectors and the new property vectors are not in the same space, so re-embed once and delete the old model's rows
 #[tokio::test]
 async fn a_second_run_over_an_unchanged_base_makes_no_embedding_call() -> anyhow::Result<()> {
     let Some(f) = Fx::new().await? else {
@@ -801,7 +801,7 @@ async fn a_second_run_over_an_unchanged_base_makes_no_embedding_call() -> anyhow
     };
     let run = async {
         f.enable_embeddings().await?;
-        // 12 条不声明域/值域的关系，加上 based_in 共 13 > SHORTLIST：这条签名要开短名单
+        // 12 relations declaring no domain/range, plus based_in makes 13 > SHORTLIST: this signature opens the shortlist
         for i in 0..12 {
             sqlx::query("INSERT INTO relation_types(id,kb_id,key,label,kind,temporal) VALUES($1,$2,$3,$3,'relation','state')")
                 .bind(Uuid::now_v7()).bind(f.kb).bind(format!("filler_{i}")).execute(&f.pool).await?;
@@ -859,7 +859,7 @@ async fn an_endpoint_class_change_moves_the_signature_and_the_old_row_stops_loop
         return Ok(());
     };
     let run = async {
-        // Acme 还没有类：签名 (based in, ?, place)，声明了域的属性不接受空的一端
+        // Acme has no class yet: signature (based in, ?, place), and a property with a declared domain does not accept an empty end
         sqlx::query("UPDATE entities SET type_id=NULL WHERE id=$1")
             .bind(f.acme)
             .execute(&f.pool)
@@ -868,7 +868,7 @@ async fn an_endpoint_class_change_moves_the_signature_and_the_old_row_stops_loop
         assert_eq!(f.requests().len(), 0);
         let old = f.binding().await?;
         assert_eq!((old.status.as_str(), old.subject_type_id), ("none", None));
-        // 类别词绑上了：签名换成 (based in, organization, place)，旧行成了孤儿
+        // The category word got bound: the signature becomes (based in, organization, place), and the old row becomes an orphan
         sqlx::query("UPDATE entities SET type_id=$2 WHERE id=$1")
             .bind(f.acme)
             .bind(f.organization)
@@ -912,7 +912,7 @@ async fn an_edit_during_the_model_request_leaves_the_decision_stale() -> anyhow:
         let kb = f.kb;
         let worker = tokio::spawn(async move { align_phrases_reasking(&state, kb, 0).await });
         tokio::time::timeout(std::time::Duration::from_secs(10), f.model.entered.notified()).await?;
-        // 模型还在答，定义改了：两票读的都是旧定义
+        // The model is still answering, and the definition changed: both votes read the old definition
         sqlx::query("UPDATE relation_types SET description='NEW definition', updated_at=clock_timestamp() WHERE id=$1")
             .bind(f.based_in)
             .execute(&f.pool)
@@ -998,9 +998,9 @@ async fn a_person_decision_made_during_the_request_is_not_overwritten() -> anyho
     run
 }
 
-/// 类别词那边 bench 里「12 篇文档一个词都没绑上」的回复形状搬到短语上：DeepSeek-V3.2
-/// 把整段答成按 id 作键的对象，第二票把 `b` 写成对象、值写成 `{"key","direction"}`。
-/// 第一票说没有，结论就是没有：第二票不投，也不问规则
+/// The reply shape from the category-word bench, where "none of the 12 documents had a word bound", carried over to phrases: DeepSeek-V3.2
+/// answered the whole thing as an object keyed by id, and the second vote wrote `b` as an object with value `{"key","direction"}`.
+/// If the first vote says none, the conclusion is none: the second vote does not cast, and is not asked the rule either
 #[tokio::test]
 async fn a_first_vote_that_says_none_is_not_followed_by_a_second() -> anyhow::Result<()> {
     let Some(f) = Fx::new().await? else {
@@ -1023,7 +1023,7 @@ async fn a_first_vote_that_says_none_is_not_followed_by_a_second() -> anyhow::Re
     run
 }
 
-/// 两票都得读出来，签名才绑得上
+/// Both votes must be readable before the signature can be bound
 #[tokio::test]
 async fn an_id_keyed_reply_still_binds_the_phrase() -> anyhow::Result<()> {
     let Some(f) = Fx::new().await? else {
@@ -1053,8 +1053,8 @@ async fn an_id_keyed_reply_still_binds_the_phrase() -> anyhow::Result<()> {
     run
 }
 
-/// 读不出的回复不再是「一项都没答」然后没了：这一轮不下结论、不写任何行，任务自己
-/// 再排一份（带 reask），排够 MAX_REASK 次就停，等下一篇文档或本体改动
+/// A reply that cannot be read is no longer "nothing answered" and then gone: this round draws no conclusion and writes no rows, and the task queues
+/// another one itself (with reask); after MAX_REASK times it stops, waiting for the next document or an ontology change
 #[tokio::test]
 async fn an_unreadable_reply_is_asked_again_a_bounded_number_of_times() -> anyhow::Result<()> {
     let Some(f) = Fx::new().await? else {
@@ -1090,7 +1090,7 @@ async fn an_unreadable_reply_is_asked_again_a_bounded_number_of_times() -> anyho
             "after the first round it queues itself once with reask=1"
         );
         f.clear_jobs().await?;
-        // 已经是最后一次自己排的：不再排
+        // Already the last self-queued one: no more queueing
         align_phrases_reasking(&f.state, f.kb, MAX_REASK).await?;
         assert_eq!(f.requests().len(), 2, "the last allowed round still asks");
         let after: i64 = sqlx::query_scalar(
@@ -1108,9 +1108,9 @@ async fn an_unreadable_reply_is_asked_again_a_bounded_number_of_times() -> anyho
     run
 }
 
-/// 编辑器建的属性先有向量，短语对齐才开跑：处理函数把 `embed_ontology` 排在
-/// `align_phrases` 前面，对齐看见补齐还排着就等；补齐跑完向量在表里，对齐才问模型，
-/// 而且新属性在候选里。改了描述再走一遍：存下的原文对不上，同一个任务把它重嵌
+/// Properties created in the editor get vectors first, before phrase alignment runs: the handler queues `embed_ontology` in front of
+/// `align_phrases`; alignment sees that backfill is still queued and waits; once the backfill finishes and vectors are in the table, alignment asks the model,
+/// and the new property is among the candidates. A description change goes through again: the stored source text no longer matches, so the same task re-embeds it
 #[tokio::test]
 async fn a_property_created_in_the_editor_has_its_vector_before_phrases_are_aligned(
 ) -> anyhow::Result<()> {
@@ -1154,7 +1154,7 @@ async fn a_property_created_in_the_editor_has_its_vector_before_phrases_are_alig
             "the handler itself does not embed"
         );
 
-        // 对齐先到：补齐还排着，不问模型，自己排到后面
+        // Alignment got there first: the backfill is still queued, so it does not ask the model and queues itself behind
         f.script(bound());
         f.run().await?;
         assert_eq!(
@@ -1168,7 +1168,7 @@ async fn a_property_created_in_the_editor_has_its_vector_before_phrases_are_alig
             "the alignment is queued again behind the refresh"
         );
 
-        // worker 到补齐这一份：跑它的主体，标成完成
+        // The worker reaches the backfill copy: run its body, mark it complete
         let embedded = crate::ontology_index::refresh(&f.state, f.kb).await?;
         assert_eq!(
             embedded, 8,
@@ -1191,7 +1191,7 @@ async fn a_property_created_in_the_editor_has_its_vector_before_phrases_are_alig
             "label (camel-cased by the store) and description are what was embedded"
         );
 
-        // 现在对齐开跑，而且新属性在候选里
+        // Alignment now actually runs, and the new property is among the candidates
         f.run().await?;
         assert!(
             !f.requests().is_empty(),
@@ -1203,7 +1203,7 @@ async fn a_property_created_in_the_editor_has_its_vector_before_phrases_are_alig
             "the new property is offered: {prompt}"
         );
 
-        // 改描述：存下的原文对不上，补齐任务再排、只重嵌这一条
+        // Description changed: the stored source text does not match, so the backfill task queues again and re-embeds only this one
         f.clear_jobs().await?;
         let req: RelationTypeReq = serde_json::from_value(json!({
             "label": "headquartered in",
@@ -1240,8 +1240,8 @@ async fn a_property_created_in_the_editor_has_its_vector_before_phrases_are_alig
     run
 }
 
-/// 状态属性下，两票还要说只带一个日期的陈述那个日期标什么（#966）。候选行写明属性是
-/// 状态；两票说得一样就绑，marks 跟着写下，两票的记录里也有它
+/// Under a state property, both votes must also say which end the date of a statement carrying only one date is labelled (#966). The candidate row states the property is
+/// a state; if both votes agree, bind and marks are written along with it, and it is also in the votes' record
 #[tokio::test]
 async fn a_state_binding_carries_what_a_single_date_marks() -> anyhow::Result<()> {
     let Some(f) = Fx::new().await? else {
@@ -1280,7 +1280,7 @@ async fn a_state_binding_carries_what_a_single_date_marks() -> anyhow::Result<()
     run
 }
 
-/// 这条签名在对齐队列里：绑到 based_in、照原文方向，只等人说那个日期标什么
+/// This signature is in the alignment queue: bound to based_in, with the original direction, waiting only for a person to say which end the date is labelled
 async fn waits_for_the_date(f: &Fx) -> anyhow::Result<bool> {
     let items = utopia_store::alignment_queue::list(&f.pool, f.kb, 10, 0).await?;
     let listed = matches!(
@@ -1298,9 +1298,9 @@ async fn waits_for_the_date(f: &Fx) -> anyhow::Result<bool> {
     Ok(listed && waiting == 1 && badge == 1)
 }
 
-/// 两票选了同一个属性、同一个方向，却一票说开始、一票说结束，或有一票没说（只答三格）：
-/// 属性两票说定了，照绑；那个日期没说定，marks 空着、记下问过，交给人。不再问，也不给
-/// 自己再排一轮（0053 修订 2026-09-27）。从前没说的算没答到，模型只答三格就永远绑不上
+/// Both votes chose the same property and the same direction, but one says start and the other says end, or one did not say at all (answered only three slots):
+/// the property is settled by both votes, so bind it; the date is not settled, so marks stays empty, the question is recorded as asked, and it goes to a person. It is not asked again, and does not
+/// queue another round for itself (0053 revision 2026-09-27). Previously an unanswered slot counted as not answered, and a model answering only three slots could never bind
 #[tokio::test]
 async fn two_votes_that_do_not_agree_on_the_date_bind_and_leave_it_to_a_person(
 ) -> anyhow::Result<()> {
@@ -1353,7 +1353,7 @@ async fn two_votes_that_do_not_agree_on_the_date_bind_and_leave_it_to_a_person(
 }
 
 impl Fx {
-    /// 把绑定改回这一问出现之前的样子：没有 marks，也没问过
+    /// Restore the binding to how it was before this question existed: no marks, and not asked
     async fn as_before_the_question(&self) -> anyhow::Result<()> {
         sqlx::query(
             "UPDATE phrase_bindings SET marks = NULL, marks_asked_at = NULL WHERE kb_id=$1",
@@ -1363,7 +1363,7 @@ impl Fx {
         .await?;
         Ok(())
     }
-    /// 绑定里补问不该动的部分：属性、方向、状态、谁判的、何时判的、指纹、两票
+    /// Backfill the parts of the binding that the question must not change: property, direction, state, who judged it, when it was judged, fingerprint, and both votes
     async fn decision(&self) -> anyhow::Result<Value> {
         Ok(sqlx::query_scalar(
             "SELECT jsonb_build_array(relation_type_id, direction, status, decided_by,
@@ -1376,9 +1376,9 @@ impl Fx {
     }
 }
 
-/// 这一问出现之前判下的绑定没有 marks。代理判的：指纹没变也问一次，只问那个日期标什么，
-/// 两票都认这条绑定、又说了同一个值就写下，绑定别的不动；问过就不再问。
-/// 人判的：代理不问，它在对齐队列里等人补，属性与方向是现在绑的
+/// A binding judged before this question existed has no marks. Agent-judged: ask once even if the fingerprint is unchanged, asking only which end the date is labelled;
+/// if both votes accept this binding and say the same value, write it down and leave the rest of the binding alone; once asked, do not ask again.
+/// Person-judged: the agent does not ask; it waits in the alignment queue for a person to fill it in, and the property and direction are the ones bound now
 #[tokio::test]
 async fn a_binding_decided_before_the_question_is_asked_once_and_a_persons_waits_in_the_queue(
 ) -> anyhow::Result<()> {
@@ -1436,8 +1436,8 @@ async fn a_binding_decided_before_the_question_is_asked_once_and_a_persons_waits
     run
 }
 
-/// 模型从来不给第四格（#975 评审）：这一列之前绑上的签名只问一次。绑定原样，它名下的
-/// 类型化行还活着，签名在对齐队列里等人；再跑一轮不再问，也不给自己排下一轮
+/// The model never gives the fourth slot (#975 review): signatures bound before this column existed are asked only once. The binding stays as it is, its typed rows stay live,
+/// and the signature waits in the queue for a person; a further round does not ask again, and does not queue the next one for itself
 #[tokio::test]
 async fn a_model_that_never_gives_the_value_is_asked_once() -> anyhow::Result<()> {
     let Some(f) = Fx::new().await? else {
@@ -1472,9 +1472,9 @@ async fn a_model_that_never_gives_the_value_is_asked_once() -> anyhow::Result<()
     run
 }
 
-/// 补问只能写那个日期标什么，重开不了绑定（#975 评审）：两票没选属性、选了另一个方向、
-/// 说的值不一样，绑定都原样，类型化行还活着，签名交给人；两票都认这条绑定、说了同一个值，
-/// 才写下那个值
+/// A backfill question can only write which end the date is labelled; it cannot reopen the binding (#975 review): if the two votes did not choose the property, chose the other direction, or said a different value,
+/// the binding stays as it is, its typed rows stay live, and the signature goes to a person.
+/// Only when both votes accept this binding and say the same value is that value written.
 #[tokio::test]
 async fn asking_what_a_date_marks_never_reopens_the_binding() -> anyhow::Result<()> {
     let Some(f) = Fx::new().await? else {

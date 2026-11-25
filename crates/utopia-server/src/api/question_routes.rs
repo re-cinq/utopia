@@ -1,5 +1,5 @@
-//! 能力问题（0061 决定 1）与本体代理（决定 2、3）的接口。
-//! 看 = viewer；改 = editor：问题是本体的验收标准，提案采纳直接改本体。
+//! Interface for capability questions (0061 decision 1) and the ontology agent (decisions 2 and 3).
+//! View = viewer; change = editor: questions are the acceptance criteria for the ontology, and accepting a proposal changes the ontology directly.
 
 use axum::extract::{Path, State};
 use axum::Json;
@@ -33,7 +33,7 @@ pub struct CreateQuestionReq {
     pub needs: Option<serde_json::Value>,
 }
 
-/// 人提的问题一落地就是 accepted：它就是人对这个库的要求
+/// A question a person raises is accepted the moment it lands: it is the person's requirement for this KB
 pub async fn create(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -79,7 +79,7 @@ pub async fn create(
 pub struct UpdateQuestionReq {
     #[serde(default)]
     pub question: Option<String>,
-    /// 空串 = 清掉
+    /// Empty string = clear it
     #[serde(default)]
     pub expected_answer: Option<String>,
     #[serde(default)]
@@ -128,7 +128,7 @@ pub async fn delete(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 让代理给这个库提问题：排一份任务。结果是 status = proposed 的问题，人接受了才算
+/// Have the agent raise questions for this KB: queue one job. The result is questions with status = proposed, which count once a person accepts them
 pub async fn propose_questions(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -147,21 +147,21 @@ pub async fn propose_questions(
 #[derive(Deserialize)]
 pub struct QuestionResultReq {
     pub answered: bool,
-    /// 拿到的回答（截断存）
+    /// The answer received (stored truncated)
     #[serde(default)]
     pub answer: Option<String>,
-    /// expected | shape：按期望答案判的，还是只查了它需要的形状
+    /// expected | shape: judged against the expected answer, or only checked for the shape it needs
     #[serde(default)]
     pub judged_by: Option<String>,
-    /// graph | text | both | none：回答从哪里来的（图谱工具拿到过事实，还是只读了正文）
+    /// graph | text | both | none: where the answer came from (the graph tool returned facts, or only the body text was read)
     #[serde(default)]
     pub via: Option<String>,
     #[serde(default)]
     pub detail: Option<serde_json::Value>,
 }
 
-/// 一条问题问过了（决定 5）。问的是 competency bench，它按人在 chat 里问的方式问；
-/// 服务端只记结果，不自己问——chat 还没有一个进程内的入口
+/// One question was asked (decision 5). It asks the competency bench, which asks the way a person asks in chat;
+/// the server only records the result and does not ask itself, since chat does not yet have an in-process entry point
 pub async fn record_result(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -188,8 +188,8 @@ pub async fn record_result(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 两个数（决定 5）：问题答对了几条；代理的提案人改过或拒掉的占几成。另带文档说了、
-/// 本体还放不下的类别词与短语形状各有多少，工作台靠它说本体还缺什么
+/// Two numbers (decision 5): how many questions were answered correctly; how much of the agent's proposals a person changed or rejected. Also records how many
+/// category words and phrase shapes the document mentions that the ontology still cannot hold, which the workbench uses to show what the ontology is still missing
 pub async fn report(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -218,12 +218,12 @@ pub async fn report(
 
 #[derive(Deserialize, Default)]
 pub struct ProposeReq {
-    /// 测量用（bench/agent.mjs）：`full` = 每批送全词表。缺省是按批裁过的
+    /// For measurement (bench/agent.mjs): `full` = send the full vocabulary with each batch. The default is the per-batch trimmed one
     #[serde(default)]
     pub glossary: Option<String>,
 }
 
-/// 叫代理来看一眼：排一份任务，马上回。结果落在 `ontology_proposals`，界面从那里读
+/// Ask the agent to take a look: queue one job and return at once. The result lands in `ontology_proposals`, from which the UI reads
 pub async fn propose(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -249,8 +249,8 @@ pub struct AdoptReq {
     pub edits: ontology_agent::AdoptEdits,
 }
 
-/// 采纳一条提案（人改过的几格随请求来）：元素、回归用例、采纳的状态和后续任务一次提交。
-/// 复用时，代理读过之后人另定了、和提案不一样的形状或类别词留着没写，列在 `skipped` 里
+/// Accept one proposal (the few cells a person changed come with the request): elements, regression cases, the accepted status and follow-up tasks are committed in one submission.
+/// On reuse, if after reading it the agent a person chose a different shape or category word from the proposal, it is left unwritten and listed in `skipped`
 pub async fn adopt(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,

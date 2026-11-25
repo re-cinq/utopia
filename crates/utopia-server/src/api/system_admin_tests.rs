@@ -1,4 +1,4 @@
-//! 授予系统管理员走的那条接口：只有系统管理员能调，调了留审计。
+//! The endpoint that grants system admin: only system admins can call it, and every call leaves an audit record.
 use crate::state::AppState;
 use axum::{
     body::Body,

@@ -164,7 +164,7 @@ async fn answer_with_deadline(
                         let (history, prior_exchange) = context.unwrap().snapshot();
                         let bounded = AnswerContext { history: &history, current: None, prior_exchange: &prior_exchange, ..input };
                         let refreshed = self::messages(&bounded);
-                        // 只换背景那一条：第二次尝试时修正指令还在
+                        // Only that background entry changes: on the second attempt the correction instruction is still there
                         messages[1] = refreshed[1].clone();
                     }
                     result => break result?,

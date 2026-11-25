@@ -1,6 +1,6 @@
-//! #1193 的裁决路径测量，与原八项案例分开。来源身份决定金标准，脚本回复只推动真实调用方。
-//! 除证据归属和图/审核状态一致性外，逐名锁定现有金标准错误：名单内必须仍错，名单外必须正确。
-//! 修复要同时移除对应名字；错误意外消失与新回归都不能被一个总数掩盖。
+//! Decision-path measurements for #1193, kept separate from the original eight cases. Source identity sets the gold standard; script replies only drive the real caller.
+//! Apart from evidence attribution and graph/review status consistency, each name locks in the existing gold-standard error: names on the list must still be wrong, and names off the list must be correct.
+//! A fix must also remove the matching name; neither an unexpected disappearance of an error nor a new regression may be hidden behind a total count.
 use super::*;
 
 const KNOWN_GOLD_ERRORS: &[&str] = &[
@@ -55,8 +55,8 @@ impl Fx {
     ) -> anyhow::Result<Value> {
         let order = if reverse { [1, 0] } else { [0, 1] };
         let mut holders = [Uuid::nil(); 2];
-        // 登记册原文明说员工号与人一一对应；金标准来自来源身份，不由模型判决反推，
-        // 也不靠本体声明唯一关系——这个开放图谱没有这样的声明。
+        // The register states in its original text that staff numbers map one-to-one to people; the gold standard comes from source identity, not back-derived from model verdicts,
+        // nor from an ontology declaring a unique relation (this open graph has no such declaration).
         let numbers = if gold_same { ["E17", "E17"] } else { EMPLOYEES };
         let quotes = numbers.map(|n| {
             format!("Register R assigns one number per person and one person per number: Alex Lee is employee {n}.")
@@ -116,7 +116,7 @@ impl Fx {
             )
             .await?;
         }
-        // 治理不读普通裁决缓存：预种缓存的治理案例仍然要问一次攒批模型。
+        // Governance does not read the ordinary decision cache: a governance case with a pre-seeded cache still asks the batching model once.
         let asks_batch = governance || !matches!(path, Path::Cached);
         let reads_evidence = matches!(path, Path::Facts | Path::Quotes | Path::QuotesSplit);
         let confidence = if reads_evidence {
@@ -181,7 +181,7 @@ impl Fx {
             "unconsumed script"
         );
         let requests = self.model.requests.lock().unwrap().clone();
-        // 检查实际 HTTP 请求里各自那一侧，包括工具结果；只查整段 contains 会放过 A/B 交换。
+        // Check each side in the actual HTTP requests, including tool results; checking only a whole-block contains would let an A/B exchange through.
         if asks_batch {
             let messages = requests[0]["messages"].as_array().unwrap();
             let user = messages.iter().find(|m| m["role"] == "user").unwrap()["content"]
@@ -256,7 +256,7 @@ impl Fx {
         .await?;
         let human: i64 = sqlx::query_scalar("SELECT count(*) FROM resolution_reviews WHERE kb_id=$1 AND stage='human' AND status='pending'")
             .bind(self.kb).fetch_one(&self.pool).await?;
-        // 终态再执行一次不能悄悄新增调查和模型调用。
+        // Running again at a terminal state must not quietly add new investigation or model calls.
         if governance {
             crate::governance::govern(&self.state, self.kb).await?;
         } else {
@@ -350,7 +350,7 @@ async fn namesake_decision_measurements_have_only_the_named_gold_errors() -> any
             }
         }
     }
-    // 名单必须被真实运行消费：删掉一行或改了名字，不能留下无人检查的旧豁免。
+    // The list must be consumed by a real run: deleting a row or changing a name must not leave an unchecked old exemption behind.
     for &name in KNOWN_GOLD_ERRORS {
         if !seen.iter().any(|id| id.as_str() == name) {
             mismatches.push(format!("{name}: unused known-gold-error name"));

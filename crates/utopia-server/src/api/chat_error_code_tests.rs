@@ -1,16 +1,16 @@
-//! 对话流的失败带 code（0004）。
+//! Failures in the chat stream carry a code (0004).
 //!
-//! 服务端不出显示文本：`error` 帧与请求被拒是同一个信封 `{error, code}`，界面拿 code
-//! 去 `err.*` 表里查措辞，英文原句留给日志、MCP 与不做本地化的客户端。从前这一帧只有
-//! 一句英文，于是中文界面上欠费、限流、空答案、存不下都是英文。
+//! The server does not send display text: the `error` frame and a rejected request share one envelope `{error, code}`, and the UI looks up the wording by code in the `err.*` table.
+//! The English sentence is kept for logs, MCP and clients that do not localize. Before this, the frame held only
+//! one English sentence, so on a Chinese UI, billing, rate limits, empty answers and storage failures all showed in English.
 //!
-//! 这里逐项核对用户会撞上的那几种失败各是哪个 code；每个 `error` 帧都带 code 这件事
-//! 由终态契约（`chat_terminal_tests.rs`）对整张表检查。
+//! This test checks, for each failure a user can hit, which code it maps to; the fact that every `error` frame carries a code
+//! is checked across the whole table by the terminal contract (`chat_terminal_tests.rs`).
 use super::*;
 
 const TOOL: Reply = Reply::Tool("find_entities", r#"{"name":"Acme"}"#);
 
-/// 这条 SSE 里那个 `error` 帧的 code 与英文原句
+/// The code of the `error` frame in this SSE stream, and the English sentence
 fn failure(sse: &str) -> (String, String) {
     let data = sse
         .split("\n\n")
@@ -79,8 +79,8 @@ async fn an_answer_that_cannot_be_saved_says_so_with_its_code() -> anyhow::Resul
     f.cleanup().await
 }
 
-/// 收尾关口的理由以文本穿过 `chat_finalization`，所以按原文认。这里直接拿
-/// `finalization_error` 的输出来对：改了措辞在这里失败，而不是悄悄变成「作答失败」
+/// The reason from the finalization gate travels as text through `chat_finalization`, so it is matched by its original wording. This test takes the output of
+/// `finalization_error` directly: changing the wording fails here, rather than quietly turning into "answer failed"
 #[test]
 fn the_finalization_reasons_keep_their_codes() {
     for (text, calls, code) in [
@@ -90,7 +90,7 @@ fn the_finalization_reasons_keep_their_codes() {
     ] {
         let reason = agent::finalization_error(text, calls, "What changed?").expect("a reason");
         assert_eq!(unpublishable_code(reason), Some(code), "{reason}");
-        // `chat_finalization` 修一次还不成时，理由包在两层话里交回来
+        // When `chat_finalization` still fails after one repair, the reason comes back wrapped in two layers of text
         let wrapped = format!(
             "Model could not produce a final answer: Model could not produce a final answer \
              after one recovery: {reason}"

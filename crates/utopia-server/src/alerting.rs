@@ -1,41 +1,41 @@
-//! 告警的产生侧（0005）。存取在 `utopia_store::alerts`，这里只管**什么时候报**。
+//! Alert generation side (0005). Storage lives in `utopia_store::alerts`; this module only decides **when to report**.
 //!
-//! 没有"什么时候消"——一次故障一行，写完不再改。见那个模块的文档。
+//! There is no "when to clear": one failure is one row, and it is never changed once written. See that module's docs.
 
 use utopia_core::models::Role;
 use utopia_store::alerts;
 
 use crate::state::AppState;
 
-/// 告警保留多少天。**纯原子的代价就在这里**：一个坏掉的来源按小时同步，
-/// 一天写 24 行，不清理这张表会长成第二个日志文件。
+/// How many days alerts are kept. **Pure atomicity has its cost right here:** a broken source syncs hourly,
+/// writing 24 rows a day. Without cleanup this table would grow into a second log file.
 ///
-/// 30 天够回答"上个月那次是怎么回事"，而更久远的事该去翻 `audit_events` 与日志。
+/// 30 days is enough to answer "what happened last month"; anything older belongs in `audit_events` and the logs.
 const RETAIN_DAYS: i32 = 30;
 
-/// 任务失败时看一眼是不是模型端点不可用。
+/// When a task fails, check whether the model endpoint is unavailable.
 ///
-/// **只在任务最终放弃时报**——次数用完，或者这次失败被标成了不必重试
-/// （[`hopeless`]，#195）。中间那几次重试报了就是同一件事发三遍：重试本来就是
-/// 为了不惊动人，报出去等于把它的意义抵消掉。一个任务至多一条告警，
-/// 不需要任何去重状态。
+/// **Only report when the task finally gives up**: the attempts are used up, or this failure was marked as not worth retrying
+/// ([`hopeless`], #195). Reporting the middle retries would report the same thing three times: retries exist so nobody gets bothered,
+/// and reporting them would undo that. A task raises at most one alert,
+/// so it needs no dedup state.
 ///
-/// 判据是错误的**类型**，不匹配错误文本——调用链上任何一层加一句 context
-/// 都会改文本。分类本身抽在 [`alert_for`]。
+/// The criterion is the error's **type**, not its text: adding one context sentence anywhere in the call chain
+/// changes the text. Classification itself lives in [`alert_for`].
 pub async fn observe_job_failure(
     state: &AppState,
     job: &utopia_store::jobs::Job,
     err: &anyhow::Error,
 ) {
-    // 标成不必重试的那些**这一次就是最后一次**，所以现在就报（#195）。
-    // 漏掉这一句的后果是失败得更快、却反而没人被告知——比不改还糟
+    // Tasks marked as not worth retrying: **this attempt is the last one**, so report now (#195).
+    // Leaving out this line means failing faster but nobody being told, which is worse than not changing anything
     if job.attempts < job.max_attempts && !utopia_core::is_terminal(err) {
         return;
     }
     let Some((kind, severity)) = alert_for(err) else {
         return;
     };
-    // 系统级：哪个库的任务撞上的不重要，端点与配额是整个部署共用的
+    // System-level: it does not matter which library's task hit it; the endpoint and quota are shared by the whole deployment
     if let Err(e) = alerts::raise(
         &state.pool,
         alerts::NewAlert {
@@ -56,8 +56,8 @@ pub async fn observe_job_failure(
     state.emit_alert();
 }
 
-/// 解析器只读了一部分正文：保留可用的前缀，但把截断范围写进告警详情。
-/// 名字存一份——文档删掉之后这条告警还读得懂。
+/// The parser read only part of the body: keep the usable prefix, but record the truncated range in the alert details.
+/// Store the name too, so the alert stays readable after the document is deleted.
 pub async fn observe_document_truncated(
     state: &AppState,
     kb_id: uuid::Uuid,
@@ -101,8 +101,8 @@ fn document_truncation_detail(
     })
 }
 
-/// 一份文件的字要靠没配的那种模型读（0040）：报一条库级告警，名字存进告警里——
-/// 文件删了告警还读得懂
+/// Reading a file's text needs a model that is not configured (0040): report one library-level alert, storing the name in it,
+/// so the alert stays readable after the file is deleted
 pub async fn observe_document_needs_reader(
     state: &AppState,
     kb_id: uuid::Uuid,
@@ -135,35 +135,35 @@ pub async fn observe_document_needs_reader(
     state.emit_alert();
 }
 
-/// 这次失败还值不值得重试。
+/// Whether this failure is worth retrying.
 ///
-/// **只有欠费是没救的。** 限流会自己恢复，端点不可达可能是重启中的服务，
-/// 别的错误更没有理由一次定生死——只有余额不会在七分钟里自己长回来（#195）。
+/// **Only insufficient credit is unrecoverable.** Rate limits recover on their own, an unreachable endpoint may be a restarting service,
+/// and other errors have no reason to decide life or death on the first try. Only the balance does not regrow within seven minutes (#195).
 ///
-/// 判据与 [`alert_for`] 同源（`utopia_llm::out_of_credit`，类型不是文本），
-/// 于是「报成 error 那一类」与「不再重试那一类」永远是同一类，不会分叉。
+/// It uses the same source as [`alert_for`] (`utopia_llm::out_of_credit`, a type not text),
+/// so "reported as error" and "not retried" are always the same class and never diverge.
 pub fn hopeless(err: &anyhow::Error) -> bool {
     utopia_llm::out_of_credit(err).is_some()
 }
 
-/// 一次任务失败该报哪一类告警，报不报。
+/// Which class of alert a task failure raises, and whether to raise one at all.
 ///
-/// **抽成纯函数是为了能测**：`observe_job_failure` 要 `AppState` 和一个真数据库，
-/// 而这里要守的是分类本身。三类该做的事完全不同——欠费要人去充值，限流要降并发
-/// 或升配额，端点不可达要查网络和地址。**混成一条会把人指向错的地方，比不报还费时间。**
+/// **Extracted as a pure function so it can be tested:** `observe_job_failure` needs `AppState` and a real database,
+/// but what needs guarding here is the classification itself. The three classes need completely different actions: insufficient credit needs a person to top up,
+/// rate limiting needs lower concurrency or a higher quota, and an unreachable endpoint needs a network and address check. **Mixing them would point people at the wrong place, which wastes more time than not reporting.**
 ///
-/// 顺序是「更该先说的放前面」，而不是判据有重叠：类型本身互斥，重叠在状态码上
-/// （OpenAI 的余额耗尽也回 429），那一层已经在 `utopia_llm::failure` 里分开了。
+/// The order is "say the more urgent thing first"; the criteria do not overlap: the types are mutually exclusive, and the overlap is in status codes
+/// (OpenAI balance exhaustion also returns 429), which is already separated in `utopia_llm::failure`.
 fn alert_for(err: &anyhow::Error) -> Option<(&'static str, &'static str)> {
-    // 欠费排在限流之前。两者的状态码会重叠——OpenAI 的余额耗尽也回 429——
-    // 而分类在 `utopia_llm::failure` 里已经做完，这里的顺序只是把「更该先说
-    // 的那件事」放前面：没钱是人必须动手的，限流不是
+    // Insufficient credit comes before rate limiting. Their status codes overlap (OpenAI balance exhaustion also returns 429),
+    // but classification is already done in `utopia_llm::failure`; the order here only puts "the thing to say first"
+    // first: running out of money needs a person to act, while rate limiting does not.
     if utopia_llm::out_of_credit(err).is_some() {
-        // `error`：它不会自己好，在有人充值之前抽取一直是停的
+        // `error`: it will not fix itself; until someone tops up, extraction stays stopped
         return Some((alerts::kind::LLM_OUT_OF_CREDIT, "error"));
     }
     if utopia_llm::rate_limited(err).is_some() {
-        // `warning` 不是 `error`：配额会自己恢复，端点挂了不会
+        // `warning` is not `error`: the quota recovers on its own, an endpoint outage does not
         return Some((alerts::kind::LLM_RATE_LIMITED, "warning"));
     }
     if utopia_llm::is_unreachable(err) {
@@ -172,7 +172,7 @@ fn alert_for(err: &anyhow::Error) -> Option<(&'static str, &'static str)> {
     None
 }
 
-/// 每天清一次过期告警。
+/// Clean up expired alerts once a day.
 pub fn spawn_retention_sweep(state: AppState) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
@@ -191,14 +191,14 @@ pub fn spawn_retention_sweep(state: AppState) {
     });
 }
 
-/// 数据源挂上了，库表结构却没摄进来。
+/// The source is mounted, but its table structure was never ingested.
 ///
-/// **报的不是那次失败，是它留下的状态。** 挂载分两步：写 `kb_data_sources`，
-/// 再把 schema 生成文档摄进库。第一步成了、第二步没成的时候，源是真挂着的——
-/// `query_data` 会入列，而模型检索不到任何表结构，只能瞎猜列名。
+/// **The report is about the state the failure left behind, not the failure itself.** Mounting has two steps: write `kb_data_sources`,
+/// then ingest the schema-generated document into the store. When the first step succeeded and the second did not, the source is really mounted:
+/// `query_data` gets queued, but the model finds no table structure and can only guess column names.
 ///
-/// 挂载那一刻的报错只有点按钮的人看得见。此后这个库就一直静默地缺着，
-/// 而这正是 0009 说的那件事：真正伤人的不是失败，是失败无声。
+/// The error at mount time is seen only by the person who clicked the button. After that this store is silently missing data,
+/// and that is exactly what 0009 says: what really hurts is not the failure, but that the failure is silent.
 pub async fn observe_schema_sync_failure(
     state: &AppState,
     kb_id: uuid::Uuid,
@@ -212,12 +212,12 @@ pub async fn observe_schema_sync_failure(
             kb_id: Some(kb_id),
             severity: "warning",
             kind: alerts::kind::SCHEMA_SYNC_FAILED,
-            // 配置类：要修的是连接串或网络，不是内容。找 admin
+            // Configuration class: the fix is the connection string or network, not the content. Find an admin
             min_role: Role::Admin,
             subject_type: Some("data_source"),
             subject_id: Some(source_id),
-            // 名字在这里存一份——源被删掉之后 subject_id 解析不出名字，
-            // 而告警该留得住
+            // The name is stored here too: once the source is deleted, subject_id cannot be resolved to a name,
+            // yet the alert should stay readable
             detail: serde_json::json!({
                 "source": source_name,
                 "error": err.to_string(),
@@ -239,11 +239,11 @@ mod tests {
     use utopia_llm::{OutOfCredit, RateLimited};
     use utopia_store::alerts::kind;
 
-    /// 限流与端点不可达是两类事，报的告警必须分开。
+    /// Rate limiting and an unreachable endpoint are two different things, so their alerts must be separate.
     ///
-    /// 混成一条的后果不是"标签不好看"：`llm.unreachable` 说的是端点连不上，
-    /// 管理员会去查网络和地址，而真正该做的是降并发或者升配额——**告警把人
-    /// 指向了错误的地方**，比不报还费时间。
+    /// Mixing them is not just "an ugly label": `llm.unreachable` says the endpoint cannot be reached,
+    /// so an admin goes to check the network and address, while what is needed is lower concurrency or a higher quota. **The alert
+    /// points people at the wrong place**, which wastes more time than not reporting.
     #[test]
     fn a_rate_limit_is_not_an_unreachable_endpoint() {
         let err = anyhow::Error::new(RateLimited {
@@ -254,8 +254,8 @@ mod tests {
         assert_eq!(alert_for(&err), Some((kind::LLM_RATE_LIMITED, "warning")));
     }
 
-    /// **判定要穿透 context 层。** 抽取那条路上至少加了一句
-    /// 「限流退避 5 次仍未通过」，靠文本匹配的判定当天就废。
+    /// **The check must go through the context layer.** The extraction path adds at least one sentence,
+    /// "rate limit backoff still failed after 5 attempts", so a text-matching check is useless the same day.
     #[test]
     fn it_survives_context_layers() {
         let err = anyhow::Error::new(RateLimited {
@@ -268,10 +268,10 @@ mod tests {
         assert_eq!(alert_for(&err), Some((kind::LLM_RATE_LIMITED, "warning")));
     }
 
-    /// 欠费与限流必须分开：一个要人去充值，一个等一会儿就好。
+    /// Insufficient credit and rate limiting must be separate: one needs a person to top up, the other just waits a while.
     ///
-    /// 报错了方向的代价是实打实的——实测 14 篇文档因为欠费整篇失败，
-    /// 而当时唯一能知道原因的办法是去数据库里翻 `graph_error`。
+    /// Misjudging the direction has a real cost: measured, 14 documents failed entirely due to insufficient credit,
+    /// and the only way to learn the cause at the time was to look up `graph_error` in the database.
     #[test]
     fn out_of_credit_is_not_a_rate_limit() {
         let err = anyhow::Error::new(OutOfCredit {
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(alert_for(&err), Some((kind::LLM_OUT_OF_CREDIT, "error")));
     }
 
-    /// 判定同样要穿透 context 层。
+    /// The check must likewise go through the context layer.
     #[test]
     fn out_of_credit_survives_context_layers() {
         let err = anyhow::Error::new(OutOfCredit {
@@ -292,23 +292,23 @@ mod tests {
         assert_eq!(alert_for(&err), Some((kind::LLM_OUT_OF_CREDIT, "error")));
     }
 
-    /// 反面：普通失败不该报告警，否则每一次解析错都弹一条，人会学会忽略它。
+    /// Counter-case: an ordinary failure should not raise an alert, or every parse error would pop one up and people would learn to ignore it.
     #[test]
     fn an_ordinary_failure_raises_nothing() {
         let err = anyhow::anyhow!("结果解析失败").context("抽取失败");
         assert_eq!(alert_for(&err), None);
     }
 
-    /// 反面：干净的 4xx 不是限流也不是不可达。密钥错了要换密钥，
-    /// 而那既不该降并发也不该查网络。
+    /// Counter-case: a clean 4xx is neither rate limiting nor unreachable. A wrong key needs replacing,
+    /// which neither lowering concurrency nor checking the network would fix.
     #[test]
     fn an_auth_failure_raises_nothing() {
         let err = anyhow::anyhow!("LLM request failed (401 Unauthorized): bad key");
         assert_eq!(alert_for(&err), None);
     }
 
-    /// **余额不会在七分钟里自己长回来**，所以那三次退避重试只是把同一句错误
-    /// 重说三遍，还把该看见的失败推迟了七分钟（#195）。
+    /// **Balance does not come back within seven minutes on its own**, so those three backoff retries just repeat the same error
+    /// three times and delay the failure that should be seen by seven minutes (#195).
     #[test]
     fn an_empty_balance_is_not_worth_retrying() {
         let err = anyhow::Error::new(OutOfCredit {
@@ -319,7 +319,7 @@ mod tests {
         assert!(super::hopeless(&err));
     }
 
-    /// 而限流正是这套退避的服务对象——两类分开（#176）的意义就在这里。
+    /// Rate limiting is exactly what this backoff serves; the reason for separating the two classes (#176) lies here.
     #[test]
     fn a_rate_limit_still_gets_its_retries() {
         let err = anyhow::Error::new(RateLimited {
@@ -330,7 +330,7 @@ mod tests {
         assert!(!super::hopeless(&err));
     }
 
-    /// 反面：普通失败照常重试。一次网络抖动不该一次定生死。
+    /// Counter-case: ordinary failures are still retried. A network blip should not decide life or death on one try.
     #[test]
     fn an_ordinary_failure_still_gets_its_retries() {
         assert!(!super::hopeless(&anyhow::anyhow!("结果解析失败")));

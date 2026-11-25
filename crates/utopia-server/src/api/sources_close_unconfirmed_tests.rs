@@ -1,5 +1,5 @@
-//! `close-unconfirmed` 收写令牌（RC-004）：读令牌 403，别的库的来源 404。
-//! 关哪些、怎么关由 store 的 `a_source_closes_its_unconfirmed_facts` 钉住。
+//! `close-unconfirmed` takes a write token (RC-004): a read token gets 403, and a source from another database gets 404.
+//! Which facts it closes, and how, is pinned by the store's `a_source_closes_its_unconfirmed_facts`.
 use crate::state::AppState;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};

@@ -1,24 +1,24 @@
-//! 开放图谱的写入路径（0044 第 1 刀，#729）：文档说了什么，就按它自己的话记下来。
+//! The write path of the open graph (0044 cut 1, #729): what the document says is recorded in its own words.
 //!
-//! 和 `extraction::run` 的分别只有一处：**提示词里没有本体**，模型不选关系、不选类、
-//! 不算日期。回复里是它提到的东西（`e`，有名字的和只被描述的）、它做的陈述（`s`，关系
-//! 短语照抄，主宾按名字写，时间词照抄，引文整句照抄）和别名（`n`）。落库时陈述成
-//! `layer = 'open'` 的事实行，短语留在行上；限定按文档自己的角色词挂在
-//! `statement_qualifiers`；时间词原样进 `time_mentions`，谁也不把它算成日期——那是
-//! 0045 的事。类型化的事实由对齐（第 2 刀）从这些行算出来，不在这里写。
+//! The only difference from `extraction::run` is one thing: **the prompt has no ontology**, so the model does not pick relations, pick classes,
+//! or compute dates. The reply holds what it mentions (`e`, both named things and merely described ones), the statements it makes (`s`: the relation
+//! phrase copied verbatim, subject and object written by name, time words copied verbatim, the quote copied as a whole sentence), and aliases (`n`). On write, a statement becomes
+//! a fact row with `layer = 'open'`, with the phrase kept on the row; qualifiers attach to `statement_qualifiers`
+//! by the document's own role words; time words go into `time_mentions` unchanged, and nobody counts them as dates, which is
+//! 0045's job. Typed facts are computed from these rows by alignment (cut 2), and are not written here.
 //!
-//! **陈述按名字指东西，不按编号。** 第一版让 `e` 带编号、陈述写编号、引文按句号索引，
-//! 省的是输出 token；实测 deepseek-v4-flash 在密的段落里会把编号对错——同一块两次回复
-//! 一次「NVIDIA has reached AI」一次「tokens are tokens」，原文说的是「AI has reached its
-//! inflection point」。原型按名字写主宾、每条陈述抄引文，333 条里编造 0 条。忠实先于省钱
+//! **Statements point at things by name, not by number.** The first version gave `e` numbers, wrote statements with numbers, and indexed quotes by sentence,
+//! to save output tokens; measured, deepseek-v4-flash mixed up the numbers in dense paragraphs: in the same chunk, two replies
+//! said "NVIDIA has reached AI" once and "tokens are tokens" once, where the source says "AI has reached its
+//! inflection point". The prototype writes subject and object by name and copies the quote for each statement, and fabricated none of 333. Faithfulness before saving money.
 //!
-//! 复用的是身份那一段：名字照旧走 `resolve_handle`（同一回复里两个同名的东西不会
-//! 塌成一个，0041 的名字事实照记），被描述的东西建成没有名字事实的实体
-//! （`create_described`），免得「一家医院」成了召回的桥。
+//! What is reused is the identity part: names still go through `resolve_handle` (two same-named things in one reply
+//! do not collapse into one, and 0041's name facts are still recorded), and described things are built as entities without name facts
+//! (`create_described`), so that "a hospital" does not become a bridge for recall.
 //!
-//! 两根时间轴（0022 / #714 / 0064）：陈述入库时的见证只认来源系统给文档的日期，没有就
-//! 留空——处理文档的时刻不是文档说的日期。文档自己说的日期（各块报上来的 `t`）在抽完
-//! 之后由时间解析那一步按节写到陈述上（`time_resolution::attest_statements`）。
+//! Two timelines (0022 / #714 / 0064): the attestation when a statement is stored only counts the date the source system gives the document; with none, it is
+//! left empty. The date the document itself states (the `t` each chunk reports) is written onto the statements after extraction
+//! by the time-resolution step, section by section (`time_resolution::attest_statements`).
 
 use crate::extraction::{
     chat_retrying_rate_limits_at, drop_signal, incomplete_reason, origin_ceiling, resolve_handle,
@@ -37,9 +37,9 @@ use utopia_store::pending::{Outcome, Proposal};
 pub(crate) use utopia_store::resolution::name_key;
 use uuid::Uuid;
 
-/// 一块调 + 解析完后的中间产物，apply 半步读它落库（#588 cut 1）。
-/// `name_vecs`（0041 决定 3 通道 2）紧跟解析算出来——apply 里的 `resolve_handle`
-/// 立刻就要它，分两处算只会让 helper 之间传更多参数。
+/// Intermediate product after one chunk's call and parsing, which the apply half reads to write to the store (#588 cut 1).
+/// `name_vecs` (0041 decision 3, channel 2) is computed right after parsing; apply's `resolve_handle`
+/// needs it immediately, and computing it in two places would only pass more arguments between the helpers.
 struct ChunkParsed {
     extraction: utopia_extract::open::OpenExtraction,
     name_vecs: HashMap<String, Vec<f32>>,
@@ -80,25 +80,25 @@ fn mention_evidence(
     evidence
 }
 
-/// 回复为什么是半截的：端点撞上了 token 上限（#760），或护栏看见它在复读、停了读（#1301）。
-/// 两种都当半截处理，丢弃行要说清是哪一种——复读的去查上限，是找错了地方
+/// Why the reply is truncated: the endpoint hit the token limit (#760), or the guard saw it repeating and stopped reading (#1301).
+/// Both are handled as truncation, and the dropped row must say which one it was: a repetition should check the limit, which would be looking in the wrong place
 #[derive(Debug, Clone, Copy)]
 enum Cut {
     Ceiling,
     Repeating,
 }
 
-/// 一个分块的前半步：调模型、解析回复、算名字向量（#588 cut 1）。这半步不写图，
-/// 所以分块之间可以不按顺序做——并发（cut 2）动的就是它；后半步 `apply_open_extraction`
-/// 要按分块顺序。`pushed`（0054）的块本身就是契约，不调模型，直接解析。
+/// The first half-step for a chunk: call the model, parse the reply, compute name vectors (#588 cut 1). This half does not write the graph,
+/// so chunks may be done out of order: concurrency (cut 2) acts on exactly this; the second half `apply_open_extraction`
+/// must run in chunk order. A `pushed` (0054) chunk is itself the contract: it does not call the model, it just parses.
 ///
-/// `Ok(None)` 是这一块跳过了：调用失败或回复解析不出，原因已经记进 `drop_signal` 和
-/// `unextracted`，主循环接着走下一块。
+/// `Ok(None)` means this chunk was skipped: the call failed or the reply could not be parsed; the reason is already recorded in `drop_signal` and
+/// `unextracted`, and the main loop moves on to the next chunk.
 ///
 /// `Err` has two causes: no chat model, or an empty balance (#1095). An empty balance
 /// stops the document, and the error keeps its chain for `alerting::hopeless`.
 ///
-/// 被接管的检查（epoch）留在主循环，不在这里：调模型之前、回复落库之前都要核对。
+/// The takeover check (epoch) stays in the main loop, not here: it is checked both before calling the model and before the reply is written.
 #[allow(clippy::too_many_arguments)]
 async fn call_and_parse_one_chunk(
     state: &AppState,
@@ -114,7 +114,7 @@ async fn call_and_parse_one_chunk(
     pushed: bool,
     unextracted: &mut Vec<(i32, String)>,
 ) -> anyhow::Result<Option<ChunkParsed>> {
-    // 推送来的陈述：块就是契约，解析它而不是问模型（0054）。下面从解析起一步不变
+    // Pushed statements: the chunk is the contract, so parse it rather than asking the model (0054). From the parse onward, the steps below are unchanged
     let (reply_text, cut) = if pushed {
         (chunk.text.clone(), None)
     } else {
@@ -124,7 +124,7 @@ async fn call_and_parse_one_chunk(
         };
         let messages =
             utopia_extract::open::build_open_messages(filename, known, opening, &chunk.text);
-        // 温度 0：照抄原文的活不该靠采样。端点缺省 1.0 时同一块两次回复密度差三倍
+        // Temperature 0: verbatim copying should not depend on sampling. When the endpoint defaults to 1.0, two replies for the same chunk differ in density by three times
         let reply = match chat_retrying_rate_limits_at(
             state,
             settings,
@@ -152,7 +152,7 @@ async fn call_and_parse_one_chunk(
             }
         };
         tracing::debug!(%document_id, seq = chunk.seq, reply = %reply.text, "开放抽取的原始回复");
-        // 解析器只看得见 JSON 少了尾巴，看不见少的原因，所以原因得从回复里带过来（#760）
+        // The parser sees only that the JSON lost its tail, not why, so the reason has to be carried over from the reply (#760)
         let cut = if reply.repeating {
             Some(Cut::Repeating)
         } else if reply.hit_token_ceiling() {
@@ -166,8 +166,8 @@ async fn call_and_parse_one_chunk(
         Ok(x) => x,
         Err(e) => {
             tracing::warn!(%document_id, seq = chunk.seq, error = %e, hit_token_ceiling = matches!(cut, Some(Cut::Ceiling)), repeating = matches!(cut, Some(Cut::Repeating)), "开放抽取回复解析失败，跳过该分块");
-            // 一整块没进图，而原因不同：撞上上限是「答案太长」，改得动；复读是模型卡在一行上；
-            // 别的解析失败是「回复不合结构」。写成同一句话就分不开了
+            // A whole chunk did not make it into the graph, and the reasons differ: hitting the limit means "the answer was too long", which can be changed; repetition is the model stuck on one line;
+            // other parse failures mean "the reply is malformed". Writing these as one sentence would make them indistinguishable
             let (why, detail) = match cut {
                 Some(Cut::Ceiling) => (
                     "response hit the token ceiling and could not be parsed; this chunk did not enter the graph",
@@ -195,7 +195,7 @@ async fn call_and_parse_one_chunk(
             return Ok(None);
         }
     };
-    // 模型把值写成了宾语的，挪回值并各记一笔；推送来的是契约，不动（0054）
+    // Where the model wrote a value into the object slot, move it to the value and record one entry for each; pushed statements are a contract and are not touched (0054)
     if !pushed {
         for name in utopia_extract::open::values_are_not_things(&mut extraction) {
             drop_signal(
@@ -222,8 +222,8 @@ async fn call_and_parse_one_chunk(
                 Some(Cut::Repeating) => {
                     "the reply started repeating itself; kept up to the last complete item"
                 }
-                // 回复正常结束而整体不合法：模型写坏了括号。逐条读出来的都收了，写坏的
-                // 条数在下面那条信号里
+                // The reply ended normally but is invalid as a whole: the model wrote the brackets wrongly. Those read out one by one are kept; the count of
+                // broken ones is in the signal below
                 None => "the open reply was not valid JSON as a whole; read item by item",
             },
             None,
@@ -244,9 +244,9 @@ async fn call_and_parse_one_chunk(
         )
         .await;
     }
-    // 名字向量（0041 决定 3 通道 2）：这一块里有名字的东西，名字字符串各算一条，
-    // 消解时拿它在同库的名字向量里找近邻。一块一批；算不出来（端点抖了）不拦抽取，
-    // 只是这一块少一条召回通道
+    // Name vectors (0041 decision 3, channel 2): for named things in this chunk, each name string gets one vector; during resolution it is used to find near neighbours
+    // among the store's name vectors. One batch per chunk; if it cannot be computed (the endpoint blipped), extraction is not blocked,
+    // this chunk just loses one recall channel
     let name_vecs: HashMap<String, Vec<f32>> = match (settings, embed_client) {
         (Some(settings), Some(client)) => {
             let mut wanted: Vec<(String, String)> = Vec::new();
@@ -267,7 +267,7 @@ async fn call_and_parse_one_chunk(
     }))
 }
 
-/// 推送块里 `e` / `s` 两个数组的规范键，按原始位置排列（9012 的记忆键）
+/// The canonical keys of the two arrays `e` and `s` in a pushed chunk, in original order (the memory key of 9012)
 struct PushedRaw {
     entities: Vec<String>,
     statements: Vec<String>,
@@ -289,20 +289,20 @@ impl PushedRaw {
     }
 }
 
-/// 再推时从上一版沿用下来的东西：没变的陈述（块内原始位置 → 事实）和没变的具名实体
-/// （规范键 → 实体）。沿用的直接用旧结果，不再走消解和落事实
+/// Things carried over from the previous version on re-push: unchanged statements (position within the chunk → fact) and unchanged named entities
+/// (canonical key → entity). Carried-over items reuse the old result directly, and do not go through resolution or write facts again
 #[derive(Default)]
 struct Carried {
     statements: HashMap<usize, Uuid>,
     entities: HashMap<String, Uuid>,
 }
 
-/// 一个分块的后半步：把解析出来的回复写成陈述、名字和证据（#588 cut 1）。
+/// The second half-step for a chunk: write the parsed reply as statements, names and evidence (#588 cut 1).
 ///
-/// **要按分块顺序跑**：前面的块认下的实体（`doc_entities`、`known_by_name`）、描述出来的
-/// 东西（`described`）、待裁决的名字，后面的块都要读。调模型那半步并发之后这里仍然串行。
+/// **Must run in chunk order**: the entities earlier chunks recognized (`doc_entities`, `known_by_name`), the things described
+/// (`described`), and the names awaiting adjudication are all read by later chunks. After the call half runs concurrently, this part stays serial.
 ///
-/// `pushed`（0054）：块本身就是契约，时间词在整块里定位，不在引文里找（0054 决定 4）
+/// `pushed` (0054): the chunk is itself the contract; time words are located within the whole chunk, not searched for in the quote (0054 decision 4)
 #[allow(clippy::too_many_arguments)]
 async fn apply_open_extraction(
     state: &AppState,
@@ -331,14 +331,14 @@ async fn apply_open_extraction(
     ambiguous_bare_cache: &mut HashMap<String, Uuid>,
     touched_names: &mut HashSet<String>,
 ) -> anyhow::Result<()> {
-    // ---- 东西：有名字的走身份消解，被描述的建成没有名字事实的实体 ----
+    // ---- Things: named ones go through identity resolution; described ones are built as entities without name facts ----
     // Object-only mentions and rejected quotes deliberately supply None, including
     // to the old #331 tie/grey-zone paths: another subject's chunk is not their clue.
     // With no owned clue, profile tiers and their ordinary review requests decide.
     let evidence = mention_evidence(extraction, &chunk.text);
     let mut response_claims: HashMap<String, Vec<Uuid>> = HashMap::new();
     let mut local: HashMap<String, Uuid> = HashMap::new();
-    // 被描述的东西：先记下名字和类别词，等陈述指到它再建（见 `place`）
+    // Described things: first record their name and category word, and build them only once a statement points to them (see `place`)
     let mut deferred: HashMap<String, (String, String)> = HashMap::new();
     let pushed_raw = pushed.then(|| PushedRaw::parse(&chunk.text));
     for e in &extraction.entities {
@@ -378,8 +378,8 @@ async fn apply_open_extraction(
                         human_reviews_found,
                     )
                     .await?;
-                    // 模型说它是什么（「a British film」里的 film）：存成它自己的说法，
-                    // 类的绑定等对齐来做
+                    // What the model says it is (the film in "a British film"): stored as its own wording;
+                    // the class binding is done later by alignment
                     if !kind.is_empty() {
                         let _ = utopia_store::resolution::set_specific_type(pool, id, kind).await;
                     }
@@ -387,8 +387,8 @@ async fn apply_open_extraction(
                     id
                 }
             };
-            // 名字就在这一块原文里时，给名字事实补出处（0041）。记忆日志里的不补：
-            // 那一句算不算出处，要等人点头（0018）
+            // When the name is literally in this chunk's source text, back-fill the name fact's provenance (0041). Memory logs do not get this:
+            // whether that sentence counts as provenance waits for a person's nod (0018)
             if !await_nod && span_in_quote(name, &chunk.text) {
                 let _ = utopia_store::names::record(
                     pool,
@@ -421,8 +421,8 @@ async fn apply_open_extraction(
         local.insert(key, id);
     }
 
-    // ---- 陈述 ----
-    // 推送来的陈述按原始位置记下它写出的事实：再推时没变的陈述可以直接沿用旧事实
+    // ---- Statements ----
+    // Pushed statements record the facts they wrote by original position: on re-push, an unchanged statement can reuse the old fact directly
     for s in &extraction.statements {
         if let Some(&fact_id) = carried.statements.get(&s.raw_index) {
             let time_words =
@@ -461,17 +461,17 @@ async fn apply_open_extraction(
             .await;
             continue;
         };
-        // 宾语写了名字但没在清单上：模型漏列了它。陈述照落，宾语落成字面值——
-        // 不凭空建实体，也不丢这条话（#559 的那一档）
-        // 一个字母数字都没有的值（表格里的「—」、空格）什么也没说：按没有值处理。
-        // 这是结构判断，不是词表——看的是有没有内容，不是内容是什么
+        // The object is written by name but was not on the list: the model left it out. The statement is written as is, with the object stored as a literal:
+        // no entity is invented, and the statement is not lost (the tier of #559)
+        // A value with no letters or digits at all (a "—" in a table, or spaces) says nothing: treated as having no value.
+        // This is a structural judgement, not a word list: it checks whether there is content, not what the content is
         let mut value = s
             .value
             .as_deref()
             .map(str::trim)
             .filter(|v| v.chars().any(char::is_alphanumeric));
-        // 模型自己写的那个值，在下面被「宾语没声明」顶替之前记下来：引文要核的是它，
-        // 不是一个实体的名字（#729）
+        // The value the model itself wrote is recorded before "object undeclared" replaces it below: the quote is checked against it,
+        // not against an entity's name (#729)
         let stated_value = value;
         let object = match s.object.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
             Some(name) => match place(
@@ -502,9 +502,9 @@ async fn apply_open_extraction(
             },
             None => None,
         };
-        // 短语就是值、短语就是主语：表格丢了列头（或没有说明句）时模型的两种写法
-        // （#743 的财报长文里各占一类）。陈述照落——值和主语都在，信息没丢——只记一笔
-        // 让它可量；只比字面，不认词
+        // The phrase is the value, and the phrase is the subject: the two ways the model writes it when a table lost its column header (or has no caption sentence)
+        // (each of the two categories appears in the long financial reports of #743). The statement is written, since the value and the subject are both there and no information is lost; just log one entry
+        // so it can be measured; compare literally only, without recognising words
         let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
         if value.is_some_and(|v| same(v, phrase)) {
             drop_signal(
@@ -559,8 +559,8 @@ async fn apply_open_extraction(
                 continue;
             }
         };
-        // 引文定位。定位不到的那句照样当证据文字记，只是没有偏移，并记一笔——
-        // 模型没照抄的句子是「不是原文说的」那一类的苗头，量它
+        // Quote locating. A sentence that cannot be located is still recorded as evidence text, only without an offset, and one entry is logged:
+        // sentences the model did not copy verbatim are the early signs of the "not stated in the source" kind, so measure it
         let quote_text = s.quote.as_deref().map(str::trim).filter(|q| !q.is_empty());
         let quote: Option<(&str, Option<(i32, i32)>)> =
             quote_text.map(|q| (q, locate(&chunk.text, q)));
@@ -575,9 +575,9 @@ async fn apply_open_extraction(
             )
             .await;
         }
-        // **值必须出现在它自己的引文里**（#729）。一行五列被压成五条只有值不同的
-        // 陈述、引文却是表上面那句导语时，五条里至多一条对，而谁也分不出是哪一条。
-        // 只查带数字的值：实体名当值写的那一类（object_undeclared）不在此列
+        // **The value must appear in its own quote** (#729). When a table row of five columns is flattened into five statements that differ only in value, but the quote
+        // is the lead sentence above the table, at most one of the five is right, and nobody can tell which. This check
+        // covers only numeric values: the kind where an entity name is written as the value (object_undeclared) is excluded
         if let (Some(v), Some((q, _))) = (stated_value, quote) {
             if v.chars().any(|c| c.is_ascii_digit()) && !shows_value(q, v) {
                 drop_signal(
@@ -592,11 +592,11 @@ async fn apply_open_extraction(
                 continue;
             }
         }
-        // 开放陈述没有模型自报的置信度：它说的是「文档这么说了」。看图描述出来的块
-        // 照旧压上限（0040 决定 4）
+        // An open statement has no self-reported confidence from the model: it says "the document says so". Rows derived from a chart description still
+        // get the cap (0040 decision 4)
         let confidence = origin_ceiling(&chunk.origin, 1.0);
-        // 限定和时间词先算好：直接落库和等人点头两条路用同一份。
-        // 限定：值是清单上某个东西的名字就挂实体，否则挂文字
+        // Qualifiers and time words are computed first: the direct-write path and the wait-for-a-nod path use the same data
+        // Qualifiers: if the value is the name of something on the list, attach the entity; otherwise attach the text
         let mut qualifiers: Vec<(&str, Option<serde_json::Value>, Option<Uuid>)> = Vec::new();
         for (role, text) in &s.qualifiers {
             let (role, text) = (role.trim(), text.trim());
@@ -621,8 +621,8 @@ async fn apply_open_extraction(
         let time_words =
             locate_time_words(state, kb_id, document_id, chunk, quote, pushed, s).await;
         if await_nod {
-            // 记忆日志：一切原样进待确认表（0015），人点头时 `pending::confirm` 才把它
-            // 落成开放陈述——同样的短语、限定、时间词、引文偏移
+            // Memory log: everything goes into the pending-confirmation table unchanged (0015); only when a person nods does `pending::confirm` turn it
+            // into an open statement: same phrase, qualifiers, time words, and quote offsets
             let (object_id, object_value) = match fact_object {
                 FactObject::Entity(id) => (Some(id), None),
                 FactObject::Value(v) => (None, Some(v)),
@@ -691,7 +691,7 @@ async fn apply_open_extraction(
             utopia_store::pushed_memo::remember(pool, chunk.id, s.raw_index as i32, key, fact_id)
                 .await?;
         }
-        // 表层谓词也写短语：今天的读路径都从 `fact_surface_predicate` 取名字
+        // The surface predicate is also written as the phrase: today's read paths all take the name from `fact_surface_predicate`
         utopia_store::graph::add_evidence_located(
             pool,
             fact_id,
@@ -721,8 +721,8 @@ async fn apply_open_extraction(
         *statement_count += 1;
     }
 
-    // ---- 别名（0041 决定 2）：服务端只核对名字确实在这一块原文里 ----
-    // 记忆日志里的别名不记：那一句算不算出处要等人点头（0018）
+    // ---- Aliases (0041 decision 2): the server checks only that the name really appears in this chunk's source text ----
+    // Aliases in memory logs are not recorded: whether that sentence counts as provenance waits for a person's nod (0018)
     for n in extraction.names.iter().filter(|_| !await_nod) {
         let name = n.name.trim();
         if name.is_empty() {
@@ -762,8 +762,8 @@ async fn apply_open_extraction(
             .await;
             continue;
         }
-        // 一个名字不会同时是两样东西的名字：这一块或本文档前面已经把它认成
-        // 另一个实体的，不记
+        // A name cannot be the name of two different things at once: if this chunk, or earlier in this document, already recognized it as
+        // another entity, it is not recorded
         let key = name_key(name);
         let claimed = handled_by_name
             .get(&key)
@@ -801,13 +801,13 @@ async fn apply_open_extraction(
         touched_names.insert(key);
     }
 
-    // 本块抽完即打标：更新时被认领的块携带标记跳过；中断的抽取可续跑
+    // Once this chunk is extracted, mark it: a chunk claimed during an update carries its mark and is skipped; an interrupted extraction can resume
     utopia_store::documents::mark_chunk_extracted(pool, chunk.id).await?;
 
     Ok(())
 }
 
-/// 文档日期只在它来自内容或来源系统时才算证据日期（与 `temporal::DATED_AT` 同一口径）。
+/// A document date counts as evidence date only when it comes from the content or from the source system (same basis as `temporal::DATED_AT`).
 pub(crate) fn dated_at(doc: &Document) -> Option<chrono::DateTime<chrono::Utc>> {
     if matches!(doc.doc_time_source.as_str(), "content" | "source") {
         doc.doc_time
@@ -816,7 +816,7 @@ pub(crate) fn dated_at(doc: &Document) -> Option<chrono::DateTime<chrono::Utc>> 
     }
 }
 
-/// 一条陈述的时间词：起与止各是一条提及，必须原样在这条陈述的引文里
+/// The time words of a statement: start and end are each one mention, and each must appear verbatim in this statement's quote
 async fn locate_time_words<'a>(
     state: &AppState,
     kb_id: Uuid,
@@ -832,8 +832,8 @@ async fn locate_time_words<'a>(
         .filter_map(|(role, words)| Some((role, words?.trim())))
         .filter(|(_, w)| !w.is_empty())
     {
-        // 推送来的陈述没有引文：条目自己就是证据（0054 决定 4），这一块就是这一份
-        // 载荷，时间词在块里找。走 `locate_time` 会在 `quote?` 上退出，起止就都丢了
+        // A pushed statement has no quote: the entry is itself the evidence (0054 decision 4), and this chunk is the one payload,
+        // with time words looked up within the chunk. Going through `locate_time` exits at `quote?`, which would drop both start and end
         let located = if pushed {
             locate(&chunk.text, words).map(|(start, _)| start)
         } else {
@@ -857,14 +857,14 @@ async fn locate_time_words<'a>(
     time_words
 }
 
-/// 一段字在块里的**字符**偏移（起、止）。字符不是字节：界面和 SQL 的 `substr` 都按字符数，
-/// 中文一个字三个字节，按字节存的偏移到界面上就错位。找不到的就 `None`——
-/// 偏移只能由服务端从原文算出来，模型报的数字不算数。
+/// The **character** offsets (start, end) of a span of text within the chunk. Characters, not bytes: the UI and SQL's `substr` both count characters,
+/// and a Chinese character is three bytes, so byte offsets would be misplaced on screen. Not found gives `None`:
+/// offsets can only be computed by the server from the source text; the number the model reports counts for nothing.
 ///
-/// **一段空白对一段空白**，别的逐字比。PDF 的文字层在行尾换行，「December⏎31, 2024」
-/// 模型抄回来是「December 31, 2024」；逐字比的话这句引文和它的日期都对不上，陈述落了、
-/// 时间却丢了（一份英文董事会纪要四个日期全没了）。换行还是空格不是原文说了什么，
-/// 偏移照原文里的位置算
+/// **A run of whitespace matches a run of whitespace**; everything else is compared character by character. PDF text layers break lines at line ends, so "December⏎31, 2024"
+/// is copied back by the model as "December 31, 2024"; compared character by character, this quote and its date would not match, so the statement is stored
+/// while the time is lost (all four dates in an English board minutes document went missing). Whether a line break or a space is used is not what the source says,
+/// so the offset is computed from the position in the source text
 fn locate(hay: &str, needle: &str) -> Option<(i32, i32)> {
     let (needle, _) = squashed(needle.trim());
     if needle.is_empty() {
@@ -879,7 +879,7 @@ fn locate(hay: &str, needle: &str) -> Option<(i32, i32)> {
     Some((start as i32, end as i32))
 }
 
-/// 连着的空白压成一个空格。第二项是压过之后每个字符在原文里的字符位置
+/// Consecutive whitespace is folded into one space. The second item is the character position in the source of each character after folding
 fn squashed(text: &str) -> (Vec<char>, Vec<usize>) {
     let (mut out, mut at) = (Vec::new(), Vec::new());
     let mut in_space = false;
@@ -899,13 +899,13 @@ fn squashed(text: &str) -> (Vec<char>, Vec<usize>) {
     (out, at)
 }
 
-/// 时间词在块里的字符起点。**必须在这条陈述自己的那句引文里**：模型会把一个时间词挂到
-/// 好几条陈述上（FDA 语料实测「week 4」挂到了「不应由过敏患者服用」上，六条带时间的陈述错了三条），
-/// 整块里搜得到不等于这句说了它。引文里有、但引文本身没在块里定位到的，起点退回整块里的第一处
-/// 这条陈述的值有没有真的写在它的引文里（#729）。
+/// The character start of a time word within the chunk. **It must be inside this statement's own quote sentence**: the model attaches a time word to
+/// several statements (in the FDA corpus, measured: "week 4" was attached to "should not be taken by patients with allergies", and three of six time-bearing statements were wrong),
+/// and being found anywhere in the chunk does not mean this sentence says it. If the quote is in the chunk but the quote itself was not located in the chunk, the start falls back to the first occurrence in the whole chunk
+/// whether this statement's value is really written in its quote (#729)
 ///
-/// 千分位逗号、空白和货币符号两边都不算数；别的按原样比。**故意放得松**：这是一条丢弃
-/// 规则，放过一条可疑的，好过丢掉一条对的
+/// Thousands separators, whitespace and currency symbols on either side do not count; everything else is compared as is. **Deliberately lenient**: this is a discard
+/// rule, and letting through a dubious one is better than dropping a correct one
 fn shows_value(quote: &str, value: &str) -> bool {
     let strip = |s: &str| {
         s.chars()
@@ -920,8 +920,8 @@ fn locate_time(chunk: &str, quote: Option<(&str, Option<(i32, i32)>)>, words: &s
     let (q, span) = quote?;
     if let Some((inner, _)) = locate(q, words) {
         return match span {
-            // 在原文的这一句里找：引文和原文的空白未必一样长（换行加缩进对一个空格），
-            // 按引文里的位置加上去会偏
+            // Looked for within this one sentence of the source: the quote and the source may not have the same whitespace (a line break plus indentation against one space),
+            // so adding the position in the quote would drift
             Some((start, end)) => {
                 let sentence: String = chunk
                     .chars()
@@ -933,9 +933,9 @@ fn locate_time(chunk: &str, quote: Option<(&str, Option<(i32, i32)>)>, words: &s
             None => locate(chunk, words).map(|(s, _)| s),
         };
     }
-    // 表格的一行：期数写在表头行里，不在这一行里；这一块就是这张表（分块器让表头
-    // 跟着每一块走），所以在整块里找。判据是结构的：引文落在块里一行 `|` 开头的
-    // 表格行上（模型常把行首的 `| ` 抄掉，所以看块里那一行，不只看引文自己）
+    // A row of a table: the period number is written in the header row, not in this row; this chunk is that table (the chunker has the header
+    // follow every chunk), so look within the whole chunk. The criterion is structural: the quote lands on a table row in the chunk that starts with `|`
+    // (the model often drops the leading `| ` from the copy, so look at that row in the chunk, not only at the quote itself)
     let on_table_row = match span {
         Some((start, _)) => {
             let start = chunk
@@ -950,8 +950,8 @@ fn locate_time(chunk: &str, quote: Option<(&str, Option<(i32, i32)>)>, words: &s
     if on_table_row {
         return locate(chunk, words).map(|(s, _)| s);
     }
-    // 标题上的时间（0064）：一节的标题只说了一个时间（「## 2025年第三季度」），它下面没写
-    // 时间的陈述拿它当 when。判据也是结构的：这几个字在块里一行 `#` 开头的标题行上
+    // Dates on headings (0064): a section's heading states only one date ("## 2025 Q3"), and a statement under it that gives no date uses it as when.
+    // The criterion is also structural: these words sit on a heading row in the chunk that starts with `#`
     let (start, _) = locate(chunk, words)?;
     let byte = chunk
         .char_indices()
@@ -966,16 +966,16 @@ fn locate_time(chunk: &str, quote: Option<(&str, Option<(i32, i32)>)>, words: &s
     None
 }
 
-/// 名字的查找键：空白折叠、小写。陈述里写的名字和 `e` 里列的名字要一字不差，
-/// 差的只许是空白和大小写
-/// 一次送去嵌入的名字数。嵌入端点按请求限批，与 `pipeline` 的 chunk 批同一档
+/// Lookup key for a name: whitespace collapsed, lowercased. The name written in a statement and the name listed in `e` must match exactly,
+/// the only allowed difference being whitespace and case
+/// The number of names sent for embedding per request. The embedding endpoint limits batches per request, on the same scale as the chunk batches in `pipeline`
 const NAME_EMBED_BATCH: usize = 16;
-/// 抽完一篇文档补多少条还没有向量的名字。一次一批，剩下的下一篇再补
+/// How many names still lacking a vector to fill in after extracting one document. One batch at a time; the rest is filled by the next document
 const NAME_VECTOR_PENDING: i64 = 256;
 
-/// 一批名字各算一条向量，键是 `name_key`。数量对不上整批放弃（配对按位置，错一条全体
-/// 错位，与 `pipeline::embed_pending` 同一条规矩）；任何失败只记日志、返回空——名字向量
-/// 是召回的辅助，抽取不因它失败
+/// One vector per name in a batch, keyed by `name_key`. If the count does not match, the whole batch is abandoned (pairing is by position, and one wrong entry
+/// misaligns everything, the same rule as `pipeline::embed_pending`); any failure only logs and returns empty: name vectors
+/// are an aid to recall, and extraction does not fail because of them
 async fn embed_names(
     state: &AppState,
     settings: &LlmSettings,
@@ -1005,8 +1005,8 @@ async fn embed_names(
     out
 }
 
-/// `embed_names` 任务：把这个库里还没有向量的名字事实补上一批；一批满了说明可能还有，
-/// 再排一份接着补。没配嵌入模型就什么都不做——设置改了，下一篇文档会再排
+/// The `embed_names` task: fills in one batch of names still lacking vectors in this library; if a batch was full, there may be more, so
+/// queue another to continue. Without an embedding model configured it does nothing; when settings change, the next document queues again
 pub(crate) async fn embed_names_job(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
     let kb = utopia_store::kbs::get(&state.pool, kb_id).await?;
     let Some(settings) = utopia_store::settings::get(&state.pool, kb.workspace_id).await? else {
@@ -1019,8 +1019,8 @@ pub(crate) async fn embed_names_job(state: &AppState, kb_id: Uuid) -> anyhow::Re
     if filled > 0 {
         tracing::info!(%kb_id, names = filled, "名字向量已补");
     }
-    // 补了名字就再排一份：这一份跑着时抽完的文档撞上「正在跑」不再排（见排它的那处），
-    // 它们写下的名字由下一份补；一批满了更是可能还有。只排着一份，所以这最多多跑一遍空的
+    // After filling in names, queue another: while one is running, documents extracted meanwhile that hit "already running" do not queue (see the exclusion there),
+    // and the names they wrote are filled by the next run; and a full batch means there may well be more. Only one is queued, so this runs at most one extra empty pass
     if filled > 0 {
         utopia_store::jobs::enqueue_unless_queued(
             &state.pool,
@@ -1032,9 +1032,9 @@ pub(crate) async fn embed_names_job(state: &AppState, kb_id: Uuid) -> anyhow::Re
     Ok(())
 }
 
-/// 把这个库里还没有向量的名字事实补上一批（这一阵新写的名字都在里面）。
-/// 消解时算过的那些这里会再算一次——消解拿不到名字事实的 id（本名在 `create_entity`
-/// 的一条语句里落下）；省的只是一次嵌入调用，不值得为它改消解的返回值
+/// Fills in one batch of names in this library that still lack vectors (the names written recently are all in there).
+/// Some of those computed during resolution are computed again here: resolution cannot get the id of the name fact (the name is written in
+/// one statement of `create_entity`); saving only one embedding call is not worth changing resolution's return value for
 async fn embed_pending_names(
     state: &AppState,
     settings: &LlmSettings,
@@ -1066,12 +1066,12 @@ async fn embed_pending_names(
     Ok(items.len())
 }
 
-/// 陈述里写的名字 → 实体。先看这一块列出的，再看本文档前面认下的（提示词里的清单）。
+/// Names written in statements → entities. Looks first at the list this chunk gave, then at the ones identified earlier in this document (the list in the prompt).
 ///
-/// **被描述的东西用到才建。** 模型会把段落里每个名词短语都列进 `e`：实测一个 25 篇的库里
-/// 848 个实体有 616 个是被描述的，其中 181 个没挂任何陈述，还有 155 字的从句。没人指着的
-/// 描述不是实体，只是一句话的一部分——所以描述先记在 `deferred` 里，第一条指到它的陈述
-/// 才把它建出来；同一篇里同一段描述只建一次（`described`）
+/// **Described things are built only when used.** The model lists every noun phrase in a paragraph in `e`: measured in a library of 25 documents,
+/// 616 of 848 entities were described things, of which 181 had no statement attached, and some were clauses of 155 characters. A description nobody points at
+/// is not an entity, only part of a sentence: so descriptions are first recorded in `deferred`, and the first statement pointing to one
+/// builds it; within one document the same description is built only once (`described`)
 async fn place(
     pool: &PgPool,
     kb_id: Uuid,
@@ -1106,10 +1106,10 @@ async fn place(
     Ok(Some(id))
 }
 
-/// `await_nod`：这是记忆日志（0015）——陈述不直接落库，原样进待确认表，人点头时才成为开放陈述。
-/// `proposer`：那句话是谁、经哪枚令牌说的（0026），随待确认项一起记。
-/// `pushed`：块本身就是契约（0054 的 `statements` 来源）——不建提示词、不问模型，直接解析；
-/// 这时 `client`（对话模型）为 None；`settings` 有就照传，名字向量的嵌入模型从它来。其余一步不变
+/// `await_nod`: this is a memory log (0015): statements do not go into the store directly; they go unchanged to the pending-confirmation table, and become open statements only when a person nods.
+/// `proposer`: who said that sentence and with which token (0026); it is recorded along with the pending item.
+/// `pushed`: the chunk is the contract (the `statements` source of 0054): no prompt is built and the model is not asked; it is parsed directly;
+/// in this case `client` (the chat model) is None; `settings` is passed if present, and the name-vector embedding model comes from it. The other steps are unchanged
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_open(
     state: &AppState,
@@ -1127,11 +1127,11 @@ pub(crate) async fn run_open(
     let pool = &state.pool;
     let document_id = doc.id;
     let kb_id = kb.id;
-    // 本轮从头讲一遍这篇文档的故事，旧信号先清掉（重抽自动作数）
+    // Tell this document's story from the start in this round; clear the old signals first (re-extraction counts automatically)
     let _ = utopia_store::extraction_drops::clear_for_document(pool, document_id).await;
     let attested_at = dated_at(doc);
     let chunks = utopia_store::documents::chunks_for_extraction(pool, document_id).await?;
-    // 记忆日志一句一块，前一句不是后一句的开头，不附（与老路同一条规矩）
+    // Memory logs are one sentence per chunk; the previous sentence is not the start of the next, so it is not attached (the same rule as the old path)
     let opening_chunk = if await_nod {
         None
     } else {
@@ -1139,13 +1139,13 @@ pub(crate) async fn run_open(
     };
     let mut pending_count = 0usize;
 
-    // 本文档已认下的**有名字的**实体，按首次出现排序，送进后续分块的提示词；
-    // 陈述按名字指它们。被描述的东西不进清单：「一家医院」在下一块里指的未必是同一家
+    // Named things this document has already recognized, sorted by first appearance, sent into the prompts of later chunks;
+    // statements point to them by name. Described things are not on this list: "a hospital" in the next chunk may not refer to the same one
     let mut doc_entities: Vec<(Uuid, String, String)> = Vec::new();
     let mut known_by_name: HashMap<String, Uuid> = HashMap::new();
-    // 类别词已经绑到类的（0044 对齐第一片）：提及带着类去消解，同名不同类才分得开
+    // Category words already bound to a class (0044 alignment, first slice): mentions go into resolution carrying their class, so same-name different-class ones can be told apart
     let bound_types = utopia_store::type_bindings::bound_map(pool, kb_id).await?;
-    // 被描述的东西按描述文字在本文档内复用：同一块里「the northern wing」说了三次是一个东西
+    // Described things are reused within this document by their description text: "the northern wing" said three times in one chunk is one thing
     let mut described: HashMap<String, Uuid> = HashMap::new();
     let mut handled_by_name: HashMap<String, Vec<Uuid>> = HashMap::new();
     let mut ambiguous_bare_cache: HashMap<String, Uuid> = HashMap::new();
@@ -1155,17 +1155,17 @@ pub(crate) async fn run_open(
     let mut human_reviews_found = false;
     let mut statement_count = 0usize;
 
-    // 名字向量的嵌入客户端（0041 决定 3 通道 2）。没配嵌入模型就是 None：召回退回
-    // 字面相等，抽取照常
+    // The embedding client for name vectors (0041 decision 3, channel 2). If no embedding model is configured it is None: recall falls back to
+    // literal equality, and extraction proceeds as usual
     let embed = settings
         .and_then(crate::llm_util::embed_client)
         .filter(|_| !identity);
-    // 文档自己说到的日期（0064 决定 1）：每一块报上来的，连它所在的标题路径。块与块之间
-    // 不传——一条日期管到哪，看的是它自己那一块正文里的标题，块并行抽的时候照样成立（#588）
+    // Dates the document itself states (0064 decision 1): each chunk reports them, along with the heading path they sit under. Nothing is passed
+    // between chunks: the scope of a date is read from the headings in its own chunk's text, which still holds when chunks are extracted in parallel (#588)
     let mut time_entries: Vec<utopia_extract::time::TimeEntry> = Vec::new();
     let mut extracted_chunks: Vec<Uuid> = Vec::new();
     for chunk in chunks.iter() {
-        // 被接管则安静退场（重抽自增 epoch）：检查放在调用模型之前
+        // If taken over, exit quietly (re-extraction bumps the epoch): the check comes before calling the model
         if utopia_store::documents::extract_epoch(pool, document_id).await? != my_epoch {
             tracing::info!(%document_id, "抽取任务已被新一轮接管，退出");
             return Ok(());
@@ -1184,7 +1184,7 @@ pub(crate) async fn run_open(
             .as_ref()
             .filter(|(id, _)| *id != chunk.id)
             .map(|(_, text)| text.as_str());
-        // 提示词里带不带前面分块认下的实体，是个为了量而设的旋钮（#588）；落库那半步不受它管
+        // Whether the prompt includes the entities recognized by earlier chunks is a knob set up for measurement (#588); the write half is not governed by it
         let shown: &[utopia_extract::KnownEntity] = if state.extract_known_in_prompt {
             &known
         } else {
@@ -1209,7 +1209,7 @@ pub(crate) async fn run_open(
             Some(p) => p,
             None => continue,
         };
-        // 模型回答期间，重建可能已删掉缓存里的实体（#1361）；旧回复不能写事实或标记分块完成。
+        // During the model's reply a rebuild may have deleted the entities in the cache (#1361); the old reply must not write facts or mark the chunk complete
         if utopia_store::documents::extract_epoch(pool, document_id).await? != my_epoch {
             tracing::info!(%document_id, "抽取任务已被新一轮接管，落库前退出");
             return Ok(());
@@ -1220,7 +1220,7 @@ pub(crate) async fn run_open(
         } = parsed;
         extracted_chunks.push(chunk.id);
         for entry in &extraction.time {
-            // 字要原样在这一块里（与名字、引文同一条规矩）；核不到的不算
+            // The word must appear verbatim in this chunk (the same rule as names and quotes); if it cannot be found it does not count
             let Some((start, _)) = locate(&chunk.text, &entry.words) else {
                 drop_signal(
                     state,
@@ -1248,7 +1248,7 @@ pub(crate) async fn run_open(
                 ..entry.clone()
             });
         }
-        // 再推时没变的陈述和名字沿用上一版（只在推送路径、且不等人点头时）
+        // On re-push, unchanged statements and names are carried over from the previous version (only on the push path, and when not waiting for a person's nod)
         let carried = if pushed && !await_nod {
             Carried {
                 statements: utopia_store::pushed_memo::carry_over(
@@ -1294,7 +1294,7 @@ pub(crate) async fn run_open(
         .await?;
     }
 
-    // 消歧后缀在实体创建时算会早于其事实写入——收尾时对本文档涉及的名字统一刷新
+    // The disambiguation suffix computed when an entity is created would come before its facts are written, so at the end refresh the names this document touches together
     for name in &touched_names {
         utopia_store::resolution::refresh_disambiguators(pool, kb_id, name).await?;
     }
@@ -1302,18 +1302,18 @@ pub(crate) async fn run_open(
         tracing::info!(%document_id, "抽取任务已被新一轮接管，收尾时退出");
         return Ok(());
     }
-    // 有分块没抽成就不许标 done（与类型化那条路同一条规矩）。**但抽成了的那些照常收尾**：
-    // 从前在这里直接返回，后面的时间解析、待确认的那一声通知都跟着没了——记忆日志里一句
-    // 抽不成的话，让它后面每一句的确认卡都不出现（#1187）。错留到最后再报
+    // A chunk that was not extracted must not be marked done (the same rule as the typed path). **But those that were extracted finish as usual**:
+    // previously it returned right here, so the later time resolution and the pending-confirmation notification were both skipped: in a memory log, one
+    // sentence that fails to extract would stop every later sentence's confirmation card from appearing (#1187). Errors are kept to report at the end
     let incomplete = incomplete_reason(&unextracted, chunks.len());
     if incomplete.is_none() {
         utopia_store::documents::set_graph_status(pool, document_id, "done").await?;
         state.emit_document(kb_id, document_id);
     }
     state.emit_graph(kb_id);
-    // 文档的时间语境（0064）：这一轮各块报上来的日期并进文档上存着的那份。没抽到的块
-    // （增量抽取时认领的未变段落）原来报的留着；这一轮抽过的块以这一轮的为准。
-    // 一条都没有就不写：解析那一步照旧读一次开头（老路是它的兜底）
+    // The document's time context (0064): the dates each chunk reported this round are merged into the copy stored on the document. Chunks not extracted
+    // (unchanged passages claimed during incremental extraction) keep what they reported before; chunks extracted this round take this round's values.
+    // If there are none, nothing is written: the parse step still reads the opening once (the old path is its fallback)
     let mut context: utopia_extract::time::DocumentDating = doc
         .time_context
         .clone()
@@ -1325,8 +1325,8 @@ pub(crate) async fn run_open(
         .retain(|e| e.chunk.as_ref().is_some_and(|c| !redone.contains(c)));
     context.entries.extend(time_entries);
     if !context.entries.is_empty() {
-        // 整篇的起算点：范围最浅的那个 `now`，同一层取先说的。它只是相对时间词在没有更近的
-        // 起算点时的基准，不盖在任何一条事实上（0064 决定 2）
+        // The start point for the whole document: the shallowest-scope `now`, and at the same level, the one stated first. It is only the baseline for relative time words
+        // when there is no nearer start point; it does not cover any fact (0064 decision 2)
         let whole = context
             .entries
             .iter()
@@ -1341,29 +1341,29 @@ pub(crate) async fn run_open(
         )
         .await?;
     }
-    // 时间词的解析是它后面的任务（0045）：文档时间上下文 + 每个提及的解释 + 算区间
+    // Time-word resolution is a later task (0045): document time context + each mention's reading + computing the intervals
     utopia_store::jobs::enqueue_unless_queued(
         pool,
         "resolve_time",
         serde_json::json!({ "document_id": document_id }),
     )
     .await?;
-    // 这篇开抽时还没绑上、抽到一半才绑上的类别词：它的类补到这篇后半建的实体上
-    // （`bound_types` 是开抽时读的一份，判定落下时的投影看不见之后建的实体）
+    // Category words not yet bound when this extraction began, but bound midway: their class is applied to the entities built later in this document
+    // (`bound_types` is a copy read at the start of extraction; the projection at the moment of writing cannot see entities built afterwards)
     let caught_up = utopia_store::type_bindings::apply_bound(pool, kb_id).await?;
     if caught_up > 0 {
         tracing::info!(%document_id, entities = caught_up, "抽取途中绑上的类补到了后建的实体上");
     }
-    // 新出现的类别词绑到类（0044 对齐第一片）：库级，同库排着就不重复
+    // Newly appearing category words are bound to classes (0044 alignment, first slice): per library, and if one is already queued in the library it is not duplicated
     utopia_store::jobs::enqueue_unless_queued(
         pool,
         "align_types",
         serde_json::json!({ "kb_id": kb_id }),
     )
     .await?;
-    // 推送来的文档（0054）：短语正好是一条声明了的关系的签名，本体当场判（#1242）；再排一份
-    // 物化，绑着的签名下新来的陈述不等对齐器跑完就成类型化行——没配对话模型的库，对齐器
-    // 一次也不会跑完。排着就不重复：连推一百篇只算一遍
+    // Pushed documents (0054): when the phrase exactly matches the signature of a declared relation, the ontology judges it on the spot (#1242); queue another
+    // materialization, since under a bound signature newly arriving statements become typed rows without waiting for the aligner to finish; in a library without a chat model the aligner
+    // never finishes. If one is already queued it is not duplicated: pushing a hundred documents computes it only once
     if pushed {
         let bound = crate::phrase_alignment::bind_declared(pool, kb_id, document_id).await?;
         if bound > 0 {
@@ -1375,7 +1375,7 @@ pub(crate) async fn run_open(
             serde_json::json!({ "kb_id": kb_id }),
         )
         .await?;
-        // 条目就是契约（RC-006）：新版本每一块都读过了，它不再陈述的事实在这里闭合
+        // The entry is the contract (RC-006): the new version has read every chunk, and facts it no longer states are closed here
         if incomplete.is_none() {
             let closing =
                 utopia_store::unconfirmed::close_of_document(pool, kb_id, document_id).await?;
@@ -1384,22 +1384,22 @@ pub(crate) async fn run_open(
             }
         }
     }
-    // 队列里多了东西才叫醒人：Review 的计数与对话里那张确认卡都靠这一声
+    // Only wake people when something was added to the queue: the Review count and the confirmation card in the conversation both depend on this signal
     if pending_count > 0 {
         tracing::info!(%document_id, pending_count, "记忆抽出的陈述进了待确认队列");
         state.emit_pending(kb_id);
         state.emit_review(kb_id);
     }
 
-    // 身份来源（0071 决定 5）：散文先写下的名字向量，这篇给了它身份证据，删掉
+    // Identity source (0071 decision 5): a name vector written in prose earlier, which this document gives identity evidence for, is deleted
     if identity {
         utopia_store::name_vectors::drop_for_document(pool, document_id).await?;
     }
-    // 名字向量：这篇新写的名字事实，向量补上（0041 决定 3 通道 2）。补在一份按库去重的
-    // `embed_names` 任务里（#1296）：找还没有向量的名字要扫全库的名字事实，一阵推送几百篇
-    // 时每篇扫一遍是推送最贵的几笔之一；排着**或正在跑**的一份就不再排——只看排着的，
-    // 第一份一开跑，之后抽完的每篇都再排一份，一份跑几小时时（身份名多的库，#1472）
-    // 十几份串在它后面各扫一遍；跑着的那份结束时若还有没补的会自己再排（`embed_names_job`）
+    // Name vectors: the name facts this document newly wrote get their vectors filled in (0041 decision 3, channel 2). They are filled in a per-library
+    // `embed_names` task that de-duplicates (#1296): finding names that still lack vectors means scanning the library's name facts, and during a push of hundreds of documents
+    // scanning once per document is one of the most expensive parts of a push; if one is queued **or running**, another is not queued. Only a queued one is checked:
+    // as soon as the first starts running, every document extracted afterwards queues another one; while one runs for hours (a library with many identity names, #1472),
+    // a dozen or so queue up behind it, each scanning again; when a running one ends with names still unfilled, it queues another itself (`embed_names_job`)
     if settings.is_some() && embed.is_some() {
         utopia_store::jobs::enqueue_unless_pending(
             pool,
@@ -1410,8 +1410,8 @@ pub(crate) async fn run_open(
         .await?;
     }
 
-    // 灰区对进了审核队列 → 治理 / 裁决任务，同库已排着的不重复。
-    // 不排类型消解、不排自动扩本体：开放图谱里没有类也没有关系可扩，那是对齐的事
+    // Ambiguous pairs entered the review queue → governance / adjudication task; if one is already queued for this library, it is not duplicated.
+    // Does not queue type resolution or automatic ontology expansion: the open graph has no classes or relations to expand; that is alignment's job
     if kb.governance {
         if needs_adjudication || human_reviews_found {
             utopia_store::jobs::enqueue_unless_queued(
@@ -1459,7 +1459,7 @@ mod name_vectors_job_tests;
 mod tests {
     use super::*;
 
-    /// #729：引文里没有这个数，这条陈述就没有依据。丢弃规则要宁松勿紧
+    /// #729: if this number is not in the quote, the statement has no basis. The discard rule must err on the lenient side
     #[test]
     fn a_value_must_be_in_the_sentence_that_is_quoted() {
         let row = "| Cost of revenue | $46 | $47 | $93 |";
@@ -1493,7 +1493,7 @@ mod tests {
         assert_eq!(locate(text, ""), None);
     }
 
-    /// PDF 的文字层在行尾换行，模型抄回来是空格：一段空白对一段空白，偏移照原文算
+    /// PDF text layers break lines at line ends, and the model copies them back as spaces: a run of whitespace matches a run of whitespace, and offsets are computed from the source
     #[test]
     fn a_line_break_in_the_passage_matches_a_space_in_the_copy() {
         let text = "1. Succession. Zhang Wei will step down as Chief Technology Officer on December\n   31, 2024. Li Na follows.";
@@ -1508,7 +1508,7 @@ mod tests {
             found,
             "Zhang Wei will step down as Chief Technology Officer on December\n   31, 2024."
         );
-        // 时间词在原文那一句里的位置，不是在引文里的位置：换行加缩进比一个空格长
+        // The position of the time word within its source sentence, not its position within the quote: a line break plus indentation is longer than one space
         let start = locate_time(text, Some((quote, Some(span))), "December 31, 2024").unwrap();
         assert_eq!(
             text.chars()
@@ -1517,9 +1517,9 @@ mod tests {
                 .collect::<String>(),
             "December"
         );
-        // 反过来也一样：原文是一个空格，抄回来多了空白
+        // Conversely, too: the source has one space and the copy has extra whitespace
         assert_eq!(locate("a b", "a  \t b"), Some((0, 3)));
-        // 空白之外逐字比：断在词中间的、换了字的都不算
+        // Compared character by character apart from whitespace: a copy broken mid-word, or with changed letters, does not count
         assert_eq!(locate("Septem\nber 1, 2024", "September 1, 2024"), None);
         assert_eq!(locate(text, "December 30, 2024"), None);
         assert_eq!(locate("   ", " "), None);
@@ -1530,12 +1530,12 @@ mod tests {
         let text = "In 2019 the plant opened. In 2019 it closed again.";
         let quote = ("In 2019 it closed again.", Some((26, 50)));
         assert_eq!(locate_time(text, Some(quote), "2019"), Some(29));
-        // 引文里有、引文自己没定位到：起点退回整块里的第一处
+        // Within the quote, and the quote itself was not located: the start falls back to the first occurrence within the whole chunk
         assert_eq!(
             locate_time(text, Some(("it closed in 2019", None)), "2019"),
             Some(3)
         );
-        // 不在这句引文里的时间不算这条陈述的，哪怕块里别处有
+        // A time not in this sentence's quote does not count for this statement, even if it appears elsewhere in the chunk
         assert_eq!(
             locate_time(text, Some(("the plant opened.", Some((8, 25)))), "2019"),
             None
@@ -1547,12 +1547,12 @@ mod tests {
     fn a_table_row_takes_its_period_from_the_header_in_the_same_chunk() {
         let text = "|  | Q2 FY27 | Q1 FY27 |\n| --- | --- | --- |\n| Revenue | $96,221 | $81,615 |";
         let row = ("| Revenue | $96,221 | $81,615 |", Some((46, 76)));
-        // 期数在表头行里，不在这一行里：表格行在整块里找
+        // The period number is in the header row, not in this row: table rows are searched within the whole chunk
         assert_eq!(locate_time(text, Some(row), "Q2 FY27"), Some(5));
-        // 模型把行首的 "| " 抄掉了：引文定位到的那一行还是表格行
+        // The model dropped the leading "| " from the copy: the row the quote locates is still a table row
         let bare = ("Revenue | $96,221 | $81,615 |", Some((48, 76)));
         assert_eq!(locate_time(text, Some(bare), "Q1 FY27"), Some(15));
-        // 不是表格行的引文还是只认自己那句
+        // A quote that is not a table row still matches only its own sentence
         assert_eq!(
             locate_time(text, Some(("Revenue was up.", None)), "Q2 FY27"),
             None

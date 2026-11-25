@@ -60,8 +60,8 @@ use utopia_core::config::AppConfig;
 use utopia_search::SearchIndex;
 use uuid::Uuid;
 
-/// 记忆那条路带着「谁说的」（0015、0026）；别的任务没有这两个字段，
-/// 读到默认值本就该如此
+/// The memory path carries "who said it" (0015, 0026); other tasks do not have these two fields,
+/// and reading the default is exactly right for them
 fn payload_proposer(payload: &serde_json::Value) -> utopia_core::models::Proposer {
     let uuid = |key: &str| {
         payload
@@ -83,9 +83,9 @@ fn payload_document_id(payload: &serde_json::Value) -> anyhow::Result<Uuid> {
         .ok_or_else(|| anyhow::anyhow!("payload 缺少 document_id"))
 }
 
-/// 连库失败里最常见的一种误会，当场说清楚（#456）：compose 部署的数据库口令
-/// 只在数据卷首次初始化时生效，之后改 .env 只改了应用这一头。看日志的人
-/// 应该直接拿到那句该跑的命令，而不是来开 issue。
+/// The most common misunderstanding among database connection failures, stated on the spot (#456): the compose deployment's database password
+/// only takes effect when the data volume is first initialised; changing .env afterwards changes only the app's side. Whoever reads the log
+/// should get the command to run straight away, not have to open an issue.
 fn explain_db_error(e: anyhow::Error) -> anyhow::Error {
     if format!("{e:#}").contains("password authentication failed") {
         e.context(
@@ -111,9 +111,9 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = AppConfig::load()?;
 
-    // 迁移要建表建触发器，运行时不需要那些权限。两者分开，应用才能用一个
-    // 只读写业务表、对台账只增不改的受限角色连库。迁移池用完立即释放，
-    // 那个高权限连接不在运行期常驻。
+    // Migrations need to create tables and triggers, which the runtime does not need those privileges for. The two are kept apart, so the app can connect with a
+    // restricted role that reads and writes business tables and only appends to the ledger. The migration pool is released right after use,
+    // so the high-privilege connection does not stay resident at runtime.
     let migration_url = cfg.migration_url().to_string();
     let separate_migration_role = cfg.migration_url.is_some();
     {
@@ -133,9 +133,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(explain_db_error)?;
 
-    // 凭据封印钥匙：环境变量优先，否则数据目录下的 secret.key（首次启动生成）。
-    // **钥匙不进库**——库泄漏不等于凭据泄漏，是这一层的全部意义。空串按未设置处理，
-    // 理由同下面的 JWT 密钥
+    // Credential sealing key: the environment variable takes precedence, otherwise secret.key in the data directory (generated on first start).
+    // **The key is not stored in the database**: a database leak is not a credential leak, which is the whole point of this layer. An empty string is treated as unset;
+    // the reasoning is the same as for the JWT secret below
     let secret_key = match cfg.secret_key.clone().filter(|s| !s.trim().is_empty()) {
         Some(text) => utopia_core::secrets::parse_key(&text).ok_or_else(|| {
             anyhow::anyhow!("UTOPIA_SECRET_KEY must be 32 bytes, as 64 hex characters or base64")
@@ -143,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
         None => secret_key_file(std::path::Path::new(&cfg.data_dir))?,
     };
     utopia_core::secrets::init(secret_key);
-    // 升级前落库的明文凭据在这里补封
+    // Plaintext credentials stored before the upgrade are sealed here
     let sealed = utopia_store::sealing::backfill(&pool).await?;
     if sealed > 0 {
         tracing::info!(rows = sealed, "凭据补封完成");
@@ -153,21 +153,21 @@ async fn main() -> anyhow::Result<()> {
     let search = Arc::new(search_recovery::open(&index_dir)?);
     tracing::info!("全文索引就绪: {}", index_dir.display());
 
-    // **索引落空就自己重建，不给按钮。**
+    // **If the index comes up empty, rebuild it automatically; no button is offered.**
     //
-    // 索引是独立于数据库的一份文件：换机器、卷没挂上、目录损坏，任何一样都会让它
-    // 落空。而落空之后检索只会静默回零——界面上看不出任何异样，用户会以为是
-    // 「确实没有匹配」。这种失败不该靠人先意识到再去点一个按钮。
+    // The index is a file separate from the database: changing machines, a volume not mounted, or a corrupted directory, any of these makes it
+    // come up empty. And once it is empty, retrieval silently returns zero: nothing looks wrong on the screen, and users think it is
+    // "genuinely no match". This kind of failure should not rely on a person noticing and then pressing a button.
     //
-    // 判据是「库里有分块而索引空着」，不是「数目对不对得上」：后者在正常运行中
-    // 也会短暂不等（一篇文档正在索引），拿它当判据会让每次启动都重建一遍。
+    // The criterion is "the database has chunks but the index is empty", not "the counts do not match": the latter also briefly disagrees during normal running
+    // (a document is being indexed), and using it as the criterion would rebuild on every start.
     reindex_if_empty(&pool, &search, &index_dir).await;
 
-    // JWT 密钥：环境变量优先（轮换、多实例显式对齐走这条），否则用库里那条；
-    // 库里也没有就现生成一条存进去。生成放在这里而不是 store 里，是因为
-    // OsRng 已经随 argon2 在 server 的依赖里，store 不必为此多一个依赖。
-    // 空串按未设置处理：compose 里写 ${UTOPIA_JWT_SECRET:-} 时环境变量是存在但为空的，
-    // 照字面读会得到 Some("")——一个所有部署都相同的空密钥，比默认值更糟。
+    // JWT secret: the environment variable takes precedence (rotation and explicit alignment across instances go this way); otherwise use the one in the database;
+    // if the database has none either, generate one now and store it. Generation is here rather than in the store because
+    // OsRng is already in the server's dependencies alongside argon2, so the store need not add a dependency for it.
+    // An empty string is treated as unset: with `${UTOPIA_JWT_SECRET:-}` in compose the variable exists but is empty, and read literally it
+    // would give Some(""), an empty secret shared by every deployment, which is worse than a default.
     let jwt_secret = match cfg.jwt_secret.clone().filter(|s| !s.trim().is_empty()) {
         Some(s) => s,
         None => {
@@ -183,20 +183,20 @@ async fn main() -> anyhow::Result<()> {
     api::oidc_routes::warn_about_password_login(&state);
     api::oidc_routes::warn_about_scopes();
 
-    // worker 并发数：系统设置持久化，启动时装载；运行中经同一 AtomicUsize 热调
+    // Worker concurrency: system settings are persisted and loaded at startup; at runtime they are adjusted live through the same AtomicUsize
     let n = utopia_store::access::worker_concurrency(&pool)
         .await
-        // 与 `deployment_settings.worker_concurrency` 的列缺省保持一致（迁移 0011）。
-        // access::worker_concurrency 自己已经在「行不存在」时兜底到 64；这里再加一层
-        // 是因为**函数本身报错**（DB 连不上、查询超时）也会落进来——这条路径上
-        // 系统正在降级，让它跑 64 而不是 32 是迁移 0011 想避免的那个并发不足。
+        // Kept consistent with the column default of `deployment_settings.worker_concurrency` (migration 0011).
+        // access::worker_concurrency already falls back to 64 when the row does not exist; this extra layer
+        // is because **the function itself erroring** (database unreachable, query timeout) also lands here: on this path
+        // the system is degraded, and running with 64 rather than 32 is the under-concurrency that migration 0011 wanted to avoid.
         .unwrap_or(64);
     state.worker_concurrency.store(
         n.clamp(1, 256) as usize,
         std::sync::atomic::Ordering::Relaxed,
     );
 
-    // 任务分发：新任务类型在这里注册
+    // Task dispatch: new task kinds are registered here
     let worker_state = state.clone();
     tokio::spawn(utopia_store::jobs::run_worker(
         pool,
@@ -204,11 +204,11 @@ async fn main() -> anyhow::Result<()> {
         move |job| {
             let st = worker_state.clone();
             async move {
-                // 任务失败时看一眼是不是模型端点连不上——那是系统级故障，
-                // 而现在它只会留在 jobs.last_error 里，没有任何界面看得到
+                // When a task fails, check whether the model endpoint is unreachable: that is a system-level failure,
+                // yet it would only stay in jobs.last_error, which no screen shows
                 //
-                // 没救的失败在这里挂上标记，队列据此不再退避重试（#195）：
-                // 判据在这一侧，因为 `utopia-store` 看不见 LLM 的错误类型
+                // An unrecoverable failure is marked here, so the queue stops backing off and retrying it (#195):
+                // the criterion is on this side, because `utopia-store` cannot see the LLM's error types
                 let result = dispatch(&st, &job)
                     .await
                     .map_err(|e| match alerting::hopeless(&e) {
@@ -225,7 +225,7 @@ async fn main() -> anyhow::Result<()> {
 
     alerting::spawn_retention_sweep(state.clone());
 
-    // 定时摄入调度器：每分钟扫一次到期来源，入队同步任务
+    // Scheduled ingestion scheduler: scan due sources once a minute, enqueue sync tasks
     let sched_state = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -247,14 +247,14 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 定时推理调度器（0002 R1）。
+    // Scheduled inference scheduler (0002 R1).
     //
-    // **必须定时，不能只靠手点**：事实是持续变的——每篇文档抽取都在加边——而
-    // 派生只在跑的那一刻算。不定时的话，下一篇文档进来之后图上的派生就是缺的，
-    // 而这种缺失界面上看不出来（不是错，是新链没推）。
+    // **It must run on a schedule, not only when pressed by hand**: facts keep changing (every document's extraction adds edges), and
+    // derivations are computed only at the moment they run. Without a schedule, after the next document comes in the derivations on the graph are missing,
+    // and this kind of gap is invisible on screen (it is not an error; the new chain simply was not inferred).
     //
-    // 与来源同步共用一个节拍：每分钟扫一遍，到期的入队。真正的推导在任务里跑，
-    // 不在这个循环里——一个大库全量重推可能要几秒，卡在调度循环里会拖住别的库
+    // Shares one beat with source sync: scan every minute and enqueue the due ones. The real derivation runs in the task,
+    // not in this loop: a full re-derivation of a large library may take seconds, and blocking the scheduling loop would hold up other libraries
     let infer_state = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -267,9 +267,9 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 治理的定时扫描（0025）：开关开着、队列里还有 agent 没看过的对的库，每小时排一轮。
-    // 抽取结束与人的裁决各自即时排；这一轮兜的是失败重试耗尽之后留下的积压，
-    // 所以是小时不是分钟——模型挂了的时候，每分钟撞一次没有意义
+    // Scheduled governance scan (0025): when the switch is on and the queue still has libraries with correct data that the agent has not looked at, queue a round every hour.
+    // Extraction completion and human rulings each queue immediately; this round catches the backlog left after failure retries are exhausted,
+    // so it is hourly rather than per minute: when the model is down, hitting it every minute is pointless
     let gov_state = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -295,7 +295,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 衰减的每日扫描（RC-003）：打开了衰减的源，活文档超过 max_items 的，排一个淘汰任务
+    // Daily decay sweep (RC-003): for sources with decay on, where live documents exceed max_items, queue an eviction task
     let decay_state = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(86_400));
@@ -321,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 被取代的分块留不留向量由部署决定：不设 `UTOPIA_SUPERSEDED_VECTOR_DAYS` 就什么都不排
+    // Whether superseded chunks keep their vectors is decided by the deployment: without `UTOPIA_SUPERSEDED_VECTOR_DAYS` nothing is queued
     if let Some(days) = cfg.superseded_vector_days {
         let prune_state = state.clone();
         tokio::spawn(async move {
@@ -355,8 +355,8 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("Utopia 服务启动于 http://{}", cfg.bind_addr);
 
-    // 浏览器可能把 localhost 解析为 ::1（IPv6）——配置为 IPv4 地址时补一个同端口的
-    // IPv6 回环监听，避免「找不到 localhost」。绑定失败（端口被占/无 IPv6）仅告警。
+    // Browsers may resolve localhost to ::1 (IPv6): when the configured address is IPv4, add an IPv6 loopback listener on the same port,
+    // to avoid "cannot find localhost". If binding fails (port in use or no IPv6), only warn.
     if let Ok(addr) = cfg.bind_addr.parse::<std::net::SocketAddrV4>() {
         let v6_addr = format!("[::1]:{}", addr.port());
         match tokio::net::TcpListener::bind(&v6_addr).await {
@@ -374,17 +374,17 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // with_connect_info：审计需要真实的 TCP 对端地址。直连部署时它是唯一真值——
-    // X-Forwarded-For 那些头此时并不存在，且本就不可轻信。
+    // with_connect_info: the audit needs the real TCP peer address. For direct deployments it is the only true value:
+    // the X-Forwarded-For headers do not exist in that case, and are not to be trusted anyway.
     let svc = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
     axum::serve(listener, svc).await?;
     Ok(())
 }
 
-/// 索引空着而库里有东西 → 从库里重建一遍。
+/// Index empty while the database has content: rebuild it from the database.
 ///
-/// 失败只告警不阻断启动：检索退化成「暂时搜不到」，而整个服务起不来是更坏的
-/// 结果。日志里那一行说清了发生什么，下次重启还会再试。
+/// Failure only warns and does not block startup: retrieval degrades to "temporarily unsearchable", and the whole service failing to start is the worse
+/// outcome. The line in the log says what happened; the next restart will try again.
 async fn reindex_if_empty(pool: &sqlx::PgPool, search: &SearchIndex, index_dir: &std::path::Path) {
     if !search.is_empty() {
         return;
@@ -409,10 +409,10 @@ async fn reindex_if_empty(pool: &sqlx::PgPool, search: &SearchIndex, index_dir: 
     }
 }
 ///
-/// 任务分发：新任务类型在这里注册。
+/// Task dispatch: new task kinds are registered here.
 ///
-/// 单拎成函数而不是内联在闭包里，是为了让失败**有一个统一的出口**——
-/// 上面那层要在每次失败时看一眼错误链，内联的话每个分支都得自己记得。
+/// Pulled out into a function rather than inlined in the closure, so that failure has **one uniform exit**:
+/// the layer above needs to look at the error chain on every failure, and inlined, every branch would have to remember to do it.
 async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow::Result<()> {
     match job.kind.as_str() {
         "noop" => {
@@ -436,8 +436,8 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
             mappings::explore_mappings(st, kb_id).await
         }
-        // 定时重推（0002 R1）。**先记时间再推**——推导抛错时也不该让这个库
-        // 在下一分钟被重新扫起来，那会变成一个每分钟失败一次的循环
+        // Scheduled re-derivation (0002 R1). **Record the time first, then derive**: even if derivation errors, this library should not
+        // be rescheduled the next minute, which would become a loop that fails once a minute
         "materialize_inferences" => {
             let kb_id: Uuid = job
                 .payload
@@ -447,9 +447,9 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
             utopia_store::reasoning::mark_inference_ran(&st.pool, kb_id).await?;
             let report = utopia_store::reasoning::materialize(&st.pool, kb_id).await?;
-            // **到点对比**：`materialize` 本来就在拿这一轮算出来的对上库里现有的，
-            // 所以「对比」不是新机制。这里只把那次对比的结果留下来给人看——
-            // 没有变化时不写，免得台账被每小时一条「什么都没变」淹掉
+            // **Compare at the due time**: `materialize` already compares what this round computed against what the library holds,
+            // so "comparison" is not a new mechanism. Here we only keep that comparison's result for people to see:
+            // not written when nothing changed, so the ledger is not flooded by one "nothing changed" entry an hour
             if report.inserted > 0 || report.invalidated > 0 {
                 let _ = utopia_store::audit::record(
                     &st.pool,
@@ -470,7 +470,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
             }
             Ok(())
         }
-        // RC-010：删除、撤销删除留下的见证重算，在来源行之外的事务里做
+        // RC-010: the witness recomputation left by deletion and undo-deletion is done in a transaction outside the source row
         "reattest_facts" => {
             let kb_id: Uuid = job
                 .payload
@@ -488,9 +488,9 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
             let id = payload_document_id(&job.payload)?;
             extraction::extract_document(st, id, payload_proposer(&job.payload)).await
         }
-        // 本体向量索引：**后台建，不卡请求**。
-        // 一份 965 类的本体首次要嵌 2600 行，六到八分钟；放在
-        // 交互请求里就是导入完之后第一个用到检索的人干等
+        // Ontology vector index: **built in the background, not blocking requests**.
+        // A first embedding of an ontology with 965 classes takes 2600 rows, six to eight minutes; if placed
+        // in an interactive request, the first person to use retrieval after the import would wait
         "embed_ontology" => {
             let kb_id: Uuid = job
                 .payload
@@ -500,8 +500,8 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
             ontology_index::refresh(st, kb_id).await.map(|_| ())
         }
-        // 向量索引（0035 / #512）：第一次写下某个维度的向量时排的，事务外
-        // CONCURRENTLY 建。维度超过 HNSW 上限的到此为止，重试也建不出来
+        // Vector index (0035 / #512): queued when the first vector of some dimension is written; built CONCURRENTLY outside the transaction.
+        // Dimensions above the HNSW limit stop here: retrying cannot build them either
         "build_vector_index" => {
             let target = job
                 .payload
@@ -535,11 +535,11 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
             );
             Ok(())
         }
-        // 时间提及按文档解析（0045）：抽完一篇排一个，重排一次就是重新解析
-        // 类别词绑到类（0044 对齐的第一片）：库级任务，抽完一篇排一个，本体改了再排
-        // 人定了一条短语签名，随判定同事务排下的重算（0051）。试锁不等：拿不到就
-        // 挂 `Deferred` 十秒后再来，占着连接排队的是别人的池子；拿到了就是一次完整
-        // 的按绑定重算，读的是当前绑定而不是判定时的载荷
+        // Time mentions are parsed per document (0045): queue one after each extraction; re-queuing it means re-parsing
+        // Category words bind to classes (first slice of 0044 alignment): a library-level task, queued once per extracted document; re-queued when the ontology changes
+        // The recomputation queued together with a short-phrase signature the person decided, in the same transaction as the decision (0051). Try-lock without waiting: if it cannot get the lock it
+        // parks as `Deferred` and retries in ten seconds, so the pool is not held by a connection queuing for someone else; if it gets it, it is one complete run
+        // recomputes by binding, reading the current binding rather than the payload at decision time
         utopia_store::phrase_bindings::MATERIALIZE_KIND => {
             let kb_id: Uuid = job
                 .payload
@@ -567,7 +567,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                         .await;
                         st.emit_graph(kb_id);
                     }
-                    // 有新行才值得勘误看一眼；没新行的重算不排
+                    // Only new rows warrant a look from the correction agent; a recompute with no new rows is not queued
                     if typed.added > 0 {
                         utopia_store::jobs::enqueue_unless_queued(
                             &st.pool,
@@ -576,7 +576,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                         )
                         .await?;
                     }
-                    // 队列卡片按绑定的状态显示，重算完了才算这条判定「落地」
+                    // The queue card shows status by binding; only once the recompute is done is this decision "landed"
                     st.emit_review(kb_id);
                     Ok(())
                 }
@@ -585,7 +585,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 )),
             }
         }
-        // 已批准的蕴含规则要的读数（0044 决定 3 第五片）：问模型、填缓存、排物化
+        // The readings the approved entailment rule needs (0044 decision 3, fifth slice): ask the model, fill the cache, queue materialisation
         utopia_store::implication_rules::READ_KIND => {
             let kb_id: Uuid = job
                 .payload
@@ -595,7 +595,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
             implication::read_phrases(st, kb_id).await
         }
-        // 勘误 agent（0044 决定 7）：物化出了新行的文档，按文档复审类型化图谱
+        // Correction agent (0044 decision 7): for documents whose materialisation produced new rows, re-review the typed graph per document
         utopia_store::errata::JOB_KIND => {
             let kb_id: Uuid = job
                 .payload
@@ -612,7 +612,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
                 .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
-            // 自己再排的那份带着第几次；文档、建类排的没有这一项
+            // The attempt count is carried by the job queued by itself; documents and class creation queue without this field
             let reask = job
                 .payload
                 .get("reask")
@@ -621,7 +621,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .unwrap_or(0);
             type_alignment::align_types_reasking(st, kb_id, reask).await
         }
-        // 关系短语按签名绑到属性（0044 对齐的第二片）：类别词绑完排一个，属性改了再排
+        // Relation phrases bind to attributes by signature (second slice of 0044 alignment): queue one after category words finish binding; re-queue when attributes change
         "align_phrases" => {
             let kb_id: Uuid = job
                 .payload
@@ -629,7 +629,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
                 .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
-            // 自己再排的那份带着第几次；文档、本体、类别词对齐排的没有这一项
+            // The attempt count is carried by the job queued by itself; the document, ontology and category-word alignment queues do not have this field
             let reask = job
                 .payload
                 .get("reask")
@@ -716,7 +716,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
                 .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
-            // 测量用：payload 里 glossary = full 时每批送全词表（bench/agent.mjs）
+            // For measurement: when the payload's glossary = full, the full glossary is sent with each batch (bench/agent.mjs)
             let full = job.payload.get("glossary").and_then(|v| v.as_str()) == Some("full");
             ontology_agent::propose_with(st, kb_id, full).await
         }
@@ -759,8 +759,8 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
     }
 }
 
-/// 数据目录下的封印钥匙：有就读，没有就生成一把写进去（unix 下 0600）。
-/// 读出来解析不了就报错停下——静默生成一把新的会让库里已封的凭据全部打不开
+/// The secret key under the data directory: read it if present; if absent, generate one and write it there (0600 on unix).
+/// If what is read cannot be parsed, error and stop: silently generating a new key would make every sealed credential in the database unopenable
 fn secret_key_file(data_dir: &std::path::Path) -> anyhow::Result<[u8; 32]> {
     let path = data_dir.join("secret.key");
     if path.exists() {

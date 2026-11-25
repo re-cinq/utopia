@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use wiremock::{matchers::method, matchers::path, Mock, MockServer, Request, ResponseTemplate};
 
 fn paced(server: &MockServer) -> Paced {
-    // 本地 mock 不走开发机的系统代理。
+    // The local mock does not go through the development machine's system proxy.
     let mut http = Paced::new(reqwest::Client::builder().no_proxy().build().unwrap());
     http.api_root = server.uri();
     http
@@ -248,7 +248,7 @@ async fn block_budget_is_shared_and_stops_before_any_further_request() {
         Some("root-next"),
     )
     .await;
-    // 无文字容器也占一块；子层第五页的第 99 块耗尽整页预算。
+    // A container with no text still takes a slot; the 99th block on the child layer's fifth page exhausts the whole page budget.
     for page in 0..5 {
         let cursor = format!("child-{page}");
         let next = format!("child-{}", page + 1);
@@ -391,7 +391,7 @@ async fn a_page_whose_body_cannot_be_read_is_left_out_and_the_others_still_come_
     .await;
 
     let (pages, truncated, unread) = fetch_pages(&mut paced(&server), None).await.unwrap();
-    // 读坏的那一页不带着半截正文或只有标题回来，另一页不受它连累
+    // A page that failed to read does not come back with a half-written body or just a title, and the other page is not dragged down by it
     assert_eq!(pages.len(), 1);
     assert_eq!(pages[0].external_key, "notion://other");
     assert!(pages[0].text.contains("Economy class under six hours"));

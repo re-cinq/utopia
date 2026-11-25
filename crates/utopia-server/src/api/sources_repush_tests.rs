@@ -1,5 +1,5 @@
-//! 推来的条目重推之后（RC-006）：新版本抽取完，它不再陈述的事实闭合；还有别的条目在陈述
-//! 的那一条留着。走真流程：推、处理、抽取、再推、再抽取。
+//! Re-pushing pushed entries (RC-006): once the new version is extracted, facts it no longer states are closed; a fact that another entry still states is kept.
+//! Walks the real flow: push, process, extract, re-push, extract again.
 use super::statements_tests::Fixture;
 use axum::http::StatusCode;
 use serde_json::{json, Value};

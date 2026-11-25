@@ -1,7 +1,7 @@
-//! 个人访问令牌的发放与撤销（0014）。
+//! Issuing and revoking personal access tokens (0014).
 //!
-//! **走的是账户级路由,不是知识库级**——令牌属于人,而人可以进好几个库。
-//! 哪几个库归令牌自己的 `kb_ids` 管,那是收窄,不是授权。
+//! **Uses the account-level route, not the knowledge-base level**: a token belongs to a person, and a person can enter several KBs.
+//! Which KBs a token is limited to is decided by its own `kb_ids`. That narrows access; it does not grant it.
 
 use axum::extract::{Path, State};
 use axum::Json;
@@ -18,21 +18,21 @@ use crate::state::AppState;
 #[derive(Deserialize)]
 pub struct IssueReq {
     pub name: String,
-    /// read | write。缺省只读——要让 agent 写进账本,得显式勾
+    /// read | write. Defaults to read-only: to let an agent write to the ledger you must tick it explicitly
     #[serde(default = "default_scope")]
     pub scope: String,
-    /// 缺省 = 这个人能进的全部库
+    /// Default = every KB this person can enter
     #[serde(default)]
     pub kb_ids: Option<Vec<Uuid>>,
-    /// 多少天后过期。缺省 90 天;显式给 0 表示不过期
+    /// How many days until it expires. Default 90 days; an explicit 0 means it never expires
     #[serde(default = "default_days")]
     pub expires_in_days: i64,
 }
 fn default_scope() -> String {
     "read".into()
 }
-/// 90 天。**不过期是能选的,但不是缺省**——一枚配在别人笔记本上的钥匙,
-/// 忘了它存在是常态
+/// 90 days. **Never expiring is available as an option, but it is not the default**: a key set up on someone else's laptop
+/// is often forgotten about
 fn default_days() -> i64 {
     90
 }
@@ -60,7 +60,7 @@ fn token_expires_at(now: DateTime<Utc>, expires_in_days: i64) -> AppResult<Optio
     Ok(Some(expires_at))
 }
 
-/// 发一枚。**明文只在这一次的响应里出现**,之后库里只有哈希。
+/// Issue one. **The plaintext appears only in this one response**; afterwards the store holds only the hash.
 pub async fn issue(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -86,7 +86,7 @@ pub async fn issue(
         json!({ "name": view.name, "scope": view.scope }),
     )
     .await;
-    // `token` 这个字段只在这里出现一次。列表接口永远给不出它
+    // The `token` field appears only here. The list endpoint can never return it
     Ok(Json(json!({ "token": plain, "info": view })))
 }
 

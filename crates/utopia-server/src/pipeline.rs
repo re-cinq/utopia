@@ -1,5 +1,5 @@
-//! 摄入管道：parse → chunk → 全文索引 → embedding（可选）→ ready。
-//! 每步幂等：重跑会先清掉旧分块与旧索引条目。
+//! Ingestion pipeline: parse → chunk → full-text index → embedding (optional) → ready.
+//! Each step is idempotent: a re-run first clears the old chunks and old index entries.
 
 use crate::llm_util;
 use crate::state::AppState;
@@ -9,8 +9,8 @@ use utopia_llm::LlmClient;
 use utopia_store::documents::{self, ProcessingInput};
 use uuid::Uuid;
 
-/// 这份文档的来源要不要抽取。没有来源的文档（直接上传、记忆片段）照旧抽。
-/// 文档所属来源的种类；没有来源（上传）为 None。抽取那边也要问同一个问题（0054）
+/// Whether this document's source should be extracted. Documents with no source (direct uploads, memory fragments) are still extracted as before.
+/// The kind of source the document belongs to; None for no source (upload). Extraction asks the same question (0054)
 pub(crate) async fn source_kind(
     state: &AppState,
     source_id: Option<Uuid>,
@@ -32,19 +32,19 @@ async fn source_extracts(state: &AppState, source_id: Option<Uuid>) -> anyhow::R
         .extracts())
 }
 
-/// 每次送多少条去嵌入。
+/// How many items to send to embedding each time.
 ///
-/// 与 ontology_index 的 64 不同，这里没量过，先不动：那边的注释说批大小要拿真实文本量，
-/// 块文本比类标签长得多，16 未必错。并发与批大小两个旋钮别在一刀里同时拧，否则结果读不出来。
+/// Unlike ontology_index's 64, this has not been measured, so leave it alone: that code's comment says batch size has to be measured with real text;
+/// chunk text is much longer than class labels, so 16 may not be wrong. Do not turn the concurrency and batch-size knobs in one go, or the result cannot be read.
 const EMBED_BATCH: usize = 16;
 
-/// 同时在飞的嵌入批数上限（#513）。
+/// Cap on embedding batches in flight at once (#513).
 ///
-/// 嵌入模型的并发闸门（`model_concurrency`，缺省 10）是部署级共享的：本体补齐
-/// （ontology_index，上限 4）、类型消解、每次提问的查询嵌入都走它。摄入是用户等着看的
-/// 前台活，比后台补齐更有资格用闸门；但它也是能一次带来上千个分块的那一路，不设上限
-/// 就把补齐、消解、检索全饿死——ontology_index 记着一次 `join_all` 把闸门占死、五篇文档
-/// 卡在 embedding 十五分钟的事故。4 与补齐相同：两路同时跑合计 8，闸门还剩 2 给别人。
+/// The embedding model's concurrency gate (`model_concurrency`, default 10) is shared across the deployment: ontology filling
+/// (ontology_index, cap 4), type resolution and per-question query embeddings all go through it. Ingestion is foreground work the user waits to see,
+/// so it has a stronger claim on the gate than background filling; but it is also the path that can bring in thousands of chunks at once, and without a cap
+/// it starves filling, resolution and retrieval alike. ontology_index recorded an incident where one `join_all` held the gate and five documents
+/// sat in embedding for fifteen minutes. 4 is the same as filling: both paths together total 8, leaving the gate 2 for others.
 const EMBED_JOBS: usize = 4;
 
 pub async fn process_document(state: &AppState, document_id: Uuid) -> anyhow::Result<()> {
@@ -52,7 +52,7 @@ pub async fn process_document(state: &AppState, document_id: Uuid) -> anyhow::Re
     let doc = &input.document;
     match run(state, &input).await {
         Ok(()) => Ok(()),
-        // 在等读字的服务读完：文档照旧是 parsing，任务过一会儿再来问
+        // Waiting for the service that reads the characters to finish: the document stays as parsing, and the task comes back to ask later
         Err(e) if utopia_core::is_deferred(&e).is_some() => {
             if documents::processing_is_current(&state.pool, &input).await? {
                 Err(e)
@@ -61,10 +61,10 @@ pub async fn process_document(state: &AppState, document_id: Uuid) -> anyhow::Re
             }
         }
         Err(e) => {
-            // 字要靠模型读、而那种模型没配（0040）：**降级**。文件留着，文档停在 failed
-            // 并记下缺哪一种，报一条库级告警；配上模型会自己重新处理。重试没用——
-            // 模型不会在两分钟里自己配上，所以挂 Terminal。
-            // 转写回来却分不出说话人，跟没配一样对待（决定 5）：换个会标说话人的模型再来
+            // The characters must be read by a model, and that kind of model is not configured (0040): **degrade**. The file is kept, the document stays failed,
+            // and which kind is missing is recorded, with one library-level alert raised; configuring a model reprocesses it by itself. Retrying does not help,
+            // since a model will not get configured on its own within two minutes, so it is parked as Terminal.
+            // A transcript that comes back without speaker labels is treated as if none were configured (decision 5): try again with a model that labels speakers
             let waiting = e
                 .downcast_ref::<utopia_ingest::NeedsReader>()
                 .map(|n| n.reader)
@@ -80,7 +80,7 @@ pub async fn process_document(state: &AppState, document_id: Uuid) -> anyhow::Re
             )
             .await?
             {
-                // 过期模型结果可丢弃，数据库故障仍要让队列看见。
+                // A stale model result can be discarded, but a database failure must still be visible to the queue.
                 if e.is::<sqlx::Error>()
                     || matches!(
                         e.downcast_ref::<utopia_core::AppError>(),
@@ -106,7 +106,7 @@ pub async fn process_document(state: &AppState, document_id: Uuid) -> anyhow::Re
                 return Err(e.context(utopia_core::Terminal));
             }
             state.emit_document(doc.kb_id, document_id);
-            // 读不了的格式（视频、二进制、空文件）换多少次也一样
+            // Formats that cannot be read (video, binary, empty files) fail the same however many times they are tried
             if e.downcast_ref::<utopia_ingest::Unreadable>().is_some() {
                 return Err(e.context(utopia_core::Terminal));
             }
@@ -118,13 +118,13 @@ pub async fn process_document(state: &AppState, document_id: Uuid) -> anyhow::Re
 async fn run(state: &AppState, input: &ProcessingInput) -> anyhow::Result<()> {
     let doc = &input.document;
     let document_id = doc.id;
-    // 排队之后被删了（#268）：墓碑不重建分块、不回索引；清过的连原文都没了
+    // Deleted after being queued (#268): a tombstone does not rebuild chunks or go back into the index; what was purged no longer even has its raw file
     if doc.deleted_at.is_some() {
         tracing::info!(document = %document_id, "skipping a deleted document");
         return Ok(());
     }
 
-    // 1. 解析（CPU 密集，放 blocking 线程）
+    // 1. Parse (CPU-heavy, run on a blocking thread)
     if !documents::set_status_if_current(&state.pool, input, "parsing").await? {
         return Ok(());
     }
@@ -139,16 +139,16 @@ async fn run(state: &AppState, input: &ProcessingInput) -> anyhow::Result<()> {
     let pushed_statements =
         source_kind(state, doc.source_id).await?.as_deref() == Some("statements");
 
-    // 2. 分块 + 入库
+    // 2. Chunk and store
     let (text, pieces, warnings) = match parsed {
         Ok(parsed) => {
             let warnings = parsed.warnings;
-            // 解析出来的正文可能夹着 NUL（PDF 文本层常见），入库之前剥掉（#611）——与记忆
-            // 那条路共用 `utopia_core::without_nul`（#665）。剥必须在算长度、分块之前：之后的
-            // text_len、分块偏移、全文索引、嵌入读的都是这一份，彼此才对得上
+            // Parsed body text may contain NULs (common in PDF text layers); strip them before storing (#611), which the memory
+            // path shares via `utopia_core::without_nul` (#665). The stripping must happen before lengths are computed and before chunking: from then on
+            // text_len, chunk offsets, the full-text index and embedding all read this one copy, so they agree with each other
             let text = utopia_core::without_nul(&parsed.text).into_owned();
-            // 推送来的陈述（0054）：载荷就是契约，整份是一块。分块预算是给模型的注意力
-            // 定的，这条路没有模型读；切开了契约就解析不回来
+            // Statements pushed (0054): the payload is the contract, and the whole thing is one chunk. The chunk budget is set for the model's attention,
+            // and this path has no model reading it; splitting it would make the contract impossible to parse back
             let pieces = if pushed_statements {
                 vec![utopia_ingest::ChunkPiece {
                     seq: 0,
@@ -163,9 +163,9 @@ async fn run(state: &AppState, input: &ProcessingInput) -> anyhow::Result<()> {
             };
             (text, pieces, warnings)
         }
-        // 没有文本层的扫描件、图片：工作区配了版面识别服务就交给它读（0040 第二刀），
-        // 按页分段切块，每块记着页码和框。录音交给会标说话人的转写模型（第三刀），
-        // 每块记着起止时刻和说话人。没配的照旧往上抛，由外面降级
+        // Scanned pages and images without a text layer: if the workspace has a layout-recognition service configured, hand it over (0040 second slice),
+        // chunk by page with the page number and box recorded. Recordings go to the speaker-labelling transcription model (third slice),
+        // each chunk recording its start and end times and speaker. If none is configured, the error is raised as before, and the outside degrades it
         Err(e) => {
             let Some(needs) = e.downcast_ref::<utopia_ingest::NeedsReader>() else {
                 return Err(e);
@@ -199,8 +199,8 @@ async fn run(state: &AppState, input: &ProcessingInput) -> anyhow::Result<()> {
     let Some(chunk_pairs) =
         documents::replace_chunks_if_current(&state.pool, input, &pieces).await?
     else {
-        // 读取期间源文档可能已更新或删除，丢弃过期结果，
-        // 不再改写新任务的索引、状态和抽取队列。
+        // The source document may have been updated or deleted while it was being read: discard the stale result,
+        // and do not rewrite the index, status and extraction queue of a newer task
         tracing::info!(%document_id, "discarding a superseded document read");
         return Ok(());
     };
@@ -217,7 +217,7 @@ async fn run(state: &AppState, input: &ProcessingInput) -> anyhow::Result<()> {
         .await;
     }
 
-    // 3. 全文索引（Tantivy）
+    // 3. Full-text index (Tantivy)
     if !documents::set_status_if_current(&state.pool, input, "indexing").await? {
         return Ok(());
     }
@@ -227,9 +227,9 @@ async fn run(state: &AppState, input: &ProcessingInput) -> anyhow::Result<()> {
     let did = document_id.to_string();
     tokio::task::spawn_blocking(move || search.reindex_document(&kb, &did, &chunk_pairs)).await??;
 
-    // 4. embedding（工作区配置了 embedding 模型才做；没配也算 ready，先享受 BM25 搜索）
-    // statements 单块保留完整 JSON 契约，可能超过 embedding 模型的输入上限；
-    // 确定性抽取不应因此被阻塞（#1375）。
+    // 4. Embedding (done only when the workspace has an embedding model configured; with none it is still ready, and BM25 search is available)
+    // A statements single chunk keeps the full JSON contract, which may exceed the embedding model's input limit;
+    // deterministic extraction should not be blocked by that (#1375)
     if !pushed_statements {
         if let Some((settings, client)) = embedder(settings.as_ref()) {
             if !documents::set_status_if_current(&state.pool, input, "embedding").await? {
@@ -240,14 +240,14 @@ async fn run(state: &AppState, input: &ProcessingInput) -> anyhow::Result<()> {
         }
     }
 
-    // 来源说了不抽取的，到这里为止：可搜、可问，不进图。
+    // Where the source says not to extract, stop here: searchable and askable, but not in the graph
     //
-    // schema 文档就是这一类（0035 决定 7）——它是给问数检索表结构的语料，进抽取的
-    // 结果是抽取器把每个列名当成一个实体（宽表语料上四十个概念实体里二十八个是
-    // 列名，#553）。状态记成 `skipped` 而不是留在 `none`：`none` 在 Library 里读作
-    // 「还没排到」，而它永远不会排到
-    // 两段式：索引就绪后，若配置了对话模型则排队图谱抽取（不阻塞可搜可问）。
-    // 推送来的陈述不问模型（0054），没配也排
+    // Schema documents are this kind (0035 decision 7): they are corpus for data questions to look up table structure, and extraction on them
+    // would have the extractor treat each column name as an entity (on a wide-table corpus, 28 of 40 concept entities were column names, #553).
+    // Status is recorded as `skipped` rather than left as `none`, since `none` reads in the Library as
+    // "not yet reached", and it never would be
+    // Two stages: once the index is ready, if a dialogue model is configured, queue graph extraction (it does not block search and asking).
+    // Statements pushed here do not ask the model (0054), so they are queued even without one
     let graph_status = if !source_extracts(state, doc.source_id).await? {
         Some("skipped")
     } else if pushed_statements || settings.as_ref().is_some_and(|s| s.chat_ready()) {
@@ -273,12 +273,12 @@ async fn run(state: &AppState, input: &ProcessingInput) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 记忆摄入（episodes 快速路径的后半程）：新 episode chunk 补 embedding、
-/// 重建全文索引、触发增量抽取（extracted_at 为空的新 chunk 才会被抽）。
-/// 免解析免分块——episode 落库时已是 chunk。
+/// Memory ingestion (the second half of the fast path for episodes): new episode chunks get embeddings filled,
+/// the full-text index is rebuilt, and incremental extraction is triggered (only new chunks with empty extracted_at get extracted).
+/// No parsing or chunking: an episode is already a chunk when stored.
 ///
-/// `proposer`：说这句话的人，以及经 MCP 时那个 agent。一路传到抽取，落在
-/// `pending_facts.proposed_by` / `proposed_token`（0015、0026）
+/// `proposer`: the person who said this sentence, and, when via MCP, the agent. It is carried all the way to extraction and lands in
+/// `pending_facts.proposed_by` / `proposed_token` (0015, 0026)
 pub async fn memory_ingest(
     state: &AppState,
     document_id: Uuid,
@@ -292,9 +292,9 @@ pub async fn memory_ingest(
     let kb_row = utopia_store::kbs::get(&state.pool, doc.kb_id).await?;
     let settings = utopia_store::settings::get(&state.pool, kb_row.workspace_id).await?;
 
-    // 一句一句嵌，嵌不了的那句留着没有向量，别的照常往下走。日志是一篇越写越长的文档，
-    // 从前所有没向量的块一起嵌、一处出错整个任务失败：一句嵌不了的记忆从此挡在每一句
-    // 新记忆前面，索引不重建、抽取不排队，而 `remember` 照样回「记下了」（#1187）
+    // Embed one sentence at a time: a sentence that cannot be embedded is left without a vector and everything else proceeds. The log is a document that keeps growing;
+    // previously all chunks lacking vectors were embedded together and one error failed the whole task, so a sentence that could not be embedded blocked every
+    // new memory from then on: the index was not rebuilt, extraction not queued, and `remember` still answered "recorded" (#1187)
     if let Some((settings, client)) = embedder(settings.as_ref()) {
         embed_each(state, settings, &client, document_id).await?;
     }
@@ -326,9 +326,9 @@ pub async fn memory_ingest(
     Ok(())
 }
 
-/// 记忆日志的嵌入：每块单独一次请求，失败的只记日志、留着下次再试，返回嵌成了几条。
-/// 与 [`embed_pending`] 相反的取舍——那边一批错位会把向量写到别人身上，所以整篇失败；
-/// 这里一次一条，没有错位可言，而一条失败不该连累后来的
+/// Embedding for the memory log: one request per chunk; a failure only logs and is left to retry next time; returns how many were embedded.
+/// The opposite trade-off from [`embed_pending`]: there a misaligned batch would write vectors onto other chunks, so the whole document fails;
+/// here it is one at a time, with no misalignment possible, and one failure should not drag down the later ones
 async fn embed_each(
     state: &AppState,
     settings: &LlmSettings,
@@ -360,24 +360,24 @@ async fn embed_each(
     Ok(done)
 }
 
-/// 工作区配了嵌入模型才有客户端；设置与客户端一起交出去，闸门许可证要按设置取。
+/// A client exists only when the workspace has an embedding model configured; settings and the client are handed out together, since the gate permit must be taken from the settings.
 fn embedder(settings: Option<&LlmSettings>) -> Option<(&LlmSettings, LlmClient)> {
     let s = settings?;
     llm_util::embed_client(s).map(|c| (s, c))
 }
 
-/// 把这篇文档还没有向量的分块全部嵌完，返回嵌了多少条。文档摄入与记忆摄入共用——
-/// 从前两处各抄一份同样的循环，且都是一批等完再发下一批。
+/// Embed all of this document's chunks that still lack a vector; returns how many were embedded. Shared by document ingestion and memory ingestion:
+/// previously each of the two places copied the same loop, and each waited for a batch to finish before sending the next.
 ///
-/// 批与批之间互不依赖（向量按位置配对，只在一批之内），`EMBED_JOBS` 个批次同时在飞，
-/// 每个批次握一张闸门许可证只到自己写完。
+/// Batches do not depend on each other (vectors are paired by position, only within one batch); `EMBED_JOBS` batches are in flight at once,
+/// each holding a gate permit only until it has written its own.
 ///
-/// **数量对不上就整批放弃。** 配对是按位置的，少一条就全体错位，把一条的向量写到另一条
-/// 身上；这种错落库之后再也看不出来——正文还在，向量是别人的。
+/// **If the count does not match, abandon the whole batch.** Pairing is by position: one missing item misaligns everything and writes one item's vector onto another;
+/// once stored this is never visible again: the text is still there, and the vector belongs to someone else.
 ///
-/// **任一批失败整篇失败。** 串行时错误自然一路 unwind；并发下要明确地把它传出去，让调用方
-/// 把文档标成 failed，而不是留它停在 embedding。已经写进去的向量留着，重跑只补缺的
-/// （`chunks_pending_embedding` 只挑 embedding 为空的）。
+/// **If any batch fails, the whole document fails.** When serial, the error unwinds naturally; under concurrency it must be passed out explicitly, so that the caller
+/// marks the document failed rather than leaving it stuck in embedding. Vectors already written stay; a re-run only fills the gaps
+/// (`chunks_pending_embedding` picks only those with empty embeddings).
 async fn embed_pending(
     state: &AppState,
     settings: &LlmSettings,
@@ -385,8 +385,8 @@ async fn embed_pending(
     input: &ProcessingInput,
 ) -> anyhow::Result<usize> {
     let pending = documents::chunks_pending_embedding(&state.pool, input.document.id).await?;
-    // 批次先切成拥有的数据：借来的切片捕进并发驱动的 future 过不了 Send 边界
-    //（ontology_index 里同一句话）
+    // Batches are first turned into owned data: borrowed slices captured into a concurrently driven future cannot cross the Send boundary
+    //(the same point as in ontology_index)
     let batches: Vec<Vec<(Uuid, String)>> =
         pending.chunks(EMBED_BATCH).map(<[_]>::to_vec).collect();
     let mut batches = stream::iter(batches)

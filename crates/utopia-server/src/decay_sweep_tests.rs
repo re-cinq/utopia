@@ -1,9 +1,9 @@
-//! 每日扫描把超出容量的源淘汰回去（RC-003），打在真库上。
+//! The daily sweep evicts over-capacity sources back down (RC-003), run against the real database.
 //!
-//! 要钉住的行为：分最低的文档被删掉（可恢复）、从全文索引里拿掉，留下的原样，
-//! 并记一笔无人操作的审计；没超出的源什么都不动。
+//! Behaviour pinned down: the lowest-scoring document is deleted (recoverable) and removed from the full-text index, the rest are left as they are,
+//! and an unattended audit entry is recorded; sources that are not over capacity are left untouched.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failing without `UTOPIA_DATABASE_URL`. Creates and drops its own database; never touches an existing one.
 
 use std::sync::Arc;
 use uuid::Uuid;

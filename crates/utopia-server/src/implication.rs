@@ -1,7 +1,7 @@
-//! 蕴含规则在服务端的两段活（0044 决定 3 第五片）：对齐结束时向模型提规则；
-//! `read_phrases` 任务把已批准规则要的读数算进缓存，然后排物化。
+//! Two server-side jobs for implication rules (0044 decision 3, fifth slice): at the end of alignment, propose rules to the model;
+//! the `read_phrases` job adds the readings the approved rules need to the cache, then queues materialization.
 //!
-//! 物化本身不调模型（`utopia_store::materialize`），缓存没填上的读数那一轮就不算。
+//! Materialization itself does not call the model (`utopia_store::materialize`); a round whose readings are not yet in the cache is skipped.
 
 use std::collections::HashMap;
 use utopia_core::models::RelationTypeView;
@@ -21,7 +21,7 @@ use crate::state::AppState;
 
 const BATCH: usize = 12;
 
-/// 一次提规则的输入：签名（带它绑到的属性与候选）和类别词（带候选）。
+/// Input for one rule proposal: the signature (with the properties and candidates it binds to) and the category words (with their candidates).
 pub struct RuleAsk<'a> {
     pub phrase: Option<&'a PhraseSignature>,
     pub kind_word: Option<&'a KindWordSignature>,
@@ -30,8 +30,8 @@ pub struct RuleAsk<'a> {
     pub basis: &'a str,
 }
 
-/// 向模型提规则，把答案落成提案（要人批）或代理的驳回（什么也不蕴含，记下免得再问）。
-/// 返回 (提案数, 失败批次)。候选为空的形状不问
+/// Propose rules to the model, turning the answers into proposals (for a person to approve) or the agent's rejections (nothing implied; recorded so it is not asked again).
+/// Returns (number of proposals, failed batches). A shape with no candidates is not asked about
 pub async fn propose_rules(
     state: &AppState,
     kb_id: Uuid,
@@ -49,7 +49,7 @@ pub async fn propose_rules(
     };
     let (mut proposed, mut failed) = (0usize, 0usize);
     let asks: Vec<&RuleAsk<'_>> = asks.iter().filter(|a| !a.candidates.is_empty()).collect();
-    // 批与批并行（与短语对齐同一条理由：串着等模型想 20 回就是十分钟）
+    // Batches run in parallel (same reason as phrase alignment: waiting on the model one after another for 20 rounds is ten minutes)
     {
         use futures_util::StreamExt;
         let (keys_of, by_key) = (&keys_of, &by_key);
@@ -181,8 +181,8 @@ pub async fn propose_rules(
                     }
                 }
                 None => {
-                    // 「什么也不蕴含」也要落下来，不然每轮都问。落成代理驳回的一行：
-                    // 属性列非空不可，这里记的是形状本身，用签名绑到的属性或第一个候选占位
+                    // "Nothing implied" must also be written down, or it is asked every round. It is written as one row of agent rejection:
+                    // the property column cannot be empty, so the shape itself is recorded here, with a property bound to the signature or the first candidate as the placeholder
                     let placeholder = a
                         .bound_to
                         .and_then(|k| by_key.get(k))
@@ -228,9 +228,9 @@ pub async fn propose_rules(
     Ok((proposed, failed))
 }
 
-/// `read_phrases` 任务：已批准规则要的、缓存里还没有的读数，问一遍模型，落进缓存；
-/// 名字解析成库里的实体（没有就建一个有名字的）；读不出来的也记，别再问。
-/// 填完排一次物化——隐含行在那里算
+/// `read_phrases` job: readings the approved rules need that are not yet in the cache; ask the model once and store them in the cache;
+/// names are resolved to entities in the KB (creating a named one if none exists); unreadable ones are also recorded so they are not asked again.
+/// After filling, queue one materialization pass, where implied rows are computed
 pub async fn read_phrases(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
     let pool = &state.pool;
     let pending = implication_rules::pending_readings(pool, kb_id).await?;

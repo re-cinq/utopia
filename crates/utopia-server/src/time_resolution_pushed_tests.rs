@@ -1,8 +1,8 @@
-//! 推送的陈述把 `when` / `ended` 写成完整日期或带区时刻时，`resolve_time` 自己读（#1089，
-//! 0054 的悬而未决那条的落点）：不问模型，没有对话模型也照常收工。
+//! A pushed statement writes `when` / `ended` as a full date or a timestamp with a zone, and `resolve_time` reads it itself (#1089,
+//! the landing point of the open question in 0054): no model is asked, and the task finishes normally even without a chat model.
 //!
-//! 与 `time_context_tests.rs` 同一个做法：脚本化的模型端点、真库，
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Same approach as `time_context_tests.rs`: scripted model endpoint, real database,
+//! skipped rather than failing without `UTOPIA_DATABASE_URL`. It creates and tears down its own database and never touches an existing one.
 use super::*;
 use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
 use serde_json::{json, Value};
@@ -31,7 +31,7 @@ async fn reply(State(m): State<Model>, Json(body): Json<Value>) -> impl IntoResp
     )
 }
 
-/// 陈述的开放行：(宾语名, valid_from, from 精度, valid_to, to 精度, 起点等级)
+/// Open rows of the statement: (object name, valid_from, from precision, valid_to, to precision, start level)
 type FactRow = (
     String,
     Option<DateTime<Utc>>,
@@ -41,11 +41,11 @@ type FactRow = (
     Option<String>,
 );
 
-/// 一条时间提及：(字, 槽, 等级, 形状)
+/// One time mention: (word, slot, level, shape)
 type MentionRow = (String, String, Option<String>, Option<String>);
 
-/// 一个 `statements` 来源、一篇推送来的文档（块就是载荷）、随需一个脚本化的对话端点。
-/// `replies` 为 None 时不配模型——这正是这条路的测试点
+/// One `statements` source, one pushed document (the chunk is the payload), and optionally one scripted chat endpoint.
+/// `replies` None means no model is configured; that is exactly what this path's tests check
 struct Rig {
     pool: sqlx::PgPool,
     state: AppState,
@@ -72,8 +72,8 @@ impl Rig {
             Uuid::now_v7(),
             Uuid::now_v7(),
         );
-        // 存的文档是 `push_statements` 自己重排出来的那份：身份、日期（有的话），
-        // 再是契约的三个数组，键序固定
+        // The stored document is the one `push_statements` rebuilds itself: identity, date (if any),
+        // then the contract's three arrays, in fixed key order
         let text = serde_json::to_string_pretty(&payload)?;
         sqlx::raw_sql(&format!(
             "INSERT INTO organizations(id,name) VALUES ('{org}','pushed-time');
@@ -125,7 +125,7 @@ impl Rig {
             &dir.path().join("search"),
         )?);
         let state = AppState::new(pool.clone(), &cfg, search, "test-only".into());
-        // 抽取：推送路径按契约解析、不问模型（0054）；这一步把陈述与时间词写进库
+        // Extraction: the push path resolves against the contract and does not ask the model (0054); this step writes the statements and time words into the store
         crate::extraction::extract_document(&state, doc, utopia_core::models::Proposer::default())
             .await?;
         Ok(Some(Self {
@@ -140,7 +140,7 @@ impl Rig {
         }))
     }
 
-    /// 陈述的开放行，按宾语名排
+    /// Open rows of the statement, sorted by object name
     async fn fact_rows(&self) -> anyhow::Result<Vec<FactRow>> {
         Ok(sqlx::query_as(
             "SELECT o.canonical_name, f.valid_from, f.valid_from_precision,
@@ -154,7 +154,7 @@ impl Rig {
         .await?)
     }
 
-    /// 时间提及行：(字、槽、等级、解释形状)
+    /// Time mention rows: (word, slot, level, reading shape)
     async fn mention_rows(&self) -> anyhow::Result<Vec<MentionRow>> {
         Ok(sqlx::query_as(
             "SELECT text, role, grade, shape FROM time_mentions
@@ -220,8 +220,8 @@ fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> Option<DateTime<Utc>>
     Some(Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap())
 }
 
-/// 没有对话模型：载荷写明的日期由代码读成 A 级、字写到的精度，任务照常完成；
-/// 字本身（`"2026-09-23"`）留着当提及与证据
+/// No chat model: the code reads the date the payload states as level A, at the precision the word gives, and the task finishes normally;
+/// the word itself (`"2026-09-23"`) is kept as the mention and evidence
 #[tokio::test]
 async fn a_pushed_date_is_resolved_in_code_without_a_model() -> anyhow::Result<()> {
     let Some(rig) = Rig::new(payload("2026-09-23", None), None).await? else {
@@ -253,8 +253,8 @@ async fn a_pushed_date_is_resolved_in_code_without_a_model() -> anyhow::Result<(
     rig.cleanup().await
 }
 
-/// 带 `Z` 与带偏移的时刻：精度到秒，值是换算成 UTC 的同一刻——偏移不是贴标签，
-/// 是真的进了值
+/// Timestamps with `Z` and with an offset: precision to the second, and the value is the same instant converted to UTC. The offset is not just a label;
+/// it actually goes into the value
 #[tokio::test]
 async fn a_pushed_timestamp_resolves_at_second_precision_and_its_zone_counts() -> anyhow::Result<()>
 {
@@ -283,7 +283,7 @@ async fn a_pushed_timestamp_resolves_at_second_precision_and_its_zone_counts() -
         rig.fact_rows().await?,
         vec![(
             "kitchen table".to_string(),
-            // +08:00 的 08:14:03 是 UTC 的 00:14:03
+            // 08:14:03 at +08:00 is 00:14:03 UTC
             at(2026, 9, 23, 0, 14, 3),
             Some("second".to_string()),
             at(2026, 9, 23, 0, 14, 3),
@@ -294,8 +294,8 @@ async fn a_pushed_timestamp_resolves_at_second_precision_and_its_zone_counts() -
     rig.cleanup().await
 }
 
-/// 字写到哪一级，精度就到哪一级：`T08` 是小时、`T08:14` 是分钟——不替它补
-/// 从没写过的秒（0024）
+/// The precision goes only as far as the word does: `T08` is hour, `T08:14` is minute; do not fill in
+/// seconds it never wrote (0024)
 #[tokio::test]
 async fn the_precision_is_the_one_the_payload_writes() -> anyhow::Result<()> {
     for (when, expected, precision) in [
@@ -326,7 +326,7 @@ async fn the_precision_is_the_one_the_payload_writes() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `when` 加 `ended` 是一个区间：起是 when、止是 ended，各带自己的精度
+/// `when` plus `ended` is an interval: start is `when`, end is `ended`, each with its own precision
 #[tokio::test]
 async fn when_plus_ended_is_an_interval() -> anyhow::Result<()> {
     let Some(rig) = Rig::new(payload("2026-09-20", Some("2026-09-23T08:14:03Z")), None).await?
@@ -348,8 +348,8 @@ async fn when_plus_ended_is_an_interval() -> anyhow::Result<()> {
     rig.cleanup().await
 }
 
-/// 光杆的年与年月不在这一刀里：没有模型时留着 C，任务照常收工；
-/// 自然语言的时间词同样留着 C
+/// Bare years and year-months are not handled in this step: without a model they stay C, and the task still finishes normally;
+/// natural-language time words also stay C
 #[tokio::test]
 async fn a_bare_year_or_year_month_or_words_are_left_for_a_model() -> anyhow::Result<()> {
     for when in ["2026", "2026-09", "last Tuesday"] {
@@ -384,8 +384,8 @@ async fn a_bare_year_or_year_month_or_words_are_left_for_a_model() -> anyhow::Re
     Ok(())
 }
 
-/// 一份载荷两种字：读得动的解成 A，读不动的留 C——一篇文档里两种结局可以并存，
-/// 任务照常收工
+/// One payload, two kinds of word: those that can be read resolve to A, and those that cannot stay C. Both outcomes can coexist in one document,
+/// and the task still finishes normally
 #[tokio::test]
 async fn a_mixed_push_resolves_what_code_can_and_leaves_the_rest() -> anyhow::Result<()> {
     let Some(rig) = Rig::new(payload_two("2026-09-23", "last Tuesday"), None).await? else {
@@ -412,8 +412,8 @@ async fn a_mixed_push_resolves_what_code_can_and_leaves_the_rest() -> anyhow::Re
     rig.cleanup().await
 }
 
-/// 文档里的字长得像 RFC 3339 也不走推送那条路：判据是来源种类，不是字的形状。
-/// 配了模型时这条提及照样送出去问——来源不是 `statements`，代码不代读
+/// A document word that looks like RFC 3339 does not take the push path either: the criterion is the source kind, not the shape of the word.
+/// With a model configured, this mention is still sent to ask: the source is not `statements`, and the code does not read it on its behalf
 #[tokio::test]
 async fn a_document_mention_that_looks_machine_readable_stays_on_the_model_path(
 ) -> anyhow::Result<()> {
@@ -442,7 +442,7 @@ async fn a_document_mention_that_looks_machine_readable_stays_on_the_model_path(
     .await?;
     let absolute = json!({
         "kind": "absolute",
-        // 契约里日期部件用紧凑键（y/m/d/h/min/s）
+        // In the contract, date parts use compact keys (y/m/d/h/min/s)
         "from": {"y": 2026, "m": 9, "d": 23, "h": 8, "min": 14, "s": 3}
     });
     let model = Model {
@@ -456,7 +456,7 @@ async fn a_document_mention_that_looks_machine_readable_stays_on_the_model_path(
                 "t": []
             })
             .to_string(),
-            // 解释：模型照答——走的还是模型这条路，代码没代读
+            // Explanation: the model answers as usual; this still goes through the model path, the code does not read it on its behalf
             json!({ "m": [[0, "point", absolute, "second"]] }).to_string(),
         ])),
         requests: Arc::new(Mutex::new(Vec::new())),
@@ -491,13 +491,13 @@ async fn a_document_mention_that_looks_machine_readable_stays_on_the_model_path(
     crate::extraction::extract_document(&state, doc, utopia_core::models::Proposer::default())
         .await?;
     resolve_document(&state, doc).await?;
-    // 一次抽取 + 一次解释：长得像日期的字照样问过模型；代码没有替它读
+    // One extraction plus one explanation: a word that looks like a date is still asked of the model; the code does not read it for the model
     assert_eq!(
         model.requests.lock().unwrap().len(),
         2,
         "the mention went to the model: source identity, not string shape"
     );
-    // 陈述行：宾语是「the kitchen table」的那条（名字事实等别的行不算）
+    // Statement row: the one whose object is "the kitchen table" (name facts and other rows do not count)
     let row: (Option<DateTime<Utc>>, Option<String>) = sqlx::query_as(
         "SELECT f.valid_from, f.valid_from_grade FROM facts f
            JOIN entities o ON o.id = f.object_id
@@ -520,14 +520,14 @@ async fn a_document_mention_that_looks_machine_readable_stays_on_the_model_path(
     Ok(())
 }
 
-/// 配了模型也一样：代码读得动的提及不送模型（回复里那条 `anchored` 是模型对
-/// 「上周」的答法——它锚在另一条提及上，而那一条正是代码读的）。再跑一次
-/// `resolve_time` 答案不变：时间戳照样不问，「上周」重问一回得的也是同一个位置——
-/// 代码读的没有模型可盖
+/// Even with a model configured, mentions the code can read are not sent to the model (the reply's `anchored` entry is the model's
+/// answer for "last week": it anchors on another mention, and that one is the one the code reads). Running
+/// `resolve_time` again gives the same answer: timestamps are still not asked, and "last week" asked again gets the same position;
+/// what the code reads has no model to override it
 #[tokio::test]
 async fn a_code_resolved_mention_is_never_asked_and_survives_reruns() -> anyhow::Result<()> {
-    // 两个时间词：代码能读的时间戳是第 0 条distinct；「上周」是第 1 条，只有它去问模型。
-    // 模型把它锚在第 0 条上——代码读出的解释与模型给的解释在同一张锚点表里
+    // Two time words: the timestamp the code can read is entry 0 (distinct); "last week" is entry 1, the only one that asks the model.
+    // The model anchors it on entry 0: the code-read explanation and the model's explanation sit in the same anchor table
     let last_week = json!({ "m": [[1, "point", {
         "kind": "anchored", "anchor": {"kind": "mention", "id": 0},
         "offset": {"count": 1, "unit": "week", "direction": "before"}
@@ -535,7 +535,7 @@ async fn a_code_resolved_mention_is_never_asked_and_survives_reruns() -> anyhow:
     .to_string();
     let Some(rig) = Rig::new(
         payload_two("2026-09-23T08:14:03Z", "上周"),
-        // 重跑还会再替「上周」问一次：给它同一个答案
+        // Rerunning would ask the model about "last week" again: give it the same answer
         Some(vec![last_week.clone(), last_week]),
     )
     .await?
@@ -543,14 +543,14 @@ async fn a_code_resolved_mention_is_never_asked_and_survives_reruns() -> anyhow:
         return Ok(());
     };
     resolve_document(&rig.state, rig.doc).await?;
-    // 抽取不问模型（推送路），这里只有一次解释调用：只问「上周」。
-    // 提示词的「提及」一栏里没有那条时间戳——它会作为载荷正文（sentence）出现在
-    // 「上周」的语境里，那是文档自己的字；关键是它没有被当成一条提及去问
+    // Extraction does not ask the model (push path), so there is only one explanation call here: only "last week" is asked.
+    // The prompt's mentions section does not contain that timestamp; it appears as the payload body (sentence) in
+    // the context of "last week", which is the document's own words. The point is that it was not asked as a mention
     let requests = rig.requests().await;
     assert_eq!(requests.len(), 1, "only the interpretation call");
     let asked = requests[0].to_string();
-    // 「提及」一栏只有「上周」这一条被问（- id 只出现一次），时间戳不在其中——
-    // 它会作为载荷正文出现在「上周」的语境里，那是文档自己的字
+    // Only "last week" is asked in the mentions section (- id appears once); the timestamp is not in it:
+    // it appears as the payload body in the context of "last week", which is the document's own words
     assert!(asked.contains("上周"), "asked: {asked}");
     assert_eq!(asked.matches("- id ").count(), 1, "asked: {asked}");
 
@@ -558,7 +558,7 @@ async fn a_code_resolved_mention_is_never_asked_and_survives_reruns() -> anyhow:
     assert_eq!(
         first,
         vec![
-            // 「上周」锚在 9-23T08:14:03Z 上前一周：2026-09-16，日精度，B 级
+            // "last week" anchored on 9-23T08:14:03Z: the week before, 2026-09-16, day precision, level B
             (
                 "counter".to_string(),
                 day(2026, 9, 16),
@@ -578,7 +578,7 @@ async fn a_code_resolved_mention_is_never_asked_and_survives_reruns() -> anyhow:
         ],
         "code-resolved, precision as written"
     );
-    // 重跑：同样的答案；脚本端点有第二份回复等着「上周」
+    // Rerun: same answer; the scripted endpoint has a second reply waiting for "last week"
     resolve_document(&rig.state, rig.doc).await?;
     let requests = rig.requests().await;
     assert_eq!(

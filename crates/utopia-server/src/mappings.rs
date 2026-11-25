@@ -1,13 +1,13 @@
-//! 问数语义映射的 Agentic 探索：读挂载源的 schema + KB 既有概念，让 LLM 提议
-//! "业务概念（Metric/Dimension 实体）→ 数据资产定义" 的映射。
+//! Agentic exploration for semantic mapping of questions: reads the mounted source's schema plus the KB's existing concepts, and has the LLM propose
+//! mappings of the form "business concept (Metric/Dimension entity) -> data asset definition".
 //!
-//! 提议写进 `concept_mappings`（status = proposed）→ Review 页自成一档，
-//! Confirm / Reject 之后 status 变 confirmed，问数只读确认过的那些。
+//! Proposals are written to `concept_mappings` (status = proposed) -> the Review page gets its own tier;
+//! after Confirm / Reject the status becomes confirmed, and question answering reads only the confirmed ones.
 //!
-//! **从前它是一条 0.6 置信的 `mapped_to` 事实**,借「低置信事实」那一档露面。
-//! 搬出来的理由见 0011:它不是关于世界的断言,是配置——而「确认」这个动作
-//! 当时是 `UPDATE facts SET confidence = 1.0`,原地改一张不许原地改的表。
-//! agent 只提议，口径生效权在人——与消解"宁分勿合"同一哲学。
+//! **Previously it was a 0.6-confidence `mapped_to` fact**, surfacing through the "low-confidence fact" tier.
+//! The reason for moving it out is in 0011: it is not an assertion about the world, it is configuration -- and the "confirm" action then
+//! was `UPDATE facts SET confidence = 1.0`, editing in place a table that must never be edited in place.
+//! The agent only proposes; the authority to make a mapping take effect rests with a person -- the same philosophy as resolution's "split rather than merge when in doubt".
 
 use crate::llm_util;
 use crate::state::AppState;
@@ -16,17 +16,17 @@ use uuid::Uuid;
 
 const MAX_SCHEMA_CHARS: usize = 12_000;
 
-/// schema 文本开头那一句图例：列行里的方括号是什么
+/// The legend line at the start of the schema text: what the square brackets in column rows mean
 const COLUMN_MARKERS: &str =
     "Column markers: [PK] single-column primary key; [FK→schema.table] foreign key to that table.
 ";
 
-/// schema 文本里的一列：`  名字 类型 [PK, FK→schema.table] -- 注释`。
+/// One column in the schema text: `  name type [PK, FK→schema.table] -- comment`.
 ///
-/// 键标记放在类型后面、注释前面，用方括号：`-- ` 已经是注释的分隔，写成 `-- PK`
-/// 就与一条内容恰好是「PK」的注释分不开。主键又是外键（一对一的扩展表）两个都标。
-/// 可空不写进来：宽表上几乎每列都是 NOT NULL，每列多十几个字符会让
-/// `MAX_SCHEMA_CHARS` 装下的列明显变少，而两个提示词都用不到它（#502）
+/// Key markers go after the type and before the comment, in square brackets: `-- ` already separates the comment, so writing `-- PK`
+/// would be indistinguishable from a comment whose content happens to be "PK". A primary key that is also a foreign key (a one-to-one extension table) gets both marked.
+/// Nullability is not written in: on a wide table almost every column is NOT NULL, and an extra dozen-plus characters per column would make
+/// fewer columns fit in `MAX_SCHEMA_CHARS`, while neither prompt uses it (#502)
 fn column_line(c: &crate::query_engine::SchemaColumn) -> String {
     let mut marks = Vec::new();
     if c.is_primary_key {
@@ -52,22 +52,22 @@ fn column_line(c: &crate::query_engine::SchemaColumn) -> String {
     )
 }
 
-/// 一轮允许提几条口径。
+/// Maximum number of mappings proposed per round.
 ///
-/// **上限跟着 schema 的大小走。** 写死的 12 对一个三张表的小库绰绰有余，
-/// 对一张八十列的宽表就是覆盖率的天花板：实测 TPC-H 八张表、二十四条口径，
-/// 十二条上限之下覆盖率 25%，漏掉的包括那条出现在七条基准查询里的核心收入
-/// 口径（#501）。
+/// **The cap follows the size of the schema.** A hardcoded 12 is ample for a small database of three tables,
+/// but for a wide table of eighty columns it is a ceiling on coverage: measured on TPC-H's eight tables and twenty-four mappings,
+/// under a cap of twelve coverage was 25%, and what was missed included the core revenue
+/// mapping that appears in seven benchmark queries (#501).
 ///
-/// 每张表三条是个估计而不是定律——一张事实表值得的口径远多于三条，一张
-/// 码表一条都不值。它只需要比常数强：**规模大的时候不至于一开始就封顶**。
-/// 下限仍是 12，小 schema 不该因此缩水；上限 60 挡住提示词与一轮人工审阅
-/// 的规模。
+/// Three per table is an estimate, not a law -- a fact table deserves far more than three mappings, and a
+/// lookup table deserves none. The floor only needs to beat a constant: **a large schema is not capped from the start**.
+/// The floor stays 12, so a small schema does not shrink because of it; the ceiling of 60 keeps prompt size and one round's human review
+/// manageable.
 fn proposal_cap(tables: i32) -> i32 {
     (tables * 3).clamp(12, 60)
 }
 
-/// 模型回的 JSON 常裹着代码栅栏；剥掉它。
+/// The JSON the model returns is often wrapped in a code fence; strip it.
 fn json_body(reply: &str) -> &str {
     reply
         .trim()
@@ -77,11 +77,11 @@ fn json_body(reply: &str) -> &str {
         .trim()
 }
 
-/// 一轮描述最多留几个问题。多了没人答；八个已经是一页
+/// At most this many questions are kept per round of descriptions. More and nobody answers them; eight already fills a page
 const MAX_DATA_QUESTIONS: usize = 8;
 
-/// 模型回的 `{"description": …, "questions": […]}`。描述空的整个不要——
-/// 一个空描述盖掉上一轮的好描述，比没写更糟
+/// The model returns `{"description": …, "questions": […]}`. If the description is empty, drop the whole thing --
+/// an empty description overwriting last round's good description is worse than not writing one
 fn parse_description(reply: &str) -> Option<(String, Vec<String>)> {
     let v: serde_json::Value = serde_json::from_str(json_body(reply)).ok()?;
     let description = v["description"].as_str()?.trim().to_string();
@@ -103,15 +103,15 @@ fn parse_description(reply: &str) -> Option<(String, Vec<String>)> {
     Some((description, questions))
 }
 
-/// 探索写库的数据描述，并列出它拿不准的地方（#570）。
+/// The data description written by exploration, along with the points it is unsure about (#570).
 ///
-/// **两半，两个来路。** schema 与注释说了的——一行是什么、键、单位、码值、时间轴、
-/// 哪两列长得像——探索读得出来，这里写；schema 没说的——测试单不算数、有效订单是
-/// 2/3/4、GMV 用实付不用优惠前——探索生成不了，**而且不能猜**：猜出来的约定进了
-/// 提示词，问数会照着算，比没有更糟。所以拿不准的写成问题，人答，答案进
-/// `data_conventions`，这里不碰那一列。
+/// **Two halves, two sources.** What the schema and comments state -- what a row is, keys, units, code values, the time axis,
+/// which two columns look alike -- exploration can read, and it is written here; what the schema does not say -- test orders do not count, valid orders are
+/// 2/3/4, GMV uses amount paid not pre-discount -- exploration cannot generate, **and it must not guess**: a guessed convention goes into
+/// the prompt, and question answering would compute by it, which is worse than having none. So what is unsure is written as a question, a person answers, and the answer goes into
+/// `data_conventions`; this does not touch that column.
 ///
-/// 语言跟本体语言走（0004：生成的文字跟语料走，不跟界面走）。
+/// The language follows the ontology's language (0004: generated text follows the corpus, not the interface).
 async fn describe_data(
     state: &AppState,
     client: &utopia_llm::LlmClient,
@@ -159,10 +159,10 @@ async fn describe_data(
     Ok(())
 }
 
-/// 探索把 schema 里的量与维度落成 Metric / Dimension 实体，而这两个类不在任何
-/// 内置本体包里——0009 之后建库不再自带类。没有它们，下面的 `type_id` 查不到，
-/// 每条提议都被 `continue` 吞掉，页面只说"已排队"就再无下文（#223）。
-/// 所以探索前把两个类补上：builtin，描述给抽取提示词，本体页可以改
+/// Exploration turns the schema's measures and dimensions into Metric / Dimension entities, but these two classes are in no
+/// built-in ontology package -- since 0009, a new database no longer ships with classes. Without them, the `type_id` lookup below finds nothing,
+/// and every proposal is swallowed by `continue`, leaving the page saying only "queued" with nothing after it (#223).
+/// So before exploring, backfill the two classes: builtin, with descriptions for the extraction prompt, which the ontology page can edit
 pub(crate) async fn ensure_concept_types(pool: &sqlx::PgPool, kb_id: Uuid) -> anyhow::Result<()> {
     for (key, label, description) in [
         (
@@ -192,16 +192,16 @@ pub(crate) async fn ensure_concept_types(pool: &sqlx::PgPool, kb_id: Uuid) -> an
     Ok(())
 }
 
-/// 一轮探索开账、干活、收账（#503）。
+/// One round of exploration opens its ledger entry, does the work, and closes the ledger (#503).
 ///
-/// **先开行再干活**：跑挂了的那一轮也留一行，因为「失败」与「跑了但一条都没提」
-/// 从前在页面上都是「没有新提议」，而该做的事完全不同。
+/// **Open the row before doing the work**: a round that crashed still leaves a row, because "failed" and "ran but proposed nothing at all"
+/// used to look the same on the page ("no new proposals"), while the action to take is entirely different.
 pub async fn explore_mappings(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
     let run = utopia_store::exploration_runs::start(&state.pool, kb_id).await?;
     match explore(state, kb_id, run).await {
         Ok(()) => Ok(()),
         Err(e) => {
-            // 报错路径上的失败不该淹掉它要报的那件事（与 `source_name` 同一条理由）
+            // A failure on the error path must not drown out the thing it is reporting (same reasoning as `source_name`)
             let _ = utopia_store::exploration_runs::fail(&state.pool, run, &e.to_string()).await;
             Err(e)
         }
@@ -222,11 +222,11 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
     }
     ensure_concept_types(&state.pool, kb_id).await?;
 
-    // 各源 schema（引擎直读，保证新鲜；限量防 prompt 爆炸）
+    // Each source's schema (read directly by the engine, so it is fresh; capped to prevent a prompt blow-up)
     //
-    // **上限是跨源的一个总数。** 从前那个 `break` 只跳出当前源的列循环，
-    // 下一个源接着往同一个字符串里追加——`MAX_SCHEMA_CHARS` 读起来像个上限，
-    // 实际上是「每个源各自超一次」的下限。
+    // **The cap is one total across sources.** Previously that `break` only exited the current source's column loop,
+    // and the next source kept appending to the same string -- `MAX_SCHEMA_CHARS` reads like a ceiling,
+    // but in practice it is a floor that each source exceeds separately.
     let mut schema_txt = String::from(COLUMN_MARKERS);
     let mut tables_scanned = 0i32;
     let mut columns_scanned = 0i32;
@@ -271,14 +271,14 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
     )
     .await;
 
-    // 先写库的数据描述与拿不准的问题，再提口径。**描述不依赖提议成不成**：
-    // 提议那一步解析失败整轮报错，描述已经落下了；反过来描述写不出来也不该
-    // 拖垮提议——它是顺手的，warn 一句继续
+    // Write the data description and the uncertain questions first, then propose mappings. **The description does not depend on the proposals succeeding**:
+    // if the proposal step fails to parse, the whole round errors after the description has already landed; conversely, a failure to write the description
+    // should not sink the proposals -- it is a side task, so warn and continue
     if let Err(e) = describe_data(state, &client, &settings, &kb, &schema_txt).await {
         tracing::warn!(%kb_id, error = %e, "数据描述没写成，提议照常");
     }
 
-    // 既有概念（供归并复用，避免重复起名）
+    // Existing concepts (for merge reuse, avoiding duplicate names)
     let existing: Vec<(String,)> = sqlx::query_as(
         "SELECT e.canonical_name FROM entities e
          JOIN entity_types t ON t.id = e.type_id
@@ -290,8 +290,8 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
     .await?;
     let existing_names: Vec<String> = existing.into_iter().map(|(n,)| n).collect();
 
-    // 人写的约定进提议的提示词。schema 里没有「测试单不算数」这句话，探索在宽表上
-    // 0/18 正是因为它；有了这句，一条提议才可能长出 FILTER (WHERE is_test = 0)（#570）
+    // Conventions written by a person go into the proposal prompt. The schema has no sentence saying "test orders do not count", and exploration on a wide table scores
+    // 0/18 because of it; with this sentence, a proposal can come out as FILTER (WHERE is_test = 0) (#570)
     let conventions = kb
         .data_conventions
         .as_deref()
@@ -340,8 +340,8 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
 
     let source_names: Vec<&str> = sources.iter().map(|d| d.name.as_str()).collect();
     let mut accepted = 0usize;
-    // 丢弃要计数，还要留一条例子——**光有计数诊断不动**：「十二条源名对不上」
-    // 得配上「模型说的是 tpch，挂的是 tpch-2026-09-08」才知道该改什么
+    // Dropped entries are counted, and one example is also kept -- **counts alone are a diagnosis that changes nothing**: "twelve source names did not match"
+    // only tells you what to change once paired with "the model said tpch, but the mounted one is tpch-2026-09-08"
     let mut drops: std::collections::BTreeMap<&'static str, (i64, String)> = Default::default();
     let mut note = |reason: &'static str, example: String| {
         let e = drops.entry(reason).or_insert((0, example));
@@ -356,9 +356,9 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
             note(drop_reason::KIND, format!("name={name:?} kind={kind:?}"));
             continue;
         }
-        // **只挂了一个源时，模型说什么都算它。** 没有歧义可言，而对不上的代价是
-        // 整条提议消失：实测源叫 `tpch-2026-09-08-12-30`，模型照着 schema 回
-        // `tpch`，十二条一条不剩地被吞掉，任务照样 done（#501 跑第一轮时踩的）
+        // **With only one source mounted, whatever source the model names counts as it.** There is no ambiguity, and the cost of a mismatch is
+        // that the whole proposal disappears: measured, the source was named `tpch-2026-09-08-12-30`, the model replied `tpch` following the schema,
+        // and all twelve were swallowed without exception while the task still said done (hit during the first round of #501)
         let source = if sources.len() == 1 {
             source_names[0]
         } else {
@@ -391,8 +391,8 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
             continue;
         };
 
-        // 概念实体：走消解（同名归并；无向量上下文按 v1 兼容归并）。
-        // 没有块原文可给——这些名字来自数据源的 schema 探索，不是从文档句子里抽的
+        // Concept entities: go through resolution (same-name merge; without a vector context, merge as in v1).
+        // There is no chunk text to give -- these names come from exploring the data source's schema, not from sentences in a document
         let resolved = utopia_store::resolution::resolve_mention(
             &state.pool,
             kb_id,
@@ -405,10 +405,10 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
         )
         .await?;
 
-        // 定义拆成列写进 concept_mappings（0011）。从前它是一份塞进
-        // `object_value` 的 JSON，宾语挂在一条叫 mapped_to 的关系上——
-        // 而那条关系是本体里的一行，跟 works_at 并列。**它不是关于世界的
-        // 断言，是配置**，所以搬去自己的表
+        // The definition is split into columns written into concept_mappings (0011). Previously it was a blob stuffed into
+        // `object_value` JSON, with the object hung on a relation called mapped_to --
+        // and that relation was a row in the ontology, alongside works_at. **It is not an assertion about the world,
+        // it is configuration**, so it moved to its own table
         let def = &p["definition"];
         if !def.is_object() {
             note(
@@ -423,8 +423,8 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
                 .filter(|x| !x.is_empty())
                 .map(str::to_string)
         };
-        // 覆盖率的分子。分母是这一轮扫见的表数——**十一条提议对着八十列的宽表，
-        // 与十一条刚好覆盖完一个小库，从 `concept_mappings` 里看长得一模一样**
+        // The numerator of coverage. The denominator is the number of tables scanned this round -- **eleven proposals against a wide table of eighty columns
+        // and eleven that exactly cover a small database look identical in concept_mappings**
         if let Some(t) = s("table") {
             covered.insert(t);
         }
@@ -437,7 +437,7 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
             s("expr").as_deref(),
             s("sql").as_deref(),
             s("unit").as_deref(),
-            // summary 是给人看的那句：Review 列表与问数 prompt 都靠它
+            // summary is the sentence for people: the Review list and the question-answering prompt both rely on it
             p["summary"].as_str().or(def["summary"].as_str()),
             def["derived"].as_bool().unwrap_or(false),
         )
@@ -451,8 +451,8 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
             );
         }
     }
-    // 超过上限的那些一条没看，也得记：不然 returned 与 accepted + dropped 对不上，
-    // 而账本的用处正是让人看出「模型回了六十条、我们只看了三十六条」
+    // The ones beyond the cap are not looked at, but they must still be recorded: otherwise returned does not match accepted + dropped,
+    // and the ledger's whole purpose is to let a person see "the model returned sixty, we only looked at thirty-six"
     if proposals.len() > cap as usize {
         drops.insert(
             drop_reason::CAP,
@@ -485,7 +485,7 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
     )
     .await
     {
-        // 账没记上不该让提议白跑，但也不能装作记上了：留在日志里
+        // Failing to record the ledger should not make the proposals run in vain, but it also must not pretend it was recorded: leave it in the log
         tracing::warn!(%kb_id, run = %run, error = %e, "探索账没记上");
     }
     tracing::info!(
@@ -497,12 +497,12 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
         truncated,
         "映射探索完成，提议已入审核队列"
     );
-    // 一条都没提出来时页面上什么都不会变——Pending 还是 0，而"已排队"那句
-    // 早就翻篇了。走告警中心说一声，人才知道该去刷新结构或给列加注释。
+    // When nothing at all was proposed, the page does not change -- Pending is still 0, and the "queued" message
+    // is long gone. Raise it through the alert center so a person knows to refresh the structure or add column comments.
     //
-    // **告警要带上是怎么空的。** 从前只说「0 条，这些源」，而「模型一条没回」
-    // 与「回了十二条全被源名挡掉」是两件事，该做的动作也不同——前者去给列加注释，
-    // 后者去看源名。`dropped` 就是这个区别，它现在也在这条告警里
+    // **The alert must say how it came to be empty.** Previously it only said "0 mappings, these sources", but "the model returned none at all"
+    // and "it returned twelve, all blocked by source-name mismatch" are two different things, with different actions -- the former means add column comments,
+    // the latter means check source names. `dropped` is that distinction, and it is in this alert now
     if accepted == 0 {
         if let Err(e) = utopia_store::alerts::raise(
             &state.pool,
@@ -567,13 +567,13 @@ mod tests {
             "  id integer [FK→a.orders]
 "
         );
-        // 一对一的扩展表：主键同时是外键，两个都标
+        // One-to-one extension table: the primary key is also a foreign key, so mark both
         assert_eq!(
             column_line(&column(true, Some("a.p1"), None)),
             "  id integer [PK, FK→a.p1]
 "
         );
-        // 注释里写着 PK 的普通列，与标记分得开
+        // An ordinary column whose comment says PK is kept distinct from the marker
         assert_eq!(
             column_line(&column(false, None, Some("PK"))),
             "  id integer -- PK
@@ -589,15 +589,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(d, "dw.dwd_ord_dtl: one row per order line.");
-        // 空问题丢掉、首尾空白剥掉，顺序保留
+        // Drop empty questions, strip leading and trailing whitespace, keep the order
         assert_eq!(
             qs,
             vec!["Which ord_st values count?", "Exclude is_test = 1?"]
         );
-        // 空描述整个不要：一个空描述盖掉上一轮的好描述，比没写更糟
+        // An empty description is dropped entirely: an empty description overwriting last round's good one is worse than not writing one
         assert!(parse_description("{\"description\": \"  \", \"questions\": []}").is_none());
         assert!(parse_description("not json").is_none());
-        // 问题没给也行，描述照收
+        // Questions may be absent, and the description is still accepted
         assert_eq!(
             parse_description("{\"description\": \"x\"}").unwrap().1,
             Vec::<String>::new()
@@ -606,17 +606,17 @@ mod tests {
 
     #[test]
     fn a_bigger_schema_gets_a_bigger_cap() {
-        // 小库不缩水：从前写死的 12 在这一端是对的
+        // A small database does not shrink: the hardcoded 12 was correct at this end
         assert_eq!(proposal_cap(1), 12);
         assert_eq!(proposal_cap(4), 12);
-        // 八张表的 TPC-H：从前 12 条封顶，二十四条真值只覆盖了 6 条（#501）
+        // TPC-H with eight tables: the old cap of 12 covered only 6 of the 24 true mappings (#501)
         assert_eq!(proposal_cap(8), 24);
-        // TPC-DS 二十四张表
+        // TPC-DS with twenty-four tables
         assert_eq!(proposal_cap(24), 60);
-        // 再大也到此为止：提示词与一轮人工审阅都有自己的上限
+        // Anything larger still stops here: the prompt and one round's human review each have their own ceiling
         assert_eq!(proposal_cap(300), 60);
-        // 一张表都没扫见（源连不上、schema 是空的）也不该是 0——
-        // **0 条上限会把「连不上」变成「模型什么都没提」**，两件事又混在一起了
+        // Even if no table was scanned at all (source unreachable, schema empty), it should not be 0 --
+        // **a zero cap would turn "unreachable" into "the model proposed nothing at all", and the two things would be mixed up again**
         assert_eq!(proposal_cap(0), 12);
     }
 }

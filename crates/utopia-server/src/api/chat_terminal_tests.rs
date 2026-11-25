@@ -1,53 +1,53 @@
-//! 一次对话轮次恰好有一个**挣来的**终结（#857）。
+//! Exactly one **earned** terminal per chat turn (#857).
 //!
-//! 这不是为某一个洞写的回归。#845 / #850 / #851 / #852 各自堵住一处「下面失败了、
-//! 上面报成功」，每条都带着自己的回归——**四个各抓一个的测试，抓不住第五个**。
-//! 第五个会被下一个人用同样的方式写出来：在第一个字节发出之后又加了一条会失败的路，
-//! 而「循环跑完了」依然够得着 `done`。
+//! This is not a regression written for one particular hole. #845 / #850 / #851 / #852 each closed one place where "failed below,
+//! reported success above", and each came with its own regression -- **four tests that each catch one case cannot catch a fifth**.
+//! A fifth will be written the same way by the next person: a failing path added after the first byte has been sent,
+//! while "the loop ran to completion" still reaches `done`.
 //!
-//! 所以这里钉的是规矩本身。表里一行是一个注入点，每一行都过同样三条：
+//! So what is pinned here is the rule itself. Each row of the table is one injection point, and every row passes the same three checks:
 //!
-//!   1. 客户端收不到 `event: done`
-//!   2. 恰好观察到一个终结（`done` 与 `error` 加起来正好一次）
-//!   3. 那个终结说得出理由：`error` 的 data 是带 `code` 与英文原句的 JSON（0004）
+//!   1. The client does not receive `event: done`
+//!   2. Exactly one terminal is observed (`done` and `error` together, exactly once)
+//!   3. The terminal can state its reason: the `error` data is JSON with a `code` and the English sentence (0004)
 //!
-//! **新增一条会失败的路，代价是加一行**；加不出那一行，说明这条路自己也没想清楚
-//! 该怎么收尾。评审该盯的就是「新开了会失败的路却没加行」。
+//! **Adding a new failing path costs one row**; if that row cannot be added, the path itself has not been thought through
+//! about how it ends. Reviewers should watch for "a new failing path was opened without adding a row".
 //!
-//! ## 不在表里的路
+//! ## Paths not in the table
 //!
-//! 有几条路的注入手段是夹具级的，进不了这张按回复脚本排的表，各自在同目录的定向测试里：
-//! 检索中途出错要关掉夹具连接池，助手 INSERT 被拒要夹具作用域的触发器——
-//! `chat_persistence_tests.rs`；降级回答的请求形状——`chat_fallback_tests.rs`；
-//! 流在答案中途被切、终结广播早于注册项移除丢失——`chat_registry_tests.rs`。
-//! 新开一条这样的路，先看这三个文件里有没有位置，再考虑新文件。
+//! Some paths are injected by fixture-level means and cannot go into a table scripted by reply; each is covered by a targeted test in the same directory:
+//! an error midway through retrieval needs the fixture connection pool closed; an assistant INSERT that is rejected needs a fixture-scoped trigger --
+//! `chat_persistence_tests.rs`; the request shape of a degraded answer -- `chat_fallback_tests.rs`;
+//! a stream cut midway through the answer, or a terminal broadcast lost because it came before the registry entry was removed -- `chat_registry_tests.rs`.
+//! For a new path of this kind, first check whether these three files have a place for it before considering a new file.
 
 use super::chat_empty_reply_tests::{fixture, Reply, Scripted};
 
-/// 这一轮该怎么收尾。
+/// How this turn should end.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Ends {
-    /// 答案成立：一个 `done`，没有 `error`
+    /// The answer holds: one `done`, no `error`
     Done,
-    /// 答案不成立：一个 `error`，**没有** `done`
+    /// The answer does not hold: one `error`, **no** `done`
     Error,
 }
 
-/// 表里的一行：一个注入点。
+/// One row in the table: one injection point.
 struct Case {
-    /// 出了什么事——断言失败时打的就是这句
+    /// What went wrong -- this is the sentence printed when an assertion fails
     what: &'static str,
-    /// 假模型这一轮按这个脚本回话
+    /// How the fake model replies in this turn, per this script
     replies: Vec<Reply>,
-    /// 该怎么收尾
+    /// How this should end
     ends: Ends,
     fallback: bool,
 }
 
-/// 数一数这条 SSE 里出现了几个终结。
+/// Count how many terminals appear in this SSE stream.
 ///
-/// 按帧数而不是按子串数：`event: done` 也可能出现在某个 `data:` 的正文里
-/// （模型完全可以在答案里讨论 SSE），那不是一个终结
+/// Count by frame, not by substring: `event: done` may also appear inside the body of some `data:`
+/// (the model is free to discuss SSE in its answer), and that is not a terminal
 fn terminals(sse: &str) -> (usize, usize, Vec<String>) {
     let (mut done, mut error, mut reasons) = (0usize, 0usize, Vec::new());
     for frame in sse.split("\n\n") {
@@ -72,7 +72,7 @@ fn terminals(sse: &str) -> (usize, usize, Vec<String>) {
     (done, error, reasons)
 }
 
-/// 三条断言，每一行都过同一遍。
+/// Three assertions; each row passes through the same check.
 fn assert_one_earned_terminal(what: &str, ends: Ends, sse: &str) {
     let (done, error, reasons) = terminals(sse);
 
@@ -94,7 +94,7 @@ fn assert_one_earned_terminal(what: &str, ends: Ends, sse: &str) {
                 !reason.is_empty(),
                 "{what}：终结得说得出理由，不能是个空 error\n{sse}"
             );
-            // 理由带 code：界面拿它查措辞，英文原句只给日志与不做本地化的客户端（0004）
+            // The reason carries a code: the UI uses it to pick wording; the English sentence is only for logs and clients that do not localize (0004)
             let body: serde_json::Value = serde_json::from_str(reason).unwrap_or_default();
             assert!(
                 body["code"].as_str().is_some_and(|c| !c.is_empty())
@@ -105,7 +105,7 @@ fn assert_one_earned_terminal(what: &str, ends: Ends, sse: &str) {
     }
 }
 
-/// 一个工具调用，让这一轮走完整的取证路径再收尾。
+/// One tool call, so this turn runs the full evidence-gathering path before ending.
 const TOOL: Reply = Reply::Tool("find_entities", r#"{"name":"Acme"}"#);
 
 // The #845 rows test the exhausted gathering boundary, so they reach it before
@@ -120,15 +120,15 @@ fn at_budget(candidate: Reply) -> Vec<Reply> {
 
 fn table() -> Vec<Case> {
     vec![
-        // 对照行：正常回答必须是 done。没有它，上面那三条断言可以靠
-        // 「永远不发 done」自动满足，整张表就是空的
+        // Control row: a normal answer must be done. Without it, the three assertions above could be satisfied
+        // by "never emit done", and the whole table would be empty
         Case {
             what: "模型正常作答",
             replies: vec![TOOL, Reply::Text("Acme 去年第四季度换了 CFO。")],
             ends: Ends::Done,
             fallback: false,
         },
-        // 已修：重试之后仍然是空正文
+        // Fixed: still an empty body after the retry
         Case {
             what: "重试之后正文仍然为空",
             replies: vec![TOOL, Reply::Empty, Reply::Empty],
@@ -141,7 +141,7 @@ fn table() -> Vec<Case> {
             ends: Ends::Error,
             fallback: true,
         },
-        // #845：端点在预算耗尽后把工具控制文本当正文吐出来
+        // #845: after the budget runs out, the endpoint spits tool-control text out as the body
         Case {
             what: "最后一轮吐的是裸的工具控制标记",
             replies: at_budget(Reply::Text(
@@ -150,7 +150,7 @@ fn table() -> Vec<Case> {
             ends: Ends::Error,
             fallback: false,
         },
-        // #845：同上，但前面先有一段像样的叙述——分帧边界不该影响判断
+        // #845: same, but preceded by a decent narrative -- where the framing boundary falls should not affect the verdict
         Case {
             what: "叙述之后接上工具控制标记",
             replies: at_budget(Reply::Text(
@@ -159,7 +159,7 @@ fn table() -> Vec<Case> {
             ends: Ends::Error,
             fallback: false,
         },
-        // #937：普通回合把工具调用写成正文，退回一次之后又写了一次
+        // #937: a normal turn wrote the tool call as body text, and after one retry wrote it again
         Case {
             what: "普通回合连续两次把工具调用写成正文",
             replies: vec![
@@ -208,10 +208,10 @@ async fn a_turn_ends_in_exactly_one_earned_terminal() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 终结计数按帧算，不按子串算。
+/// Terminal counting is by frame, not by substring.
 ///
-/// 单列出来是因为它是上面三条断言的地基：`terminals` 要是把答案正文里的
-/// `event: done` 数进去，整张表就会在模型讨论 SSE 的那天集体变绿或集体变红
+/// Kept separate because it is the foundation of the three assertions above: if `terminals` counted the `event: done` inside the answer body,
+/// the whole table would turn green or red together on the day the model discusses SSE.
 #[test]
 fn a_terminal_is_a_frame_not_a_substring() {
     let sse = "event: delta\ndata: {\"text\": \"SSE 里用 event: done 表示结束\"}\n\n\

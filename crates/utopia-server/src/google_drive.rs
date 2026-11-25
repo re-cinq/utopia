@@ -1,40 +1,40 @@
-//! Google Drive 来源：一个人用自己的 Google 账号授权，按他选的文件夹同步（0074）。
+//! Google Drive source: a person authorizes it with their own Google account, and it syncs the folders they pick (0074).
 //!
-//! 按 [0013](../../docs/decisions/0013-a-source-should-hand-over-its-history.md) 的四条判据：
+//! Per the four criteria in [0013](../../docs/decisions/0013-a-source-should-hand-over-its-history.md):
 //!
-//! | 判据 | Google Drive |
+//! | Criterion | Google Drive |
 //! |---|---|
-//! | 真实时间戳 | `modifiedTime`，文件内容最后一次改动的时刻 |
-//! | 会不会自我推翻 | 方案、纪要、合同的新版本覆盖旧版本 |
-//! | 稳定身份 | 文件 id，改名、挪目录都不变 |
-//! | 企业知识住不住在那儿 | 大多数团队的文档就住在这儿 |
+//! | Real timestamp | `modifiedTime`, the last time the file content changed |
+//! | Does it supersede itself | New versions of plans, minutes and contracts overwrite the old ones |
+//! | Stable identity | File id; unchanged by renames or moves |
+//! | Does enterprise knowledge live there | Most teams' documents live there |
 //!
-//! 与 Notion 一样**只交出现状**：修订历史在 API 里有，但 Google 文档的旧修订只能
-//! 导出成当时的全文，抽样哪几个是另一个决定，这一版不做。
+//! Like Notion, it **hands over only the current state**: revision history exists in the API, but old revisions of Google Docs can only
+//! be exported as the full text at that time; which ones to sample is a separate decision, not done in this version.
 //!
-//! ## 授权是一个人的，不是部署的
+//! ## Authorization belongs to a person, not the deployment
 //!
-//! Notion、对象存储是管理员贴一把密钥；这里是**这个来源的编辑者**点「连接 Google
-//! Drive」，在 Google 那边同意只读授权，我们存下刷新令牌（封印，`SOURCE_SECRET_KEYS`）。
-//! OAuth 客户端是部署级的（`UTOPIA_GOOGLE_DRIVE_CLIENT_ID` 等），没配就没有这个按钮。
-//! 授权顺带要 `openid email`，只为在界面上说清「这是以谁的身份在读」。
+//! For Notion and object storage an admin pastes a key; here the **editor of this source** clicks "Connect Google
+//! Drive", agrees to read-only access at Google, and we store the refresh token (sealed, `SOURCE_SECRET_KEYS`).
+//! The OAuth client is per deployment (`UTOPIA_GOOGLE_DRIVE_CLIENT_ID` etc.); without it there is no such button.
+//! Authorization also asks for `openid email`, only so the UI can make clear "this is being read as whom".
 //!
-//! ## 几个容易踩的
+//! ## Pitfalls to watch for
 //!
-//! **没有递归查询。** `q` 只认 `'{id}' in parents`，一层一层走；两个选中的文件夹
-//! 互相嵌套时同一个文件会出现两次，按 id 去重。
+//! **No recursive query.** `q` only accepts `'{id}' in parents`, so it walks level by level; when two selected folders
+//! are nested inside each other, the same file appears twice, so deduplicate by id.
 //!
-//! **共享云端硬盘里的东西默认看不见。** 每个请求都得带 `supportsAllDrives=true`，
-//! 列表还得带 `includeItemsFromAllDrives=true`，少了不报错，只是结果是空的。
+//! **Things in shared drives are invisible by default.** Every request must carry `supportsAllDrives=true`,
+//! and listings must also carry `includeItemsFromAllDrives=true`; without them there is no error, the results are just empty.
 //!
-//! **Google 自己的格式要导出。** Docs/Sheets/Slides 没有字节，`alt=media` 回 403；
-//! 走 `export` 换成 DOCX/XLSX/PPTX，交给已有的解析器（标题层级、表格、多张工作表都在）。
-//! 导出上限 10 MB，超了是 403 `exportSizeLimitExceeded`，按读不出来的那一份处理。
+//! **Google's own formats must be exported.** Docs/Sheets/Slides have no bytes, and `alt=media` returns 403;
+//! use `export` to convert them to DOCX/XLSX/PPTX, which the existing parser handles (heading levels, tables and multiple sheets all survive).
+//! The export limit is 10 MB; over it returns 403 `exportSizeLimitExceeded`, handled as a file that cannot be read.
 //!
-//! **导出的字节每次都不同**（压缩包里带时间戳），所以「变没变」不能靠内容哈希，
-//! 靠 Drive 给的标记：二进制用 `md5Checksum`，Google 格式用 `modifiedTime`。
+//! **Exported bytes differ on every call** (the zip carries timestamps), so "did it change" cannot rely on a content hash;
+//! instead it uses the markers Drive provides: `md5Checksum` for binaries, `modifiedTime` for Google formats.
 //!
-//! 错误文案是英文：它会原样落到来源的同步状态里给用户看。
+//! Error text is in English: it is shown to users as-is in the source's sync status.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
@@ -50,34 +50,34 @@ pub const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const API_ROOT: &str = "https://www.googleapis.com/drive/v3";
 
-/// 只读整个 Drive。`drive.file` 不够：它只给应用自己建的、或经 Picker 逐个选中的
-/// 文件，选一个文件夹并不连带它里面的东西
+/// Read-only access to the whole Drive. `drive.file` is not enough: it only grants files the app created, or those selected one by one via the Picker;
+/// selecting a folder does not bring along what is inside it
 pub const DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
 pub const SCOPES: &str = "openid email https://www.googleapis.com/auth/drive.readonly";
 
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 const SHORTCUT_MIME: &str = "application/vnd.google-apps.shortcut";
-/// 一个文件要用到的元数据，列表与快捷方式的目标都取这些
+/// The metadata a file needs; the listing and the shortcut targets both take these
 const FILE_FIELDS: &str = "id,name,mimeType,modifiedTime,md5Checksum,size";
 
-/// 一次遍历最多列多少个文件。列表只是元数据，标记没变的文件不下载，所以这里放得宽；
-/// 它只防一棵大得离谱的树把内存撑爆。到了这个数，这一轮说出来，不报成功
+/// Maximum files listed per traversal. Listing is metadata only, and files whose markers have not changed are not downloaded, so the cap is generous;
+/// it only guards against a tree so huge it would exhaust memory. When the cap is reached, the run says so instead of reporting success
 const MAX_FILES_LISTED: usize = 50_000;
-/// 一次同步最多下载（或导出）多少个文件，与 WebDAV、对象存储同一个量级：摄入不可逆。
-/// 上限卡在下载上而不是列表上：列表每轮都是全的，没变的不花钱，到了上限的这一轮
-/// 说出来，下一轮从还没下的接着下，不会每次都停在同一个地方（#1212 那类缺口）
+/// Maximum files downloaded (or exported) per sync, on the same scale as WebDAV and object storage: ingestion is irreversible.
+/// The cap applies to downloads rather than listing: the listing is complete every round and unchanged files cost nothing; a round that hits the cap
+/// says so, and the next round resumes from what has not been downloaded yet, so it never stops at the same spot every time (the kind of gap seen in #1212)
 pub const MAX_DOWNLOADS_PER_SYNC: usize = 2_000;
-/// 单个文件的上限，同对象存储
+/// Per-file cap, same as object storage
 const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
-/// 选中文件夹往下走几层。再深的留着不走，比一轮同步卡在一棵树上好
+/// How many levels to descend from a selected folder. Deeper levels are left unwalked, which is better than a sync getting stuck on one tree
 const MAX_DEPTH: usize = 16;
-/// 文件夹浏览器一次最多回多少个子文件夹
+/// Maximum subfolders a folder browser response returns
 const MAX_FOLDERS_LISTED: usize = 1_000;
-/// 429 / 5xx 最多再试几回
+/// Maximum retries on 429 / 5xx
 const MAX_RETRIES: u32 = 3;
 const JSON_LIMIT: usize = 4 * 1024 * 1024;
 
-/// 部署级的 OAuth 客户端。三项都得有，缺一项就当没配
+/// Deployment-level OAuth client. All three must be present; if any one is missing it counts as not configured
 #[derive(Clone)]
 pub struct OAuthConfig {
     pub client_id: String,
@@ -99,8 +99,8 @@ pub fn oauth_config() -> Option<OAuthConfig> {
     })
 }
 
-/// 文件、文件夹、共享盘的 id 只有这些字符。它们要拼进 `q` 的单引号里，
-/// 不在这张表上的一律不收——比转义可靠
+/// File, folder and shared drive ids contain only these characters. They are spliced into single quotes in `q`,
+/// so anything not on this table is refused outright: more reliable than escaping
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
@@ -109,7 +109,7 @@ pub fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// 来源配置里选中的文件夹：`folders: [{id, name}]`。名字只给界面看，同步只认 id
+/// Folders selected in the source config: `folders: [{id, name}]`. Names are for display only; sync uses only the id
 pub fn selected_folders(config: &Value) -> Vec<String> {
     config["folders"]
         .as_array()
@@ -124,16 +124,16 @@ pub fn selected_folders(config: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 谁连上的这个来源：回调时记下的 Utopia 用户。没有 = 还没连，或是这条规则之前连的
+/// Who connected this source: the Utopia user recorded at the callback. None = not connected yet, or connected before this rule existed
 pub fn connected_by(config: &Value) -> Option<Uuid> {
     config["connected_by"].as_str()?.parse().ok()
 }
 
-/// 授权码换来的东西
+/// What the authorization code exchange yields
 #[derive(Debug)]
 pub struct Grant {
     pub refresh_token: String,
-    /// 授权的那个 Google 账号，ID token 里核验过的邮箱；只用来在界面上显示
+    /// The Google account that authorized it, with the email verified in the ID token; used only for display in the UI
     pub account_email: Option<String>,
 }
 
@@ -143,8 +143,8 @@ fn http() -> anyhow::Result<reqwest::Client> {
         .build()?)
 }
 
-/// 授权码 + PKCE verifier 换令牌。要的是刷新令牌：访问令牌一小时就过期，
-/// 同步是在没人看着的时候跑的
+/// Exchange the authorization code + PKCE verifier for tokens. The refresh token is what matters: access tokens expire after an hour,
+/// while sync runs when no one is watching
 pub async fn exchange_code(cfg: &OAuthConfig, code: &str, verifier: &str) -> anyhow::Result<Grant> {
     exchange_code_at(&http()?, TOKEN_URL, cfg, code, verifier).await
 }
@@ -170,14 +170,14 @@ async fn exchange_code_at(
         .await
         .context("google token")?;
     let v = token_response(resp).await?;
-    // 同意页上 Google 允许人把某一项权限的勾去掉；去掉了 Drive 的那一项，
-    // 令牌照发，只是什么都读不到。在这里说清楚，比让第一次同步报 403 好
+    // On the consent screen Google lets a person untick one permission; if the Drive one is unticked, the token is still issued,
+    // but nothing can be read. Say so here, which is better than letting the first sync fail with a 403
     let scopes = v["scope"].as_str().unwrap_or("");
     anyhow::ensure!(
         scopes.split_whitespace().any(|s| s == DRIVE_SCOPE),
         "Google did not grant read access to Drive; connect again and allow it"
     );
-    // 只有第一次同意（或 `prompt=consent`）才发刷新令牌；`begin` 每次都带 consent
+    // A refresh token is issued only on first consent (or with `prompt=consent`); `begin` always passes consent
     let refresh_token = v["refresh_token"]
         .as_str()
         .filter(|t| !t.is_empty())
@@ -193,7 +193,7 @@ async fn exchange_code_at(
     })
 }
 
-/// 刷新令牌换一个访问令牌
+/// Exchange a refresh token for an access token
 async fn access_token_at(
     http: &reqwest::Client,
     token_url: &str,
@@ -219,8 +219,8 @@ async fn access_token_at(
         .to_string())
 }
 
-/// 令牌端点的响应。`invalid_grant` 单独说：那是人撤了授权、改了密码，或者
-/// 刷新令牌半年没用过期了——重连能好，重试不能
+/// The token endpoint's response. `invalid_grant` is reported separately: it means the person revoked the grant, changed their password, or the refresh token
+/// expired after going unused for six months; reconnecting fixes it, retrying does not
 async fn token_response(resp: reqwest::Response) -> anyhow::Result<Value> {
     let status = resp.status();
     let v: Value = resp
@@ -244,12 +244,12 @@ async fn token_response(resp: reqwest::Response) -> anyhow::Result<Value> {
     )
 }
 
-/// ID token 里的邮箱。
+/// The email in the ID token.
 ///
-/// **不验签名**：这枚令牌是我们自己拿授权码、经 TLS 直接从 Google 的令牌端点换回来的，
-/// OIDC Core 3.1.3.7 允许这时以 TLS 代替签名校验。issuer 与 audience 照查——查的是
-/// 「这是 Google 签给本部署的」。邮箱只拿来显示，不认身份、不开账号；
-/// 没验证过的邮箱不显示，免得界面上写着一个那人并不拥有的地址
+/// **Signature not verified**: this token came from us exchanging the authorization code directly with Google's token endpoint over TLS,
+/// and OIDC Core 3.1.3.7 allows TLS to stand in for signature checking in this case. The issuer and audience are still checked: what is checked is
+/// "Google signed this for this deployment". The email is only for display; it is not used for identity and does not open an account;
+/// an unverified email is not shown, so the UI never claims an address the person does not own
 fn id_token_email(id_token: &str, client_id: &str) -> anyhow::Result<Option<String>> {
     let payload = id_token
         .split('.')
@@ -284,14 +284,14 @@ fn id_token_email(id_token: &str, client_id: &str) -> anyhow::Result<Option<Stri
     })
 }
 
-/// 文件夹浏览器里的一项
+/// An item in the folder browser
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FolderEntry {
     pub id: String,
     pub name: String,
 }
 
-/// 选中的文件夹里的一个文件
+/// A file in a selected folder
 #[derive(Debug, Clone)]
 pub struct DriveFile {
     pub id: String,
@@ -303,12 +303,12 @@ pub struct DriveFile {
 }
 
 impl DriveFile {
-    /// `gdrive://{file_id}`——文件 id 是它最稳的身份
+    /// `gdrive://{file_id}`: the file id is its most stable identity
     pub fn external_key(&self) -> String {
         format!("gdrive://{}", self.id)
     }
 
-    /// 「变没变」的标记，见模块注释
+    /// The "did it change" marker; see the module comment
     pub fn marker(&self) -> String {
         self.md5
             .clone()
@@ -317,30 +317,30 @@ impl DriveFile {
     }
 }
 
-/// 一轮遍历的结果
+/// The result of one traversal round
 #[derive(Debug, Default)]
 pub struct Listing {
     pub files: Vec<DriveFile>,
-    /// 到了文件数上限，或有文件夹深过 `MAX_DEPTH`
+    /// The file count cap was reached, or a folder is deeper than `MAX_DEPTH`
     pub truncated: bool,
-    /// 选中却打不开的文件夹（删了、或不再共享给这个人）。有它时不对账：
-    /// 打不开不等于里面的东西都没了
+    /// A selected folder that cannot be opened (deleted, or no longer shared with this person). When present, reconciliation is skipped:
+    /// failing to open it does not mean everything inside is gone
     pub unreachable: Vec<String>,
-    /// 跳过的文件，每个一句原因：表单、超大的
+    /// Files skipped, one reason each: forms, or too large
     pub skipped: usize,
-    /// 指向这个人打不开的文件的快捷方式（没共享给他、删了），按快捷方式的名字
+    /// Shortcuts pointing at files this person cannot open (not shared with them, or deleted), named by the shortcut's name
     pub broken_shortcuts: Vec<String>,
 }
 
-/// 读一个文件拿到的字节
+/// Bytes read from a file
 pub struct Content {
     pub bytes: Vec<u8>,
     pub filename: String,
     pub mime: &'static str,
 }
 
-/// Google 自己的格式导出成什么。不在这张表上的 Google 格式（表单、绘图、
-/// 快捷方式、站点……）没有能读的正文，跳过
+/// What each Google-native format exports to. Google formats not on this table (forms, drawings,
+/// shortcuts, sites, ...) have no readable body and are skipped
 fn export_as(mime: &str) -> Option<(&'static str, &'static str)> {
     Some(match mime {
         "application/vnd.google-apps.document" => (
@@ -359,13 +359,13 @@ fn export_as(mime: &str) -> Option<(&'static str, &'static str)> {
     })
 }
 
-/// 拿着一个访问令牌的 Drive 客户端
+/// A Drive client holding an access token
 pub struct Drive {
     http: reqwest::Client,
     token: std::sync::Mutex<String>,
-    /// 访问令牌一小时就过期，一轮同步可以更长：遇到 401 凭刷新令牌换一枚新的，再试一次
+    /// An access token expires after an hour, and a sync round can run longer: on a 401, exchange the refresh token for a new one and try again
     renewal: Option<Renewal>,
-    // 私有地址入口让 HTTP 测试走真实的遍历逻辑，不增加用户配置
+    // The private-address entry point lets HTTP tests run the real traversal logic, without adding any user configuration
     api_root: String,
 }
 
@@ -376,7 +376,7 @@ struct Renewal {
 }
 
 impl Drive {
-    /// 用刷新令牌换访问令牌，得到一个能用的客户端
+    /// Exchange the refresh token for an access token, getting a usable client
     pub async fn connect(cfg: &OAuthConfig, refresh_token: &str) -> anyhow::Result<Self> {
         let http = http()?;
         let token = access_token_at(&http, TOKEN_URL, cfg, refresh_token).await?;
@@ -392,9 +392,9 @@ impl Drive {
         })
     }
 
-    /// 发一次 GET。429 与 5xx 退避重试；401 换一枚访问令牌再试一次（只一次：换来的也被拒，
-    /// 就是授权本身出了问题）；其余非 2xx 带上 Google 自己的 message 报错，
-    /// 状态码与 `reason` 留在错误里给调用方分辨（404 = 打不开）
+    /// Send one GET. 429 and 5xx retry with backoff; a 401 exchanges for a new access token and tries once more (only once: if the new one is also rejected,
+    /// the authorization itself is broken); other non-2xx errors carry Google's own message, and the status code and `reason` are kept in the error
+    /// so the caller can tell them apart (404 = cannot be opened)
     async fn get(
         &self,
         what: &str,
@@ -465,7 +465,7 @@ impl Drive {
         serde_json::from_slice(&bytes).with_context(|| format!("google drive {what}: not JSON"))
     }
 
-    /// 按 `q` 列文件，翻完所有页或到 `limit` 为止。第二项：是不是因为到了上限才停的
+    /// List files by `q`, paging through all pages or until `limit`. Second item: whether it stopped because the cap was reached
     async fn list(
         &self,
         q: &str,
@@ -502,8 +502,8 @@ impl Drive {
         }
     }
 
-    /// 文件夹浏览器的第一层：我的云端硬盘、与我共享的、每个看得见的共享云端硬盘。
-    /// 前两项的名字由界面按 id 换成它的语言
+    /// Top level of the folder browser: My Drive, Shared with me, and every visible shared drive.
+    /// The names of the first two are swapped for their localized labels by the UI, keyed by id
     pub async fn roots(&self) -> anyhow::Result<Vec<FolderEntry>> {
         let mut out = vec![
             FolderEntry {
@@ -541,7 +541,7 @@ impl Drive {
         }
     }
 
-    /// 一个文件夹（或共享盘、或「与我共享」）下面的子文件夹
+    /// Subfolders under a folder (or a shared drive, or "Shared with me")
     pub async fn child_folders(&self, parent: &str) -> anyhow::Result<Vec<FolderEntry>> {
         let q = if parent == SHARED_WITH_ME {
             format!("sharedWithMe = true and mimeType = '{FOLDER_MIME}' and trashed = false")
@@ -561,9 +561,9 @@ impl Drive {
             .collect())
     }
 
-    /// 走遍选中的文件夹，收集文件。
+    /// Walk the selected folders and collect files.
     ///
-    /// 广度优先，访问过的文件夹不再进（两个选中的文件夹互相嵌套时），文件按 id 去重
+    /// Breadth-first; folders already visited are not entered again (when two selected folders are nested in each other); files are deduplicated by id
     pub async fn walk(&self, folders: &[String]) -> anyhow::Result<Listing> {
         let mut listing = Listing::default();
         let mut visited: HashSet<String> = HashSet::new();
@@ -573,7 +573,7 @@ impl Drive {
         for id in folders {
             match self.folder_is_open(id).await {
                 Ok(true) => queue.push_back((id.clone(), 0)),
-                // 进了回收站：里面的东西对这个人已经不算数了，不进去，让对账把它们标出来
+                // Inside the trash: its contents no longer count for this person, so do not descend; let reconciliation flag them
                 Ok(false) => {}
                 Err(e) if is_not_found(&e) => listing.unreachable.push(id.clone()),
                 Err(e) => return Err(e),
@@ -592,8 +592,8 @@ impl Drive {
                 listing.truncated = true;
             }
             for item in items {
-                // 别人组织的会议，纪要与转写住在他的 Drive 里，这边的文件夹里只有快捷方式：
-                // 换成它指向的那一个，之后与普通文件一样
+                // A meeting organized by someone else keeps its notes and transcript in their Drive, and this side's folder holds only a shortcut:
+                // swap it for the one it points to, after which it is handled like an ordinary file
                 let f = if item["mimeType"] == SHORTCUT_MIME {
                     match self.shortcut_target(&item).await {
                         Ok(Some(target)) => target,
@@ -616,7 +616,7 @@ impl Drive {
                 else {
                     continue;
                 };
-                // Drive 回来的 id 之后要拼进查询和地址：与选中的文件夹同一个字符集，不合的不收
+                // Ids returned by Drive are later spliced into queries and URLs: same character set as the selected folders, and any that do not fit are refused
                 if !valid_id(id) {
                     listing.skipped += 1;
                     continue;
@@ -634,7 +634,7 @@ impl Drive {
                     listing.skipped += 1;
                     continue;
                 }
-                // Drive 的 size 是字符串里的整数；Google 格式没有 size
+                // Drive's size is an integer in string form; Google formats have no size
                 let size = f["size"].as_str().and_then(|s| s.parse::<u64>().ok());
                 if !google_format && size.is_none_or(|n| n == 0 || n > MAX_FILE_BYTES) {
                     listing.skipped += 1;
@@ -664,9 +664,9 @@ impl Drive {
         Ok(listing)
     }
 
-    /// 快捷方式指向的那一个。指向文件夹的照文件夹走；指向文件的取目标自己的元数据，
-    /// 变更标记、大小、导出格式都按目标算，文件也按目标的 id 认（直接选到与经快捷方式
-    /// 到达的是同一份）。目标在回收站里 → `None`；打不开 → 403/404 的错误
+    /// The one the shortcut points to. A folder target is treated as a folder; a file target takes the target's own metadata,
+    /// with the change marker, size and export format all computed from the target, and the file also identified by the target's id (so selecting it directly and reaching it through a shortcut give the same result).
+    /// If the target is in the trash -> `None`; if it cannot be opened -> the 403/404 error
     async fn shortcut_target(&self, shortcut: &Value) -> anyhow::Result<Option<Value>> {
         let details = &shortcut["shortcutDetails"];
         let Some(target) = details["targetId"].as_str().filter(|id| valid_id(id)) else {
@@ -691,8 +691,8 @@ impl Drive {
         Ok((v["trashed"].as_bool() != Some(true)).then_some(v))
     }
 
-    /// 选中的这个还在不在：在且没进回收站 → true；进了回收站 → false；
-    /// 打不开 → 404 的错误。`root` 是「我的云端硬盘」，共享盘的 id 也能当文件夹用
+    /// Whether this selected item still exists: exists and not in the trash -> true; in the trash -> false;
+    /// cannot be opened -> 404 error. `root` is "My Drive"; a shared drive's id can also be used as a folder
     async fn folder_is_open(&self, id: &str) -> anyhow::Result<bool> {
         let url = format!("{}/files/{id}", self.api_root);
         let v = self
@@ -712,7 +712,7 @@ impl Drive {
         Ok(v["trashed"].as_bool() != Some(true))
     }
 
-    /// 一个文件的字节：Google 格式导出，其余原样下载
+    /// A file's bytes: Google formats are exported, everything else downloaded as-is
     pub async fn content(&self, file: &DriveFile) -> anyhow::Result<Content> {
         anyhow::ensure!(
             valid_id(&file.id),
@@ -742,7 +742,7 @@ impl Drive {
                 &[("alt", "media"), ("supportsAllDrives", "true")],
             )
             .await?;
-        // 不猜 mime，理由同对象存储：解析先看魔数、再看扩展名
+        // Does not guess the MIME type, for the same reason as object storage: parsing checks magic bytes first, then the extension
         Ok(Content {
             bytes: read_capped(resp, MAX_FILE_BYTES).await?,
             filename: file.name.clone(),
@@ -751,10 +751,10 @@ impl Drive {
     }
 }
 
-/// 文件夹浏览器里「与我共享」的占位 id。真的 id 里没有冒号，撞不上
+/// The placeholder id for "Shared with me" in the folder browser. Real ids contain no colon, so it cannot collide
 pub const SHARED_WITH_ME: &str = "shared:with-me";
 
-/// Drive 的一个非 2xx 响应
+/// A non-2xx response from Drive
 #[derive(Debug)]
 struct DriveError {
     status: StatusCode,
@@ -774,13 +774,13 @@ fn is_not_found(e: &anyhow::Error) -> bool {
         .is_some_and(|d| d.status == StatusCode::NOT_FOUND)
 }
 
-/// 打不开：Drive 对没共享给这个人的文件有时回 404，有时回 403
+/// Cannot be opened: Drive sometimes returns 404 and sometimes 403 for files not shared with this person
 fn is_inaccessible(e: &anyhow::Error) -> bool {
     e.downcast_ref::<DriveError>()
         .is_some_and(|d| d.status == StatusCode::NOT_FOUND || d.status == StatusCode::FORBIDDEN)
 }
 
-/// 读一个限了体积的响应体。先看 Content-Length，再边读边数
+/// Read a size-capped response body. Check Content-Length first, then count while reading
 async fn read_capped(mut resp: reqwest::Response, limit: u64) -> anyhow::Result<Vec<u8>> {
     if resp.content_length().is_some_and(|n| n > limit) {
         anyhow::bail!("response is larger than {limit} bytes");
@@ -795,7 +795,7 @@ async fn read_capped(mut resp: reqwest::Response, limit: u64) -> anyhow::Result<
     Ok(body)
 }
 
-/// 上一轮摄入时每个文件的标记
+/// Each file's marker as of the last ingest round
 pub async fn markers(
     pool: &sqlx::PgPool,
     source_id: Uuid,
@@ -826,8 +826,8 @@ pub async fn remember(
     Ok(())
 }
 
-/// 这一轮没出现的文件忘掉标记：它再出现时得重新读一遍，不能凭旧标记跳过。
-/// 只在遍历完整的轮次调用，与对账同一个条件
+/// Files that did not appear in this round have their markers forgotten: when they reappear they must be read again, and cannot be skipped on the strength of an old marker.
+/// Called only on fully completed traversal rounds, under the same condition as reconciliation
 pub async fn forget_others(
     pool: &sqlx::PgPool,
     source_id: Uuid,

@@ -1,18 +1,18 @@
-//! 单点登录：窄范围的 OIDC 授权码流程（PKCE、一次性 state、nonce、
-//! issuer/audience 与 RS256 校验）。
+//! Single sign-on: a narrow OIDC authorization code flow (PKCE, one-time state, nonce,
+//! issuer/audience and RS256 checks).
 //!
-//! **身份提供方的一个 subject 由账号本人绑定。** 人先用密码登录，再在账户页走一遍
-//! SSO；回调核对「完成这次流程的就是发起绑定的那个已登录的人」才写 `oidc_identities`。
-//! 从前是管理员把任意 subject 填给任意账号——那等于给了管理员一条冒充任何人
-//! （包括别的管理员）登录的路：绑定不经本人、本人看不见、改密码也断不掉，之后的
-//! 操作在台账上记成被冒充的人（0014：身份来自本人）。管理员现在只能看与解绑。
+//! **A subject at the identity provider is bound by the account owner themselves.** The person first logs in with a password, then goes through
+//! SSO on the account page; the callback checks that "the person who completed this flow is the logged-in person who started the binding", and only then writes `oidc_identities`.
+//! Before, an admin could fill any subject into any account, which was a route to impersonate anyone (including other admins): the binding did not go through the person, the person could not see it, and a password change did not cut it off; later
+//! actions were recorded in the ledger as done by the impersonated person (0014: identity comes from the person).
+//! Admins can now only view and unbind.
 //!
-//! 默认绝不按身份提供方的 email 这类可变声明自动关联，首次登录也不自动开账号。
-//! 例外是部署列了 `UTOPIA_OIDC_ALLOWED_DOMAINS`：那些域名里核实过的 email 首次登录时
-//! 关联已有账号或开一个（0069：身份提供方对这些域名说了算）。
+//! By default, auto-linking by a mutable claim such as the identity provider's email never happens, and a first login does not auto-create an account.
+//! The exception is when the deployment lists `UTOPIA_OIDC_ALLOWED_DOMAINS`: for those domains, an email verified by the provider on first login
+//! links to an existing account or opens one (0069: the identity provider decides for those domains).
 //!
-//! **另一个应用可以拿它刚登录到的 ID token 换一个会话**（`exchange`，0066）：同一个
-//! 身份提供方、受信的 audience 列表、十分钟内签发、只换一次，映射规则与登录相同。
+//! **Another application can exchange the ID token it has just logged in with for a session** (`exchange`, 0066): same
+//! identity provider, trusted audience list, issued within ten minutes, exchanged only once; the mapping rules are the same as for login.
 
 use crate::{
     auth::{self, AuthUser},
@@ -37,22 +37,22 @@ use utopia_core::AppError;
 use uuid::Uuid;
 
 const FLOW_COOKIE: &str = "utopia_oidc_state";
-/// HTTPS 下用 `__Host-` 前缀：浏览器只接受 Secure、Path=/、不带 Domain 的这个名字，
-/// 同站点的兄弟子域名或明文链路就种不进来。否则攻击者先种一个自己的 state，
-/// 再把受害者带到自己的回调地址上，受害者就登进了攻击者的账号（登录 CSRF）
+/// With `__Host-` prefix over HTTPS: browsers accept only this name when it is Secure, Path=/ and has no Domain,
+/// so a sibling subdomain of the same site or a plaintext link cannot plant it. Otherwise an attacker plants their own state first,
+/// then leads the victim to the attacker's own callback address, and the victim logs into the attacker's account (login CSRF).
 const FLOW_COOKIE_HOST: &str = "__Host-utopia_oidc_state";
 const FLOW_TTL_SECS: u64 = 600;
-/// 同时在途的登录流程上限。`start` 不需要登录，每一次都会落一行、问一次身份提供方；
-/// 没有上限的话，一个脚本就能把表撑大、把身份提供方对这个部署的限流打满
+/// Cap on login flows in flight at the same time. `start` needs no login, and every call writes a row and asks the identity provider once;
+/// without a cap, one script could bloat the table and exhaust the identity provider's rate limit for this deployment.
 const MAX_PENDING_FLOWS: i64 = 1000;
-/// 发现文档、JWKS、令牌响应的体积上限。它们来自身份提供方，但一个出了问题的
-/// 身份提供方不该能把服务器的内存吃掉
+/// Size cap for the discovery document, JWKS and token responses. They come from the identity provider, but a misbehaving
+/// identity provider must not be able to eat the server's memory.
 const DOC_LIMIT: usize = 256 * 1024;
 const TOKEN_LIMIT: usize = 64 * 1024;
-/// 发现文档与 JWKS 的缓存时长。轮换密钥时 `kid` 找不到会强制刷新一次
+/// Cache lifetime for the discovery document and JWKS. When rotating keys, a `kid` that is not found forces one refresh
 const CACHE_TTL: Duration = Duration::from_secs(600);
-/// 同一地址两次强制刷新之间至少隔这么久。`kid` 由请求方写，`exchange` 又不需要登录：
-/// 不设冷却的话，编一个 `kid` 就能让服务器每次都去问一遍身份提供方
+/// Minimum gap between two forced refreshes of the same address. `kid` is written by the requester, and `exchange` needs no login:
+/// without a cooldown, making up a `kid` would let the server ask the identity provider every time.
 const FORCE_COOLDOWN: Duration = Duration::from_secs(60);
 
 struct Config {
@@ -60,21 +60,21 @@ struct Config {
     client_id: String,
     secret: Option<String>,
     redirect: String,
-    /// `exchange` 收哪些 client 的 ID token。空 = 不开放换会话。与 Utopia 共用一个
-    /// client 的部署把 Utopia 自己的 client id 写进来
+    /// Which clients' ID tokens `exchange` accepts. Empty = exchange is not offered. A deployment whose client is shared with Utopia
+    /// writes Utopia's own client id here
     exchange_audiences: Vec<String>,
-    /// 这些域名里核实过的 email 首次登录时按 email 关联已有账号，没有就开一个
-    /// （`UTOPIA_OIDC_ALLOWED_DOMAINS`）。空 = 只认本人绑定过的 subject
+    /// An email verified among these domains, on first login, is matched by email to an existing account, or one is opened if none exists
+    /// (`UTOPIA_OIDC_ALLOWED_DOMAINS`). Empty = only trust subjects the person bound themselves
     allowed_domains: Vec<String>,
-    /// 本地开发：允许 issuer 与各端点走回环地址上的明文 HTTP。只认 localhost /
-    /// 127.0.0.1 / ::1，公网地址照旧只能 HTTPS
+    /// Local development: allows the issuer and each endpoint to use plaintext HTTP on a loopback address. Only localhost /
+    /// 127.0.0.1 / ::1 are accepted; public addresses must still be HTTPS
     loopback_http: bool,
-    /// 授权请求的 scope（`UTOPIA_OIDC_SCOPES`，默认 `openid profile email`）。有的身份提供方
-    /// 的管理员只批了 `openid profile`，多要一个 `email` 就让每个人登录时都卡在同意页（#1355）
+    /// Scope of the authorization request (`UTOPIA_OIDC_SCOPES`, default `openid profile email`). Some identity providers'
+    /// admins only approve `openid profile`; asking for an extra `email` makes every login stick on the consent page (#1355)
     scopes: String,
 }
 
-/// `openid` 必须在：少了它就不是 OIDC，拿不到 ID token。没写就补在最前面，而不是报错
+/// `openid` is required: without it this is not OIDC and no ID token is returned. If it is missing it is prepended rather than raising an error
 fn scopes(raw: Option<&str>) -> String {
     let mut out: Vec<&str> = Vec::new();
     for s in raw
@@ -145,7 +145,7 @@ fn secure_url(s: &str, loopback: bool) -> Result<reqwest::Url, AppError> {
     Ok(url)
 }
 
-/// 一次拒绝：`code` 回给界面（登录页 / 账户页按它措辞），`reason` 只进日志与台账
+/// One rejection: `code` is returned to the UI (the login and account pages word their messages by it), and `reason` goes only to the log and the ledger
 struct Refusal {
     code: &'static str,
     reason: String,
@@ -172,8 +172,8 @@ fn client() -> Result<reqwest::Client, Refusal> {
         .map_err(|e| refuse("unavailable", format!("http client: {e}")))
 }
 
-/// 读一个限了体积的 JSON 响应。先看 Content-Length，再边读边数——
-/// 不报长度的响应一样截得住
+/// Read a size-capped JSON response. Check Content-Length first, then count while reading;
+/// a response that reports no length is still cut off
 async fn read_json(mut resp: reqwest::Response, limit: usize) -> Result<Value, String> {
     if !resp.status().is_success() {
         return Err(format!("status {}", resp.status()));
@@ -198,8 +198,8 @@ fn cache() -> &'static Cache {
     CACHE.get_or_init(Default::default)
 }
 
-/// 发现文档与 JWKS 按地址缓存。`start` 不需要登录，不缓存的话每一次匿名请求
-/// 都会让服务器去问一次身份提供方
+/// The discovery document and JWKS are cached per address. `start` needs no login, and without caching every anonymous request
+/// would make the server ask the identity provider again
 async fn cached_json(url: &reqwest::Url, force: bool) -> Result<Value, Refusal> {
     let key = url.to_string();
     let force = force && force_allowed(&key).await;
@@ -225,8 +225,8 @@ async fn cached_json(url: &reqwest::Url, force: bool) -> Result<Value, Refusal> 
     Ok(v)
 }
 
-/// 这一次强制刷新放不放行：冷却期内的一律退回读缓存。先记下时刻再去取，
-/// 同时到的一批请求里只有一个真去问身份提供方
+/// Whether this forced refresh is allowed: during the cooldown everything falls back to the cache. Record the time first, then fetch,
+/// so that of a batch of requests arriving together only one actually asks the identity provider
 async fn force_allowed(key: &str) -> bool {
     static LAST: std::sync::OnceLock<tokio::sync::Mutex<HashMap<String, Instant>>> =
         std::sync::OnceLock::new();
@@ -287,7 +287,7 @@ fn flow_cookie(value: String, secure: bool) -> Cookie<'static> {
         .build()
 }
 
-/// 当前请求带着的已登录会话（cookie），停用的账号不算
+/// The logged-in session the current request carries (cookie); a deactivated account does not count
 async fn session_user(s: &AppState, jar: &CookieJar) -> Option<Uuid> {
     let token = jar.get(auth::COOKIE_NAME)?.value().to_string();
     let id = auth::decode_user_id(s, &token).ok()?;
@@ -298,8 +298,8 @@ async fn session_user(s: &AppState, jar: &CookieJar) -> Option<Uuid> {
         .map(|u| u.id)
 }
 
-/// RFC 6749 §2.3.1：client id 与 secret 先按表单编码，再放进 Basic 头。
-/// 不编码的话含 `:`、`%`、`+` 的 secret 在严格的身份提供方那里认证失败
+/// RFC 6749 section 2.3.1: client id and secret are form-encoded first, then put into the Basic header.
+/// Without encoding, a secret containing `:`, `%` or `+` fails authentication at a strict identity provider
 fn form_encode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
@@ -308,14 +308,14 @@ pub async fn status(State(s): State<AppState>) -> Json<Value> {
     Json(json!({"enabled": config().is_ok(), "password_login": password_login(&s)}))
 }
 
-/// 密码登录实际开没开：`UTOPIA_PASSWORD_LOGIN=false` 只在 SSO 配好时生效。
-/// 没有 SSO 还关掉密码，谁都进不来——那就当这个开关没设，与登录页同一条规则
+/// Whether password login is actually enabled: `UTOPIA_PASSWORD_LOGIN=false` only takes effect when SSO is configured.
+/// Turning off the password with no SSO means nobody can get in, so in that case the switch is treated as unset, with the same rule as the login page
 pub fn password_login(s: &AppState) -> bool {
     s.password_login || config().is_err()
 }
 
-/// 启动时说出来：允许名单按 ID token 里核实过的 email 关联账号，scope 里没有 `email`
-/// 时多数身份提供方根本不发这个声明，名单就形同虚设
+/// Stated at startup: the allowlist links accounts by the email verified in the ID token, and when `email` is not in the scope
+/// most identity providers do not send that claim at all, so the allowlist is effectively useless
 pub fn warn_about_scopes() {
     if let Ok(c) = config() {
         if !c.allowed_domains.is_empty() && !c.scopes.split_whitespace().any(|s| s == "email") {
@@ -324,8 +324,8 @@ pub fn warn_about_scopes() {
     }
 }
 
-/// 启动时把关掉密码登录的两种后果说出来：没配 SSO 时这个开关不生效；
-/// 没有允许名单时只有绑定过身份的人进得来，新人既注册不了也开不了户
+/// Two consequences of turning off password login are stated at startup: without SSO the switch has no effect;
+/// without an allowlist only people with a bound identity can get in, and new people can neither register nor have an account opened
 pub fn warn_about_password_login(s: &AppState) {
     if s.password_login {
         return;
@@ -347,7 +347,7 @@ pub struct StartQuery {
     link: Option<String>,
 }
 
-/// 浏览器导航过来的：出错一律带着代码跳回页面，不给人看一段 JSON
+/// Reached by browser navigation: errors always redirect back to the page with a code, rather than showing the person a JSON blob
 fn back_to(page: &str, code: &str) -> Redirect {
     Redirect::to(&format!("{page}?sso_error={code}"))
 }
@@ -381,7 +381,7 @@ async fn begin(
     linking: bool,
 ) -> Result<(String, reqwest::Url), Refusal> {
     let c = config().map_err(|_| refuse("unavailable", "not configured"))?;
-    // 绑定只替已登录的本人发起：流程上记下是谁，回调时再核对一次
+    // Binding is started only on behalf of the logged-in person: the flow records who it was, and the callback checks again
     let link_user = if linking {
         Some(
             session_user(s, jar)
@@ -434,14 +434,14 @@ async fn begin(
 pub struct Callback {
     code: Option<String>,
     state: Option<String>,
-    /// 人在身份提供方那边点了取消，或者它拒绝了这次请求
+    /// The person clicked cancel at the identity provider, or it rejected the request
     error: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
 struct Claims {
     sub: String,
-    /// 登录拿到的令牌带着本次流程的 nonce；换会话的令牌是别人的流程签的，未必有
+    /// A login token carries the nonce of this flow; a token for exchange was signed by someone else's flow, and may not have one
     #[serde(default)]
     nonce: Option<String>,
     iat: i64,
@@ -450,8 +450,8 @@ struct Claims {
     aud: Value,
     #[serde(default)]
     email: Option<String>,
-    /// 每个令牌都要过这里：有的身份提供方发字符串 `"true"`，严格按 bool 解析会让所有人
-    /// 都登不进来。只有 `true` / `"true"` 算核实过，其它一律不算
+    /// Every token passes through here: some identity providers send the string `"true"`, and strict bool parsing would stop everyone
+    /// from logging in. Only `true` / `"true"` count as verified; anything else does not
     #[serde(default, deserialize_with = "lenient_true")]
     email_verified: bool,
     /// Microsoft Entra sends no `email_verified`. Its optional claim `xms_edov` says the
@@ -470,7 +470,7 @@ fn lenient_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error
     })
 }
 
-/// 开户用的显示名：`name` 声明去掉首尾空白、最多 64 个字符；空的就用 email 的本地部分
+/// Display name for the account being opened: the `name` claim with leading and trailing whitespace removed, at most 64 characters; if empty, use the local part of the email
 fn display_name(claim: Option<&str>, email: &str) -> String {
     let name: String = claim.unwrap_or_default().trim().chars().take(64).collect();
     if name.is_empty() {
@@ -480,8 +480,8 @@ fn display_name(claim: Option<&str>, email: &str) -> String {
     }
 }
 
-/// 能自动开户或按 email 关联的那个 email：身份提供方核实过，而且域名在允许名单里。
-/// 名单空着就永远是 `None`——默认仍然只认本人绑定过的 subject
+/// The email that can be used to open an account automatically or link by email: verified by the identity provider, and the domain is on the allowlist.
+/// With the list empty it is always `None`, since by default only subjects the person bound themselves are trusted
 fn provisioned_email(claims: &Claims, allowed_domains: &[String]) -> Option<String> {
     let email = claims.email.as_deref()?.trim().to_lowercase();
     let (_, domain) = email.rsplit_once('@')?;
@@ -489,7 +489,7 @@ fn provisioned_email(claims: &Claims, allowed_domains: &[String]) -> Option<Stri
     (verified && allowed_domains.iter().any(|d| d == domain)).then_some(email)
 }
 
-/// 按 `kid` 找钥匙；令牌不带 `kid` 时，只有 JWKS 里恰好一把 RSA 钥匙才用它
+/// Find the key by `kid`; when the token has no `kid`, use the one RSA key only if the JWKS contains exactly one
 fn pick_key<'a>(keys: &'a JwkSet, kid: Option<&str>) -> Option<&'a jsonwebtoken::jwk::Jwk> {
     match kid {
         Some(kid) => keys.find(kid),
@@ -519,8 +519,8 @@ fn verify_token(
     Ok(claims)
 }
 
-/// 签名、issuer、有效期与 audience：令牌得是配置的 issuer 签给 `audiences` 之一的。
-/// `azp` 出现时（或 audience 不止一个时）也必须在其中
+/// Signature, issuer, validity period and audience: the token must be signed by the configured issuer for one of `audiences`.
+/// When `azp` is present (or there is more than one audience) it must also be among them
 fn verify_for(
     c: &Config,
     id_token: &str,
@@ -556,10 +556,10 @@ fn verify_for(
     Ok(claims)
 }
 
-/// 换会话的 ID token 最多多旧：它是登录一完成就拿来换的
+/// How old an exchanged ID token may be at most: it is used for the exchange right after login completes
 const EXCHANGE_MAX_AGE_SECS: i64 = 600;
 
-/// 一个刚签发的、签给受信 audience 之一的 ID token
+/// A freshly issued ID token signed for one of the trusted audiences
 fn verify_exchange_token(c: &Config, id_token: &str, keys: &JwkSet) -> Result<Claims, AppError> {
     let audiences: Vec<&str> = c.exchange_audiences.iter().map(String::as_str).collect();
     let claims = verify_for(c, id_token, keys, &audiences)?;
@@ -574,10 +574,10 @@ pub struct Exchange {
     id_token: String,
 }
 
-/// 另一个应用（client id 在 `UTOPIA_OIDC_EXCHANGE_AUDIENCES` 里）让它的用户在同一个
-/// 身份提供方登录，再拿刚到手的 ID token 换一个 Utopia 会话，以那个人的身份调这里的
-/// API。映射与 SSO 登录相同：本人绑定过的身份，或者允许名单里的域名（0069）。
-/// 没配 SSO 或没配受信 audience 时就当这个端点不存在
+/// Another application (whose client id is in `UTOPIA_OIDC_EXCHANGE_AUDIENCES`) lets its user log in at the same
+/// identity provider, then exchanges the ID token it just received for a Utopia session, and calls the API here as that person.
+/// The mapping is the same as SSO login: an identity the person bound themselves, or a domain on the allowlist (0069).
+/// If SSO or a trusted audience is not configured, this endpoint is treated as if it does not exist
 pub async fn exchange(
     State(s): State<AppState>,
     Json(body): Json<Exchange>,
@@ -603,9 +603,9 @@ pub async fn exchange(
     }
     let claims = verify_exchange_token(&c, &body.id_token, &keys)?;
 
-    // 一次性：令牌的哈希落一行，活过令牌还能被接受的每一刻；插不进去就是换过了。
-    // 只按 `iat` 算：十分钟的新鲜度没有宽限，而 `exp` 的校验有 60 秒宽限——按 `exp` 记的话，
-    // 过期后的那一分钟里行已经扫掉、令牌却还验得过，能再换一次。多留的一分钟给应用和库的钟差
+    // One use only: a hash of the token is stored as a row, for every moment the token would still be accepted; if the insert fails, it has already been exchanged.
+    // Counted by `iat` only: the ten-minute freshness has no grace, while the `exp` check has a 60-second grace. If recorded by `exp`,
+    // in the minute after expiry the row has already been swept while the token still validates, so it could be exchanged again. The extra minute covers clock skew between the app and the library
     sqlx::query("DELETE FROM oidc_exchanges WHERE expires_at < now()")
         .execute(&s.pool)
         .await?;
@@ -656,7 +656,7 @@ pub async fn exchange(
     Ok(Json(json!({"token": token, "expires_at": expires_at})))
 }
 
-/// 回调办成的是哪一件事
+/// Which action the callback performed
 enum Done {
     SignedIn(Uuid),
     Linked,
@@ -670,7 +670,7 @@ pub async fn callback(
 ) -> (CookieJar, Redirect) {
     let secure = auth::behind_tls(&headers, s.cookie_secure);
     let mut linking = false;
-    // 先读后删：CookieJar 删掉的 cookie 再 `get` 就取不到了
+    // Read first, then delete: a cookie removed by CookieJar can no longer be fetched with `get`
     let outcome = finish(&s, &jar, q, &mut linking).await;
     let jar = jar
         .remove(flow_cookie(String::new(), true))
@@ -686,7 +686,7 @@ pub async fn callback(
         Ok(Done::Linked) => (jar, Redirect::to("/account?sso=linked")),
         Err(r) => {
             tracing::warn!(code = r.code, reason = %r.reason, "单点登录被拒");
-            // 失败也进台账，与密码登录的 `auth.login_failed` 同一个口径
+            // Failures go into the ledger too, under the same convention as the password login's `auth.login_failed`
             let _ = utopia_store::audit::record_opt(
                 &s.pool,
                 None,
@@ -771,7 +771,7 @@ async fn finish(
         serde_json::from_value::<JwkSet>(v).map_err(|e| refuse("unavailable", format!("jwks: {e}")))
     };
     let mut keys = parse(cached_json(&jwks_url, false).await?)?;
-    // 身份提供方轮换了密钥：缓存里没有这个 kid 就强制刷新一次，再不认就是真不认
+    // The identity provider rotated keys: if the cache lacks this kid, force one refresh; if still not recognized, it is truly unrecognized
     let kid = decode_header(id_token).ok().and_then(|h| h.kid);
     if pick_key(&keys, kid.as_deref()).is_none() {
         keys = parse(cached_json(&jwks_url, true).await?)?;
@@ -781,8 +781,8 @@ async fn finish(
 
     match link_user {
         Some(user_id) => {
-            // 完成绑定的必须还是发起绑定的那个人：流程是在他登录着的时候开始的，
-            // 回调时同一个浏览器里得还是他的会话
+            // The person who completes the binding must still be the one who started it: the flow began while he was logged in,
+            // so at callback time the same browser must still hold his session
             if session_user(s, jar).await != Some(user_id) {
                 return Err(refuse(
                     "session",
@@ -811,8 +811,8 @@ async fn finish(
     }
 }
 
-/// 这个 subject 登进哪个账号：本人绑定过的优先；没绑定、而 email 落在允许的域名里，
-/// 就按 email 找账号（找不到开一个）并替他绑上
+/// Which account this subject logs in to: the person's own bound one first; if none is bound and the email falls in an allowed domain,
+/// look up the account by email (open one if not found) and bind it for them
 async fn account_of(s: &AppState, c: &Config, claims: &Claims) -> Result<Option<Uuid>, Refusal> {
     let linked: Option<Uuid> = sqlx::query_scalar(
         "SELECT i.user_id FROM oidc_identities i JOIN users u ON u.id = i.user_id
@@ -880,7 +880,7 @@ async fn link(s: &AppState, c: &Config, user_id: Uuid, subject: &str) -> Result<
             .await;
     match inserted {
         Ok(_) => {}
-        // 两个约束各对应一种撞车：subject 被别人抢先绑了，或者这个账号已经有一个
+        // The two constraints each guard against one kind of collision: the subject was taken first by someone else, or this account already has one
         Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
             let code = if db.constraint().is_some_and(|n| n.contains("user")) {
                 "already_linked"
@@ -904,7 +904,7 @@ async fn link(s: &AppState, c: &Config, user_id: Uuid, subject: &str) -> Result<
     Ok(())
 }
 
-/// 我自己的绑定：账户页用
+/// My own bindings: used by the account page
 pub async fn me(State(s): State<AppState>, AuthUser(u): AuthUser) -> ApiResult<Json<Value>> {
     let Ok(c) = config() else {
         return Ok(Json(json!({"enabled": false, "linked": false})));
@@ -921,7 +921,7 @@ pub async fn me(State(s): State<AppState>, AuthUser(u): AuthUser) -> ApiResult<J
     ))
 }
 
-/// 解绑我自己的身份
+/// Unbind my own identity
 pub async fn unlink_me(State(s): State<AppState>, AuthUser(u): AuthUser) -> ApiResult<Json<Value>> {
     let c = config()?;
     let done = sqlx::query("DELETE FROM oidc_identities WHERE issuer = $1 AND user_id = $2")
@@ -967,8 +967,8 @@ pub async fn identities(
     ))
 }
 
-/// 管理员解绑。**只有解绑，没有替人绑定**（见模块说明）。解绑不会让已签发的会话
-/// 失效——会话是无状态的 JWT，要立刻切断访问得停用账号
+/// Admin unbind. **Unbinding only, no binding on someone's behalf** (see the module notes). Unbinding does not invalidate sessions already issued;
+/// sessions are stateless JWTs, so cutting off access immediately requires deactivating the account
 pub async fn unbind(
     State(s): State<AppState>,
     AuthUser(u): AuthUser,
@@ -1240,7 +1240,7 @@ mod tests {
         )
         .is_err());
 
-        // 不带 kid：JWKS 里只有一把 RSA 钥匙时用它，多于一把就不猜
+        // Without a `kid`: use it when the JWKS has exactly one RSA key; if more than one, do not guess
         header.kid = None;
         let no_kid = encode(&header, &valid, &key).unwrap();
         assert!(super::verify_token(&c, &no_kid, &keys, "expected").is_ok());
@@ -1295,7 +1295,7 @@ mod tests {
         multi["azp"] = json!(c.client_id);
         assert!(super::verify_exchange_token(&c, &sign(&multi), &keys).is_ok());
 
-        // 另一个应用用它自己的 client id；不在受信列表里的照样不认
+        // Another application uses its own client id; one not in the trusted list is still refused
         let mut sibling = valid.clone();
         sibling["aud"] = json!("sibling-app");
         assert!(super::verify_exchange_token(&c, &sign(&sibling), &keys).is_ok());

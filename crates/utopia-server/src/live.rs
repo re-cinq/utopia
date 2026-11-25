@@ -1,16 +1,16 @@
-//! 正在生成的回答，能被重新接上。
+//! An answer still being generated can be reattached.
 //!
-//! **一条 SSE 流绑在一个 HTTP 请求上，而回答比请求活得长。** 生成已经搬进
-//! 独立任务（`api::chat`），所以刷新页面不会再丢答案；但那条流断了就是断了，
-//! 刷新之后只能等它落库，中间那段看不见。前端把进行中的那一次搬出组件，
-//! 解决的是同一个标签页里切来切去；**刷新、换标签页、换设备都不在其中**。
+//! **One SSE stream is bound to one HTTP request, but the answer lives longer than the request.** Generation has already moved into
+//! its own task (`api::chat`), so refreshing the page no longer loses the answer; but when that stream breaks, it is broken, and
+//! after a refresh you can only wait for it to be saved, with the middle part invisible. The front end lifts the in-progress one out of the component,
+//! which solves switching between tabs in the same window; **refresh, a new tab or a new device are not covered by that**.
 //!
-//! 这里补上最后一段：生成期间把它登记下来，谁都可以再接上。
+//! This fills the last gap: while generating, register it, so anyone can reattach.
 //!
-//! **接上时先给一份快照，不是重放事件。** 事件流会无限长，缓冲它等于把
-//! 一次对话的全部增量都留在内存里；而快照的大小就是那个回答本身的大小，
-//! 有天然上限。客户端那边也更简单：拿快照覆盖当前状态，然后照常收增量，
-//! 不必去想"我重放到哪一条了"。
+//! **On reattach, first give a snapshot, not a replay of events.** An event stream grows without bound, and buffering it would keep
+//! every increment of one conversation in memory; whereas the size of a snapshot is the size of the answer itself,
+//! which has a natural ceiling. The client side is simpler too: overwrite the current state with the snapshot, then take increments as usual,
+//! with no need to think "which event did I replay up to".
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -18,10 +18,10 @@ use tokio::sync::{broadcast, watch, RwLock};
 use utopia_core::{AppError, AppResult};
 use uuid::Uuid;
 
-/// 一个 SSE 事件：事件名 + 已经序列化好的 data。
+/// One SSE event: the event name plus the already-serialised data.
 ///
-/// 不用 `axum::response::sse::Event`——它没有读回内容的办法，而这里既要
-/// 广播出去，又要拿它更新快照。
+/// Not `axum::response::sse::Event`: it has no way to read the content back, and here we need both
+/// to broadcast it and to update the snapshot with it.
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub event: &'static str,
@@ -34,7 +34,7 @@ impl Frame {
     }
 }
 
-/// 到此刻为止这个回答长什么样。接上的人先拿到它。
+/// What this answer looks like up to this moment. A reattaching viewer gets it first.
 #[derive(Clone, Default, Debug)]
 pub struct Snapshot {
     pub generation_id: Uuid,
@@ -45,8 +45,8 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// **快照由事件本身推出来，不另设一套写入口。** 两套写法迟早对不上——
-    /// 那正是这个仓库反复踩到的形状（一处认得新字段，另一处不认）
+    /// **The snapshot is derived from the events themselves; no second write path is set up.** Two write paths would sooner or later disagree:
+    /// that is exactly the shape this repo keeps tripping over (one place recognises a new field, another does not)
     fn apply(&mut self, f: &Frame) {
         match f.event {
             "delta" => {
@@ -61,7 +61,7 @@ impl Snapshot {
                     self.steps.push(v);
                 }
             }
-            // sources 是全量重发，不是追加
+            // sources are re-sent in full, not appended
             "sources" => {
                 if let Ok(serde_json::Value::Array(a)) = serde_json::from_str(&f.data) {
                     self.sources = a;
@@ -97,7 +97,7 @@ struct Entry {
     ready: watch::Sender<bool>,
 }
 
-/// 保留取消信号：Stop 可能早于生成器开始等待。
+/// Keep the cancel signal: Stop may arrive before the generator starts waiting.
 #[derive(Clone)]
 pub struct Cancellation(watch::Sender<bool>);
 
@@ -122,12 +122,12 @@ impl Cancellation {
     }
 }
 
-/// 按会话登记进行中的生成，在写问题前占位。注册表锁不跨越 await；
-/// 使用同步锁，让准备失败时的 Drop 也能释放占位。
+/// Register the in-progress generation per session, taking the slot before the question is written. The registry lock does not span an await;
+/// a synchronous lock is used, so that the Drop that releases the slot also works when preparation fails.
 #[derive(Default)]
 pub struct Registry(Mutex<HashMap<Uuid, Entry>>);
 
-/// 一次生成期间握着的把手。发事件、结束时注销。
+/// A handle held during one generation. Emits events, and deregisters when finished.
 pub struct Handle {
     conversation_id: Uuid,
     generation_id: Uuid,
@@ -151,21 +151,21 @@ impl Handle {
         self.snap.read().await.clone()
     }
 
-    /// 准备成功后才开放订阅；被拒的重试只释放占位，不会留下等待终态的客户端。
+    /// Subscription opens only after preparation succeeds; a rejected retry only releases the slot and leaves no client waiting for a terminal state.
     pub async fn start(&self) {
         self.ready.send_replace(true);
     }
 
-    /// 发一个事件：记进快照，然后广播。
+    /// Emit one event: record it into the snapshot, then broadcast.
     ///
-    /// **广播时仍然握着快照的写锁**，这一点是必需的。只保证「先写后发」
-    /// 挡不住重复：接上的人在两步之间订阅，就会既在快照里看到这一段、
-    /// 又从广播里再收一次。握着锁发，`attach` 那边握着读锁订阅，两者互斥——
-    /// 于是接上的时刻要么整个在这次 emit 之前，要么整个在它之后
+    /// **The snapshot's write lock is still held during the broadcast**, and this is required. "Write first, then send" alone
+    /// does not prevent duplication: a reattacher who subscribes between the two steps would see this segment both in the snapshot
+    /// and receive it again from the broadcast. Sending while holding the lock, with `attach` holding the read lock while subscribing, makes the two mutually exclusive:
+    /// so a reattach moment is either wholly before this emit or wholly after it
     pub async fn emit(&self, frame: Frame) {
         let mut snap = self.snap.write().await;
-        // 终态也必须记进快照并遵守订阅边界：
-        // 广播后才接入的订阅者仍需要收到同一个结果。
+        // A terminal state must also be recorded into the snapshot and obey the subscription boundary:
+        // a subscriber attached after the broadcast still needs to receive the same result.
         if snap.terminal.is_some() {
             return;
         }
@@ -173,12 +173,12 @@ impl Handle {
         if matches!(frame.event, "done" | "error") {
             snap.terminal = Some(frame.clone());
         }
-        // 没有订阅者是常态（人走了），不是错
+        // No subscribers is the normal case (the person left), not an error
         let _ = self.tx.send(frame);
     }
 
-    /// 持久化完成后，先释放会话，再通知订阅者可以继续提问；
-    /// 快照和订阅仍保持同一个边界。
+    /// Once persistence completes, release the session first, then notify subscribers they may ask again;
+    /// the snapshot and the subscription still keep the same boundary.
     pub async fn complete(self, terminal: Frame) {
         let mut snap = self.snap.write().await;
         self.retire();
@@ -207,7 +207,7 @@ impl Drop for Handle {
 }
 
 impl Registry {
-    /// 检查和占位在同一把锁下，新问题与重试都只允许一个生成者。
+    /// The check and the slot-taking happen under the same lock: a new question and a retry both allow only one generator.
     pub async fn begin(self: &Arc<Self>, conversation_id: Uuid) -> AppResult<Handle> {
         let mut entries = self.0.lock().expect("live registry lock");
         if entries.contains_key(&conversation_id) {
@@ -245,7 +245,7 @@ impl Registry {
         })
     }
 
-    /// 延迟或重复的 Stop 不能取消下一轮生成。
+    /// A delayed or duplicate Stop must not cancel the next generation.
     pub async fn stop(&self, conversation_id: Uuid, generation_id: Uuid) {
         let entries = self.0.lock().expect("live registry lock");
         let Some(entry) = entries.get(&conversation_id) else {
@@ -256,9 +256,9 @@ impl Registry {
         }
     }
 
-    /// 接上一次正在跑的生成：拿到此刻的快照，以及之后的增量。
+    /// Reattach to a generation that is running: get the snapshot at this moment, plus the increments after it.
     ///
-    /// 返回 `None` = 这个会话没有在跑的生成。**那不是错**，是最常见的情况
+    /// Returns `None` = no generation running for this session. **That is not an error**, and it is the most common case
     pub async fn attach(
         &self,
         conversation_id: Uuid,
@@ -272,12 +272,12 @@ impl Registry {
                 entry.ready.subscribe(),
             )
         };
-        // 不持有 ready 的发送端：准备失败释放占位时，等待者会醒来并回到 idle。
-        // 准备成功则接上同一轮，避免过早返回 idle 后错过整个回答。
+        // Do not hold the ready sender: when preparation fails and the slot is released, waiters wake up and return to idle.
+        // If preparation succeeds, attach to the same round, so that we do not return idle too early and miss the whole answer.
         ready.wait_for(|started| *started).await.ok()?;
-        // **握着快照的读锁再订阅。** `emit` 是握着写锁广播的，所以这一段
-        // 与任何一次 emit 互斥：拿到的快照与订阅起点严丝合缝，
-        // 中间那一小段既不会漏、也不会重
+        // **Subscribe while holding the snapshot's read lock.** `emit` broadcasts while holding the write lock, so this section
+        // is mutually exclusive with any emit: the snapshot obtained and the subscription start line up exactly,
+        // and nothing in between is either missed or repeated
         let guard = snap.read().await;
         let rx = tx.subscribe();
         Some((guard.clone(), rx))
@@ -372,8 +372,8 @@ mod tests {
         let id = Uuid::now_v7();
         let handle = registry.begin(id).await.unwrap();
         handle.start().await;
-        // 两种拿锁顺序都合法：每个增量必须恰好出现在快照或订阅中一次，
-        // 既不能重复，也不能遗漏。
+        // Both lock orders are valid: every increment must appear exactly once, either in the snapshot or in the subscription,
+        // neither duplicated nor missed.
         for index in 0..64 {
             let attached = if index % 2 == 0 {
                 tokio::join!(handle.emit(delta("x")), registry.attach(id)).1

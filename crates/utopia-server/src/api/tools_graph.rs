@@ -1,15 +1,15 @@
-//! 图谱查询工具（#558）：`paths_between`、`neighbors`、`timeline`，以及
-//! `find_entities` 的排序和 `entity_facts` 的过滤与分组。
+//! Graph query tools (#558): `paths_between`, `neighbors`, `timeline`, and
+//! sorting in `find_entities`, plus filtering and grouping in `entity_facts`.
 //!
-//! 从前模型手里的图谱只有两个动作：按名找实体、倒出一个实体的全部事实。
-//! 「OpenAI 和 Anthropic 的关系」要它自己把两边几百条事实在上下文里连线，
-//! 十六次里三次连上；「OpenAI 的时间线」是一份 433 行的倾倒，它自己排序。
-//! 这里把查询的活收回服务端：路径是服务端搜的，邻居按谓词分好组，时间线按
-//! 世界时间排好，事实可以按谓词、对象类型、时段筛。
+//! Previously the model had only two graph actions: find an entity by name, and dump all of an entity's facts.
+//! "The relation between OpenAI and Anthropic" required it to wire together hundreds of facts from both sides in its context:
+//! it managed it three times out of sixteen; "OpenAI's timeline" was a 433-line dump that it had to sort itself.
+//! Here the query work is moved back to the server: paths are searched server-side, neighbours are grouped by predicate, timelines are ordered by
+//! world time, and facts can be filtered by predicate, object type and time period.
 //!
-//! **实体参数收 uuid 也收名字。** 收名字是为了省掉一轮 find_entities，以及那一轮
-//! 之后常见的「你说的是哪个 OpenAI」——排序规则挑一个，把挑了谁、还有谁一并
-//! 写在结果最上面，模型不同意就拿 id 再来一次。
+//! **Entity arguments accept a uuid or a name.** Accepting a name saves a round of find_entities, and the common follow-up
+//! after that round, "which OpenAI do you mean?": the ordering rule picks one, and writes who was picked, and who else
+//! matched, at the top of the result; if the model disagrees it retries with the id.
 
 use super::tools::{
     entity_facts_detail, fact_line, just_before, literal_text, page_offset, parse_when, Step,
@@ -26,15 +26,15 @@ const TIMELINE_DEFAULT: usize = 60;
 const FACTS_DEFAULT: usize = 80;
 const LIST_MAX: usize = 300;
 
-// ---- 实体参数 -------------------------------------------------------------------
+// ---- Entity arguments -------------------------------------------------------------------
 
-/// 名字匹配的排序：**类型判出来的在前，同名精确命中在前，事实多的在前**。
+/// Sorting for name matches: **type-identified ones first, exact same-name hits first, then the ones with more facts**.
 ///
-/// 没类型的短语（"lawsuit against OpenAI"，#559）在有别的候选时不列：它们几乎全是
-/// 抽取漏进来的描述，列出来只会把问题变成一次消歧。全是 untyped 时照列——一个
-/// 类型都没判出来的库也得能用。**叫这个名字的照列，有没有类型都一样**：问的就是
-/// "Acme"，而 Acme 本身还没判出类型时，只剩一个 "Acme lawsuit" 是把人引到错的实体上，
-/// 没类型的实体也得找得到（0009）。
+/// Phrases with no type ("lawsuit against OpenAI", #559) are left out when other candidates exist: almost all of them are
+/// descriptions that extraction let in by mistake, and listing them would only turn the question into one more disambiguation. When all are untyped they are listed, so a
+/// library in which no type was identified at all must still be usable. **Those with this exact name are always listed, typed or not**: the question is
+/// "Acme", and while Acme itself has not yet been typed, leaving only "Acme lawsuit" would point the person at the wrong entity;
+/// untyped entities must still be findable (0009).
 pub(super) fn rank(mut hits: Vec<GraphNode>, query: &str) -> Vec<GraphNode> {
     let q = query.trim().to_lowercase();
     let exact = |n: &GraphNode| n.name.trim().to_lowercase() == q;
@@ -50,7 +50,7 @@ pub(super) fn rank(mut hits: Vec<GraphNode>, query: &str) -> Vec<GraphNode> {
     hits
 }
 
-/// 第一名是不是明显的那一个：只有它，或只有它精确命中，或它的事实数是第二名的三倍
+/// Whether the first place is clearly the one: only it, or only it as an exact hit, or its fact count is three times the second place's
 pub(super) fn dominant(ranked: &[GraphNode], query: &str) -> bool {
     let q = query.trim().to_lowercase();
     match ranked {
@@ -74,14 +74,14 @@ fn node_line(n: &GraphNode) -> String {
         n.id,
         n.name,
         dis,
-        // 没判出类型的实体照样能被搜到、被引用（0009）
+        // Entities whose type was not identified are still found and referenced (0009)
         n.type_label.as_deref().unwrap_or("untyped"),
         n.degree
     )
 }
 
-/// 记下这一轮认下的实体。下一轮会被告知「直接用这些 id，别再按名字查」，所以这里
-/// 只能是真的读过、或者搜索明确指向的那个——同一轮先按名字认、再按 id 读，只记一次
+/// Records the entities accepted in this turn. The next round is told "use these ids directly, do not look up by name again", so here it
+/// may only hold ones that were actually read, or the one the search explicitly pointed to: within one turn, first accepted by name and then read by id, record only once
 fn remember(sink: &mut ToolSink, n: &GraphNode) {
     let id = n.id.to_string();
     if sink.resolved.iter().any(|e| e["id"] == id.as_str()) {
@@ -92,12 +92,12 @@ fn remember(sink: &mut ToolSink, n: &GraphNode) {
     }));
 }
 
-/// 一个实体参数解析成 id。名字走 [`rank`]，挑了谁写进 `note` 交给结果开头
+/// Resolve one entity argument to an id. The name goes through [`rank`]; whoever was picked is written into `note` and handed to the top of the result
 struct Resolved {
     id: Uuid,
     name: String,
     note: Option<String>,
-    /// 参数本来就是一个 id：没在库里查过，`name` 也只是那串 id
+    /// The argument is already an id: it was not looked up in the library, and `name` is just that id string
     by_id: bool,
 }
 
@@ -173,7 +173,7 @@ async fn resolve(
     })
 }
 
-/// 时刻参数三件套：`at` 世界轴，`as_of` / `before` 记录轴（before 优先，减一微秒）
+/// Time parameter trio: `at` for the world axis, `as_of` / `before` for the record axis (before takes precedence, minus one microsecond)
 struct Moments {
     at: Option<chrono::DateTime<chrono::Utc>>,
     as_of: Option<chrono::DateTime<chrono::Utc>>,
@@ -205,21 +205,21 @@ fn contains_ci(haystack: Option<&str>, needle: &str) -> bool {
 
 // ---- evidence marks (#935) -------------------------------------------------------
 
-/// 这一次显示出来的事实各自的第一条有效证据（#935）。
+/// For each fact displayed this time, its first valid evidence (#935).
 ///
-/// 事实行上印它的 `[n]`，证据块登进这一轮的来源清单，界面上点开就是那句原话；从前
-/// 图谱答出来的回答一个号也没有，界面只能说「未引用任何来源」。印哪一行时才登记，
-/// 所以号码按出现的顺序排，与检索结果共用一套号（同一块只有一个号）。
+/// The `[n]` of the fact is printed on the fact line, and the evidence block is registered in this turn's source list; clicking it in the UI shows that sentence. Previously
+/// an answer produced by the graph had no number at all, and the UI could only say "no source cited". Registration happens when a line is printed,
+/// so numbers follow the order of appearance and share one numbering with retrieval results (one block, one number).
 ///
-/// 没有来源清单（MCP）、或证据读不出来时是空的：事实行照旧，不带号。
+/// Empty when there is no source list (MCP), or when the evidence cannot be read: fact lines are unchanged and carry no number.
 ///
-/// 每条事实还带着那条证据的引文（#968 的后续）：号打开的是那一块，条目里的 `quotes`
-/// 是块里说出它的那一句，界面据此把那句话标出来
+/// Each fact also carries that evidence's quote (follow-up to #968): the number opens that block, and the entry's `quotes`
+/// is the sentence in the block that states it, which the UI uses to highlight that sentence
 struct Evidence(HashMap<Uuid, (utopia_core::models::ChunkView, Option<String>)>);
 
 impl Evidence {
-    /// 事实 id 收成自有的 `Vec` 再传进来：借着显示列表的迭代器跨 await 持有，工具的
-    /// future 就不再对所有生命周期都是 `Send`（对话的钩子与 MCP 路由都要求它）
+    /// Collect the fact ids into the function's own `Vec` before passing them in: holding the display list's iterator across an await would stop the tool's
+    /// future from being `Send` for every lifetime (both the conversation hook and the MCP route require it)
     async fn load(
         ctx: &ToolCtx<'_>,
         fact_ids: Vec<Uuid>,
@@ -243,14 +243,14 @@ impl Evidence {
         }
     }
 
-    /// 关上这一行的那一行的号（#970 第二步）：推出来的终点在那条事实的原句里写着
+    /// The number of the line that closes this row (#970 step 2): the inferred end point is written in that fact's original sentence
     fn closer_mark(&self, sink: &mut ToolSink, f: &EntityFact) -> String {
         f.closed_by_id
             .map(|id| self.mark(sink, id))
             .unwrap_or_default()
     }
 
-    /// ` [n]`：这条事实的证据登进清单后的号。没有有效证据的事实（派生事实也是）不带号
+    /// ` [n]`: the number the fact's evidence gets once it is entered in the list. A fact with no valid evidence (derived facts too) carries no number
     fn mark(&self, sink: &mut ToolSink, fact_id: Uuid) -> String {
         match self.0.get(&fact_id) {
             Some((chunk, quote)) => {
@@ -267,7 +267,7 @@ impl Evidence {
     }
 }
 
-/// 显示的事实加上关上它们的那几行（#970 第二步）：一次证据查询把两边的块都读回来
+/// The facts shown, plus the lines that close them (#970 step 2): one evidence query reads back the blocks on both sides
 fn with_closers<'f>(facts: impl IntoIterator<Item = &'f EntityFact>) -> Vec<Uuid> {
     facts
         .into_iter()
@@ -309,18 +309,18 @@ pub async fn find_entities(ctx: &ToolCtx<'_>, sink: &mut ToolSink, args: &Value)
         lines.extend(ranked.iter().map(node_line));
         lines.join("\n")
     };
-    // 截断要说出来（与 `rule_matches` 同一条）：只读了前几个，模型会把它们当成这个
-    // 名字的全部，然后告诉人「库里只有这几个」
+    // Truncation must be stated (same as `rule_matches`): if only the first few are read, the model will take them as this
+    // name's full set and then tell a person "the library has only these"
     if let Some(total) = total.filter(|t| *t > read as i64) {
         text.push_str(&format!(
             "\n({total} entities have a name containing \"{name}\"; only the first {read} were \
              read. A longer or more exact name narrows the search.)"
         ));
     }
-    // 同名歧义时候选只是搜索结果，不是认下的实体。从前这里全记，下一轮就收到一串
-    // 同名的 id 和一句「直接用这些」，没选的那个还常常排在前面。选中的那个在它被
-    // 读的时候记（entity_facts / neighbors / timeline）；上一轮的候选另有工具往返
-    // 的回放可查
+    // With same-name ambiguity, candidates are only search results, not accepted entities. Previously all were recorded here, so the next round received a list
+    // of same-named ids and a "use these directly" line, and the one not chosen often still ranked first. The chosen one is recorded when it is
+    // read (entity_facts / neighbors / timeline); the previous turn's candidates can be looked up in the replay of
+    // the earlier tool round-trip
     if let Some(best) = ranked.first().filter(|_| clear) {
         remember(sink, best);
     }
@@ -342,10 +342,10 @@ pub async fn find_entities(ctx: &ToolCtx<'_>, sink: &mut ToolSink, args: &Value)
 
 // ---- entity_facts ----------------------------------------------------------------
 
-/// 事实的另一端：对端实体，或属性值
-/// 边上的属性（0037）跟在对端后面：`Vega Capital [amount: 5000000000 $]`。
-/// 模型读事实行时最常问的就是"投了多少"，数不在行里它就答"没有金额信息"。
-/// 按文档角色词记的属性（0061）接在后面，名字是角色词：`[lines: 10-42]`
+/// The other end of the fact: the counterpart entity, or an attribute value
+/// Attributes on the edge (0037) follow the counterpart: `Vega Capital [amount: 5000000000 $]`.
+/// The question the model asks most often when reading fact lines is "how much was invested"; if the amount is not on the line it answers "no amount information".
+/// Attributes recorded by document-role word (0061) follow, named by the role word: `[lines: 10-42]`
 fn qualifiers_text(f: &EntityFact) -> String {
     let typed = f
         .qualifiers
@@ -392,7 +392,7 @@ fn other_text(f: &EntityFact) -> String {
         .to_string()
 }
 
-/// `closer_mark` 是关上它的那一行证据的号（#970 第二步；MCP 与没有证据时为空）
+/// `closer_mark` is the number of the evidence line that closes it (#970 step 2; empty for MCP and when there is no evidence)
 fn range_text(f: &EntityFact, closer_mark: &str) -> String {
     let successor =
         super::tools::successor_text(f.closed_by.as_deref(), f.closed_by_value.as_ref());
@@ -419,7 +419,7 @@ fn confidence_text(f: &EntityFact) -> String {
     format!("[{}%]", (f.confidence * 100.0).round() as i32)
 }
 
-/// 谓词组的抬头：出边 `pred →`，入边 `← pred`
+/// Header of a predicate group: outgoing edges `pred →`, incoming edges `← pred`
 fn group_key(f: &EntityFact) -> String {
     let pred = f.predicate_label.as_deref().unwrap_or("?");
     if f.direction == "out" {
@@ -429,7 +429,7 @@ fn group_key(f: &EntityFact) -> String {
     }
 }
 
-/// 按谓词分组，多的组在前；组内保持传入顺序（时间序）。回 (组名, 该组事实)
+/// Group by predicate; larger groups come first; within a group the input order (time order) is kept. Returns (group name, that group's facts)
 pub(super) fn grouped(facts: &[EntityFact]) -> Vec<(String, Vec<&EntityFact>)> {
     let mut groups: BTreeMap<String, Vec<&EntityFact>> = BTreeMap::new();
     for f in facts {
@@ -440,8 +440,8 @@ pub(super) fn grouped(facts: &[EntityFact]) -> Vec<(String, Vec<&EntityFact>)> {
     out
 }
 
-/// 过滤没命中时告诉模型这个实体身上有哪些谓词：它猜的词（"board member"）和
-/// 库里的词（`comprised`、`has_member`）常常对不上（#560），空手而回它只会再猜一次
+/// When a filter matches nothing, tell the model which predicates this entity has: the words it guesses ("board member") and
+/// the words in the library (`comprised`, `has_member`) often do not match (#560), and returning empty-handed would only make it guess again
 pub(super) fn predicates_of(facts: &[EntityFact]) -> String {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for f in facts {
@@ -457,19 +457,19 @@ pub(super) fn predicates_of(facts: &[EntityFact]) -> String {
         .join(", ")
 }
 
-/// 子串找不到时按词找：每个词各去库里捞一把，名字里含的词数达到「全部减一、至少两个」
-/// 的候选算命中（"OpenAI board members" → "OpenAI's board of directors"）。
-/// 模型给的名字常带一个库里没有的词（members、公司、这个），全词命中会把它们全漏掉
+/// When substring search finds nothing, search by word: each word is looked up in the library separately, and a candidate counts as a match
+/// if the number of its words it contains reaches "all but one, and at least two" (`"OpenAI board members"` → `"OpenAI's board of directors"`).
+/// Names the model gives often include a word the library does not have (members, company, this); whole-word matching would miss all of those
 ///
-/// 回的是查到的实体，以及这个名字一共命中几个。只读前八个，总数用来告诉模型这不是
-/// 全部；按词拼凑的那一路没有总数
+/// returns the entities found and how many matched this name in total. Only the first eight are read; the total tells the model this is not
+/// everything. The word-by-word path has no total
 async fn lookup(
     ctx: &ToolCtx<'_>,
     raw: &str,
 ) -> utopia_core::AppResult<(Vec<GraphNode>, Option<i64>)> {
-    // 工具调用来自聊天 / MCP：当下的问题，不在回放里。传 None 让 `degree` 按
-    // 现在算——和现状一致，回放图上的搜索框另走 `/kbs/{id}/entities` 自己挂
-    // 时刻
+    // Tool calls come from chat / MCP: the question of the present, not replay. Passing None lets `degree` be computed
+    // as of now, consistent with the status quo; the search box on the replay graph goes through `/kbs/{id}/entities` and attaches its own
+    // time
     let (hits, total) =
         utopia_store::graph::search_entities(&ctx.state.pool, ctx.kb_id, raw, 8, 0, None, false)
             .await?;
@@ -501,7 +501,7 @@ async fn lookup(
     Ok((scored.into_iter().map(|(_, n)| n).take(8).collect(), None))
 }
 
-/// 名字里含了几个词（大小写不敏感）
+/// Number of words in the name (case-insensitive)
 pub(super) fn word_score(name: &str, words: &[&str]) -> usize {
     let lower = name.to_lowercase();
     words
@@ -510,10 +510,10 @@ pub(super) fn word_score(name: &str, words: &[&str]) -> usize {
         .count()
 }
 
-/// 同名候选按问题排：用户的问题嵌成向量，与候选的上下文画像比，近的在前。问题一轮
-/// 只嵌一次（`embed_once`）：这一轮里每按名字查一次实体都会走到这里，句子却是同一句。
-/// 精确命中仍在前（问 OpenAI 就先给叫 OpenAI 的），画像只在同一档里排序。
-/// 没有问题（MCP）、没有嵌入模型、只有一个候选：原样返回，第二个值说明有没有用上
+/// Same-name candidates are ranked by the question: the user's question is embedded into a vector and compared with each candidate's context profile, nearest first. The question is
+/// embedded only once per turn (`embed_once`): within one turn, each by-name entity lookup comes here, yet the sentence is the same one.
+/// Exact hits still come first (asking about OpenAI puts the one named OpenAI first), and profiles only order within the same tier.
+/// With no question (MCP), no embedding model, or only one candidate: return as-is; the second value says whether it was used
 async fn rank_by_question(
     ctx: &ToolCtx<'_>,
     sink: &mut ToolSink,
@@ -539,7 +539,7 @@ async fn rank_by_question(
     (reorder_by_distance(ranked, query, &dist), true)
 }
 
-/// 纯函数：精确命中的一档在前；档内按画像距离升序，没有画像的垫底；再按事实数
+/// Pure function: the exact-hit tier comes first; within a tier, ascending by profile distance, with no profile at the bottom; then by fact count
 pub(super) fn reorder_by_distance(
     mut ranked: Vec<GraphNode>,
     query: &str,
@@ -560,9 +560,9 @@ pub(super) fn reorder_by_distance(
     ranked
 }
 
-/// 谓词参数与库里的词对齐：模型说 "board member"，库里叫 `has_member`。子串对不上时
-/// 把它嵌一次，取最近的关系类型（关系向量在 `relation_types.embedding`），距离在
-/// 上限内的算它说的是那几个。自动扩本体造出的关系没有向量（#560），对不到
+/// Align the predicate argument with the library's words: the model says "board member", the library calls it `has_member`. When substrings do not match,
+/// embed it once and take the nearest relation type (relation vectors live in `relation_types.embedding`); those within the distance
+/// limit count as the ones it meant. Relations auto-expanded from the ontology have no vector (#560), so they cannot be matched
 const PREDICATE_DISTANCE: f32 = 0.45;
 const PREDICATE_CANDIDATES: i64 = 5;
 
@@ -588,7 +588,7 @@ async fn aligned_predicates(ctx: &ToolCtx<'_>, sink: &mut ToolSink, word: &str) 
         .collect()
 }
 
-/// 过滤；谓词按子串对不上时向量对齐一次，回一句说明给结果开头
+/// Filter; when a predicate does not match by substring, align it by vector once and return a note at the top of the result
 async fn filtered<'f>(
     ctx: &ToolCtx<'_>,
     sink: &mut ToolSink,
@@ -652,7 +652,7 @@ impl FactFilter<'_> {
             || self.until.is_some()
     }
 
-    /// 时段用**说出来的**区间：起点在 until 之前、终点在 since 之后（开放的终点算在后）
+    /// The time period uses the **stated** interval: the start is before `until`, the end is after `since` (an open end counts as later)
     fn keeps(&self, f: &EntityFact) -> bool {
         if let Some(p) = self.predicate {
             if !contains_ci(f.predicate_key.as_deref(), p)
@@ -732,13 +732,13 @@ pub async fn entity_facts(ctx: &ToolCtx<'_>, sink: &mut ToolSink, args: &Value) 
                 .error();
             }
         };
-    // 按 id 读的也是认下：模型常常先搜到一串同名的，再按 id 读其中一个，读的这个
-    // 才是这一轮说的那个（按名字认下的 `resolve` 已记过，这里不会重复）
+    // Reading by id is also acceptance: the model often searches first and gets a run of same-named entities, then reads one by id; the one it reads
+    // is the one this turn is about (the name-based `resolve` already recorded it, so it is not recorded twice here)
     remember(sink, &node);
-    // 规则的结论也是这个实体的一部分（0021）。**不给的话模型会拿那些读数自己再判
-    // 一遍**——而阈值写在规则里，它看不见，于是两处判断迟早不一致
+    // The rule's conclusion is also part of this entity (0021). **If not given, the model would judge those readings again itself**
+    // and the threshold is written into the rule, which it cannot see, so the two judgements would eventually disagree
     let derived = match
-        // 两根轴一起传（#549）：as_of 回到三月，派生也回到三月
+        // Both axes are passed together (#549): as_of goes back to March, and the derivation goes back to March too
         utopia_store::reasoning::derived_for_entity(
             &ctx.state.pool,
             ctx.kb_id,
@@ -767,7 +767,7 @@ pub async fn entity_facts(ctx: &ToolCtx<'_>, sink: &mut ToolSink, args: &Value) 
         })
         .collect();
 
-    // 名字单独一行（0041）：「海探1」和「海洋探测器1号」是同一个，模型答题时要知道
+    // Names on their own line (0041): "Haitan 1" and "Ocean Explorer No. 1" are the same, and the model must know this when answering
     let names = utopia_store::names::for_entity(&ctx.state.pool, ctx.kb_id, who.id, m.as_of)
         .await
         .unwrap_or_else(|e| {
@@ -840,7 +840,7 @@ pub async fn entity_facts(ctx: &ToolCtx<'_>, sink: &mut ToolSink, args: &Value) 
                 ));
             }
         }
-        // 派生事实自己不带号：它是规则算出来的，出处在它的前提上，前提各带各的
+        // Derived facts carry no number of their own: they are computed by a rule, and the source sits on their premises, each premise carrying its own
         lines.extend(derived_lines);
     }
     let detail = entity_facts_detail(shown.len(), m.at, m.as_of, m.before);
@@ -952,7 +952,7 @@ pub async fn neighbors(ctx: &ToolCtx<'_>, sink: &mut ToolSink, args: &Value) -> 
             }
         };
     remember(sink, &node);
-    // 邻居是对端**实体**；属性值不算邻居，entity_facts 里有
+    // Neighbours are the counterpart **entities**; attribute values do not count as neighbours, entity_facts has them
     let (matched, aligned) = filtered(ctx, sink, &facts, &filter).await;
     let linked: Vec<&EntityFact> = matched
         .into_iter()
@@ -991,7 +991,7 @@ pub async fn neighbors(ctx: &ToolCtx<'_>, sink: &mut ToolSink, args: &Value) -> 
         let ids = with_closers(shown.iter());
         let evidence = Evidence::load(ctx, ids, m.as_of).await;
         let groups = grouped(&shown);
-        // 数的是对端实体，不是事实：同一条边常是两条事实（一条带日期一条不带）
+        // What is counted is the counterpart entity, not facts: the same edge is often two facts (one with a date, one without)
         let entities: HashSet<Uuid> = linked.iter().filter_map(|f| f.other_id).collect();
         let mut head = format!(
             "{} ({type_label}): {} linked entities under {} predicates",
@@ -1090,8 +1090,8 @@ pub async fn timeline(ctx: &ToolCtx<'_>, sink: &mut ToolSink, args: &Value) -> T
             }
         };
     remember(sink, &node);
-    // 只要**说出了世界时间**的事实。没日期的那些起点是摄取时刻，排进时间线只会
-    // 把一篇文章的日期当成事件的日期
+    // Only facts that **state a time in the world**. Those with no date have their start at the ingestion moment, and putting them on the timeline would
+    // treat the date of an article as the date of the event
     let (matched, aligned) = filtered(ctx, sink, &facts, &filter).await;
     let mut dated: Vec<&EntityFact> = matched
         .into_iter()
@@ -1162,7 +1162,7 @@ pub async fn timeline(ctx: &ToolCtx<'_>, sink: &mut ToolSink, args: &Value) -> T
 
 // ---- paths_between ---------------------------------------------------------------
 
-/// 一条边在链上的写法：顺着走 `A —pred→ B`，逆着走 `A ←pred— B`
+/// How an edge is written on the chain: walked forwards `A —pred→ B`, backwards `A ←pred— B`
 pub(super) fn edge_text(prev: Uuid, e: &PathEdge, closer_mark: &str) -> String {
     let pred = e.predicate.as_deref().unwrap_or("?");
     let successor =
@@ -1203,8 +1203,8 @@ pub(super) fn path_text(p: &Path) -> String {
     path_text_marked(p, |_| String::new())
 }
 
-/// 一条路径，每一跳后面跟着 `mark` 给那条事实的东西（对话里是它证据的 `[n]`，#935）；
-/// 时间线关上的那一跳，关它的那一行也由 `mark` 给号（#970 第二步）
+/// One path, with what `mark` gives each fact after each hop (in the conversation it is that fact's evidence `[n]`, #935);
+/// the hop that the timeline closes also gets its number from `mark` for the line that closes it (#970 step 2)
 fn path_text_marked(p: &Path, mut mark: impl FnMut(Uuid) -> String) -> String {
     let mut parts = Vec::new();
     for (i, e) in p.edges.iter().enumerate() {
@@ -1215,7 +1215,7 @@ fn path_text_marked(p: &Path, mut mark: impl FnMut(Uuid) -> String) -> String {
     parts.join("; ")
 }
 
-/// 一个端点在这条路径上的名字：路径两头的边写着它
+/// The name of one end of this path: the edges at both ends of the path write it
 fn name_on_path(p: &Path, id: Uuid) -> Option<&str> {
     p.edges.iter().find_map(|e| {
         if e.subject_id == id {
@@ -1287,9 +1287,9 @@ pub async fn paths_between(ctx: &ToolCtx<'_>, sink: &mut ToolSink, args: &Value)
             .error();
         }
     };
-    // 以 id 给出的一端没在库里查过。找到了路径，它就在路上，名字写在边上；没找到，
-    // 可能只是这个 id 不在这个库（抄错的、别的库的）——那时「两者之间没有路径」
-    // 读起来像一个关于图的事实，所以先认一遍，认不出就照实说
+    // An end given as an id was not looked up in the library. If a path is found, it is on the route and its name is written on the edge; if not found,
+    // it may simply be that this id is not in this library (copied wrong, or from another library): then "no path between the two" would read like a fact about the graph,
+    // so first confirm it, and if it cannot be confirmed, say so plainly
     for (key, end) in ["from", "to"].into_iter().zip(ends.iter_mut()) {
         if !end.by_id {
             continue;
@@ -1353,7 +1353,7 @@ pub async fn paths_between(ctx: &ToolCtx<'_>, sink: &mut ToolSink, args: &Value)
         from.name,
         to.name
     ));
-    // 每一跳是一条事实，各带各的号；时间线关上的那一跳，关它的那一行也要号
+    // Each hop is a fact with its own number; the hop that the timeline closes also needs its line's number
     let hops: Vec<Uuid> = paths
         .iter()
         .flat_map(|p| {
@@ -1406,7 +1406,7 @@ mod tests {
         }
     }
 
-    /// 短语实体（untyped）不列，精确命中在前，事实多的在前
+    /// Phrase entities (untyped) are not listed; exact hits come first, then those with more facts
     #[test]
     fn a_name_match_is_ranked_by_type_exactness_and_weight() {
         let hits = vec![
@@ -1428,7 +1428,7 @@ mod tests {
         );
     }
 
-    /// 精确命中的 untyped 实体不被同名的有类型实体挤掉
+    /// An untyped exact-hit entity is not pushed out by a typed entity with the same name
     #[test]
     fn an_exact_untyped_match_is_not_hidden_by_a_typed_namesake() {
         let ranked = rank(
@@ -1463,7 +1463,7 @@ mod tests {
         assert!(dominant(&ranked, "acme"));
     }
 
-    /// 谁都不明显：两个同名同量级的实体，不替模型挑
+    /// Nobody is clearly the one: for two same-named entities of the same magnitude, do not pick for the model
     #[test]
     fn two_namesakes_of_equal_weight_are_not_dominant() {
         let ranked = rank(
@@ -1527,7 +1527,7 @@ mod tests {
         }
     }
 
-    /// 问题的向量只在同一档里排序：精确命中的仍在前，档内近的先，没画像的垫底
+    /// The question's vector orders only within the same tier: exact hits still come first, within a tier the nearer ones first, those with no profile at the bottom
     #[test]
     fn the_question_orders_namesakes_but_not_over_an_exact_match() {
         let exact_far = node("Sam Altman", Some("Organization"), 66);
@@ -1568,7 +1568,7 @@ mod tests {
         assert_eq!(word_score("openai board members list", &words), 3);
     }
 
-    /// 空手而回时把实体身上的谓词报出来，多的在前
+    /// When returning empty-handed, report the predicates on the entity, largest first
     #[test]
     fn an_empty_filter_names_the_predicates_that_exist() {
         let facts = vec![
@@ -1579,7 +1579,7 @@ mod tests {
         assert_eq!(predicates_of(&facts), "comprised → (2), ← removed (1)");
     }
 
-    /// 分组：多的组在前，出边 `pred →`，入边 `← pred`
+    /// Grouping: larger groups first, outgoing `pred →`, incoming `← pred`
     #[test]
     fn facts_group_by_predicate_largest_group_first() {
         let facts = vec![
@@ -1593,7 +1593,7 @@ mod tests {
         assert_eq!(groups[0].1.len(), 2);
     }
 
-    /// 过滤：谓词按子串、对象类型按子串、时段按说出来的区间
+    /// Filter: predicate by substring, object type by substring, time period by the stated interval
     #[test]
     fn a_filter_reads_predicate_type_and_window() {
         let mut f = fact("out", "works_for", "Acme", Some("Organization"));
@@ -1631,7 +1631,7 @@ mod tests {
         assert!(!filter(None, None, None, None).narrows());
     }
 
-    /// 链的写法：顺着走用 →，逆着走用 ←，每条边带自己的区间
+    /// Chain notation: forward uses →, backward uses ←, each edge carries its own interval
     #[test]
     fn a_chain_reads_in_walking_order() {
         let (a, x, b) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());

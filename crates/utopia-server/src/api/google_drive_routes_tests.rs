@@ -1,5 +1,5 @@
-//! 连接流程的几道关卡与「谁连上的谁来选」（0074 决定 3、5），连真库跑。
-//! 测试环境没配 OAuth 客户端：过了所有关卡的回调停在「没配置」，不会去敲 Google
+//! The gates of the connection flow and "whoever connected it chooses" (0074 decisions 3 and 5), run against a real database.
+//! The test environment has no OAuth client configured: a callback that passes all the gates stops at "not configured" and never calls Google
 use super::*;
 use crate::auth::SessionOrToken;
 use axum::body::{to_bytes, Body};
@@ -27,7 +27,7 @@ impl Fixture {
         utopia_store::db::migrate(&pool).await?;
         let id = Uuid::now_v7;
         let (org, ws, kb, connector, colleague) = (id(), id(), id(), id(), id());
-        // 插进去的只有本地生成的 UUID
+        // Only a locally generated UUID is inserted
         sqlx::raw_sql(&format!(
             "INSERT INTO organizations(id,name) VALUES ('{org}','google-drive-test');
              INSERT INTO workspaces(id,org_id,name) VALUES ('{ws}','{org}','google-drive-test');
@@ -164,7 +164,7 @@ impl Fixture {
     }
 
     async fn reject_sync_jobs(&self, reject: bool) -> anyhow::Result<()> {
-        // 名称和拒绝条件都限定到本测试的来源，清理不会删除其他测试的注入器。
+        // The name and the refusal condition are scoped to this test's source, so cleanup does not delete other tests' injectors.
         let guard = format!("test_reject_source_sync_{}", self.source.simple());
         let sql = if reject {
             format!(
@@ -190,7 +190,7 @@ async fn source_sync_enqueue_manual_failure_rolls_back_and_can_retry() -> anyhow
         return Ok(());
     };
     fx.reject_sync_jobs(true).await?;
-    // 检查失败也先清理触发器，避免把故障注入留在共享测试库里。
+    // Clean up the trigger even when the check fails, so fault injection does not stay in the shared test database.
     let result = async {
         let (status, body) = fx.sync_http().await?;
         anyhow::ensure!(status == StatusCode::INTERNAL_SERVER_ERROR, "{body}");
@@ -469,7 +469,7 @@ async fn a_grant_is_kept_while_another_source_uses_the_same_account() -> anyhow:
     )
     .await?
     .id;
-    // 同一个邮箱，大小写不同：Google 账号不分大小写
+    // Same mailbox, different case: Google accounts are case-insensitive
     for (id, email) in [
         (fx.source, account.clone()),
         (other, account.to_uppercase()),

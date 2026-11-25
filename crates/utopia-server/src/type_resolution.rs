@@ -1,119 +1,119 @@
-//! 类型消解：把实体的类型改对——**往细里走，也把走错的掰回来**。
+//! Type resolution: correct each entity's type -- **go finer, and pull back the ones that went wrong**.
 //!
-//! 起初只有前半句：抽取给粗类，消解往它的后代精化。抽取开始按分块检索候选
-//! 之后，它自己就会挑细类，也就会挑错（实测 `绍兴 → address`、
-//! `慢病管理小程序 → entry_point`）。而正确答案是错类的**兄弟**不是它的后代，
-//! 于是被"候选必须更细"那条规则挡在门外——那条规则是我自己写进提示词的。
+//! At first only the first half existed: extraction gave a coarse class, and resolution refined it toward its descendants. Once extraction began retrieving candidates per chunk,
+//! it picked finer classes itself, and so it also picked wrong ones (measured: `Shaoxing → address`,
+//! `chronic-disease management mini-program → entry_point`). The right answer is a **sibling** of the wrong class, not its descendant,
+//! so the rule "candidates must be finer" blocked it at the door -- a rule I wrote into the prompt myself.
 //!
-//! 现在两个方向都认。纠正天然判为跨轴，所以一定进人工：推翻抽取的判断比
-//! 细化它风险大，不该自动发生。
+//! Both directions are accepted now. A correction is naturally judged as crossing an axis, so it always goes to a human: overturning extraction's judgment is riskier than refining it,
+//! and should not happen automatically.
 //!
-//! 0009 之后还有第三种输入，而且是最常见的那种：**根本还没有类**。删掉兜底类
-//! 之后，本体装不下的实体不再被塞进 `concept`，而是 `type_id IS NULL`。这一档
-//! 身上没有"抽取的判断"要推翻，给它定类是补齐不是重新分类，所以**不判跨轴**、
-//! 高置信度直接落库——否则删掉哨兵的代价就是每个实体都要人看一眼。
+//! After 0009 there is a third input, and the most common one: **there is no class at all yet**. Once the catch-all class is deleted,
+//! entities the ontology cannot hold are no longer stuffed into `concept`; they get `type_id IS NULL`. This tier has no
+//! "extraction's judgment" to overturn; assigning it a class is filling in, not reclassifying, so it is **not judged as crossing an axis**,
+//! and a high-confidence result is written straight to the database -- otherwise deleting the sentinel would cost a human look at every entity.
 //!
-//! **为什么能事后做，而谓词不能**（0001 的那个不对称）：类型是挂在节点上的
-//! 注解，可以等证据攒够了再贴；谓词就是事实本身，`(NVIDIA, ?, Mellanox)`
-//! 根本不是一条事实。所以谓词走"先记原词、后映射"，类型走"先粗后精"。
+//! **Why this can be done afterwards, but predicates cannot** (the asymmetry from 0001): a type is an annotation attached to a node, and can be affixed once enough evidence has accumulated;
+//! a predicate is the fact itself, and `(NVIDIA, ?, Mellanox)` is not a fact at all.
+//! So predicates go "record the original word first, map later", while types go "coarse first, then fine".
 //!
-//! 消解手里的东西跟抽取当场完全不同：
+//! What resolution has to work with differs entirely from what extraction had on the spot:
 //!
-//! 1. **`proposed_type`**——抽取时模型自己报的类型名，词表里没有才留下来。
-//!    最强的一条，因为任务从"读懂这是什么"变成了"本体里哪个类叫这个意思"。
-//! 2. **实体画像**——它参与的全部谓词，跨文档累积。
-//! 3. **证据引文**——同一批句子，但聚在一起，且不必跟几十个别的实体抢注意力。
+//! 1. **`proposed_type`** -- the type name the model itself reported during extraction, kept only if the vocabulary did not already have it.
+//!    The strongest signal, because the task changes from "understand what this is" to "which class in the ontology means this".
+//! 2. **Entity profile** -- all the predicates it takes part in, accumulated across documents.
+//! 3. **Evidence citations** -- the same sentences, but grouped together, and not competing for attention with dozens of other entities.
 //!
-//! 候选**两路来**，取并集不合分数：一路拿画像搜类的描述，一路拿语境向量搜
-//! 已定类的实体、把它们的类当票投。第二路绕开了第一路的软肋（中文画像对
-//! 英文样板描述），而且库越大越准。两路的距离一个在类空间一个在实体空间，
-//! 合成一个排序是自欺——何况实测同一路的距离都不能跨实体比。
+//! Candidates come from **two routes**, taken as a union without merging scores: one route searches class descriptions with the profile, the other searches with the context vector
+//! for entities whose classes are settled, and votes with their classes. The second route avoids the first route's weak spot (a Chinese profile against
+//! English boilerplate descriptions), and it gets more accurate the larger the database. One route's distance lives in class space and the other's in entity space,
+//! so merging them into one ranking is self-deception -- and measured distances within one route cannot even be compared across entities.
 //!
-//! 粗类的后代**排在前面**，但不是唯一能选的——两套本体的分类轴常常不重合
-//! （schema.org 把软件挂在 CreativeWork 下，而抽取给的粗类是 product）。
-//! 该说不的是裁决那一步，它看得到描述也看得到粗类。
+//! Descendants of the coarse class are **ranked first**, but they are not the only choice -- the two ontologies' classification axes often do not coincide
+//! (schema.org files software under CreativeWork, while extraction's coarse class was product).
+//! The step that says no is adjudication: it sees both the descriptions and the coarse class.
 
 use crate::{llm_util, ontology_index, AppState};
 use utopia_core::{AppError, AppResult};
 use uuid::Uuid;
 
-/// 一轮看多少个实体。够一次人工过目，也够看出检索准不准。
+/// How many entities one round looks at. Enough for one human review pass, and enough to see whether retrieval is accurate.
 const BATCH: i64 = 60;
-/// 每个实体检索几个候选。
+/// How many candidates to retrieve per entity.
 ///
-/// **检索的活是端候选,说不是裁决的活。** 所以宁可多端两个——裁决看得到描述、
-/// 看得到现类,能说出"这些都不是";而检索漏掉的,裁决再好也够不着。0001 P3a
-/// 实测的失败正是全在检索一侧(`administrative_area`、`periodical` 从没被端上来)。
+/// **Retrieval's job is to put candidates on the table; saying no is not its job.** So it is better to put two more out -- adjudication sees descriptions
+/// and the current class, and can say "none of these"; but what retrieval misses, however good adjudication is, it cannot reach. The failures measured in 0001 P3a
+/// were entirely on the retrieval side (`administrative_area` and `periodical` were never put on the table).
 ///
-/// 从 8 加到 10:两路交替各占五席。代价是提示词里多两行类定义,而漏检没有退路。
+/// Raised from 8 to 10: the two routes alternate, five seats each. The cost is two more class definitions in the prompt, and a miss has no fallback.
 const CANDIDATES: i64 = 10;
-/// 看几个已定类的近邻。少了凑不出票数，多了尾巴上全是噪音。
+/// Look at a few neighbors of settled classes. Fewer cannot make up a vote count; more and the tail is all noise.
 const NEIGHBOURS: i64 = 10;
 
-/// 一个实体的消解建议（preview 用，不写库）。
+/// Resolution suggestion for one entity (used by preview; writes nothing to the database).
 #[derive(Debug, serde::Serialize)]
 pub struct TypeSuggestion {
     pub entity_id: Uuid,
     pub name: String,
-    /// 现在挂着的类，**可能没有**（0009）
+    /// The class it currently carries, which **may be absent** (0009)
     pub coarse: Option<String>,
-    /// 现类的描述。裁决要判"现在这个类对不对"，光看 key 不够
+    /// The current class's description. Adjudication has to judge whether "this class is right now"; looking at the key alone is not enough
     pub coarse_description: Option<String>,
-    /// 粗类的 id。裁决要拿它跟目标类配成一对，去查"这一对人认可过没有"
+    /// The coarse class's id. Adjudication pairs it with the target class and checks whether a person has approved this pair
     #[serde(skip)]
     pub coarse_id: Option<Uuid>,
     pub proposed_type: Option<String>,
     pub specific_type: Option<String>,
     pub fact_count: i64,
-    /// 送去检索的那段字。**回给调用方**——检索找不着的时候，
-    /// 第一个要看的就是"我们拿什么去找的"
+    /// The text sent for retrieval. **Returned to the caller** -- when retrieval finds nothing,
+    /// the first thing to check is "what did we search with"
     pub profile: String,
-    /// 第一路候选：画像 → 类的描述
+    /// First-route candidates: profile -> class description
     pub candidates: Vec<utopia_core::models::TypeCandidate>,
-    /// 第二路候选：语境相似的已定类实体，按类投票
+    /// Second-route candidates: settled-class entities with similar context, voting by class
     pub neighbours: Vec<NeighbourVote>,
-    /// 粗类的全部后代。裁决据此分档：选中的类在里面 = 往下走一格，
-    /// 不在 = 换了分类轴。**不序列化**——它是给分档用的，不是给人看的
+    /// All descendants of the coarse class. Adjudication tiers on this: a chosen class inside it = one step down,
+    /// not inside = a different classification axis. **Not serialized** -- it is for tiering, not for people to read
     #[serde(skip)]
     pub descendants: std::collections::HashSet<Uuid>,
 }
 
-/// 近邻投出来的一个类。
+/// A class that neighbors voted for.
 ///
-/// **不跟 `candidates` 合成一个排序**：两路的距离一个在类空间、一个在实体空间，
-/// 本来就不可比——何况实测同一路的距离都不能跨实体比。并集交给裁决，
-/// 各自标明来源。附带的好处是这一路的证据人能读懂：
-///「像 Milvus，而 Milvus 标的是 software_application」比「余弦 0.49」有用得多。
+/// **Not merged with `candidates` into one ranking**: the two routes' distances, one in class space and one in entity space,
+/// are not comparable to begin with -- and measured distances within one route cannot even be compared across entities. The union goes to adjudication,
+/// each labelled with its source. A side benefit: a person reviewing the evidence can read this route's:
+///"like Milvus, which is tagged software_application" is far more useful than "cosine 0.49".
 #[derive(Debug, serde::Serialize)]
 pub struct NeighbourVote {
     pub key: String,
-    /// 有几个近邻是这个类
+    /// How many neighbors are this class
     pub votes: usize,
-    /// 最近的那个近邻有多近
+    /// How close the nearest neighbor is
     pub best_distance: f64,
-    /// 投票的实体名，给人看的证据
+    /// The names of the voting entities, as evidence for people
     pub examples: Vec<String>,
-    /// 这些近邻是不是**全部**来自同一批文档。
-    /// 是的话这一票要打折：只出现一次的实体，语境向量就是那一块的向量，
-    /// 同文档的实体自然互相成为近邻，而那不是类型证据
+    /// Whether these neighbors all come from **the same batch of documents**.
+    /// If so, this vote is discounted: an entity that appears only once has a context vector that is just that chunk's vector,
+    /// and entities from the same document naturally become neighbors of each other, which is not type evidence
     pub same_document_only: bool,
 }
 
-/// 只算不写：每个待消解实体的画像与候选。
+/// Compute only, write nothing: the profile and candidates of each entity awaiting resolution.
 ///
-/// 独立成一步是有意的——在花力气建裁决之前，先回答"检索到底找不找得到"。
-/// 找不到的话，裁决做得再好也没有用。
+/// Making this a separate step is deliberate -- before investing effort in building adjudication, first answer "can retrieval find it at all".
+/// If it cannot be found, adjudication is useless however good it is.
 pub async fn preview(state: &AppState, kb_id: Uuid) -> AppResult<Vec<TypeSuggestion>> {
     preview_with(state, kb_id, false).await
 }
 
-/// `unattended` = 自动跑：只看引擎没看过的实体（见 `entities_for_type_resolution`）
+/// `unattended` = automatic run: looks only at entities the engine has not looked at (see `entities_for_type_resolution`)
 async fn preview_with(
     state: &AppState,
     kb_id: Uuid,
     unattended: bool,
 ) -> AppResult<Vec<TypeSuggestion>> {
-    // 只补类那一半：这一步用不到关系，而一份大本体的关系有一千多条
+    // Backfill only the class half: this step does not use relations, and a large ontology has over a thousand of them
     let _ = ontology_index::refresh_scoped(
         state,
         kb_id,
@@ -130,30 +130,30 @@ async fn preview_with(
     if subjects.is_empty() {
         return Ok(Vec::new());
     }
-    // **每个实体两个查询，不是一个。**
+    // **Two queries per entity, not one.**
     //
-    // 画像里模型自己的说法排在最前，但后面整段是语境，一样进向量。实测
-    //「杭州拱墅区」的画像是 `district. 杭州拱墅区. located_in by 仁和堂连锁药房.
-    // 仁和堂连锁药房在杭州拱墅区开设了第 40 家门店`——整段讲的是药房，
-    // 于是候选给回 pharmacy、store，而 administrative_area 一次都没上来。
-    // 名字被稀释进了段落。
+    // The model's own wording in the profile comes first, but the rest of the paragraph is context, and it all goes into the vector alike. Measured:
+    // the profile of "Gongshu District, Hangzhou" is `district. Gongshu District, Hangzhou. located_in by Renhe Tang chain pharmacy.
+    // Renhe Tang chain pharmacy opened its 40th store in Gongshu District, Hangzhou` -- the whole paragraph is about the pharmacy,
+    // so the candidates returned pharmacy and store, and administrative_area never came up once.
+    // The name was diluted into the paragraph.
     //
-    // 所以名字单独发一次：短查询对短标签，正是这个索引擅长的形状；
-    // 画像那一次仍然发，它照顾没有 specific_type 的实体和需要语境才判得出的。
-    // 两次结果取并集——多一次嵌入，换掉一整类漏检。
+    // So the name is sent on its own: a short query against a short label is exactly the shape this index is good at;
+    // the profile query is still sent, for entities without a specific_type and those that can only be judged with context.
+    // The two results are unioned -- one more embedding, in exchange for eliminating a whole class of misses.
     let profiles: Vec<String> = subjects.iter().map(profile_of).collect();
     let names: Vec<Option<String>> = subjects.iter().map(name_query_of).collect();
-    // **两路各查各的索引**（见 `entity_types.label_embedding`）。从前两路共用整段索引，于是短说法那一路
-    // 被同义反复的类接管：`district. place` 回来的是 Map / Park / Country /
-    // Museum，四个赢家的嵌入原文全是 `X\nAn X.` 一行话，而带一百字定义的
-    // AdministrativeArea 排不进前八。短对短、长对长，这才是可比的
+    // **Each route queries its own index** (see `entity_types.label_embedding`). Previously both routes shared one whole-text index, so the short-wording route
+    // was taken over by classes with tautological definitions: `district. place` returned Map / Park / Country /
+    // Museum; the four winners' embedded source text was all a one-line `X\nAn X.` pattern, while AdministrativeArea, with its hundred-word definition,
+    // could not make the top eight. Short against short, long against long: that is what is comparable
     let name_queries: Vec<String> = names.iter().flatten().cloned().collect();
     let (profile_hits, name_hits) = tokio::join!(
         ontology_index::nearest_for_each(
             state,
             kb_id,
             &profiles,
-            // 多取一些再按祖先过滤：过滤在检索之后，所以要留出被滤掉的余量
+            // Take more and then filter by ancestry: the filter runs after retrieval, so leave headroom for what gets filtered out
             CANDIDATES * 4,
             ontology_index::Target::Class,
         ),
@@ -167,8 +167,8 @@ async fn preview_with(
     );
     let profile_hits = profile_hits.unwrap_or_default();
     let name_hits = name_hits.unwrap_or_default();
-    // 每个实体在两份结果里各占的下标：(画像, 名字)。名字那一路只有给得出
-    // 说法的实体才发了查询，所以下标要单独数
+    // The index each entity occupies in the two result sets: (profile, name). The name route only fires for entities that can be given
+    // a wording, so its indices must be counted separately
     let mut slots: Vec<(usize, Option<usize>)> = Vec::with_capacity(subjects.len());
     let mut ni = 0usize;
     for (pi, n) in names.iter().enumerate() {
@@ -180,8 +180,8 @@ async fn preview_with(
         slots.push((pi, slot));
     }
 
-    // 邻居先一起取（#514）：六十个查询彼此无关，有界并发取回来，下面再按原顺序推理。
-    // 后代集合按粗类记一批：同一个粗类的递归 CTE 一批里只发一次
+    // Fetch the neighbors together first (#514): the sixty queries are independent of one another; fetch them with bounded concurrency, and reason in original order below.
+    // Descendant sets are batched per coarse class: the recursive CTE for one coarse class is sent once per batch
     let ids: Vec<Uuid> = subjects.iter().map(|s| s.id).collect();
     let mut neighbour_lists =
         utopia_store::resolution::nearest_typed_for_each(&state.pool, kb_id, &ids, NEIGHBOURS)
@@ -190,29 +190,29 @@ async fn preview_with(
 
     let mut out = Vec::with_capacity(subjects.len());
     for (i, s) in subjects.iter().enumerate() {
-        // 粗类的后代**排前面，但不是唯一能选的**。
+        // Descendants of the coarse class are **ranked first, but are not the only choice**.
         //
-        // 起初这里是硬闸门（只许往后代走），实测 17 个实体里挡掉 4 个正确答案：
-        // schema.org 把 SoftwareApplication 与 Periodical 都挂在 CreativeWork 下，
-        // 而抽取给的粗类是 product / organization——两套分类的轴根本不重合，
-        // 硬拦就是把正确答案永久锁在门外。跟 part_of 那次同一条教训：
-        // **签名是导向，不是闸门**；系统性丢数据比偶尔判错贵得多。
+        // At first this was a hard gate (only descendants allowed); measured, it blocked 4 of 17 entities' correct answers:
+        // schema.org files both SoftwareApplication and Periodical under CreativeWork,
+        // while extraction's coarse classes were product / organization -- the two classification axes simply do not coincide,
+        // so a hard block just locks the correct answers permanently outside the door. The same lesson as the part_of incident:
+        // **a signature is a guide, not a gate**; systematically losing data costs far more than an occasional wrong judgment.
         //
-        // 该说不的是裁决那一步：它看得到描述、看得到粗类，能说出"这不是"。
-        // 还没有类的实体没有"粗类的后代"这个轴可用（0009），整张类表都是候选，
-        // 排序就纯按检索顺序来
+        // The step that says no is adjudication: it sees the descriptions and the coarse class, and can say "this is not it".
+        // Entities with no class yet have no "descendants of the coarse class" axis to use (0009), so the whole class table is candidates,
+        // and the ordering simply follows retrieval order
         let descendants = descendants_memo
             .get(&state.pool, kb_id, s.coarse_id)
             .await?;
-        // **两路交替取，不按距离合并。**
+        // **Take the two routes alternately; do not merge by distance.**
         //
-        // 距离在两路之间不可比：短查询（"医药集团"）产生的距离系统性地小于
-        // 一整段画像，按距离排就等于让名字那一路独占前几名。实测这么做之后
-        // 仁和医药集团、国家药监局、中华医学会全被挤掉了正确候选——
-        // 上一轮它们是自动通过的。跟 A/B 两路那条"取并集不合分数"同一条，
-        // 我在这儿违反了它。
+        // Distances are not comparable between the two routes: a short query ("pharmaceutical group") yields distances systematically smaller than
+        // a whole-paragraph profile, so sorting by distance would let the name route monopolize the top places. Measured after doing this,
+        // Renhe Pharmaceutical Group, the National Medical Products Administration and the Chinese Medical Association all had their correct candidates pushed out --
+        // in the previous round they had passed automatically. It is the same rule as the "take the union, do not merge scores" of the A/B routes,
+        // which I violated here.
         //
-        // 交替之后两路各占一半席位，谁的距离数值大小不再影响谁被看见。
+        // After alternating, each route holds half the seats, and the size of one route's distance number no longer affects whether it is seen.
         let (pi, ni) = slots[i];
         let mut lists: Vec<Vec<_>> = vec![profile_hits.get(pi).cloned().unwrap_or_default()];
         if let Some(k) = ni {
@@ -230,23 +230,23 @@ async fn preview_with(
                 ranked.push(c.clone());
             }
         }
-        // **不再把后代无条件提前。**
+        // **No longer moves descendants to the front unconditionally.**
         //
-        // 从前这里是 `ranked.sort_by_key(|c| !descendants.contains(&c.id))`：key 是
-        // 布尔,于是候选被切成"后代"与"非后代"两堆,前者整堆压过后者,**距离完全
-        // 不参与**。实测「深蓝向量数据库」(现类 product,specific = vector database
-        // software):正确答案 `software_application` 在检索里排**第 1**,却被
-        // product_collection(0.437)、some_products(0.440) 这五个不相关的 product
-        // 后代挤出候选——它们上来只因为出身,不因为像。
+        // Previously this was `ranked.sort_by_key(|c| !descendants.contains(&c.id))`: the key is
+        // a boolean, so the candidates were split into a "descendant" pile and a "non-descendant" pile, the first entirely overriding the second, **distance
+        // does not count at all**. Measured: "deep blue vector database" (current class product, specific = vector database
+        // software): the correct answer `software_application` ranked **first** in retrieval, yet was pushed out of the candidates
+        // by product_collection (0.437), some_products (0.440) and five other unrelated product
+        // descendants -- they got in only because of their origin, not because they resembled the entity.
         //
-        // 这个偏好本来就表达了三遍:这行排序、提示词里 narrowing/correcting 的分辨、
-        // 以及 `crosses_axis` 分档。删掉最不讲证据的那一遍,另外两遍照旧——换轴的
-        // 改动仍然不自动落库,仍然进人工,风险面没有变。
+        // This preference was expressed three times: this sort line, the narrowing/correcting distinction in the prompt,
+        // and the `crosses_axis` tiering. Removing the one that argues from the least evidence leaves the other two as they were -- an axis-changing
+        // change still does not get written automatically and still goes to a human; the risk surface has not changed.
         //
-        // 剩下的顺序就是两路交替的检索序:检索决定端什么上去,裁决决定它是什么,
-        // `crosses_axis` 决定要不要人看。一层一件事。
+        // The remaining order is the alternating retrieval order of the two routes: retrieval decides what is put on the table, adjudication decides what it is,
+        // and `crosses_axis` decides whether a human looks. One layer, one job.
         let candidates: Vec<_> = ranked.into_iter().take(CANDIDATES as usize).collect();
-        // 第二路：语境相似的已定类实体，按类投票（上面一起取回来的，这里按序拿）
+        // Second route: settled-class entities with similar context, voting by class (fetched together above; taken here in order)
         let raw = std::mem::take(&mut neighbour_lists[i]);
         let mut votes: std::collections::BTreeMap<String, (usize, f64, Vec<String>, bool)> =
             std::collections::BTreeMap::new();
@@ -298,18 +298,18 @@ async fn preview_with(
     Ok(out)
 }
 
-/// 实体画像：送去做向量检索的那段字。
+/// Entity profile: the text sent for vector retrieval.
 ///
-/// **模型自己报的类型名放最前面。** 它是最强的信号，而检索匹配的是类的
-/// `label + description`——一个类名对一段类定义，比一串谓词对一段类定义近得多。
+/// **The model's own reported type name goes first.** It is the strongest signal, and retrieval matches a class's
+/// `label + description` -- a class name against a class definition is far closer than a string of predicates against one.
 ///
-/// 名字、别名其次；谓词与引文垫后当语境。
+/// Names and aliases come next; predicates and citations follow as context.
 ///
-/// 这一段是**语境查询**，跟 [`name_query_of`] 那个短查询各发一次、结果取并集。
+/// This paragraph is the **context query**; it is sent once alongside the short query from [`name_query_of`], and the results are unioned.
 fn profile_of(s: &utopia_store::resolution::TypeCandidateSubject) -> String {
     let mut parts: Vec<String> = Vec::new();
-    // 模型自己的说法放最前面，两个都有就都写。它们是**名字**，而检索的目标
-    //（类的 label）也是名字——名字对名字，正是这个索引擅长的形状
+    // The model's own wording goes first; write both if both exist. They are **names**, and the retrieval target
+    // (the class label) is also a name -- name against name is exactly the shape this index is good at
     for named in [s.specific_type.as_deref(), s.proposed_type.as_deref()] {
         if let Some(p) = named.map(str::trim).filter(|x| !x.is_empty()) {
             parts.push(p.to_string());
@@ -322,29 +322,29 @@ fn profile_of(s: &utopia_store::resolution::TypeCandidateSubject) -> String {
     if !s.roles.is_empty() {
         parts.push(s.roles.join(" "));
     }
-    // 引文垫后当语境，且只有两句：它们是关于这个实体的句子没错，但也带着
-    // 一堆跟类型无关的东西（时间、数字、别的实体），放多了会把画像的重心
-    // 从"这是什么"拖到"这段文字讲了什么"。查询侧已经保证只取主语位的
+    // Citations follow as context, and only two sentences: they are indeed sentences about this entity, but they also carry
+    // a pile of things unrelated to type (times, numbers, other entities); too many would shift the profile's centre of gravity
+    // from "what this is" to "what this text is about". The query side already guarantees only subject-position
     for q in s.quotes.iter().take(2) {
         parts.push(q.chars().take(120).collect());
     }
     parts.join(". ")
 }
 
-/// 一条裁决结果。
+/// One adjudication result.
 #[derive(Debug, serde::Deserialize)]
 struct Verdict {
-    /// 提示词里那条的编号——**对回 preview 的钥匙**。
+    /// The number of that entry in the prompt -- **the key that matches results back to preview**.
     ///
-    /// 从前是靠 `name`。0009 之后同名的未分类实体可以并存（NULL ≠ NULL，见该篇
-    /// 的唯一索引一节），实测一个库里 4 个「张伟」：按名字对回来会把它们塌成
-    /// 同一条，同一个 entity_id 被推进 picks 四次,落库时撞 (batch_id, entity_id)
-    /// 主键；而另外三个永远不会被定类——它们对这条路根本不可见
+    /// It used to rely on `name`. After 0009, unclassified entities with the same name can coexist (NULL ≠ NULL, see that document's
+    /// unique-index section); measured in one database: 4 "Zhang Wei"s. Matching back by name would collapse them into
+    /// one, the same entity_id pushed into picks four times, and hitting the (batch_id, entity_id) primary
+    /// key on persist; and the other three would never be classified -- they are simply invisible to this route
     #[serde(default)]
     id: Option<usize>,
-    /// 实体名。模型漏给 id 时的退路,且名字不重复时它足够
+    /// Entity name. The fallback when the model omits the id, and sufficient when names are not duplicated
     name: String,
-    /// 选中的类 key；判不出来时为空
+    /// The chosen class key; empty when it cannot be judged
     #[serde(default)]
     choice: Option<String>,
     #[serde(default)]
@@ -359,27 +359,27 @@ struct VerdictReply {
     verdicts: Vec<Verdict>,
 }
 
-/// 低于这条线的一律进人工，无论它落在哪。
+/// Anything below this line goes to a human, wherever it falls.
 ///
-/// **它不是灰区的主判据**：实测模型自报的 confidence 是双峰的——15 条全 ≥0.85、
-/// 4 条 null，中间一个都没有。自报置信度是文风不是概率，模型挑的是一个
-/// 跟自己语气相称的数字。拿它当闸门，闸门什么也拦不住。
-/// 真正分档的是下面那条"跨没跨分类轴"，这条只兜住偶尔出现的低分。
+/// **It is not the main criterion for the gray zone**: measured, the model's self-reported confidence is bimodal -- 15 entries all ≥0.85,
+/// 4 nulls, and none in between. A self-reported confidence is a style of writing, not a probability: the model picks a number
+/// that matches its own tone. Used as a gate, the gate blocks nothing.
+/// The real tiering is the "crosses a classification axis or not" criterion below; this one only catches the occasional low score.
 const AUTO_THRESHOLD: f32 = 0.85;
 
-/// 一次消解的结果，给调用方交代清楚三档各去了哪里。
+/// The result of one resolution, which tells the caller clearly where each of the three tiers went.
 #[derive(Debug, serde::Serialize)]
 pub struct ResolutionOutcome {
     pub batch: Option<Uuid>,
-    /// 自动改掉的
+    /// Changed automatically
     pub retyped: u32,
-    /// 跨了分类轴、或置信度不够，留给人的
+    /// Crossed a classification axis, or confidence was insufficient; left for a human
     pub for_review: Vec<ReviewItem>,
-    /// 裁决说"都不是"的，**连同它给的理由**。
+    /// Adjudication said "none of these", **together with the reason it gave**.
     ///
-    /// 只报一个数是不够的：这一步的整个设计押在"选择都不是是个体面答案"上，
-    /// 而那就是最大的一档——不记理由，最大的那一档就是不透明的。
-    /// 跟本体导入预览那条"必须说得出为什么"是同一条。
+    /// Reporting only a count is not enough: the whole design of this step rests on "choosing none of these is a respectable answer",
+    /// and that is the biggest tier -- without recording reasons, the biggest tier is opaque.
+    /// It is the same rule as the "must be able to say why" in the ontology import preview.
     pub left_alone: Vec<DeclineNote>,
 }
 
@@ -388,10 +388,10 @@ pub struct DeclineNote {
     pub name: String,
     pub coarse: Option<String>,
     pub specific_type: Option<String>,
-    /// 模型给的理由；它压根没提到这个实体时为空
+    /// The reason the model gave; empty when it did not mention this entity at all
     pub reason: Option<String>,
-    /// 检索给的头一个候选。理由说不通时，看这个就知道是检索没找着
-    /// 还是裁决没看上
+    /// The first candidate retrieval gave. When the reason does not make sense, this shows whether retrieval failed to find it
+    /// or adjudication passed over it
     pub top_candidate: Option<String>,
 }
 
@@ -400,50 +400,50 @@ pub struct ReviewItem {
     pub entity_id: Uuid,
     pub name: String,
     pub coarse: Option<String>,
-    /// 配对的两端。认可这一条时认可的是**这一对类**，不是这一个实体。
-    /// 起点可能没有（0009）——那时没有"一对类"可认可，只能一个个改
+    /// The two ends of the pair. Approving this one approves **this pair of classes**, not this one entity.
+    /// The starting end may be absent (0009) -- then there is no "pair of classes" to approve, and entities can only be changed one by one
     pub from_type_id: Option<Uuid>,
     pub to_type_id: Uuid,
     pub choice: String,
     pub confidence: f32,
     pub reason: Option<String>,
-    /// 选中的类**不在**粗类的子树里——它换的是分类轴，不是往下走一格
+    /// The chosen class is **not** in the coarse class's subtree -- it changes the classification axis, not one step down
     pub crosses_axis: bool,
 }
 
-/// 跑一轮类型消解并落库。
+/// Run one round of type resolution and persist it.
 ///
-/// **落库时不带 actor,尽管是人点的运行。** `retype_entities` 的 actor 参数
-/// 现在有两重身份:账本里记"谁改的",而它现在还决定 `type_source`——
-/// 有 actor 就是 `human`,而 `human` 意味着**引擎从此不再碰这个实体**。
+/// **Persisting carries no actor, even though a person clicked the run.** The actor parameter of `retype_entities`
+/// now has two roles: the ledger records "who changed it", and it also decides `type_source` --
+/// with an actor it is `human`, and `human` means **the engine never touches this entity again**.
 ///
-/// 这两个问题不是一回事:
+/// These two questions are not the same thing:
 ///
-/// | | 谁发起 | 谁判定这个实体是什么 |
+/// | | Who initiates | Who decides what this entity is |
 /// |---|---|---|
-/// | 手工改实体类型 | 人 | 人 |
-/// | 认可类对 + 点名实体 | 人 | 人 |
-/// | **跑一轮消解** | 人点了运行 | **引擎** |
+/// | Manually change an entity's type | Person | Person |
+/// | Approve a class pair + name entities | Person | Person |
+/// | **Run a round of resolution** | Person clicked run | **The engine** |
 ///
-/// 第三行传了 user 就等于宣称"这个类是人判的",于是**跑过一次消解的实体
-/// 从此永远不再被消解**。实测:一个没有任何人工 PATCH 记录（`entity.retyped`
-/// 审计 0 条）的库,跑完消解后每个实体都成了 `type_source = human`,
-/// 下一次预览返回空列表。
+/// If the third row passes a user, it is as good as declaring "this class was decided by a person", so **an entity that has once been through resolution
+/// is never resolved again**. Measured: in a database with no manual PATCH records at all (`entity.retyped`
+/// audit: 0 rows), after a resolution run every entity became `type_source = human`,
+/// and the next preview returned an empty list.
 ///
-/// 谁点的运行记在 `ontology.types_resolved` 审计里,带批次 id,查得到。
+/// Who clicked the run is recorded in the `ontology.types_resolved` audit, with the batch id, and can be looked up.
 pub async fn resolve(state: &AppState, kb_id: Uuid) -> AppResult<ResolutionOutcome> {
     resolve_with(state, kb_id, false).await
 }
 
-/// 抽取结束后的自动一轮（0016 C2）。
+/// An automatic round after extraction ends (0016 C2).
 ///
-/// 与人点的那一轮是同一套判定——在原类子树里精化的自动改，跨轴的留给人——差别只有
-/// 两处：只看引擎没看过的实体，且看过的打上 `type_resolved_at`，下一轮不回头。
-/// 待人工的那一档这里**不落库**：它们留在候选里，人在 Ontology 页点一次运行就会再
-/// 见到（那条路不看标记）。开关关着的库什么都不做。
+/// It is the same judgment as the round a person clicks -- refinements within the original class's subtree are changed automatically, cross-axis ones are left to a human -- the only differences are
+/// two: it looks only at entities the engine has not seen, and those it has seen get `type_resolved_at`, so the next round does not revisit them.
+/// The tier awaiting a human is **not persisted** here: they stay among the candidates, and a human will see them again on a run from the Ontology page
+/// (that path does not look at the marker). A database whose switch is off does nothing at all.
 ///
-/// 一次任务最多跑 `MAX_ROUNDS` 轮，每轮一次模型调用、六十个实体；更多的等下一篇
-/// 文档抽完再排——任务是按库去重入队的，不会堆积
+/// One task runs at most `MAX_ROUNDS` rounds, each one model call over sixty entities; more wait until the next document
+/// finishes extraction and is queued then -- tasks are enqueued deduplicated per database, so they do not pile up
 pub async fn resolve_types_job(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
     const MAX_ROUNDS: usize = 10;
     let kb = utopia_store::kbs::get(&state.pool, kb_id).await?;
@@ -487,8 +487,8 @@ async fn resolve_with(
     unattended: bool,
 ) -> AppResult<ResolutionOutcome> {
     let items = preview_with(state, kb_id, unattended).await?;
-    // 自动跑：这一批不管裁成哪一档都算看过（连检索都没给候选的也算——
-    // 它们下一轮照样没有），否则同一批实体每轮都回来
+    // Automatic run: this batch counts as looked at whichever tier it lands in (including those for which retrieval gave no candidates --
+    // they still have none next round), otherwise the same batch of entities would come back every round
     if unattended && !items.is_empty() {
         let ids: Vec<Uuid> = items.iter().map(|i| i.entity_id).collect();
         utopia_store::resolution::mark_type_judged(&state.pool, kb_id, &ids).await?;
@@ -524,15 +524,15 @@ async fn resolve_with(
     let parsed: VerdictReply =
         serde_json::from_str(&block).map_err(|e| AppError::Other(e.into()))?;
 
-    // 名字 → 下标**列表**，不是单条。同名的未分类实体可以并存（0009），
-    // 塌成一条会让其中几个永远拿不到裁决。裁决优先按 id 对回来，
-    // 名字只是模型漏给 id 时的退路
+    // Name -> index **list**, not a single entry. Unclassified entities with the same name can coexist (0009),
+    // collapsing them into one would leave some of them never getting a verdict. Verdicts are matched back by id first,
+    // and the name is only the fallback when the model omits the id
     let mut by_name: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
     for (i, it) in items.iter().enumerate() {
         by_name.entry(it.name.as_str()).or_default().push(i);
     }
-    // 人认可过的配对：同一对不再进人工。跨轴是类与类之间的事，
-    // 实体只是碰巧撞上它——第二个城市不该再问一遍
+    // A pair a person has approved: the same pair no longer goes to a human. Crossing an axis is a matter between classes,
+    // and the entity just happened to collide with it -- the second city should not be asked again
     let approved = utopia_store::resolution::approved_refinements(&state.pool, kb_id).await?;
     let mut picks: Vec<(Uuid, Uuid)> = Vec::new();
     let mut for_review: Vec<ReviewItem> = Vec::new();
@@ -546,32 +546,32 @@ async fn resolve_with(
         top_candidate: item.candidates.first().map(|c| c.key.clone()),
     };
     for v in &parsed.verdicts {
-        // id 优先；漏给时退回名字，取该名字下**还没裁决过的**第一条。
-        // 越界的 id 当没给——模型偶尔会编一个
+        // The id takes precedence; if omitted, fall back to the name, taking the first entry under that name that has **not yet been adjudicated**.
+        // An out-of-range id counts as not given -- the model occasionally makes one up
         let idx = v.id.filter(|i| *i < items.len()).or_else(|| {
             by_name
                 .get(v.name.as_str())
                 .and_then(|ids| ids.iter().find(|i| !decided.contains(i)).copied())
         });
         let Some(idx) = idx else { continue };
-        // 同一条只认第一份裁决。模型重复作答时，第二份会把同一个 entity_id
-        // 再推进 picks 一次，落库撞主键
+        // For the same entry, only the first verdict counts. When the model answers twice, the second would push the same entity_id
+        // into picks once more, and hit the primary key on persist
         if !decided.insert(idx) {
             continue;
         }
         let item = &items[idx];
-        // **字符串 "null" 也是 null。** 模型时而给 JSON null、时而给这四个字母，
-        // 而当成 key 去查候选必然查不到，于是这条被记成"选了个候选之外的 key"——
-        // 一条编造的拒绝理由盖掉了模型真正给的那条。拒绝的理由是这一步最要紧的
-        // 输出，被自己的解析弄脏比没有更糟
+        // **The string "null" is also null.** The model sometimes gives JSON null and sometimes these four letters,
+        // and looking that up as a key among the candidates always fails, so this entry gets recorded as "picked a key outside the candidates" --
+        // a fabricated rejection reason overwrites the one the model actually gave. The rejection reason is the most important output of this step,
+        // and having it polluted by our own parsing is worse than having none
         let Some(choice) = v.choice.as_deref().map(str::trim).filter(|c| {
             !c.is_empty() && !c.eq_ignore_ascii_case("null") && !c.eq_ignore_ascii_case("none")
         }) else {
             left_alone.push(decline(item, v.reason.clone()));
             continue;
         };
-        // 只认候选清单里的 key。清单之外的答案不是"更好的判断"，
-        // 是模型在凭记忆写一个 schema.org 里的名字——本体里未必有
+        // Only keys in the candidate list are accepted. An answer outside the list is not a "better judgment",
+        // it is the model writing from memory a name from schema.org -- which the ontology may not have
         let Some(target) = item.candidates.iter().find(|c| c.key == choice) else {
             left_alone.push(decline(
                 item,
@@ -580,20 +580,20 @@ async fn resolve_with(
             continue;
         };
         let confidence = v.confidence.unwrap_or(0.0);
-        // **分档看跨没跨分类轴，不看模型自报的那个数字。**
+        // **Tiering looks at whether an axis was crossed, not at the number the model self-reported.**
         //
-        // 在粗类的子树里 = 往下走一格，抽取的判断没被推翻，自动改。
-        // 不在 = 换了一条分类轴（判成 product 的东西落到了 CreativeWork 底下），
-        // 那是重新分类而不是精化，值得一个人看一眼。实测那一轮唯一明确的错
-        //（《中国数据智能》→ publication_issue）正是这一类。
+        // Inside the coarse class's subtree = one step down, extraction's judgment is not overturned, changed automatically.
+        // Not inside = a different classification axis (something judged product ended up under CreativeWork),
+        // that is reclassification, not refinement, and it deserves a human look. The only clear error measured in that round
+        // ("China Data Intelligence" -> publication_issue) was exactly of this kind.
         //
-        // **纠正也走这里，而且天然如此**：抽取挑错细类之后（绍兴 → address），
-        // 正确答案是它的兄弟而不是它的后代，所以一定判为跨轴、一定进人工。
-        // 这正是想要的——推翻抽取的判断比细化它风险大，不该自动发生。
+        // **Corrections also go this way, and naturally so**: after extraction picked a wrong finer class (Shaoxing -> address),
+        // the right answer is its sibling, not its descendant, so it is always judged as crossing an axis and always goes to a human.
+        // That is exactly what is wanted -- overturning extraction's judgment is riskier than refining it, and should not happen automatically.
         //
-        // **还没有类的实体不算跨轴**（0009）：它身上没有一个"抽取的判断"要被
-        // 推翻，第一次给它定类是补齐而不是重新分类。这里若判成跨轴，等于
-        // 删掉兜底类之后每一个实体都要人看一遍，整条自动化就废了
+        // **Entities with no class yet do not count as crossing an axis** (0009): there is no "extraction judgment" on them to be
+        // overturned; assigning a class for the first time is filling in, not reclassifying. If it were judged as crossing an axis here, it would amount to
+        // every entity needing a human look once the catch-all class is deleted, and the whole automation would be useless
         let crosses_axis = match item.coarse_id {
             Some(from) => {
                 !item.descendants.contains(&target.id) && !approved.contains(&(from, target.id))
@@ -616,7 +616,7 @@ async fn resolve_with(
             });
         }
     }
-    // 裁决压根没提到的实体也算"没动"，否则三档加起来对不上总数
+    // Entities adjudication never mentioned also count as "untouched"; otherwise the three tiers would not add up to the total
     for (i, item) in items.iter().enumerate() {
         if !decided.contains(&i) {
             left_alone.push(decline(item, None));
@@ -638,22 +638,22 @@ async fn resolve_with(
     })
 }
 
-/// 裁决提示词。
+/// Adjudication prompt.
 ///
-/// **"都不是"必须是个体面的答案。** 这跟 `related_to` 那个逃生舱正好相反：
-/// 那里兜底选项销毁信息，所以撤掉；这里保持粗类什么也不损失——实体照样在图上、
-/// 事实照样挂着，只是没变得更具体。硬逼模型从候选里挑一个，换来的是一批
-/// 自信的错误，而且它们不进时间轴、不容易被看见。
+/// **"None of these" must be a respectable answer.** This is exactly the opposite of the `related_to` escape hatch:
+/// there, the catch-all option destroys information, so it was removed; here keeping the coarse class loses nothing -- the entity is still on the graph,
+/// its facts are still attached, it just did not become more specific. Forcing the model to pick one of the candidates gets a batch of
+/// confident errors, and they do not enter the timeline and are hard to notice.
 fn adjudication_prompt(items: &[TypeSuggestion]) -> String {
     let mut blocks = Vec::new();
-    // **编号是钥匙,名字不是**（0009）。同名的未分类实体可以并存,一个库里
-    // 实测有 4 个「张伟」——按名字对回来会把它们塌成同一条
+    // **The number is the key, the name is not** (0009). Unclassified entities with the same name can coexist; in one database
+    // measured 4 "Zhang Wei"s -- matching back by name would collapse them into one entry
     for (i, it) in items.iter().enumerate() {
-        // 现类连描述一起给：要判"现在这个类对不对"，光看 key 不够——
-        // 导入本体的 key 常常自解释不了（`entry_point` 是什么？）
+        // Give the current class together with its description: to judge "whether this class is right now", the key alone is not enough --
+        // keys from imported ontologies often cannot explain themselves (what is `entry_point`?)
         //
-        // 没有类的实体直说没有（0009）。这一行从前一定填着 concept，模型读到的是
-        // 「它已经是个概念」——一个错误的先验；现在读到的是「还没定」，正是实情
+        // An entity with no class says so plainly (0009). This line used to always hold concept, and the model read
+        // "it is already a concept" -- a wrong prior; now it reads "not yet decided", which is the truth
         let current = match (&it.coarse, it.coarse_description.as_deref().map(str::trim)) {
             (Some(k), Some(d)) if !d.is_empty() => format!("{k} ({d})"),
             (Some(k), _) => k.clone(),
@@ -736,15 +736,15 @@ fn adjudication_prompt(items: &[TypeSuggestion]) -> String {
     )
 }
 
-/// 只有名字的那个查询：模型自己的说法，别的一概不放。
+/// The name-only query: the model's own wording, and nothing else at all.
 ///
-/// **分开发的理由是稀释。** 语境查询里这几个词排在最前，但后面整段一样进向量，
-/// 而语境讲的往往是别人：「杭州拱墅区」的引文在讲一家药房，于是候选回来的是
-/// pharmacy、store。短查询对短标签没有这个问题——检索目标（类的 label）
-/// 本来就是名字。
+/// **The reason for sending them separately is dilution.** In the context query these words come first, but the whole paragraph after them goes into the vector alike,
+/// and the context is often about someone else: the citation for "Gongshu District, Hangzhou" is about a pharmacy, so the candidates came back as
+/// pharmacy and store. A short query against a short label does not have this problem -- the retrieval target (the class's label)
+/// is a name to begin with.
 ///
-/// 两个说法都没有就返回 `None`：只剩实体名的查询跟语境查询的开头一模一样，
-/// 再发一次是白花一次嵌入。
+/// If neither wording exists, return `None`: the name-only query would be identical to the start of the context query,
+/// and sending it again would waste an embedding.
 fn name_query_of(s: &utopia_store::resolution::TypeCandidateSubject) -> Option<String> {
     let parts: Vec<&str> = [s.specific_type.as_deref(), s.proposed_type.as_deref()]
         .into_iter()

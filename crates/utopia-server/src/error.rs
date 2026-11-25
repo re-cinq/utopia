@@ -4,7 +4,7 @@ use axum::Json;
 use serde_json::json;
 use utopia_core::AppError;
 
-/// axum 响应包装（orphan rule：IntoResponse 不能直接实现在 core 类型上）。
+/// axum response wrapper (orphan rule: IntoResponse cannot be implemented directly on core types).
 pub struct ApiErr(pub AppError);
 
 impl<E: Into<AppError>> From<E> for ApiErr {

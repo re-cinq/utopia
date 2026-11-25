@@ -1,10 +1,10 @@
-//! `LlmClient` 站到 rig 的 `CompletionModel` 后面（#546）。
+//! Puts `LlmClient` behind rig's `CompletionModel` (#546).
 //!
-//! **循环与钩子是 rig 的，线上的字节是我们的。** `LlmClient` 里攒着的东西都是
-//! 事故换来的：读超时（7,459 块的摄取死在第 55 块上没有一条错误）、错误体转发
-//! （#538）、欠费与限流的分类、缓存 token 的日志。换成 rig 自带的 provider
-//! client 这些全都会丢。所以这里只做两个方向的翻译：rig 的请求 → OpenAI 协议的
-//! JSON；`LlmClient` 的回合与流 → rig 的回答与流。
+//! **The loop and hooks are rig's; the bytes on the wire are ours.** Everything `LlmClient` accumulates was earned through incidents:
+//! the read timeout (7,459 chunks of ingestion died at chunk 55 with not one error), forwarding of error bodies
+//! (#538), classification of credit exhaustion and rate limits, and logging of cached tokens. Swapping in rig's own provider
+//! client would lose all of these. So this file only translates in two directions: rig's requests to OpenAI-protocol
+//! JSON, and `LlmClient`'s turns and streams to rig's answers and streams.
 
 use futures_util::{stream, Stream, StreamExt};
 use rig_core::completion::{
@@ -21,7 +21,7 @@ use rig_core::streaming::{
 use serde_json::{json, Value};
 use utopia_llm::{AssistantTurn, LlmClient, ToolStreamItem};
 
-/// rig 要给每个回答挂一个「谁回的」；这里没有厂商之分，全是 `LlmClient`
+/// rig requires every answer to carry a "who answered"; there is no vendor distinction here, everything is `LlmClient`
 const PROVIDER: &str = "utopia";
 
 #[derive(Clone)]
@@ -35,9 +35,9 @@ impl RigModel {
         Self { client, context }
     }
 
-    /// 开一条流。**端点不接受 `tool_choice` 时去掉它重发一次**：`required` 不在
-    /// 每家的协议里，而循环那头拿到 400 会读成「这家不支持工具调用」整个降级——
-    /// 那是两件事。去掉之后模型仍可能只说不查，那一层由 turn-finished 钩子兜。
+    /// Open a stream. **If the endpoint does not accept `tool_choice`, drop it and resend once**: `required` is not
+    /// in every vendor's protocol, and the loop side would read a 400 as "this vendor does not support tool calls" and demote the whole thing:
+    /// those are two different things. After dropping it, the model may still only talk and not look things up; that layer is backed by the turn-finished hook.
     async fn open_stream(
         &self,
         w: &Wire,
@@ -98,8 +98,8 @@ impl CompletionModel for RigModel {
     ) -> Result<StreamingCompletionResponse, CompletionError> {
         let w = wire(&request);
         let source = self.open_stream(&w).await?;
-        // `LlmClient` 的流已经把工具调用按 index 归并好、放在流末的 `Turn` 里；
-        // 推理块也要交给 rig 保留，下一次工具续接时随 assistant 消息回传
+        // `LlmClient`'s stream has already merged tool calls by index and put them in the `Turn` at the end of the stream;
+        // reasoning blocks must also be handed to rig to keep, and passed back with the assistant message on the next tool continuation
         let inner = source.flat_map(|item| {
             let items: Vec<Result<RawStreamingChoice, CompletionError>> = match item {
                 Ok(ToolStreamItem::Delta(text)) => vec![Ok(RawStreamingChoice::Message(text))],
@@ -154,13 +154,13 @@ fn finish_reason(reason: &str) -> rig_core::completion::FinishReason {
     }
 }
 
-// ---- 错误：整条 anyhow 链穿过 rig -------------------------------------------
+// ---- Errors: the whole anyhow chain goes through rig -------------------------------------------
 
-/// `LlmClient` 的错误穿过 rig 的 `CompletionError`。
+/// `LlmClient`'s errors go through rig's `CompletionError`.
 ///
-/// rig 的错误枚举里只有 `RequestError(Box<dyn Error>)` 能装外来的东西，而循环
-/// 那头要认出限流、欠费、被拒（只在「端点拒绝工具调用」时降级），所以整条
-/// anyhow 链原样装进去，那头 downcast 回来。
+/// Of rig's error enum, only `RequestError(Box<dyn Error>)` can hold a foreign error, while the loop
+/// side has to recognise rate limits, credit exhaustion and rejections (it only demotes on "the endpoint rejects tool calls"), so the whole
+/// anyhow chain is stored as-is and downcast back on that side.
 #[derive(Debug)]
 pub struct LlmFailure(pub anyhow::Error);
 
@@ -176,7 +176,7 @@ fn completion_error(err: anyhow::Error) -> CompletionError {
     CompletionError::RequestError(Box::new(LlmFailure(err)))
 }
 
-/// rig 错误里我们自己的那条链，拿不到（rig 自己的错误）就是 None
+/// Our own chain inside a rig error cannot be obtained if it is rig's own error: None
 pub fn llm_failure(err: &CompletionError) -> Option<&anyhow::Error> {
     match err {
         CompletionError::RequestError(inner) => inner.downcast_ref::<LlmFailure>().map(|f| &f.0),
@@ -184,38 +184,38 @@ pub fn llm_failure(err: &CompletionError) -> Option<&anyhow::Error> {
     }
 }
 
-/// 端点拒绝了请求的形状（400/422）。带工具的首个请求撞上它，才是「这家不支持
-/// 工具调用」；网断、密钥错、限流、欠费都不是，降级也救不了它们。上下文超限也是
-/// 400，但那是历史太长不是形状不对：裁掉旧问答重发才是解法，退成 RAG 只会把同样
-/// 长的历史再发一遍（#964）
+/// The endpoint rejected the request's shape (400/422). Only when the first request with tools hits it is it "this
+/// vendor does not support tool calls"; a dropped network, a wrong key, rate limiting or running out of credit are not, and demotion cannot rescue them. A context-length overflow is also a
+/// 400, but that is a history that is too long rather than a wrong shape: the fix is to trim old Q&A and resend; falling back to RAG would only resend the same
+/// long history (#964)
 fn rejected_shape(err: &anyhow::Error) -> bool {
     utopia_llm::context_too_long(err).is_none()
         && utopia_llm::rejected(err).is_some_and(|r| r.status == 400 || r.status == 422)
 }
 
-/// 见 [`rejected_shape`]，从 rig 的错误上判
+/// See [`rejected_shape`]; judged from rig's error
 pub fn tool_calling_rejected(err: &CompletionError) -> bool {
     llm_failure(err).is_some_and(rejected_shape)
 }
 
-// ---- rig → OpenAI 协议 ---------------------------------------------------------
+// ---- rig → OpenAI protocol ---------------------------------------------------------
 
-/// 一次请求在线上的三样：消息、工具清单、`tool_choice`
+/// One request on the wire has three parts: the messages, the tool list, and `tool_choice`
 pub(crate) struct Wire {
     pub messages: Vec<Value>,
-    /// None = 不带工具字段（`ToolChoice::None` 或本来就没有工具）
+    /// None = no tool field (`ToolChoice::None`, or there were no tools to begin with)
     pub tools: Option<Value>,
     pub tool_choice: Option<Value>,
 }
 
-/// rig 的请求摊成 OpenAI 协议。
+/// Flatten rig's request into the OpenAI protocol.
 ///
-/// - `preamble` 是第一条 system。
-/// - `documents`（rig 的「上下文文档」，我们放已认下的实体清单）是一条 system，
-///   **插在最后一条 user 消息之前**：位置就是服从性（紧挨当前问题），而角色不再是
-///   user——从前它假扮成用户发言，模型会回复它（「看起来你已经获得了实体 ID…」）。
-/// - `ToolChoice::None` 直接不带工具：`"tool_choice": "none"` 不是每家都认，
-///   没有工具字段则人人都认，效果一样。
+/// - `preamble` is the first system message.
+/// - `documents` (rig's "context documents", which we use for the list of entities already accepted) is one system message,
+///   **inserted before the last user message**: the position is what gives it weight (right next to the current question), and the role is no longer
+///   user. Previously it posed as the user speaking, and the model replied to it ("it looks like you already have the entity IDs…").
+/// - `ToolChoice::None` simply sends no tools: `"tool_choice": "none"` is not accepted by every vendor,
+///   whereas having no tool field is accepted by all, with the same effect.
 pub(crate) fn wire(req: &CompletionRequest) -> Wire {
     let mut messages = Vec::new();
     if let Some(p) = &req.preamble {
@@ -269,13 +269,13 @@ pub(crate) fn wire(req: &CompletionRequest) -> Wire {
 
 fn tool_choice_json(choice: &ToolChoice) -> Option<Value> {
     match choice {
-        // 默认值不写：写了反而有端点不认
+        // Default values are not written: writing them would make some endpoints refuse
         ToolChoice::Auto => None,
         ToolChoice::None => Some(json!("none")),
         ToolChoice::Required => Some(json!("required")),
         ToolChoice::Specific { function_names } => match function_names.as_slice() {
             [one] => Some(json!({ "type": "function", "function": { "name": one } })),
-            // OpenAI 协议点不了「这几个之一」，退成「必须调一个」
+            // The OpenAI protocol cannot express "one of these", so fall back to "must call one"
             _ => Some(json!("required")),
         },
     }
@@ -294,13 +294,13 @@ pub(super) fn push_message(out: &mut Vec<Value>, m: &Message) {
                         }
                         text.push_str(&t.text);
                     }
-                    // tool 消息要紧跟带 tool_calls 的 assistant 消息，所以先于正文
+                    // A tool message must follow the assistant message that carries tool_calls, so it goes before the body text
                     UserContent::ToolResult(r) => out.push(json!({
                         "role": "tool",
                         "tool_call_id": r.call.as_str(),
                         "content": tool_result_text(&r.content),
                     })),
-                    // 图片、音频、附件：这条线上没有
+                    // Images, audio and attachments: there is no such thing on this wire
                     _ => {}
                 }
             }
@@ -322,8 +322,8 @@ pub(super) fn push_message(out: &mut Vec<Value>, m: &Message) {
                             }
                         }
                     }
-                    // 端点挂在调用上的 `extra_content`（Gemini 3 的 thought_signature）
-                    // 跟着回去：同一回合里缺了它，端点拒收整个请求
+                    // The endpoint attaches `extra_content` to the call (Gemini 3's thought_signature)
+                    // and it must go back as well: without it in the same turn, the endpoint rejects the whole request
                     AssistantContent::ToolCall(tc) => {
                         let mut call = json!({
                             "id": tc.id.as_str(),
@@ -338,7 +338,7 @@ pub(super) fn push_message(out: &mut Vec<Value>, m: &Message) {
                         }
                         calls.push(call);
                     }
-                    // 图片不回灌
+                    // Images are not fed back
                     _ => {}
                 }
             }
@@ -357,7 +357,7 @@ pub(super) fn push_message(out: &mut Vec<Value>, m: &Message) {
     }
 }
 
-/// 工具结果的正文：文本原样，结构化 JSON 序列化
+/// Tool result body: text verbatim, structured JSON serialised
 pub(crate) fn tool_result_text(content: &[ToolResultContent]) -> String {
     let mut out = String::new();
     for c in content {
@@ -370,16 +370,16 @@ pub(crate) fn tool_result_text(content: &[ToolResultContent]) -> String {
     out
 }
 
-// ---- OpenAI 协议 → rig ---------------------------------------------------------
+// ---- OpenAI protocol → rig ---------------------------------------------------------
 
-/// 参数串 → JSON。**解不开的不补成空对象**：模型撞上 token 上限时参数会在半路
-/// 断掉，补成 `{}` 就变成一次拿用户原话去检索的「正常调用」（见 `check_call`）。
-/// 原串装进一个 JSON 字符串，到了 `check_call` 那里它不是对象，照样拒绝。
+/// Arguments string → JSON. **What cannot be parsed is not padded into an empty object**: when the model hits the token limit, the arguments are cut off partway
+/// and padding them to `{}` would turn it into a "normal call" that searches with the user's exact words (see `check_call`).
+/// The original string is stored in a JSON string; by the time it reaches `check_call` it is not an object, and it is still rejected.
 pub(crate) fn args_value(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
 
-/// [`args_value`] 的反向：原本就是一段残串的，原样还回去
+/// The reverse of [`args_value`]: if it was already a broken fragment, return it as-is
 pub(crate) fn args_string(v: &Value) -> String {
     match v {
         Value::String(raw) => raw.clone(),
@@ -387,8 +387,8 @@ pub(crate) fn args_string(v: &Value) -> String {
     }
 }
 
-/// 有的端点（本地 Ollama 一类）不给 tool call id。rig 要一个，协议回灌时也要
-/// 一个，所以补一个；端点自己没发过，回去时它也不会对不上
+/// Some endpoints (local Ollama and the like) do not give tool call ids. rig requires one, and the protocol also requires one when replaying,
+/// so one is generated; the endpoint never sent it, so it will not mismatch when sent back
 pub(crate) fn call_id(id: &str) -> String {
     if id.is_empty() {
         format!("call_{}", uuid::Uuid::now_v7().simple())
@@ -455,7 +455,7 @@ mod tests {
         assert!(w.tool_choice.is_none(), "没说就不写 tool_choice");
     }
 
-    /// 实体清单从前假扮成 user 发言，模型会回复它。现在是 system，且紧挨当前问题
+    /// The entity list used to pose as the user speaking, and the model would reply to it. Now it is a system message, right next to the current question
     #[test]
     fn documents_become_a_system_message_right_before_the_question() {
         let mut r = req(vec![
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(w.messages[4]["content"], "second");
     }
 
-    /// 工具往返回灌：assistant 带 tool_calls（参数是字符串），tool 消息紧随其后
+    /// Tool round-trip replay: assistant with tool_calls (arguments are a string), the tool message follows right after
     #[test]
     fn a_tool_exchange_round_trips_in_protocol_shape() {
         let w = wire(&req(vec![
@@ -524,7 +524,7 @@ mod tests {
         assert!(w.tool_choice.is_none());
     }
 
-    /// 半路断掉的参数不能变成空对象（那会变成一次拿原话检索的正常调用）
+    /// Arguments cut off partway must not become an empty object (that would become a normal call that searches with the original words)
     #[test]
     fn cut_off_arguments_stay_a_string_and_come_back_verbatim() {
         let v = args_value("{\"query\": \"Acme reven");
@@ -566,8 +566,8 @@ mod tests {
         }
     }
 
-    /// Gemini 3 把 thought_signature 挂在调用的 `extra_content` 上，同一回合回灌时
-    /// 必须原样带回：rig 这边装在 `additional_params`，上线时还原成 `extra_content`
+    /// Gemini 3 attaches thought_signature to the call's `extra_content`; when replaying within the same turn
+    /// it must be carried back verbatim: on rig's side it is stored in `additional_params`, and restored to `extra_content` on the way out
     #[test]
     fn a_tool_call_carries_its_extra_content_from_turn_to_wire() {
         let extra = json!({"google": {"thought_signature": "Eq0CCqoC"}});

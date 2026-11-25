@@ -1,5 +1,5 @@
-//! 个人令牌读得到本体（#1262，0014 决定 7）：本体与某个类下的实例两条读。
-//! 人的角色仍是上限，`kb_ids` 排除掉的库照文档原件（0052）回 404。
+//! Personal tokens can read the ontology (#1262, 0014 decision 7): two reads, the ontology and the instances under a class.
+//! The person's role is still the ceiling; databases excluded by `kb_ids` still return 404 for the original document (0052).
 use crate::state::AppState;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -12,11 +12,11 @@ struct Fixture {
     pool: sqlx::PgPool,
     app: axum::Router,
     org: Uuid,
-    /// 两个库的 viewer
+    /// Viewer of two databases
     viewer: Uuid,
     kb: Uuid,
     other_kb: Uuid,
-    /// `kb` 里的一个类
+    /// One class in `kb`
     entity_type: Uuid,
     _dir: tempfile::TempDir,
 }
@@ -74,7 +74,7 @@ impl Fixture {
         )
     }
 
-    /// 本体与 `kb` 里那个类的实例，两条读各回一次
+    /// The ontology and the instances of that class in `kb`: each of the two reads answers once
     async fn read_ontology(&self, token: &str) -> anyhow::Result<[(StatusCode, Value); 2]> {
         let (kb, entity_type) = (self.kb, self.entity_type);
         Ok([

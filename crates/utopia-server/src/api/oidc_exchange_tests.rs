@@ -1,4 +1,4 @@
-//! 换会话走完整条路由：发现文档与 JWKS 来自本机的假身份提供方，映射与一次性走真库。
+//! Exchanging a session goes through the full route: the discovery document and JWKS come from a fake identity provider on this machine; mapping and single-use checks go through the real database.
 use crate::state::AppState;
 use axum::{
     body::Body,
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-// 这把钥匙只为测试生成，应用从不使用
+// This key is generated only for the test; the application never uses it
 #[tokio::test]
 async fn exchange_maps_only_linked_active_people_and_spends_each_token_once() -> anyhow::Result<()>
 {
@@ -36,7 +36,7 @@ async fn exchange_maps_only_linked_active_people_and_spends_each_token_once() ->
         .route("/jwks", get(move || async move { Json(jwks) }));
     let server = tokio::spawn(async move { axum::serve(listener, provider).await.unwrap() });
 
-    // 关掉密码登录只在 SSO 配好时生效：配置读的是进程环境变量，所以和换会话放在一个测试里
+    // Turning off password login only takes effect once SSO is configured: the config is read from process environment variables, so this sits in the same test as the session exchange
     let dir = tempfile::tempdir()?;
     let no_password = AppState::new(
         pool.clone(),
@@ -77,7 +77,7 @@ async fn exchange_maps_only_linked_active_people_and_spends_each_token_once() ->
         "without SSO the switch is ignored"
     );
 
-    // 只有这个测试读写这几个变量
+    // Only this test reads and writes these variables
     std::env::set_var("UTOPIA_OIDC_ISSUER", &issuer);
     std::env::set_var("UTOPIA_OIDC_CLIENT_ID", "utopia-test");
     std::env::set_var(
@@ -121,7 +121,7 @@ async fn exchange_maps_only_linked_active_people_and_spends_each_token_once() ->
         ))?;
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some("fixture".into());
-        // `jti` 只为让每次签出来的令牌不同；Utopia 不读它
+        // `jti` only makes each issued token different; Utopia does not read it
         let sign_at = |sub: &str, issued_ago: i64, expires_in: i64| {
             let now = chrono::Utc::now().timestamp();
             encode(
@@ -148,7 +148,7 @@ async fn exchange_maps_only_linked_active_people_and_spends_each_token_once() ->
             }
         };
 
-        // 没配受信 audience：端点不存在
+        // No trusted audience configured: the endpoint does not exist
         let (status, _) = exchange(sign(&subject)?).await?;
         anyhow::ensure!(status == StatusCode::NOT_FOUND, "closed: {status}");
         std::env::set_var("UTOPIA_OIDC_EXCHANGE_AUDIENCES", "other-app, sibling-app");
@@ -171,8 +171,8 @@ async fn exchange_maps_only_linked_active_people_and_spends_each_token_once() ->
         let (status, body) = exchange(token).await?;
         anyhow::ensure!(body["code"] == "oidc_replayed", "replay: {status} {body}");
 
-        // 刚过 `exp` 的令牌还在校验的宽限里、验得过：换过一次的记录不能先于它失效，
-        // 否则这一分钟里它能再换一次
+        // A token just past its `exp` is still inside the validation grace period and passes: a record of an exchange already used must not expire before it,
+        // otherwise within that minute it could be exchanged again
         let late = sign_at(&subject, 100, -30)?;
         let (status, body) = exchange(late.clone()).await?;
         anyhow::ensure!(status == StatusCode::OK, "within leeway: {status} {body}");
@@ -189,7 +189,7 @@ async fn exchange_maps_only_linked_active_people_and_spends_each_token_once() ->
         let (status, body) = exchange(sign(&subject)?).await?;
         anyhow::ensure!(body["code"] == "oidc_unlinked", "deactivated: {status} {body}");
 
-        // 允许名单里的域名：核实过的 email 关联已有账号，没有就开一个，之后按 subject 认人
+        // Domains on the allow-list: a verified email links to an existing account; if there is none, one is opened; the person is recognised by subject afterwards
         std::env::set_var("UTOPIA_OIDC_ALLOWED_DOMAINS", "example.test");
         let sign_email = |sub: &str, email: &str, verified: bool| {
             let now = chrono::Utc::now().timestamp();
@@ -248,12 +248,12 @@ async fn exchange_maps_only_linked_active_people_and_spends_each_token_once() ->
                     .await
             }
         };
-        // 停用的人换个新 subject 回来：email 还被他的停用账号占着，不开新号
+        // A deactivated person comes back with a new subject: the email is still held by their deactivated account, so no new account is opened
         let (status, body) = exchange(sign_email("sub-comeback", &format!("{user}@example.test"), true)?).await?;
         anyhow::ensure!(body["code"] == "oidc_unlinked", "deactivated email: {status} {body}");
         anyhow::ensure!(accounts(format!("{user}@example.test")).await? == 1);
 
-        // subject 已绑在停用的账号上，新 email 开户撞车：什么都不留，内部原因也不回给调用方
+        // The subject is already bound to a deactivated account, and opening an account with the new email collides: leave nothing behind, and do not return the internal reason to the caller
         let stray = format!("{}@example.test", Uuid::now_v7().simple());
         let (status, body) = exchange(sign_email(&subject, &stray, true)?).await?;
         anyhow::ensure!(

@@ -1,9 +1,9 @@
-//! Trino（旧名 Presto）：REST 协议 `POST /v1/statement`，然后沿 `nextUri` 一页页取。
-//! 一个引擎顶起整个湖仓——Iceberg / Delta / Hive / Hudi 都是它的 catalog，
-//! 换格式不换协议。Starburst 同协议。
+//! Trino (formerly Presto): REST protocol `POST /v1/statement`, then fetches page by page along `nextUri`.
+//! One engine tops the whole lakehouse -- Iceberg / Delta / Hive / Hudi are all its catalogs,
+//! changing the format does not change the protocol. Starburst uses the same protocol.
 //!
-//! 没有会话可设只读：超时靠 `X-Trino-Session: query_max_execution_time`，
-//! 只读靠 `guard_sql_for`。
+//! There is no session to set read-only: the timeout is set via `X-Trino-Session: query_max_execution_time`,
+//! and read-only relies on `guard_sql_for`.
 
 use super::conn::TrinoConn;
 use super::{
@@ -74,7 +74,7 @@ impl TrinoEngine {
         Ok(h)
     }
 
-    /// 提交并沿 nextUri 收完：列在第一个带 columns 的页上，数据分页累积
+    /// Submit and drain along nextUri: columns come on the first page that carries them, and data accumulates across pages
     async fn run(&self, sql: &str) -> anyhow::Result<(Vec<String>, Vec<Vec<serde_json::Value>>)> {
         let client = super::http()?;
         let headers = self.headers()?;
@@ -120,7 +120,7 @@ impl TrinoEngine {
                 .await?;
         }
         let columns = columns.unwrap_or_default();
-        // 协议把 decimal 写成字符串（其余的数都是 JSON 数），按列类型还原
+        // The protocol writes decimal as a string (other numbers are JSON numbers), restored by column type
         for row in &mut rows {
             for (v, c) in row.iter_mut().zip(&columns) {
                 if c.ty.starts_with("decimal") {
@@ -169,7 +169,7 @@ impl QueryEngine for TrinoEngine {
     }
 }
 
-/// information_schema 的一行 → SchemaColumn（值可能是 null，comment 常是）
+/// One row of information_schema -> SchemaColumn (a value may be null; comment often is)
 pub(crate) fn schema_row(row: Vec<serde_json::Value>) -> SchemaColumn {
     let text = |i: usize| -> String {
         row.get(i)
@@ -187,17 +187,17 @@ pub(crate) fn schema_row(row: Vec<serde_json::Value>) -> SchemaColumn {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string),
-        // 键在这里一律「不知道」（#502）。四个引擎各不相同，别照 SQL 标准去读：
-        // - Trino / Presto：每个 catalog 的 `information_schema` 都由内建连接器提供，只有
-        //   columns、tables、views、schemata 与权限、角色几张表，**没有**
-        //   `table_constraints` / `key_column_usage`——查它们是 TABLE_NOT_FOUND（#682）；
-        // - Snowflake：没有 `key_column_usage`，列级的键要 `SHOW PRIMARY KEYS` /
-        //   `SHOW IMPORTED KEYS`；
-        // - Databricks：Unity Catalog 在 `information_schema.table_constraints` /
-        //   `key_column_usage` / `referential_constraints` 里登记信息性的主外键，读得到；
-        // - ClickHouse：`system.columns` 有 `is_in_primary_key`，但主键是排序键的前缀，
-        //   不保证唯一——MergeTree 照收主键相同的两行，标成键会让探索提示词拿一个
-        //   会重复的列当 ID
+        // Keys are always "unknown" here (#502). The four engines differ, so do not read them by the SQL standard:
+        // - Trino / Presto: each catalog's `information_schema` is provided by the built-in connector, with only
+        //   columns, tables, views, schemata, and the privilege and role tables; there is **no**
+        //   `table_constraints` / `key_column_usage` -- querying them gives TABLE_NOT_FOUND (#682);
+        // - Snowflake: no `key_column_usage`; column-level keys come from `SHOW PRIMARY KEYS` /
+        //   `SHOW IMPORTED KEYS`;
+        // - Databricks: Unity Catalog records informational primary and foreign keys in `information_schema.table_constraints` /
+        //   `key_column_usage` / `referential_constraints`, which can be read;
+        // - ClickHouse: `system.columns` has `is_in_primary_key`, but the primary key is a prefix of the sorting key,
+        //   not guaranteed unique -- MergeTree accepts two rows with the same primary key, and marking it as a key would make the exploration prompt take
+        //   a column that can repeat as an ID
         is_primary_key: false,
         references_table: None,
     }
@@ -209,13 +209,13 @@ mod live_tests {
     use super::super::QueryEngine;
     use super::TrinoEngine;
 
-    /// 对着真 Trino 跑的那一档。没有 `UTOPIA_TEST_TRINO_URL` 就跳过——
-    /// wiremock 回放证得了协议分页与列序，证不了「真集群的 information_schema
-    /// 长这样、REST 一页页取回来的值解得对」。这两样只有真服务器有答案。
+    /// Runs against a real Trino -- the tier that does so. Without `UTOPIA_TEST_TRINO_URL` the test is skipped:
+    /// wiremock playback proves protocol paging and column order, but cannot prove what the real cluster's information_schema looks like, or that values fetched page by page via REST decode correctly.
+    /// Only a real server has an answer to those two.
     ///
-    /// 起一个来跑（内置 tpch 目录，数据现成、schema 固定）：
+    /// Start one to run against (the built-in tpch catalog: data ready-made, schema fixed):
     /// `docker run -d -p 8080:8080 trinodb/trino`
-    /// 然后 `UTOPIA_TEST_TRINO_URL=trino://probe@127.0.0.1:8080/tpch/tiny`。
+    /// then `UTOPIA_TEST_TRINO_URL=trino://probe@127.0.0.1:8080/tpch/tiny`.
     fn live_url() -> Option<String> {
         std::env::var("UTOPIA_TEST_TRINO_URL")
             .ok()
@@ -230,8 +230,8 @@ mod live_tests {
         let engine = TrinoEngine::new(TrinoConn::parse(&url).expect("parse url"));
         engine.test().await.expect("SELECT 1");
 
-        // fetch_schema 打的是 "<catalog>".information_schema.columns——列名与写法
-        // 只有真集群能证。schema 段限定了范围（tpch 有许多 sfN，只取 tiny）
+        // fetch_schema queries "<catalog>".information_schema.columns -- the column names and the spelling
+        // can only be proven by a real cluster. The schema segment limits the scope (tpch has many sfN; only tiny is taken)
         let schema = engine.fetch_schema().await.expect("schema");
         let name = schema
             .iter()
@@ -244,8 +244,8 @@ mod live_tests {
             name.data_type
         );
 
-        // 取值往返：QUEUED → nextUri 一页页取，直到拿到 data。tpch.tiny.region
-        // 是 TPC-H 标准表，五行、内容固定，正好当判据
+        // Value round-trip: QUEUED -> fetch page by page along nextUri until data arrives. tpch.tiny.region
+        // is a TPC-H standard table, five rows with fixed content, exactly right as a criterion
         let r = engine
             .execute("SELECT regionkey, name FROM tpch.tiny.region ORDER BY regionkey")
             .await
@@ -257,7 +257,7 @@ mod live_tests {
         let last: serde_json::Value = serde_json::from_str(&r.rows[4]).unwrap();
         assert_eq!(last["name"], serde_json::json!("MIDDLE EAST"));
 
-        // 写路径仍被闸挡住（第 1 层），与 mysql 那档对称
+        // The write path is still blocked by the gate (layer 1), symmetric with the mysql tier
         assert!(super::super::guard_sql_for("trino", "DROP TABLE tpch.tiny.region").is_err());
     }
 }
@@ -319,8 +319,8 @@ mod tests {
         assert!(!out.truncated);
     }
 
-    /// Trino 的 REST 协议把 decimal 写成字符串（`SqlDecimal` 走 `writeString`），
-    /// 别的数是 JSON 数
+    /// Trino's REST protocol writes decimal as a string (`SqlDecimal` goes through `writeString`),
+    /// other numbers are JSON numbers
     #[tokio::test]
     async fn a_decimal_reads_as_a_number() {
         let server = MockServer::start().await;

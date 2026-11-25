@@ -33,7 +33,7 @@ impl Fixture {
         Self::with_pool(pool).await.map(Some)
     }
 
-    /// 同一份种子，池子由调用方给——连池参数的测试（比如最小池）走这里
+    /// The same seed, with the pool supplied by the caller: tests of pool parameters (such as a minimal pool) go through here
     async fn with_pool(pool: sqlx::PgPool) -> anyhow::Result<Self> {
         utopia_store::db::migrate(&pool).await?;
         let dir = std::env::temp_dir().join(format!("utopia-mcp-{}", Uuid::now_v7()));
@@ -212,7 +212,7 @@ fn uuid(value: &Value) -> Uuid {
     value.as_str().unwrap().parse().unwrap()
 }
 
-/// 调一个工具，取它交给界面的那一步（#942）。MCP 的回复里没有这一步，所以直接调
+/// Call a tool, taking the step that hands its result to the UI (#942). The MCP reply has no such step, so call it directly
 async fn step_of(
     f: &Fixture,
     sources: &[utopia_core::models::DataSourceView],
@@ -234,7 +234,7 @@ async fn step_of(
         .step
 }
 
-/// `want` 里的每一项这一步都有、而且相等；写成 null 的那一项必须没有
+/// Every item in `want` must be present at this step and equal; an item written as null must be absent
 fn step_has(step: &Value, want: Value) -> anyhow::Result<()> {
     for (key, value) in want.as_object().expect("the fields to check") {
         anyhow::ensure!(
@@ -355,8 +355,8 @@ async fn record_axis_subseconds_survive_authenticated_rdf_export() -> anyhow::Re
     result.and(cleanup)
 }
 
-/// 争议与违规要作为**独立的资源**进导出（0062），而不是把争议藏进事实的注脚；
-/// 导出本身是只读的——跑完一遍，库里那两行原样还在
+/// Disputes and violations must be exported as **separate resources** (0062), rather than hiding the dispute in a footnote of the fact;
+/// the export itself is read-only: after it runs, the two rows in the KB are still there unchanged
 #[tokio::test]
 async fn contest_state_survives_authenticated_rdf_export() -> anyhow::Result<()> {
     use axum::body::{to_bytes, Body};
@@ -398,7 +398,7 @@ async fn contest_state_survives_authenticated_rdf_export() -> anyhow::Result<()>
         ))
         .execute(&f.state.pool)
         .await?;
-        // 导出不许碰这两张表：它是只读快照，不是清陈的扳机
+        // The export must not touch these two tables: it is a read-only snapshot, not a trigger for cleanup
         let snapshot_sql = "SELECT jsonb_build_array(
             (SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM fact_conflicts t WHERE kb_id=$1),
             (SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM axiom_violations t WHERE kb_id=$1))";
@@ -445,7 +445,7 @@ async fn contest_state_survives_authenticated_rdf_export() -> anyhow::Result<()>
                 .for_slice(&bytes)
                 .collect::<Result<std::collections::HashSet<_>, _>>()?;
 
-            // 争议：两类资源各自成类，各连两条事实；open 违规指回它的判据
+            // Disputes: each of the two resource kinds is its own class, each linked to two facts; an open violation points back to its criterion
             let c = names.fact_conflict(conflict);
             anyhow::ensure!(has(&quads, &c, rdf_type, "urn:utopia:ns:FactConflict"));
             for (pred, fact) in [
@@ -485,13 +485,13 @@ async fn contest_state_survives_authenticated_rdf_export() -> anyhow::Result<()>
                 ),
                 "open violation lost its criterion"
             );
-            // fixture 的 works_for 没有导入 IRI，判据挂在它自己的稳定标识上
+            // The fixture's works_for has no import IRI, so the criterion hangs off its own stable identifier
             let relation_iri = format!("urn:utopia:kb:{}:relation:works_for", f.kb);
             anyhow::ensure!(
                 has(&quads, &v, "urn:utopia:ns:onRelation", &relation_iri),
                 "open violation lost the relation its criterion lives on"
             );
-            // 结案的行不报判据：促成它的本体版本可能已经不在了
+            // A closed row does not report its criterion: the ontology version that produced it may no longer exist
             let r = names.axiom_violation(retired);
             anyhow::ensure!(
                 quads.iter().all(|q| {
@@ -502,7 +502,7 @@ async fn contest_state_survives_authenticated_rdf_export() -> anyhow::Result<()>
                 "resolved violation claimed a criterion"
             );
 
-            // 环的 path 是有序证据：顺着 rdf:List 走一遍，次序不许变
+            // The ring's path is ordered evidence: walk it along rdf:List, and the order must not change
             let cy = names.axiom_violation(cycle);
             let mut node = quads
                 .iter()
@@ -543,7 +543,7 @@ async fn contest_state_survives_authenticated_rdf_export() -> anyhow::Result<()>
                 .collect();
             anyhow::ensure!(walked == expected, "cycle order did not survive {format}");
 
-            // 争着的事实照旧是普通事实：争议是旁边的一份资源，不是标签
+            // Contested facts stay ordinary facts: the dispute is a separate resource alongside, not a label
             for fact in [f.fact, f.corrected] {
                 anyhow::ensure!(
                     has(
@@ -568,8 +568,8 @@ async fn contest_state_survives_authenticated_rdf_export() -> anyhow::Result<()>
     result.and(cleanup)
 }
 
-/// `criterion_changed` 是系统写的东西（0062：本体改动的事务收编旧判据的行），
-/// 不是人递得进来的裁决——裁决口收下它就等于让人替机器签名
+/// `criterion_changed` is written by the system (0062: the ontology-change transaction absorbs old criterion rows), and is not a verdict
+/// that a person can submit; the verdict endpoint accepting it would mean having a person sign on the machine's behalf
 #[tokio::test]
 async fn criterion_changed_is_not_a_human_disposition() -> anyhow::Result<()> {
     use axum::body::Body;
@@ -580,7 +580,7 @@ async fn criterion_changed_is_not_a_human_disposition() -> anyhow::Result<()> {
         return Ok(());
     };
     async fn check(f: &Fixture) -> anyhow::Result<()> {
-        // 裁决要编辑权——fixture 里的成员是 viewer
+        // A verdict needs edit rights: the member in the fixture is a viewer
         sqlx::query("UPDATE kb_members SET role = 'editor' WHERE kb_id = $1")
             .bind(f.kb)
             .execute(&f.state.pool)
@@ -631,9 +631,9 @@ async fn criterion_changed_is_not_a_human_disposition() -> anyhow::Result<()> {
     result.and(cleanup)
 }
 
-/// open 违规上解不开的判据让整份导出被拒绝（0062）：带着悬空判据的资源
-/// 发出去，读的人会拿到一个指不到任何关系的 criterion——宁可是确定性错误
-/// 也不是一份半个谎的文件
+/// A criterion that cannot be resolved for an open violation makes the whole export refused (0062): a resource with a dangling criterion
+/// must not be emitted, since the reader would get a criterion that points at no relation. A deterministic error
+/// is better than a half-lying file
 #[tokio::test]
 async fn an_unresolvable_criterion_fails_the_export_closed() -> anyhow::Result<()> {
     use axum::http::{Request, StatusCode};
@@ -643,8 +643,8 @@ async fn an_unresolvable_criterion_fails_the_export_closed() -> anyhow::Result<(
         return Ok(());
     };
     async fn check(f: &Fixture) -> anyhow::Result<()> {
-        // detail.predicate_id 指着一个不存在的谓词：open 行的判据解不出来，
-        // contest_integrity 要在第一个字节之前拦下
+        // detail.predicate_id points at a predicate that does not exist: the open row's criterion cannot be resolved,
+        // so contest_integrity must stop it before the first byte
         let dangling = Uuid::now_v7();
         sqlx::query(&format!(
             "INSERT INTO axiom_violations (id, kb_id, kind, left_fact, right_fact, detail)
@@ -680,11 +680,11 @@ async fn an_unresolvable_criterion_fails_the_export_closed() -> anyhow::Result<(
     result.and(cleanup)
 }
 
-/// 每个导出的快照事务活满整个流——它占住一条连接直到文件发完。台账如果排在
-/// 事务之后写，就是在「已经占了一条」的情况下再向池子要第二条：支持的最小池
-/// （2 条连接）上两个并发导出会互相把对方的审计饿死到超时。所以顺序必须是：
-/// 先写完台账、放掉连接，再开始占着不放的长事务。两个导出都该落得下一行
-/// kb.exported，而不是在等一条永远不会来的连接
+/// Each export's snapshot transaction is busy for the whole stream: it holds one connection until the file has been sent. If the ledger were written
+/// after the transaction, it would ask the pool for a second connection while already holding one: on a minimal pool
+/// (2 connections) two concurrent exports would starve each other's audit into timeout. So the order must be:
+/// write the ledger first and release the connection, and only then start the long transaction that holds on. Both exports should land
+/// kb.exported on the next line, rather than waiting on a connection that will never come
 #[tokio::test]
 async fn concurrent_exports_on_a_minimum_pool_still_record_their_audits() -> anyhow::Result<()> {
     use axum::body::{to_bytes, Body};
@@ -694,8 +694,8 @@ async fn concurrent_exports_on_a_minimum_pool_still_record_their_audits() -> any
     let Some(url) = utopia_store::test_db::url() else {
         return Ok(());
     };
-    // 支持的最小池：两条连接。短的 acquire 超时只是为了不让失败的探测等太久——
-    // 断言不依赖时钟，依赖台账行在不在
+    // The minimal supported pool: two connections. The short acquire timeout is only so a failing probe does not wait too long -
+    // the assertion does not depend on the clock, only on whether the ledger row exists
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .acquire_timeout(std::time::Duration::from_millis(400))
@@ -725,7 +725,7 @@ async fn concurrent_exports_on_a_minimum_pool_still_record_their_audits() -> any
             Ok::<(StatusCode, axum::body::Bytes), anyhow::Error>((status, bytes))
         }
     };
-    // 一次性失败上限：真饿死也只是多等几秒，不该挂着不走
+    // One-shot failure ceiling: even if truly starved it only waits a few more seconds, and must not hang
     let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         let (a, b) = tokio::join!(export(app.clone()), export(app));
         (a.unwrap(), b.unwrap())
@@ -735,7 +735,7 @@ async fn concurrent_exports_on_a_minimum_pool_still_record_their_audits() -> any
     anyhow::ensure!(b.0 == StatusCode::OK, "export B rejected: {}", b.0);
     anyhow::ensure!(!a.1.is_empty() && !b.1.is_empty(), "export body empty");
 
-    // 两份导出，两行台账——任何一份的审计被池子饿死这里都露馅
+    // Two exports, two ledger rows: if either one's audit is starved by the pool, it shows up here
     let audits: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM audit_events WHERE kb_id = $1 AND action = 'kb.exported'",
     )
@@ -747,8 +747,8 @@ async fn concurrent_exports_on_a_minimum_pool_still_record_their_audits() -> any
         "two exports must each record kb.exported, got {audits}"
     );
 
-    // 两条流发完之后连接都得回家：接着借满整个池（两条）都该立刻拿到——
-    // 快照事务没放下的话，这里就会撞 acquire 超时
+    // After both streams have sent, the connections must go home: borrowing the whole pool (two) should succeed at once
+    // If the snapshot transaction has not released, this would hit the acquire timeout
     let c1 = f.state.pool.acquire().await?;
     let c2 = f.state.pool.acquire().await?;
     drop(c2);
@@ -1214,7 +1214,7 @@ async fn changes_shows_the_superseded_value_even_outside_the_window() -> anyhow:
         .execute(&f.state.pool)
         .await?;
 
-    // 3 月 10 日的前一次断言既在窗口外，也被 kinds 排除，不能靠相邻事件找前值。
+    // The assertion before 3 March 10 is both outside the window and excluded by kinds, so the previous value cannot be found by looking at neighboring events
     let args = json!({"since":"2026-03-20","until":"2026-03-20","kinds":["corrected"]});
     let result = f.call("changes", args).await?;
     let changes = result["structuredContent"]["changes"].as_array().unwrap();
@@ -1399,7 +1399,7 @@ async fn changes_returns_fact_ids_and_a_reusable_correction_timestamp() -> anyho
     .bind(f.kb)
     .fetch_all(&f.state.pool)
     .await?;
-    // 同一事实同一时刻的两种事件恰好跨页；只按时间或事实 id 排都不够。
+    // Two kinds of event for the same fact at the same moment happen to straddle a page; sorting by time or by fact id alone is not enough
     sqlx::query("UPDATE facts SET invalidated_at=recorded_at WHERE id=$1")
         .bind(ids[39])
         .execute(&f.state.pool)
@@ -1459,7 +1459,7 @@ async fn changes_returns_fact_ids_and_a_reusable_correction_timestamp() -> anyho
     assert_eq!(exhausted["structuredContent"]["changes"], json!([]));
     assert!(exhausted["structuredContent"]["next_offset"].is_null());
     assert_eq!(exhausted["isError"], false);
-    // 满四十条不等于还有下一页；过滤后再偏移，断言事件正好剩四十条。
+    // Forty items does not mean there is a next page; after filtering, offset again, and assert exactly forty events remain
     let full_last = f
         .call(
             "changes",
@@ -1556,8 +1556,8 @@ async fn opposite_directions_reach_authenticated_path_output() -> anyhow::Result
     result.and(cleanup)
 }
 
-/// 以 id 给出的一端要真在这个库里。从前一个不存在的 id（抄错的、别的库的）得到的是
-/// 「两者之间没有路径」，读起来像一个关于图的事实；结果里的名字也只是那串 id
+/// An end given by id must really be in this KB. Before, a nonexistent id (mistyped, or from another KB) produced
+/// "no path between them", which reads like a fact about the graph; the names in the result were also just the id string
 #[tokio::test]
 async fn a_path_to_an_unknown_id_says_so() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -1587,7 +1587,7 @@ async fn a_path_to_an_unknown_id_says_so() -> anyhow::Result<()> {
         assert_eq!(result["isError"], false, "{result}");
         assert_eq!(result["content"][0]["text"], text.as_str());
     }
-    // 在库里的 id：没有路径时照常说没有，而且说的是名字
+    // An id that is in the KB: when there is no path, still say so, and say it by name
     let none = f
         .call("paths_between", json!({"from":f.subject,"to":loner}))
         .await?;
@@ -1597,7 +1597,7 @@ async fn a_path_to_an_unknown_id_says_so() -> anyhow::Result<()> {
         text.starts_with("No path of up to 3 hops between Alice and Loner."),
         "{text}"
     );
-    // 找到路径时，开头那一行也写名字
+    // When a path is found, the opening line also writes the names
     let found = f
         .call("paths_between", json!({"from":f.subject,"to":f.object}))
         .await?;
@@ -2145,7 +2145,7 @@ async fn failed_reads_do_not_become_successful_empty_results() -> anyhow::Result
         ),
     ] {
         let called = tools::dispatch(&ctx, &mut ToolSink::default(), name, &args).await;
-        // 界面上的那一步也是失败，不是一个「0 个」（#942）
+        // The step on the interface also fails, rather than being a "0" (#942)
         assert_eq!(called.step["status"], "failed", "{name}: {}", called.step);
         let result = tool_result(called);
         assert_eq!(result["isError"], true, "{name}: {result}");
@@ -2778,7 +2778,7 @@ async fn rule_reads_include_active_ontology_axioms_without_compiling_them() -> a
             assert!(text.contains(line), "{line} missing from {text}");
         }
         assert!(!text.contains("foreign_axiom"), "{text}");
-        // 夹具保留了一条旧对称规则，但它的声明已经撤销，不能把历史规则列成现行公理。
+        // The fixture keeps an old symmetric rule, but its declaration has been withdrawn, so the historical rule must not be listed as a current axiom
         assert!(!text.contains("symmetric of works_for"), "{text}");
         step_has(
             &step_of(&f, &[], "list_rules", json!({})).await,
@@ -3472,7 +3472,7 @@ async fn a_list_cut_at_its_limit_says_so() -> anyhow::Result<()> {
             .await?;
         anyhow::ensure!(!text(&few).contains("most recent changes"), "{few}");
         anyhow::ensure!(few["structuredContent"]["limit_reached"] == false, "{few}");
-        // 界面上的那一步同样说「40+」：`more`，窗口的两头按问的那两天（#942）
+        // The step on the interface also says "40+": `more`, with the two ends of the window being the two days asked about (#942)
         step_has(
             &step_of(
                 f,
@@ -3569,8 +3569,8 @@ async fn a_list_cut_at_its_limit_says_so() -> anyhow::Result<()> {
     result.and(cleanup)
 }
 
-/// 每一步交给界面的是字段，不只是一句英文（#942）：界面按读者的语言说，
-/// `detail` 留给存下的旧消息和不做本地化的读者，一个字不改
+/// Each step hands the UI fields, not just one English sentence (#942): the UI speaks in the reader's language,
+/// and `detail` is kept for stored old messages and for readers who do not localize, and is not changed by a single character
 #[tokio::test]
 async fn each_step_carries_the_fields_the_interface_words() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -3621,7 +3621,7 @@ async fn each_step_carries_the_fields_the_interface_words() -> anyhow::Result<()
                 "count":1,"total":null}),
         )?;
 
-        // 世界时间一个，记录时间一个：给了 before 就只写 before，那是人问的那一刻
+        // One for world time, one for recorded time: if only before is given, write only before, which is the moment the person asked
         let facts = step_of(
             f,
             &[],
@@ -3674,8 +3674,8 @@ async fn each_step_carries_the_fields_the_interface_words() -> anyhow::Result<()
             )?;
         }
 
-        // 两个方向各算一条（见 opposite_directions_reach_authenticated_path_output）：
-        // 数不写死，与存下的那句英文对上
+        // Each direction counts as one (see opposite_directions_reach_authenticated_path_output):
+        // the count is not hard-coded, and matches the English sentence that was stored
         let path = step_of(
             f,
             &[],
@@ -3704,7 +3704,7 @@ async fn each_step_carries_the_fields_the_interface_words() -> anyhow::Result<()
             json!({"kind":"path","status":"not_found"}),
         )?;
 
-        // 窗口的两头按问的那两天，没有 until 就不写：label 里那个 "now" 是英文
+        // The two ends of the window are the two days asked about; without until it is not written: the "now" in the label is English
         let window = step_of(
             f,
             &[],
@@ -3749,7 +3749,7 @@ async fn each_step_carries_the_fields_the_interface_words() -> anyhow::Result<()
             json!({"kind":"tool","label":"no_such_tool","status":"not_found"}),
         )?;
 
-        // 只剩 NUL 的一句：什么也没写，这一步说缺的是 text
+        // A sentence that is only NUL: nothing is written, and this step says the missing piece is text
         let writer = ToolCtx {
             state: &f.state,
             kb_id: f.kb,
@@ -3777,14 +3777,14 @@ async fn each_step_carries_the_fields_the_interface_words() -> anyhow::Result<()
     result.and(cleanup)
 }
 
-/// 问数那一步带着它跑的 SQL、读到几行、成没成（#936）：界面可以展开那条 SQL，
-/// 出错的查询是失败的一步，不再和「查到了」长得一样
+/// The data-question step carries the SQL it ran, the rows it read, and whether it succeeded (#936): the UI can expand that SQL,
+/// and a failed query is a failed step, no longer looking like "rows found"
 #[tokio::test]
 async fn a_query_step_carries_its_sql_rows_and_failure() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
         return Ok(());
     };
-    // 数据源指向测试库本身：只读会话里跑 SELECT，什么也不改
+    // Data source points at the test database itself: run a SELECT in a read-only session, and change nothing
     let user: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE org_id=$1")
         .bind(f.org)
         .fetch_one(&f.state.pool)

@@ -1,27 +1,27 @@
-//! 一条受管的抓取路径（#330）。
+//! A managed fetch path (#330).
 //!
-//! 从前每个来源各建各的 `reqwest::Client`——六处，每处只设了超时和 UA，没有
-//! 一处问过「这个请求要连到哪里去」。于是 `http://169.254.169.254/latest/meta-data/`
-//! 会被当成一篇网页抓回来、切块、索引；重定向默认跟十跳，公网主机可以把
-//! 第二跳指进内网；响应体一次 `bytes()` 读进内存，没有上限。
+//! Before, each source built its own `reqwest::Client`, six of them, each setting only a timeout and UA, with no
+//! single place that asked "where is this request going to connect". So `http://169.254.169.254/latest/meta-data/`
+//! would be fetched as a web page, chunked and indexed; redirects followed ten hops by default, so a public host could point
+//! the second hop at the internal network; the response body was read into memory in one `bytes()` call, with no limit.
 //!
-//! **谁选的这个地址，决定该有多严。**
+//! **Who chose the address decides how strict to be.**
 //!
-//! - [`Reach::Operator`]：地址是这个库的 editor 自己填的（url / webdav / jira /
-//!   custom 来源）。内网是**正当目标**——自部署的内部 wiki 正是这个产品的用途，
-//!   `sync_custom` 至今为回环地址专门关掉了代理。
-//! - [`Reach::Content`]：地址来自抓回来的内容（feed 里的文章链接）。这时
-//!   「一个人选的」已经退化成「一个 feed 说的」，只准公网。
+//! - [`Reach::Operator`]: the address was typed in by an editor of this KB (url / webdav / jira /
+//!   custom sources). The internal network is a **legitimate target**: a self-hosted internal wiki is exactly what this product is for,
+//!   and `sync_custom` has long turned off the proxy for loopback addresses.
+//! - [`Reach::Content`]: the address comes from fetched content (an article link in a feed). Here
+//!   "someone chose it" has degraded to "a feed said so", so only public addresses are allowed.
 //!
-//! 两种都拿到的东西：解析后**逐个地址校验**、`resolve_to_addrs` 把地址钉死
-//! （校验完再解析一次就能被改掉，那是 DNS rebinding 的整个手法）、重定向手动
-//! 逐跳跟并复验、https 不许降级成 http、响应体有字节上限、整趟有总时限。
+//! What both get: after resolution, **every address is validated**; `resolve_to_addrs` pins the addresses
+//! (resolving again after validation is how the DNS rebinding trick works); redirects are followed hop by hop manually
+//! and re-checked; https must not be downgraded to http; the response body has a byte limit; and the whole run has an overall time limit.
 //!
-//! **重定向不许升级可达范围**：operator 填的是公网主机时，第二跳就不能指进内网——
-//! 他选的是那台机器，不是那台机器的转发能力。
+//! **A redirect must not widen the reach**: when the operator typed a public host, the second hop may not point into the internal network,
+//! because they chose that machine, not that machine's forwarding ability.
 //!
-//! 形状与实现要点来自 #326（@J-i-K）为 RSS 全文抓取写的那一版；这里把它抽成
-//! 所有来源共用的一条路。
+//! The shape and key implementation points come from the version #326 (@J-i-K) wrote for RSS full-text fetching; here it is extracted into
+//! a single path shared by all sources.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
@@ -30,12 +30,12 @@ use std::time::{Duration, Instant};
 use futures_util::StreamExt;
 use reqwest::Url;
 
-/// 目的地是谁选的。
+/// Who chose the destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reach {
-    /// 库里的 editor 自己填的主机：内网也放行
+    /// A host typed in by an editor of the KB: the internal network is also allowed
     Operator,
-    /// 抓回来的内容里给出的地址：只准公网
+    /// An address given in fetched content: only public addresses
     Content,
 }
 
@@ -99,11 +99,11 @@ pub struct Fetched {
     pub bytes: Vec<u8>,
 }
 
-/// 一个只连得到这个主机、且地址已按 `reach` 校验过的 client。
+/// A client that can only reach this host, with the address already validated against `reach`.
 ///
-/// 给那些自己要发好几个请求的来源用（GitHub / Jira / 自定义端点 / WebDAV 都要
-/// 带认证头、要翻页、要发 PROPFIND）——它们保留自己的请求逻辑，只是换一个
-/// 连得到的地方受管的 client。
+/// For sources that send several requests of their own (GitHub / Jira / custom endpoints / WebDAV all need
+/// auth headers, paging, and PROPFIND) — they keep their own request logic and only swap in a
+/// managed client for where they connect.
 pub async fn client_for(
     url: &Url,
     reach: Reach,
@@ -112,8 +112,8 @@ pub async fn client_for(
     build_client(url, reach, limits, true).await
 }
 
-/// `follow`：`get` 自己逐跳跟并复验，所以它要一个**不跟**的 client；
-/// 那些自己发请求的来源（GitHub / Jira / WebDAV）保持库默认的跟随行为。
+/// `follow`: `get` follows hop by hop and re-checks by itself, so it needs a client that does **not** follow;
+/// sources that send their own requests (GitHub / Jira / WebDAV) keep the library's default follow behavior.
 async fn build_client(
     url: &Url,
     reach: Reach,
@@ -150,14 +150,14 @@ async fn build_client(
     if !follow {
         builder = builder.redirect(reqwest::redirect::Policy::none());
     }
-    // 内网/回环不走系统代理：代理对这些地址只会 502（`sync_custom` 一直是这么做的）
+    // Internal and loopback do not go through the system proxy: a proxy would only return 502 for these addresses (`sync_custom` has always done this)
     if private {
         builder = builder.no_proxy();
     }
     Ok(builder.build()?)
 }
 
-/// GET 一个 URL，自己跟重定向。
+/// GET a URL, following redirects itself.
 pub async fn get(raw_url: &str, reach: Reach, limits: Limits) -> Result<Fetched, FetchError> {
     // DNS and redirect validation also consume the overall budget.
     tokio::time::timeout(limits.overall_timeout, get_inner(raw_url, reach, limits))
@@ -177,8 +177,8 @@ async fn get_inner(raw_url: &str, reach: Reach, limits: Limits) -> Result<Fetche
         if remaining.is_zero() {
             return Err(FetchError::Status(408));
         }
-        // **自带的重定向要关掉**：跟哪一跳由上面那个循环决定，逐跳复验；
-        // 交给 reqwest 跟就等于没人看它跟去了哪里
+        // **Built-in redirects must be turned off**: which hop to follow is decided by the loop above, re-checked hop by hop;
+        // handing it to reqwest to follow would mean nobody sees where it went
         let client = build_client(&url, reach, limits.with_overall(remaining), false).await?;
         let mut request = client.get(url.clone());
         if reach == Reach::Content {
@@ -219,10 +219,10 @@ async fn get_inner(raw_url: &str, reach: Reach, limits: Limits) -> Result<Fetche
     Err(FetchError::RedirectLimit)
 }
 
-/// 一跳是否走得过去。
+/// Whether a hop is allowed through.
 ///
-/// 除了 `reach` 本身的规则，还有一条**不许升级**：这一跳原本落在公网上，
-/// 下一跳就不能落进内网。operator 选的是那台主机，不是那台主机的转发能力。
+/// Besides the rules of `reach` itself, there is one **no-upgrade** rule: if this hop originally landed on the public internet,
+/// the next hop may not land on the internal network. The operator chose that host, not that host's forwarding ability.
 async fn check_hop(from: &Url, to: &Url, reach: Reach) -> Result<(), FetchError> {
     if from.scheme() == "https" && to.scheme() == "http" {
         return Err(FetchError::BlockedRedirect(to.to_string()));
@@ -290,10 +290,10 @@ fn parse(raw: &str) -> Result<Url, FetchError> {
     }
 }
 
-/// 解析主机并按 `reach` 校验每一个地址。
+/// Resolve the host and validate every address against `reach`.
 ///
-/// **一次解析，之后钉住**：校验完再让 client 自己解析一遍，中间那一瞬就是
-/// DNS rebinding 的下手处。端口留 0，hyper 的连接器会用 URL 上的端口。
+/// **Resolve once, then pin**: if the client resolved again after validation, that instant is
+/// where DNS rebinding strikes. The port is left as 0; hyper's connector uses the port in the URL.
 async fn resolve(host: &str, url: &Url, reach: Reach) -> Result<Vec<SocketAddr>, FetchError> {
     let port = url
         .port_or_known_default()
@@ -323,8 +323,8 @@ fn validate_resolved(
         return Err(FetchError::Dns(host.to_string()));
     }
     if reach == Reach::Content {
-        // **一个不合格就整体拒绝**，不是挑出公网的那些来连：一个主机同时解析出
-        // 公网与内网地址，本身就是要把请求引进内网的手法
+        // **If any one fails, reject the whole thing**: do not pick out the public ones and connect to them. A host resolving to both
+        // public and internal addresses is itself the method of pulling a request into the internal network
         if let Some(bad) = resolved.iter().find(|a| !is_public_ip(a.ip())) {
             return Err(FetchError::BlockedAddress(bad.ip()));
         }
@@ -353,7 +353,7 @@ async fn read_bounded(
         .and_then(|v| v.split(';').next())
         .map(|v| v.trim().to_ascii_lowercase())
         .unwrap_or_else(|| "application/octet-stream".into());
-    // Content-Length 说自己超了就别开始读——但它是对方说的，不能只信它
+    // If Content-Length says it is over the limit, do not start reading; but it is what the other side says, so do not trust it alone
     if response
         .content_length()
         .is_some_and(|n| n as usize > max_bytes)
@@ -377,11 +377,11 @@ async fn read_bounded(
     })
 }
 
-/// 这个地址在公网上吗。
+/// Is this address on the public internet.
 ///
-/// 按 RFC 6890 的特殊用途地址表拦，**只拦表里的**：`192.0.0.0/16` 整段当保留
-/// 是个常见的过度拦截（保留的只有 `192.0.0.0/24` 与 `192.0.2.0/24`），而多拦
-/// 一段就是一个用户抓不到的正当站点。
+/// Blocked using the RFC 6890 special-purpose address table, **blocking only what is in the table**: treating all of `192.0.0.0/16` as reserved
+/// is a common over-block (only `192.0.0.0/24` and `192.0.2.0/24` are reserved), and blocking one extra range
+/// means a legitimate site that a user cannot fetch.
 pub fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -394,10 +394,10 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
                 || v4.is_unspecified()  // 0.0.0.0/8
                 || a == 0
                 || (a == 100 && (64..=127).contains(&b))   // 100.64/10 CGNAT
-                || (a == 192 && b == 0 && c == 0)          // 192.0.0/24 IETF 协议分配
-                || (a == 192 && b == 88 && c == 99)        // 6to4 中继任播
-                || (a == 198 && (b == 18 || b == 19))      // 198.18/15 基准测试
-                || a >= 224) // 组播与保留
+                || (a == 192 && b == 0 && c == 0)          // || (a == 192 && b == 0 && c == 0)          // 192.0.0/24 IETF protocol assignments
+                || (a == 192 && b == 88 && c == 99)        // || (a == 192 && b == 88 && c == 99)        // 6to4 relay anycast
+                || (a == 198 && (b == 18 || b == 19))      // || (a == 198 && (b == 18 || b == 19))      // 198.18/15 benchmarking
+                || a >= 224) // || a >= 224) // multicast and reserved
         }
         IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
@@ -421,7 +421,7 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
                 );
                 return is_public_ip(IpAddr::V4(v4));
             }
-            // 6to4（2002::/16）同理，v4 在第 2、3 段
+            // 6to4 (2002::/16) likewise: the v4 address is in segments 2 and 3
             if seg[0] == 0x2002 {
                 let v4 = std::net::Ipv4Addr::new(
                     (seg[1] >> 8) as u8,
@@ -433,10 +433,10 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
             }
             !(v6.is_loopback()
                 || v6.is_unspecified()
-                || (seg[0] & 0xff00) == 0xff00      // ff00::/8 组播
-                || (seg[0] & 0xfe00) == 0xfc00      // fc00::/7 唯一本地
-                || (seg[0] & 0xffc0) == 0xfe80      // fe80::/10 链路本地
-                || (seg[0] == 0x2001 && seg[1] == 0x0db8)) // 2001:db8::/32 文档用
+                || (seg[0] & 0xff00) == 0xff00      // || (seg[0] & 0xff00) == 0xff00      // ff00::/8 multicast
+                || (seg[0] & 0xfe00) == 0xfc00      // || (seg[0] & 0xfe00) == 0xfc00      // fc00::/7 unique local
+                || (seg[0] & 0xffc0) == 0xfe80      // || (seg[0] & 0xffc0) == 0xfe80      // fe80::/10 link-local
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8)) // || (seg[0] == 0x2001 && seg[1] == 0x0db8)) // 2001:db8::/32 documentation use
         }
     }
 }
@@ -547,7 +547,7 @@ mod tests {
             "10.1.2.3",
             "172.16.0.1",
             "192.168.1.5",
-            "169.254.169.254", // 云上的元数据服务，这条路最常被人走
+            "169.254.169.254", // "169.254.169.254", // the cloud metadata service; this is the path most often abused
             "100.64.0.1",
             "192.0.0.1",
             "198.18.0.1",
@@ -555,9 +555,9 @@ mod tests {
             "::1",
             "fc00::1",
             "fe80::1",
-            "::ffff:127.0.0.1", // v4 映射回环
-            "64:ff9b::7f00:1",  // NAT64 裹着回环
-            "2002:7f00:1::",    // 6to4 裹着回环
+            "::ffff:127.0.0.1", // "::ffff:127.0.0.1", // v4-mapped loopback
+            "64:ff9b::7f00:1",  // "64:ff9b::7f00:1",  // NAT64 wrapping loopback
+            "2002:7f00:1::",    // "2002:7f00:1::",    // 6to4 wrapping loopback
         ] {
             assert!(!is_public_ip(ip(blocked)), "{blocked} 该被拦下");
         }
@@ -568,17 +568,17 @@ mod tests {
         for allowed in [
             "1.1.1.1",
             "8.8.8.8",
-            "192.0.1.1",   // 192.0.0.0/16 里**不**保留的那部分
-            "192.88.98.1", // 6to4 中继只占 192.88.99.0/24
+            "192.0.1.1",   // "192.0.1.1",   // the part of 192.0.0.0/16 that is **not** reserved
+            "192.88.98.1", // "192.88.98.1", // the 6to4 relay only occupies 192.88.99.0/24
             "2606:4700::1111",
-            "2002:0808:0808::", // 6to4 裹着 8.8.8.8
+            "2002:0808:0808::", // "2002:0808:0808::", // 6to4 wrapping 8.8.8.8
         ] {
             assert!(is_public_ip(ip(allowed)), "{allowed} 不该被拦");
         }
     }
 
-    /// 真的起一个本机服务打一遍：回环是**私有地址**，所以这套断言正好卡在
-    /// 两种 reach 的分界上——内容给的地址够不着它，操作者填的够得着。
+    /// Actually run a local server and hit it: loopback is a **private address**, so these assertions sit exactly on
+    /// the boundary between the two reaches: an address given by content cannot reach it, while one the operator typed can.
     #[tokio::test]
     async fn a_loopback_host_is_reachable_only_when_a_person_typed_it() {
         let server = wiremock::MockServer::start().await;
@@ -592,14 +592,14 @@ mod tests {
             .await;
         let url = format!("{}/page", server.uri());
 
-        // feed 里的一个链接指向 127.0.0.1 —— 正是这条路要拦的东西
+        // A link in a feed points at 127.0.0.1 -- exactly what this path is meant to block
         let refused = get(&url, Reach::Content, Limits::default()).await;
         assert!(
             matches!(refused, Err(FetchError::InvalidUrl(_))),
             "内容给出的地址不该够得到回环，得到的是 {refused:?}"
         );
 
-        // 同一个地址，来源是这个库的人自己填的：内部服务本来就是正当目标
+        // The same address, but the source was typed in by this KB's own person: an internal service is a legitimate target
         let page = get(&url, Reach::Operator, Limits::default())
             .await
             .expect("操作者填的内网地址该抓得到");
@@ -614,7 +614,7 @@ mod tests {
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("x".repeat(4096)))
             .mount(&server)
             .await;
-        // 从前这里是一句 `resp.bytes()`：对面回多少就读多少
+        // Before, this was a single `resp.bytes()`: whatever the other side returned was read in full
         let limits = Limits {
             max_bytes: 1024,
             ..Limits::default()

@@ -1,9 +1,9 @@
-//! 改区间的路由收发的是存的边界（#994）：`end_after_period` 是唯一一个缺省即保留的字段。
+//! The routes that edit a range send and receive the stored bounds (#994): `end_after_period` is the only field kept when omitted.
 //!
-//! 实体详情读得到标记；不带它的请求，终点（时刻与精度）没动、起点还在就留着，改了终点或清掉
-//! 起点就丢掉（时刻照旧）；显式的值照收，只改标记也算改了终点；显式 true 得是状态属性、有起点、
-//! 终点有日期；倒置按截到精度之后的两端判。每一步的结果收进一张表一起比，dev 上哪几步不同一次
-//! 看全。没有 `UTOPIA_DATABASE_URL` 时跳过。
+//! Entity details can read the marker. For a request without it: if the end (moment and precision) is unchanged and the start is still there, it is kept; if the end is changed or the start cleared, it is dropped (the moment stays as it was);
+//! explicit values are accepted as given; changing only the marker also counts as changing the end; an explicit true must be a state property, with a start,
+//! and the end must have a date; inversion is judged on both ends after truncation to precision. Each step's result is collected into one table and compared together, so which steps differ on dev shows at once.
+//! Without `UTOPIA_DATABASE_URL` the test is skipped.
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use axum::Router;
@@ -41,7 +41,7 @@ async fn send(
     Ok((status, serde_json::from_slice(&bytes)?))
 }
 
-/// 一个请求体：起点日精度、终点年精度，空串是没有；标记给了才带
+/// A request body: start day precision, end year precision, empty string means none; the marker is included only when given
 fn span(from: &str, to: &str, mark: Option<bool>) -> Value {
     let from = Some(from).filter(|t| !t.is_empty());
     let to = Some(to).filter(|t| !t.is_empty());
@@ -104,10 +104,10 @@ async fn a_correction_keeps_the_mark_unless_the_request_changes_it() -> anyhow::
         let read = read.find(|x| x["id"] == json!(marked));
         let mut seen = vec![("entity detail", json!(read.map(|x| &x["end_after_period"])))];
         let mut wanted = vec![("entity detail", json!(true))];
-        // 每一步：改哪一行（None 是上一步写下的那行）、请求体、要的结果——写下的那一行（标记、
-        // 人改过哪一端、终点），或拒绝的代码。不带标记的：只改起点留着，改了终点的时刻或精度、
-        // 清掉起点都丢掉；显式的照收，只改标记把终点那一端记成人改的；显式 true 缺起点、缺终点、
-        // 不是状态的都不收
+        // Each step: which row to change (None is the row the previous step wrote), the request body, and the expected result: the row written (marker, which end a person changed, the end), or the rejection code.
+        // Without a marker: only the start is changed and kept; changing the end's moment or precision, or clearing the start, drops it. An explicit marker is accepted as given;
+        // changing only the marker records the end as changed by a person; an explicit true without a start, or without an end, is not accepted
+        // nor is one on something that is not a state.
         let bad = json!([422, "bad_end_after_period"]);
         let steps = [
             ("start only", None, span(FEB, END, None), json!([true, "start", END])),
@@ -127,7 +127,7 @@ async fn a_correction_keeps_the_mark_unless_the_request_changes_it() -> anyhow::
             ("true, no start", None, span("", END, Some(true)), bad.clone()),
             ("true, no end", None, span(FEB, "", Some(true)), bad.clone()),
             ("true, no state", Some(loose), span(MARCH, END, Some(true)), bad),
-            // 小时精度的 08:30 是 08:00，早于分钟精度的起点 08:10
+            // An hour-precision 08:30 is 08:00, which is earlier than a minute-precision start at 08:10
             (
                 "inverted once truncated",
                 Some(loose),

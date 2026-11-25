@@ -1,14 +1,14 @@
-//! 相对的时间词从它自己那一节的日期起算（0064 决定 1、4）。
+//! Relative time words count from the date of their own section (0064 decisions 1 and 4).
 //!
-//! 一篇文档收了两份周报，每一节有自己的提报日期，每一节里都有一句「上周……」。抽取每一块
-//! 报上它那一段说到的日期（`t`），服务端从那一块正文里的标题算出这条日期管到哪；解析时
-//! 每条时间词按它所在的那一节找起算点。所以两句「上周」算出来差一周，而不是都从第一份
-//! 周报的日期起算。模型照字报的粒度 `week` 落在日这一档。事后不再另问一次开头。
+//! One document holds two weekly reports, each section has its own reporting date, and each section contains a sentence "last week...". Extraction for each chunk
+//! reports the date its own passage mentions (`t`); the server works out from the heading in that chunk's text the range this date governs; at parse time
+//! each time phrase finds its starting point by the section it sits in. So two "last week" sentences come out a week apart, rather than both counting from the first
+//! weekly report's date. The model's granularity `week` as reported falls in the day bucket. No separate question about the opening is asked afterwards.
 //!
-//! 块与块之间什么都不传：两块的提示词里都没有对方的日期（#588，块并行抽的时候照样成立）。
+//! Nothing is passed between chunks: neither chunk's prompt contains the other's date (#588; this still holds when chunks are extracted in parallel).
 //!
-//! 脚本化的模型端点、真库，与 `extraction_open_known_flow_tests.rs` 同一个做法。
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Scripted model endpoint plus a real database, the same approach as `extraction_open_known_flow_tests.rs`.
+//! Skipped rather than failing without `UTOPIA_DATABASE_URL`. It creates and tears down its own database and never touches an existing one.
 use super::*;
 use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
 use serde_json::{json, Value};
@@ -88,12 +88,12 @@ async fn last_week_is_counted_from_the_date_of_its_own_section() -> anyhow::Resu
                 "n": [],
                 "t": [
                     ["now", "提报日期", "2026年9月4日", {"y": 2026, "m": 9, "d": 4}, null],
-                    // 字不在这一块里的日期不算
+                    // Dates whose words are not in this chunk do not count
                     ["date", "数据截止", "2026年8月31日", {"y": 2026, "m": 8, "d": 31}, null]
                 ]
             })
             .to_string(),
-            // 解析：两条「上周」字和句子都不同，各是一条；粒度照字报 week
+            // Parsing: the two "last week" wordings and sentences differ, so each is one entry; granularity is as reported: week
             json!({ "m": [[0, "point", anchored, "week"], [1, "point", anchored, "week"]] })
                 .to_string(),
         ])),
@@ -130,7 +130,7 @@ async fn last_week_is_counted_from_the_date_of_its_own_section() -> anyhow::Resu
     let run = async {
         crate::extraction::extract_document(&state, doc, utopia_core::models::Proposer::default())
             .await?;
-        // 文档上存下了两条起算点，各带它所在的标题路径；字不在块里的那条没进来
+        // Two starting points are stored on the document, each with its heading path; the one whose words are not in the chunk did not get in
         let context: DocumentDating = serde_json::from_value(
             sqlx::query_scalar::<_, Value>("SELECT time_context FROM documents WHERE id=$1")
                 .bind(doc)
@@ -157,8 +157,8 @@ async fn last_week_is_counted_from_the_date_of_its_own_section() -> anyhow::Resu
                 ),
             ]
         );
-        // 块与块之间什么都没传：第二块的提示词里没有第一块的日期之外的东西可依赖——
-        // 它自己的正文里本来就有自己的标题和日期
+        // Nothing is passed between chunks: the second chunk's prompt has nothing to rely on beyond the first chunk's date:
+        // its own text already has its own heading and date
         let second = model.requests.lock().unwrap()[1]["messages"][1]["content"]
             .as_str()
             .unwrap_or("")
@@ -180,7 +180,7 @@ async fn last_week_is_counted_from_the_date_of_its_own_section() -> anyhow::Resu
         .fetch_all(&pool)
         .await?;
         let day = |y, m, d| Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap();
-        // 每条陈述由它自己那一节的提报日期作证，连那条日期的名字；不是处理文档的那一刻
+        // Each statement is attested by its own section's reporting date, including that date's name; not the moment the document is processed
         let attested: Vec<(String, Option<DateTime<Utc>>, Option<String>)> = sqlx::query_as(
             "SELECT o.canonical_name, f.attested_from, f.attested_by
                FROM facts f JOIN entities o ON o.id = f.object_id
@@ -207,13 +207,13 @@ async fn last_week_is_counted_from_the_date_of_its_own_section() -> anyhow::Resu
         assert_eq!(
             dated,
             vec![
-                // 第 36 周的「上周」从 9 月 4 日起算
+                // Week 36's "last week" counts from September 4
                 (
                     "泰国市场".to_string(),
                     Some(day(2026, 8, 28)),
                     Some("B".to_string())
                 ),
-                // 第 35 周的「上周」从 8 月 28 日起算
+                // Week 35's "last week" counts from August 28
                 (
                     "韩国市场".to_string(),
                     Some(day(2026, 8, 21)),
@@ -238,8 +238,8 @@ async fn last_week_is_counted_from_the_date_of_its_own_section() -> anyhow::Resu
     run
 }
 
-/// 文档没说自己是哪天的：抽取报了「没有」，就是没有。不再另问一次开头；相对的时间词
-/// 锚不到，等着（C 级），陈述没有见证。
+/// The document does not say which day it is: extraction reported "none", so it is none. No separate question about the opening; relative time words
+/// cannot be anchored, so they wait (level C), and the statement has no attestation.
 #[tokio::test]
 async fn a_document_that_states_no_date_is_not_asked_for_one() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {

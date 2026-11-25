@@ -1,6 +1,6 @@
-//! 推陈述的来源（0054）：请求体就是开放抽取契约，门口拒绝契约之外的键，通过的载荷
-//! 整份成一块，抽取按契约解析而**不问模型**——夹具故意不配对话模型，证明这条路不需要它。
-//! 连库的部分没有 `UTOPIA_DATABASE_URL` 就跳过（同 documents_routes_tests）。
+//! Source that pushes statements (0054): the request body is the open extraction contract; the door refuses keys outside the contract, and a payload that passes
+//! is kept as a single block; extraction parses it per the contract and **does not ask a model** -- the fixture deliberately has no chat model configured, to prove this path does not need one.
+//! The database-backed part is skipped without `UTOPIA_DATABASE_URL` (same as documents_routes_tests).
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -11,7 +11,7 @@ use utopia_core::models::Proposer;
 use utopia_store::documents;
 use uuid::Uuid;
 
-/// 门口的校验不连库，任何环境都跑
+/// The door's validation does not touch the database, so it runs in every environment
 #[test]
 fn the_door_refuses_what_the_contract_has_no_slot_for() {
     let ok = json!({
@@ -23,8 +23,8 @@ fn the_door_refuses_what_the_contract_has_no_slot_for() {
     let (_, content) = super::validate_statements_payload(ok.to_string().as_bytes())
         .expect("a well-formed contract passes");
     let content = content.expect("a non-tombstone yields the document text");
-    // 存的是我们重新序列化的那份：带着这次观测的身份，能被抽取用的同一个解析器读回
-    // （它只读三个数组，身份和日期两个键它不看）
+    // Stores the copy we re-serialized: with this observation's identity, and it reads back through the same parser extraction uses
+    // (it reads only the three arrays; it ignores the identity and date keys)
     let stored: Value = serde_json::from_str(&content).unwrap();
     assert_eq!(stored["external_id"], "obs-1");
     assert!(
@@ -46,43 +46,43 @@ fn the_door_refuses_what_the_contract_has_no_slot_for() {
             .unwrap_or_else(|| panic!("{body} must be refused"));
         assert!(err.contains(needle), "{err:?} should mention {needle:?}");
     };
-    // 契约里没有属性的格子：一个 `predicate` 键在门口就拦下，而不是静默忽略
+    // A cell with no property in the contract: a `predicate` key is blocked at the door rather than silently ignored
     let mut typed = ok.clone();
     typed["predicate"] = json!("located_in");
     refuse(typed, "unknown key");
-    // 引文格必须为空：条目自己就是证据
+    // The citation cell must be empty: the entry is itself the evidence
     let mut quoted = ok.clone();
     quoted["s"][0][0] = json!("cup-7 is on the kitchen table");
     refuse(quoted, "quote");
-    // 八格少一格不是截断，是形状错
+    // One cell short of eight is not truncation, it is a shape error
     let mut short = ok.clone();
     short["s"][0] = json!([null, "cup-7", "is on", "kitchen table"]);
     refuse(short, "eight");
-    // 没有身份就没有更新语义
+    // No identity, no update semantics
     let mut anon = ok.clone();
     anon["external_id"] = json!("  ");
     refuse(anon, "external_id");
-    // 空陈述数组：什么都推不进图，直说
+    // Empty statement array: nothing can be pushed into the graph; say so directly
     let mut empty = ok.clone();
     empty["s"] = json!([]);
     refuse(empty, "at least one");
-    // 主语没在 `e` 里：抽取会把它作为 UNKNOWN_REF 静默丢掉，门口就得说不
+    // The subject is not in `e`: extraction would silently drop it as UNKNOWN_REF, so the door must refuse
     let mut stray = ok.clone();
     stray["s"][0][1] = json!("cup-8");
     refuse(stray, "not a thing listed in e");
-    // 只差空白和大小写的算同一个名字（与抽取的 `name_key` 同一条折叠规则）
+    // Names that differ only in whitespace and case count as the same name (same folding rule as extraction's `name_key`)
     let mut folded = ok.clone();
     folded["s"][0][1] = json!("  Cup-7 ");
     super::validate_statements_payload(folded.to_string().as_bytes())
         .expect("whitespace and case do not make a different thing");
-    // 别名所属的东西也一样；别名的引文格同样必须为空
+    // The same for the thing an alias belongs to; the alias's citation cell must likewise be empty
     let mut alias = ok.clone();
     alias["n"] = json!([["mug-7", "the cup", null]]);
     refuse(alias, "n[0][0]");
     let mut alias_quoted = ok.clone();
     alias_quoted["n"] = json!([["cup-7", "the cup", "the cup sat there"]]);
     refuse(alias_quoted, "n[0][2]");
-    // 条数和字节数的上限：第一刀的限制，超过直说而不是截断
+    // Caps on count and bytes: a first-cut limit, exceeding it says so rather than truncating
     let mut many = ok.clone();
     many["s"] = json!(vec![ok["s"][0].clone(); 201]);
     refuse(many, "limit is 200");
@@ -102,7 +102,7 @@ pub(super) struct Fixture {
     api_source: Uuid,
     pub(super) token: String,
     api_token: String,
-    /// 编辑者的会话令牌：查看和轮换密钥走会话认证，不走推送密钥
+    /// The editor's session token: viewing and rotating the key use session auth, not the push key
     session: String,
     _dir: tempfile::TempDir,
 }
@@ -136,7 +136,7 @@ impl Fixture {
         ))
         .execute(&pool)
         .await?;
-        // 故意**不**配对话模型：这条路不需要它
+        // Deliberately does NOT configure a chat model: this path does not need one
         let token = super::new_ingest_token();
         utopia_store::sources::set_ingest_token(&pool, source, &token).await?;
         let api_token = super::new_ingest_token();
@@ -178,7 +178,7 @@ impl Fixture {
             .await
     }
 
-    /// 不带 Authorization 头（`None`）或推原始字节：门口的 401 和字节上限要从 HTTP 这一侧看
+    /// Sends no Authorization header (`None`) or pushes raw bytes: the door's 401 and byte cap must be seen from the HTTP side
     async fn push_raw(
         &self,
         source: Uuid,
@@ -189,7 +189,7 @@ impl Fixture {
             .await
     }
 
-    /// 推给 api 来源（`/ingest`），用它自己的密钥
+    /// Pushes to an api source (`/ingest`), using its own key
     async fn push_api(&self, body: &Value) -> anyhow::Result<(StatusCode, Value)> {
         let path = format!("/api/v1/sources/{}/ingest", self.api_source);
         self.send(&path, Some(&self.api_token), body.to_string().into_bytes())
@@ -217,7 +217,7 @@ impl Fixture {
         Ok((status, value))
     }
 
-    /// 以编辑者会话调一个来源接口（查看 / 轮换密钥）
+    /// Calls a source endpoint as the editor's session (view / rotate key)
     async fn as_editor(&self, method: &str, path: &str) -> anyhow::Result<(StatusCode, Value)> {
         let response = self
             .app
@@ -236,14 +236,14 @@ impl Fixture {
         Ok((status, value))
     }
 
-    /// 编辑者的一枚读令牌；`kb_ids` 为 `None` 时不限库
+    /// One read token from the editor; when `kb_ids` is `None` it is not limited by database
     async fn read_token(&self, kb_ids: Option<&[Uuid]>) -> anyhow::Result<String> {
         let (_, token) =
             utopia_store::tokens::issue(&self.pool, self.user, "ci", "read", kb_ids, None).await?;
         Ok(token)
     }
 
-    /// 按 external_id 读回 statements 来源的文档
+    /// Reads back a document from a statements source by external_id
     async fn read_back(
         &self,
         token: &str,
@@ -262,7 +262,7 @@ impl Fixture {
     }
 }
 
-/// 不借 `Fixture`，好在测试里另起一个任务去读
+/// Does not borrow `Fixture`, so the test can spawn another task to read it
 async fn read_back(
     app: axum::Router,
     kb: Uuid,
@@ -298,8 +298,8 @@ fn observation(when: &str, place: &str) -> Value {
     })
 }
 
-/// 推一条陈述，走完处理与抽取，它就是一条开放陈述：有短语、有主宾实体、有证据行
-/// （块 = 载荷，偏移为空），而工作区没有任何对话模型
+/// Pushes one statement through the full processing and extraction; it is an open statement: it has a phrase, subject and object entities, and evidence rows
+/// (block = payload, offsets are empty), while the workspace has no chat model at all
 #[tokio::test]
 async fn a_pushed_statement_reaches_the_open_graph_without_a_model() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -383,7 +383,7 @@ async fn a_pushed_statement_reaches_the_open_graph_without_a_model() -> anyhow::
         entities, 2,
         "both things are entities with the pushed names"
     );
-    // 时间词落成提及（0054 决定 3）：没有引文时在载荷自己里找，而不是走引文路退出
+    // Time words become mentions (0054 decision 3): when there is no citation, look in the payload itself rather than exiting via the citation path
     let mentions: Vec<(String, String)> =
         sqlx::query_as("SELECT text, role FROM time_mentions WHERE fact_id = $1")
             .bind(facts[0].0)
@@ -397,7 +397,7 @@ async fn a_pushed_statement_reaches_the_open_graph_without_a_model() -> anyhow::
     f.cleanup().await
 }
 
-/// 同一身份再推一份新内容是更新：原地替换并记版本，和 `api` 推送一个语义
+/// Pushing new content again under the same identity is an update: replace in place and record a version, the same semantics as an `api` push
 #[tokio::test]
 async fn a_second_push_under_the_same_identity_updates_in_place() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -437,7 +437,7 @@ async fn a_second_push_under_the_same_identity_updates_in_place() -> anyhow::Res
     f.cleanup().await
 }
 
-/// 0070 的例子：再推一次把 `lines` 从 40-52 改成 58-70，读回来只有新的范围
+/// The 0070 example: pushing again changes `lines` from 40-52 to 58-70, and reading back shows only the new range
 #[tokio::test]
 async fn a_re_push_that_moves_lines_to_58_70_reads_back_only_58_70() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -473,8 +473,8 @@ async fn a_re_push_that_moves_lines_to_58_70_reads_back_only_58_70() -> anyhow::
     f.cleanup().await
 }
 
-/// 门口的拒绝走到 HTTP 是 422（`AppError::Validation`，与 `api` 推送被拒时同一个码），
-/// 并且这次推送留在 run 历史里；`api` 来源不认这条路由（404），钥匙不对是 401
+/// A door refusal reaches HTTP as 422 (`AppError::Validation`, the same code as when an `api` push is refused), and this push
+/// stays in the run history; the `api` source does not recognize this route (404), and a wrong key is 401
 #[tokio::test]
 async fn the_route_answers_422_404_and_401_at_the_door() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -514,7 +514,7 @@ async fn the_route_answers_422_404_and_401_at_the_door() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "no header is no key");
-    // 64 KiB 上限从 HTTP 这一侧看仍是 422 带说明，不是路由层的 413
+    // The 64 KiB cap is still 422 with an explanation from the HTTP side, not a 413 from the routing layer
     let mut fat = observation("08:14:03", "kitchen table");
     fat["s"][0][5] = json!({ "note": "x".repeat(64 * 1024) });
     let (status, body) = f.push(f.source, &f.token, &fat).await?;
@@ -526,8 +526,8 @@ async fn the_route_answers_422_404_and_401_at_the_door() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// 墓碑与复活，和 `api` 推送同一语义：`deleted: true` 给该身份打 "Not in source" 标记而不删；
-/// 同一身份再推内容就把标记清掉。没见过的身份打墓碑是空操作，照样回 marked_missing
+/// Tombstone and resurrection, same semantics as the `api` push: `deleted: true` marks that identity "Not in source" without deleting;
+/// pushing content for the same identity again clears the mark. Tombstoning an identity never seen is a no-op, and still answers marked_missing
 #[tokio::test]
 async fn a_tombstone_marks_the_item_missing_and_a_new_push_revives_it() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -560,7 +560,7 @@ async fn a_tombstone_marks_the_item_missing_and_a_new_push_revives_it() -> anyho
     .fetch_one(&f.pool)
     .await?;
     assert_eq!(missing, (true, true), "marked missing, still present");
-    // 复活：同一身份、同样内容——文档没变（unchanged），但标记清掉了
+    // Resurrection: same identity, same content -- the document did not change (unchanged), but the mark was cleared
     let (status, body) = f
         .push(
             f.source,
@@ -576,7 +576,7 @@ async fn a_tombstone_marks_the_item_missing_and_a_new_push_revives_it() -> anyho
             .fetch_one(&f.pool)
             .await?;
     assert!(revived, "a new push under the identity clears the marker");
-    // 没见过的身份：打不到任何文档，也不算错
+    // An identity never seen: it reaches no document, and that is not an error either
     let (status, body) = f
         .push(
             f.source,
@@ -595,7 +595,7 @@ async fn a_tombstone_marks_the_item_missing_and_a_new_push_revives_it() -> anyho
     f.cleanup().await
 }
 
-/// api 来源的墓碑按 external_id 认身份，不用再带文件名；正常推送缺文件名照旧不收
+/// An api source's tombstone identifies by external_id, no longer needing a file name; a normal push without a file name is still refused as before
 #[tokio::test]
 async fn an_api_tombstone_needs_only_its_external_id() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -610,7 +610,7 @@ async fn an_api_tombstone_needs_only_its_external_id() -> anyhow::Result<()> {
         .await?;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["action"], "marked_missing");
-    // 回复对没推过的 id 也是 marked_missing，所以要看文档本身真的标了
+    // The reply is marked_missing for an id never pushed too, so check that the document itself is really marked
     let doc = documents::find_by_external_key(&f.pool, f.api_source, "api:note-7")
         .await?
         .expect("the tombstone marks the document, it does not delete it");
@@ -631,9 +631,9 @@ async fn an_api_tombstone_needs_only_its_external_id() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// 密钥的查看和轮换对 `statements` 来源和 `api` 来源一样可用：创建时给过一次的密钥
-/// 之后还查得到，轮换后旧密钥立刻失效、新密钥能推。端到端跑服务时抓到的：这两个接口
-/// 原来只认 `api`
+/// Viewing and rotating the key work for both `statements` and `api` sources, the same as at creation: the key given once at creation
+/// is still retrievable afterwards, and after a rotation the old key stops working immediately and the new one can push. Caught when running the service end to end: these two endpoints
+/// originally accepted only `api`
 #[tokio::test]
 async fn the_push_token_can_be_viewed_and_rotated_like_an_api_source() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -673,9 +673,9 @@ async fn the_push_token_can_be_viewed_and_rotated_like_an_api_source() -> anyhow
     f.cleanup().await
 }
 
-/// 同一份载荷在新身份下是另一次观测（#900）：两次看到杯子在桌上就是两篇文档，各带自己的
-/// 日期。身份写在正文里，所以两篇正文不同，库里「一份内容一篇文档」的唯一性和文件型
-/// 来源那条「同内容出现在新路径 = 改名」的识别都碰不到它
+/// The same payload under a new identity is another observation (#900): two sightings of a cup on the table are two documents, each carrying its own
+/// date. The identity is in the body, so the two bodies differ; the database's "one document per content" uniqueness and the file-type
+/// source's "same content at a new path = rename" detection do not touch it
 #[tokio::test]
 async fn the_same_payload_under_a_new_identity_is_a_second_observation() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -710,9 +710,9 @@ async fn the_same_payload_under_a_new_identity_is_a_second_observation() -> anyh
     f.cleanup().await
 }
 
-/// api 推送带了 `external_id`，身份就是这个 ID：另一个 ID 推来同样的字节不是把第一篇
-/// 改名过去（从前走「同内容出现在新路径 = 移动」，第一个 ID 就此消失），而是如实回一句
-/// 重复了谁，两个 ID 里已有的那篇原样留着
+/// If an api push carries an `external_id`, the identity is that ID: another ID pushing the same bytes does not rename the first document
+/// over (previously "same content at a new path = move" would make the first ID vanish), but honestly answers which document it duplicates,
+/// and the document already under the two IDs stays as it is
 #[tokio::test]
 async fn a_new_id_with_the_same_content_does_not_take_the_first_ids_document() -> anyhow::Result<()>
 {
@@ -741,8 +741,8 @@ async fn a_new_id_with_the_same_content_does_not_take_the_first_ids_document() -
     f.cleanup().await
 }
 
-/// 同样的字节已经在库里别处（这里是一篇普通上传）：从前回 `unchanged`、什么也没建，
-/// 调用方以为它的 ID 已经落库
+/// The same bytes already exist elsewhere in the database (here an ordinary upload): previously it answered `unchanged` and created nothing,
+/// so the caller believed its ID had been persisted
 #[tokio::test]
 async fn content_already_in_the_base_is_reported_as_a_duplicate() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -773,8 +773,8 @@ async fn content_already_in_the_base_is_reported_as_a_duplicate() -> anyhow::Res
     f.cleanup().await
 }
 
-/// 已有的 ID 改成另一篇文档的内容：从前撞上 `documents_kb_sha_idx`，推送以一条 SQL 错误
-/// 失败、来源被标成同步失败；现在回重复了谁，这个 ID 的文档保持原来的内容
+/// An existing ID changed to the content of another document: previously it hit `documents_kb_sha_idx`, and the push failed with a SQL error,
+/// marking the source as failed to sync; now it answers which document it duplicates, and this ID's document keeps its original content
 #[tokio::test]
 async fn an_update_to_another_documents_content_is_a_duplicate_not_a_failure() -> anyhow::Result<()>
 {
@@ -798,8 +798,8 @@ async fn an_update_to_another_documents_content_is_a_duplicate_not_a_failure() -
     f.cleanup().await
 }
 
-/// 拿 ID 当路径用的调用方这样改名：先墓碑旧 ID，再用同样的字节推新 ID。新 ID 接手那篇
-/// 被墓碑标记的文档（同一篇、历史还在），旧 ID 不再留着一篇「不在来源中」的孤本
+/// A caller that uses the ID as a path renames like this: tombstone the old ID first, then push the new ID with the same bytes. The new ID takes over the document
+/// that the tombstone marked (the same document, history intact), and the old ID no longer leaves an orphan copy marked "not in source"
 #[tokio::test]
 async fn a_new_id_with_a_tombstoned_ids_content_takes_over_its_document() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -825,7 +825,7 @@ async fn a_new_id_with_a_tombstoned_ids_content_takes_over_its_document() -> any
     f.cleanup().await
 }
 
-/// 回收站里的 ID 推来另一篇文档的内容：先答重复，回收站里那篇不被恢复
+/// An ID in the trash pushed with another document's content: answers duplicate first, and the one in the trash is not restored
 #[tokio::test]
 async fn a_trashed_id_pushed_with_another_documents_content_stays_in_the_trash(
 ) -> anyhow::Result<()> {
@@ -853,8 +853,8 @@ async fn a_trashed_id_pushed_with_another_documents_content_stays_in_the_trash(
     f.cleanup().await
 }
 
-/// 推上去的身份按 external_id 读得回来（#1276）：读令牌拿到当前正文与两个版本；
-/// 限定到别的库的令牌和读不到的文档一样是 404
+/// An identity pushed up can be read back by external_id (#1276): a read token gets the current body and both versions;
+/// a token for another database gets 404, the same as an unreadable document
 #[tokio::test]
 async fn a_read_token_reads_an_updated_identity_back_and_one_for_another_base_gets_404(
 ) -> anyhow::Result<()> {
@@ -888,7 +888,7 @@ async fn a_read_token_reads_an_updated_identity_back_and_one_for_another_base_ge
     f.cleanup().await
 }
 
-/// 墓碑标记过的身份和回收站里的文档都读不到，与没推过的身份一样是 404
+/// An identity marked by tombstone and a document in the trash are both unreadable, and answer 404 just like an identity never pushed
 #[tokio::test]
 async fn a_tombstoned_identity_and_a_trashed_document_read_back_as_404() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -917,8 +917,8 @@ async fn a_tombstoned_identity_and_a_trashed_document_read_back_as_404() -> anyh
     f.cleanup().await
 }
 
-/// 查到文档之后、读原件之前它被墓碑标记了：判断落在锁住的那一行上，所以答 404，
-/// 而不是把锁之前读到的那一行当真，照样把正文交出去
+/// After finding the document but before reading the original, it gets tombstoned: the check lands on the locked row, so it answers 404,
+/// rather than trusting the row read before the lock and handing over the body anyway
 #[tokio::test]
 async fn an_identity_tombstoned_while_the_read_waits_for_its_row_reads_back_as_404(
 ) -> anyhow::Result<()> {
@@ -934,7 +934,7 @@ async fn an_identity_tombstoned_while_the_read_waits_for_its_row_reads_back_as_4
         .expect("obs-000412 is stored");
     let token = f.read_token(None).await?;
 
-    // 未提交的墓碑握着行锁：读路由的查找看到的还是活的那行，随后卡在锁上
+    // An uncommitted tombstone holds the row lock: the read route's lookup still sees the live row, and then blocks on the lock
     let mut tombstone = f.pool.begin().await?;
     let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *tombstone)

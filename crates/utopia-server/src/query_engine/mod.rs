@@ -1,22 +1,22 @@
-//! 问数查询引擎：trait 接缝（BlobStore 同手法）+ 引擎无关的安全闸。
+//! Query engine for questions: trait seam (same technique as BlobStore) + engine-agnostic safety gate.
 //!
-//! 引擎按协议族扩，不按产品名扩：postgres 线协议（`postgres.rs`）、MySQL 线协议
-//! （`mysql.rs`，一条协议顺带覆盖 TiDB / OceanBase / Doris / StarRocks / MariaDB）
-//! → HTTP 族——
-//! `trino.rs` 一个顶起 Iceberg / Delta / Hive 整个湖仓生态，`databricks.rs`、
-//! `snowflake.rs` 各走自家的 SQL REST API，`clickhouse.rs` 走 ClickHouse 的 HTTP 接口。
-//! 挂载模型与注册表引擎无关，加引擎只放宽一条 CHECK。连接串是唯一的输入：引擎由
-//! scheme 决定（[`engine_from_conn`]），剩下的部分各引擎自己拆（`conn.rs`），
-//! 凭据只在服务端流转。
+//! Engines grow by protocol family, not by product name: the postgres wire protocol (`postgres.rs`), the MySQL wire protocol
+//! (`mysql.rs`, one protocol also covers TiDB / OceanBase / Doris / StarRocks / MariaDB)
+//! -> HTTP families --
+//! `trino.rs` alone tops the whole Iceberg / Delta / Hive lakehouse ecosystem; `databricks.rs`,
+//! `snowflake.rs` each go through their own SQL REST API; `clickhouse.rs` goes through ClickHouse's HTTP interface.
+//! The mount model and the registry are engine-agnostic; adding an engine only relaxes one CHECK. The connection string is the only input: the engine is decided by its
+//! scheme ([`engine_from_conn`]), and the rest is parsed by each engine itself (`conn.rs`);
+//! credentials only ever flow on the server side.
 //!
-//! 安全闸（纵深防御，不信任模型）：
-//! 1. sqlparser 解析：仅放行单条 SELECT/WITH（含 CTE），拒绝 DML/DDL/多语句/SELECT INTO。
-//!    按引擎选方言；sqlparser 没有 Trino 方言，Generic 是它的超集
-//! 2. 强制外包一层 LIMIT（cap+1 探测截断）
-//! 3. 会话级只读 + 语句超时（引擎各自的机制，parser 万一漏网也写不进去）。
-//!    HTTP 族没有会话，只有语句超时——只读靠第 1 层，这是它们比线协议少的那一层。
-//!    ClickHouse 例外：每个请求自己带 `readonly`，见 `clickhouse.rs`
-//! 4. 结果统一为 JSON Lines：PG 让库自己转；HTTP 族拿到列名与值后在这里拼，列序保留
+//! Safety gate (defense in depth, the model is not trusted):
+//! 1. sqlparser parsing: only a single SELECT/WITH (including CTEs) is let through; DML/DDL/multi-statement/SELECT INTO are refused.
+//!    The dialect is chosen per engine; sqlparser has no Trino dialect, so Generic, which is its superset, is used
+//! 2. Always wrap in an outer LIMIT (cap+1 probe detects truncation)
+//! 3. Session-level read-only + statement timeout (each engine's own mechanism, so that even if the parser slips, nothing can be written).
+//!    HTTP families have no session, only a statement timeout -- read-only relies on layer 1, which is the layer they have fewer of than the wire protocols.
+//!    ClickHouse is the exception: each request carries `readonly` itself, see `clickhouse.rs`
+//! 4. Results are unified as JSON Lines: PG lets the database do the conversion; the HTTP families get column names and values and assemble here, preserving column order
 
 mod clickhouse;
 mod conn;
@@ -34,14 +34,14 @@ use sqlparser::dialect::{
 use sqlparser::parser::Parser;
 use std::time::Duration;
 
-/// 行数上限（外包 LIMIT cap+1，第 201 行只用来判断截断）。
+/// Row-count cap (outer LIMIT cap+1; row 201 is used only to detect truncation).
 pub const ROW_CAP: usize = 200;
 pub(crate) const STATEMENT_TIMEOUT_SECS: u32 = 10;
-/// HTTP 族：单次请求的超时，与整条语句从提交到拿完结果的轮询预算
+/// HTTP families: timeout for a single request, and the polling budget from submitting the whole statement to fetching its result
 pub(crate) const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const HTTP_POLL_BUDGET: Duration = Duration::from_secs(30);
 
-/// 注册表里 `engine` 列的取值。迁移里的 CHECK 与这张表要一致
+/// Values of the `engine` column in the registry. The CHECK in the migration must match this table
 pub const ENGINES: &[&str] = &[
     "postgres",
     "mysql",
@@ -53,7 +53,7 @@ pub const ENGINES: &[&str] = &[
 
 #[derive(Debug)]
 pub struct QueryResult {
-    /// 每行一个 JSON 对象文本（键序 = 查询列序）
+    /// Each row as one JSON object text (key order = query column order)
     pub rows: Vec<String>,
     pub truncated: bool,
 }
@@ -65,18 +65,18 @@ pub struct SchemaColumn {
     pub column: String,
     pub data_type: String,
     pub comment: Option<String>,
-    /// 该列本身是这张表的主键（单列主键；组合主键里这一位仍为 false）。
-    /// Postgres（#671）与 MySQL / MariaDB（#678）从 catalog 读出来；Trino / Snowflake /
-    /// Databricks / ClickHouse 恒为 false，意思是「不知道」，不是「不是键」
-    /// （各自能不能读见 `trino::schema_row` 上的注释）。
-    /// 探索提示词靠它把 ID 与量分开，宽表上一个八十列的 schema 没有这个
-    /// 几乎认不出哪一列是键（#502）
+    /// This column is itself the table's primary key (single-column primary key; in a composite key this bit is still false).
+    /// Read from the catalog for Postgres (#671) and MySQL / MariaDB (#678); Trino / Snowflake /
+    /// Databricks / ClickHouse are always false, meaning "unknown", not "not a key"
+    /// (see the comment on `trino::schema_row` for whether each can read it).
+    /// The exploration prompt relies on this to separate IDs from quantities; a wide table of eighty columns with no such marker
+    /// can hardly tell which column is the key (#502)
     pub is_primary_key: bool,
-    /// 该列本身是某张表的单列外键时，它指向的表（`schema.table`）；组合外键的成员
-    /// 与读不出外键的引擎都是 None。
+    /// When this column is itself a single-column foreign key of some table, the table it points to (`schema.table`); members of a composite foreign key,
+    /// and engines that cannot read foreign keys, are always None.
     ///
-    /// 可空没有放进来：两个探索提示词都不用它，宽表上每列多一个 NOT NULL 只是挤掉
-    /// 列（#502 真用到时再加）
+    /// Nullability is not included: neither exploration prompt uses it, and on a wide table one extra NOT NULL per column only pushes
+    /// columns out (added when #502 really needs it)
     pub references_table: Option<String>,
 }
 
@@ -84,17 +84,17 @@ pub struct SchemaColumn {
 pub trait QueryEngine: Send + Sync {
     async fn test(&self) -> anyhow::Result<()>;
     async fn fetch_schema(&self) -> anyhow::Result<Vec<SchemaColumn>>;
-    /// 执行已过闸的 SELECT。实现自身仍需强制只读会话与超时（纵深防御）。
+    /// Execute a SELECT that has passed the gate. The implementation must still enforce a read-only session and timeout itself (defense in depth).
     async fn execute(&self, sql: &str) -> anyhow::Result<QueryResult>;
 }
 
-/// scheme → 引擎名。界面上每档引擎的表单最后都拼成一条连接串（`dsSpecs`），这里是它唯一的分派点。
+/// scheme -> engine name. Each engine's form in the UI ends up assembled into one connection string (`dsSpecs`); this is its only dispatch point.
 pub fn engine_from_conn(conn: &str) -> Option<&'static str> {
     let scheme = conn.trim().split("://").next()?.to_ascii_lowercase();
     match scheme.as_str() {
         "postgres" | "postgresql" => Some("postgres"),
-        // 一条线协议顺带覆盖 TiDB / OceanBase / Doris / StarRocks——它们都说
-        // MySQL 协议，连接串照写 mysql:// 即可
+        // One wire protocol also covers TiDB / OceanBase / Doris / StarRocks -- they all speak
+        // the MySQL protocol, so writing the mysql:// connection string is enough
         "mysql" | "mariadb" => Some("mysql"),
         "trino" | "presto" => Some("trino"),
         "databricks" => Some("databricks"),
@@ -104,7 +104,7 @@ pub fn engine_from_conn(conn: &str) -> Option<&'static str> {
     }
 }
 
-/// 引擎工厂。conn 凭据只在服务端流转。
+/// Engine factory. Credentials only flow on the server side.
 pub fn engine_for(engine: &str, conn: &str) -> anyhow::Result<Box<dyn QueryEngine>> {
     match engine {
         "postgres" => Ok(Box::new(postgres::PostgresEngine::new(conn))),
@@ -125,7 +125,7 @@ pub fn engine_for(engine: &str, conn: &str) -> anyhow::Result<Box<dyn QueryEngin
     }
 }
 
-/// 安全闸第 1 层：按引擎方言解析并校验，返回规整后的语句文本。
+/// Safety gate layer 1: parse and validate per the engine's dialect, returning the normalized statement text.
 pub fn guard_sql_for(engine: &str, sql: &str) -> anyhow::Result<String> {
     let cleaned = sql.trim().trim_end_matches(';').trim();
     if cleaned.is_empty() {
@@ -165,20 +165,20 @@ fn statement_kind(s: &Statement) -> &'static str {
     }
 }
 
-/// 第 2 层：外包一层 LIMIT。HTTP 族的引擎都认这个写法；PG 有自己的 row_to_json 版本
+/// Layer 2: wrap in an outer LIMIT. HTTP-family engines all accept this form; PG has its own row_to_json version
 pub(crate) fn wrap_limit(sql: &str) -> String {
     format!("SELECT * FROM ( {sql} ) AS _q LIMIT {}", ROW_CAP + 1)
 }
 
-/// 第 201 行只用来判断截断，不交给模型
+/// Row 201 is used only to detect truncation and is not handed to the model
 pub(crate) fn truncate_rows<T>(mut rows: Vec<T>) -> (Vec<T>, bool) {
     let truncated = rows.len() > ROW_CAP;
     rows.truncate(ROW_CAP);
     (rows, truncated)
 }
 
-/// HTTP 族共用：「列名 + 行值」拼成 JSON Lines。手拼而不是 `serde_json::Map`，
-/// 后者不开 `preserve_order` 就按键排序，而列序是查询写下的顺序，模型读表靠它
+/// Shared by the HTTP families: column names plus row values are assembled into JSON Lines. Assembled by hand rather than `serde_json::Map`,
+/// the latter sorts keys unless `preserve_order` is on, while column order is the order the query wrote it, which the model relies on to read tables
 pub(crate) fn rows_to_json_lines(
     columns: &[String],
     rows: &[Vec<serde_json::Value>],
@@ -201,10 +201,10 @@ pub(crate) fn rows_to_json_lines(
         .collect()
 }
 
-/// Databricks 的 JSON_ARRAY 与 Snowflake 的 data 把每个值都给成字符串（或 null），
-/// ClickHouse 的 JSONCompactStrings 也是（它只把浮点与布尔交给这里，
-/// 见 `clickhouse::cell`）。
-/// 按列类型把数与布尔还原，其余留字符串——模型对 `"42"` 和 `42` 的算术不一样
+/// Databricks' JSON_ARRAY and Snowflake's data give every value as a string (or null),
+/// and ClickHouse's JSONCompactStrings does too (it hands only floats and booleans to this path;
+/// see `clickhouse::cell`).
+/// Restore numbers and booleans by column type; leave the rest as strings -- the model's arithmetic on `"42"` and `42` differs
 pub(crate) fn coerce(type_name: &str, raw: &serde_json::Value) -> serde_json::Value {
     let serde_json::Value::String(s) = raw else {
         return raw.clone();
@@ -214,7 +214,7 @@ pub(crate) fn coerce(type_name: &str, raw: &serde_json::Value) -> serde_json::Va
         "INT", "LONG", "SHORT", "BYTE", "FLOAT", "DOUBLE", "DECIMAL", "NUMBER", "FIXED", "REAL",
         "NUMERIC",
     ];
-    // INTERVAL 也含 "INT"：解析不成数就原样留下，不会误伤
+    // INTERVAL also contains "INT": if it does not parse as a number it is left as is, so nothing is harmed
     if NUMERIC.iter().any(|k| ty.contains(k)) {
         if let Ok(n) = s.parse::<i64>() {
             return n.into();
@@ -235,8 +235,8 @@ pub(crate) fn coerce(type_name: &str, raw: &serde_json::Value) -> serde_json::Va
     raw.clone()
 }
 
-/// 定点数（DECIMAL / NUMERIC / NUMBER / FIXED）有效数字超过 15 位时 f64 装不下，
-/// 转成数就改了值：`12345678901234567.89` 会变成 `12345678901234568`。那样留字符串
+/// Fixed-point numbers (DECIMAL / NUMERIC / NUMBER / FIXED) with more than 15 significant digits do not fit in f64;
+/// converting them to a number would change the value: `12345678901234567.89` would become `12345678901234568`. So they are kept as strings
 fn fits_f64(ty: &str, s: &str) -> bool {
     if !["DECIMAL", "NUMERIC", "NUMBER", "FIXED"]
         .iter()
@@ -249,22 +249,22 @@ fn fits_f64(ty: &str, s: &str) -> bool {
     digits.trim_start_matches('0').trim_end_matches('0').len() <= 15
 }
 
-/// 单引号字面量的转义：schema 名进 information_schema 的 WHERE 子句
+/// Escaping of single-quoted literals: schema names go into the WHERE clause of information_schema
 pub(crate) fn sql_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// HTTP 族共用的客户端。
+/// The client shared by the HTTP families.
 ///
-/// **代理策略是显式的**：回环地址与 `NO_PROXY` 里的主机直连，其余按 `HTTPS_PROXY` /
-/// `HTTP_PROXY` / `ALL_PROXY` 走。不用 reqwest 的系统代理探测——Windows 上它读注册表，
-/// 而注册表里 `127.*` 这种绕过写法它认不全，本机的替身服务会被送进代理拿回 502。
-/// 服务进程该看环境变量，这条规矩与 docker-compose 里的写法一致
+/// **The proxy policy is explicit**: loopback addresses and hosts in `NO_PROXY` connect directly; the rest go through `HTTPS_PROXY` /
+/// `HTTP_PROXY` / `ALL_PROXY`. Does not use reqwest's system-proxy detection -- on Windows it reads the registry,
+/// and the registry's bypass syntax such as `127.*` is not fully understood by it, so a local stand-in service would be sent through a proxy and come back as 502.
+/// The service process should read environment variables; this rule matches how docker-compose is written
 pub(crate) fn http() -> anyhow::Result<reqwest::Client> {
     Ok(http_builder().build()?)
 }
 
-/// 读字服务另设超时和重定向策略，代理规则仍与其余 HTTP 请求共用。
+/// The text-reading service has its own timeout and redirect policy; the proxy rules are still shared with the other HTTP requests.
 pub(crate) fn http_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .timeout(HTTP_REQUEST_TIMEOUT)
@@ -294,8 +294,8 @@ fn proxy_for(url: &reqwest::Url) -> Option<reqwest::Url> {
         .and_then(|v| reqwest::Url::parse(v.trim()).ok())
 }
 
-/// `NO_PROXY=localhost,127.0.0.1,.internal,corp.example` 的常见写法：整名相等，
-/// 或者以点开头的后缀匹配
+/// The common form of `NO_PROXY=localhost,127.0.0.1,.internal,corp.example`: whole-name equality,
+/// or a suffix match with a leading dot
 fn no_proxy_matches(host: &str) -> bool {
     let raw = std::env::var("NO_PROXY")
         .or_else(|_| std::env::var("no_proxy"))
@@ -369,15 +369,15 @@ mod tests {
                 "{engine}"
             );
         }
-        // 各家的方言细节：反引号、双冒号转型，都要过得去
+        // Each engine's dialect quirks: backticks and double-colon casts must pass
         assert!(guard_sql_for("databricks", "SELECT `region` FROM main.sales.orders").is_ok());
         assert!(guard_sql_for("snowflake", "SELECT amount::number FROM db.public.orders").is_ok());
         assert!(guard_sql_for("trino", "SELECT count(*) FROM hive.default.orders").is_ok());
-        // MySQL 的反引号与 PG 方言不兼容，走自己的方言才过得去
+        // MySQL's backticks are incompatible with the PG dialect, so it uses its own dialect to get through
         assert!(guard_sql_for("mysql", "SELECT `region` FROM `sales`.`orders`").is_ok());
-        // ClickHouse 的函数名与 FINAL 修饰都要过得去。语句里的 SETTINGS 闸这一层不管：
-        // readonly=1 生效时服务器拒掉它；readonly=2 的账号不拒，那时超时靠 KILL
-        // （见 clickhouse.rs）
+        // ClickHouse's function names and the FINAL modifier must both pass. The SETTINGS gate at the statement level is not this layer's job:
+        // when readonly=1 is in effect the server refuses it; an account with readonly=2 does not refuse, and then the timeout is enforced by KILL
+        // (see clickhouse.rs)
         assert!(guard_sql_for(
             "clickhouse",
             "SELECT toStartOfMonth(placed_on) AS m, count() FROM sales.orders FINAL GROUP BY m"
@@ -400,7 +400,7 @@ mod tests {
             Some("snowflake")
         );
         assert_eq!(engine_from_conn("mysql://u:p@h:3306/db"), Some("mysql"));
-        // 同一套协议的另一个写法，引擎里会被改写成 mysql:// 再交给驱动
+        // Another way of writing the same protocol; inside the engine it is rewritten to mysql:// before being handed to the driver
         assert_eq!(engine_from_conn("mariadb://u@h/db"), Some("mysql"));
         assert_eq!(
             engine_from_conn("clickhouse://u:p@h:8123/sales"),

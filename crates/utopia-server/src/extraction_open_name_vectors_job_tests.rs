@@ -1,8 +1,8 @@
-//! 名字向量补在一份按库去重的任务里（#1296）：从前每篇文档抽完都在线扫一遍全库还没有向量的
-//! 名字事实，一阵推送几百篇就是几百遍全库扫描。现在一阵推送只排一份 `embed_names`，
-//! 它跑一遍补上一批；没补完就再排一份，直到补完。
+//! Name-vector backfill runs in one task per database, deduplicated (#1296): previously each extracted document scanned the whole database online for name facts still without vectors,
+//! so a burst of several hundred pushed documents meant several hundred full-database scans. Now a burst queues only one `embed_names`,
+//! which runs once and backfills one batch; if it did not finish, it queues another, until everything is backfilled.
 //!
-//! 真库、脚本化的嵌入端点。没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆。
+//! Real database, scripted embedding endpoint. Without `UTOPIA_DATABASE_URL` the test is skipped rather than failed. It sets up and tears down its own database.
 use super::*;
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};

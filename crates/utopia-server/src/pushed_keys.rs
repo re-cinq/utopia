@@ -1,8 +1,8 @@
-//! 推送来源（`api`、`statements`）的文档怎么按推送方给的 identity 存 `external_key`、
-//! 怎么从它取回来。推送的处理器、按 `external_id` 读回和检索都用这一份（#1271）
+//! How documents from push sources (`api`, `statements`) store `external_key` from the identity the pusher supplies,
+//! and how it is read back. The push handler, the read-back by `external_id`, and retrieval all use this one (#1271).
 
-/// 有推送密钥的来源：`api` 推文档，`statements` 推陈述（0054）。两种的密钥同一套
-/// 生成、查看、轮换
+/// Sources with push keys: `api` pushes documents, `statements` pushes statements (0054). Both kinds share one key scheme for
+/// generation, viewing and rotation
 pub fn is_push_kind(kind: &str) -> bool {
     matches!(kind, "api" | "statements")
 }
@@ -14,7 +14,7 @@ pub fn pushed_key(source: &utopia_core::models::Source, identity: &str) -> Strin
     format!("{}:{identity}", source.kind)
 }
 
-/// `pushed_key` 倒过来：推送来源的文档交回推送方给的 identity，别的来源没有（#1271）
+/// The reverse of `pushed_key`: documents from push sources hand back the identity the pusher supplied; other sources have none (#1271)
 pub fn pushed_identity<'k>(kind: &str, key: &'k str) -> Option<&'k str> {
     if !is_push_kind(kind) {
         return None;

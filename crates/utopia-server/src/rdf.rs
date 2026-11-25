@@ -1,17 +1,17 @@
-//! 账本 → RDF（0020）。
+//! Ledger to RDF (0020).
 //!
-//! 读的人不是另一个 Utopia，是一个手里有三元组库、要问「这个结论凭什么」的人。
-//! 所以导出的内容是**区间与出处**，不只是当下的那些边——一份读起来干净自信、
-//! 却没说其中一半在三月被撤回过的图，比没有导出更坏。
+//! The reader is not another Utopia; it is someone holding a triple store who asks "what is the basis for this conclusion".
+//! So what is exported is **validity intervals and provenance**, not just the edges that hold right now: a graph that reads clean and confident
+//! but never mentions that half of it was retracted in March is worse than no export.
 //!
-//! 三件事定了这份文件的形状：
+//! Three things fix the shape of this file:
 //!
-//! 1. **导入来的类和关系留着原 IRI**（`entity_types.iri` / `relation_types.iri`）。
-//!    schema.org 的库导出去还是 `schema:Organization`，对面手里的词汇表对得上
-//! 2. **区间挂在具体化语句上**，不是挂在三元组上。RDF-star 更自然但多数消费者
-//!    还读不了，命名图在 Turtle 里根本没有——一份打不开的文件不叫导出
-//! 3. **有标准词就不自造**：`prov:invalidatedAtTime` 说的正是我们记录轴上那件事，
-//!    另起一个私名只会把一个大家都认识的概念藏起来
+//! 1. **Classes and relations imported from elsewhere keep their original IRIs** (`entity_types.iri` / `relation_types.iri`).
+//!    A KB imported from schema.org still exports as `schema:Organization`, so the vocabulary the other side holds matches.
+//! 2. **Intervals hang off reified statements, not off the triples.** RDF-star is more natural but most consumers
+//!    cannot read it yet, and named graphs do not exist in Turtle at all: a file that cannot be opened is not an export.
+//! 3. **If a standard term exists, do not invent one**: `prov:invalidatedAtTime` says exactly what happens on our recording axis,
+//!    and a private name would only hide a concept everyone already knows.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -28,15 +28,15 @@ use uuid::Uuid;
 const OWL: &str = "http://www.w3.org/2002/07/owl#";
 const PROV: &str = "http://www.w3.org/ns/prov#";
 const SCHEMA: &str = "https://schema.org/";
-/// 没有标准词的那几样才落在这里：置信度、派生标记、模型原话。
+/// Only the items with no standard term land here: confidence, the derived flag, and the model's original words.
 ///
-/// **URN 而不是 http://**：域名还没定，而一个词汇表 IRI 一旦发出去就不该再改。
-/// 指向一个我们并不提供的地址，比指向一个不承诺解引用的 URN 更糟
+/// **URN rather than http://**: the domain is not settled yet, and once a vocabulary IRI is published it should never change.
+/// Pointing at an address we do not serve is worse than pointing at a URN that makes no promise about dereferencing.
 const UTOPIA: &str = "urn:utopia:ns:";
 
 fn nn(iri: impl Into<String>) -> NamedNode {
-    // 拼出来的 IRI 全部来自 uuid / 本体 key / 配置里的 base，越界的字符在
-    // `Names::new` 就挡掉了；这里再失败只能是 bug，不该把整份导出变成 500
+    // Every IRI built here comes from uuids / ontology keys / the configured base, and out-of-range characters are already
+    // blocked in `Names::new`; if this still fails, it can only be a bug, and should not turn the whole export into a 500
     NamedNode::new(iri.into()).expect("导出 IRI 必须合法")
 }
 
@@ -53,12 +53,12 @@ fn utopia(term: &str) -> NamedNode {
     nn(format!("{UTOPIA}{term}"))
 }
 
-/// 这份导出里的 IRI 怎么造。
+/// How the IRIs in this export are built.
 ///
-/// 缺省是 URN：`urn:utopia:kb:{kb}:entity:{uuid}`。**稳定优先于可解引用**——
-/// 同一个库隔一年再导一次，两份文件必须对得上；而一个自部署的实例并不知道
-/// 自己对外的地址是什么。按请求的 Host 头去造，等于让身份取决于走了哪个反代。
-/// 部署方知道自己发布在哪时，`?base=https://…/` 换成 http IRI。
+/// Default is a URN: `urn:utopia:kb:{kb}:entity:{uuid}`. **Stability comes before dereferenceability**:
+/// exporting the same KB again a year later, the two files must match; and a self-hosted instance does not know
+/// its own public address. Building from the request's Host header would make identity depend on which reverse proxy was used.
+/// When the operator knows where it is published, `?base=https://…/` switches to http IRIs.
 pub struct Names {
     prefix: String,
     sep: char,
@@ -106,17 +106,17 @@ impl Names {
     pub fn rule(&self, id: Uuid) -> NamedNode {
         self.mint("rule", &id.to_string())
     }
-    /// 事实争议（0062）：`…:conflict:{uuid}`
+    /// A factual dispute (0062): `…:conflict:{uuid}`
     pub fn fact_conflict(&self, id: Uuid) -> NamedNode {
         self.mint("conflict", &id.to_string())
     }
-    /// 公理违规发现（0062）：`…:violation:{uuid}`
+    /// An axiom violation finding (0062): `…:violation:{uuid}`
     pub fn axiom_violation(&self, id: Uuid) -> NamedNode {
         self.mint("violation", &id.to_string())
     }
-    /// 本体自己长出来的类/关系用 **key** 而不是 uuid：key 是这个库内部就在用的
-    /// 标识（`UNIQUE (kb_id, key)`，抽取提示词和 API 用的都是它），文件因此读得懂。
-    /// 导入来的一律用原 IRI
+    /// Classes and relations that the ontology grew itself use the **key** rather than the uuid: the key is the identifier this KB already uses internally
+    /// (`UNIQUE (kb_id, key)`; extraction prompts and the API both use it), so the file reads well.
+    /// Imported ones always use their original IRI
     pub fn class(&self, c: &ExportClass) -> NamedNode {
         match c.iri.as_deref() {
             Some(iri) => NamedNode::new(iri).unwrap_or_else(|_| self.mint("class", &c.key)),
@@ -131,8 +131,8 @@ impl Names {
     }
 }
 
-/// 序列化器写进来的地方。写完一页就把攒下的字节取走发给客户端——
-/// 几十万条事实不能先在内存里拼成一整个 String
+/// The place the serializer writes to. After each page is written, the bytes accumulated so far are taken and sent to the client:
+/// hundreds of thousands of facts must not first be assembled into one whole String in memory
 #[derive(Clone, Default)]
 pub struct SharedBuf(Arc<Mutex<Vec<u8>>>);
 
@@ -156,11 +156,11 @@ impl Write for SharedBuf {
     }
 }
 
-/// 两种格式共用同一套三元组，只是落笔不同——`oxrdfio` 把两个序列化器收在
-/// 同一个类型后面，所以这里没有分支。
+/// Both formats share the same set of triples; only the writing differs: `oxrdfio` puts the two serializers behind
+/// one type, so there is no branch here.
 pub struct Sink(oxrdfio::WriterQuadSerializer<SharedBuf>);
 
-/// 前缀表。Turtle 里它决定文件读起来是 `schema:Organization` 还是一长串尖括号
+/// The prefix table. In Turtle it decides whether the file reads `schema:Organization` or a long run of angle brackets
 const PREFIXES: [(&str, &str); 6] = [
     ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
     ("rdfs", "http://www.w3.org/2000/01/rdf-schema#"),
@@ -187,12 +187,12 @@ impl Sink {
             .serialize_quad(t.in_graph(oxrdf::GraphNameRef::DefaultGraph))
     }
 
-    /// `s p o`，o 是资源。
+    /// `s p o`, where o is a resource.
     fn r(&mut self, s: &NamedNode, p: &NamedNode, o: &NamedNode) -> std::io::Result<()> {
         self.triple(TripleRef::new(s.as_ref(), p.as_ref(), o.as_ref()))
     }
 
-    /// `s p o`，o 是字面值。
+    /// `s p o`, where o is a literal value.
     fn l(&mut self, s: &NamedNode, p: &NamedNode, o: &Literal) -> std::io::Result<()> {
         self.triple(TripleRef::new(s.as_ref(), p.as_ref(), o.as_ref()))
     }
@@ -212,8 +212,8 @@ impl Format {
     fn rdf_format(self) -> oxrdfio::RdfFormat {
         match self {
             Format::Turtle => oxrdfio::RdfFormat::Turtle,
-            // streaming profile：按主语一组一组往外写，不在内存里攒出整个文档。
-            // 导出是这个仓库里唯一一处「一次输出可能比库还大」的地方
+            // Streaming profile: writes out group by group per subject, without building the whole document in memory.
+            // Export is the only place in this repo where one output may be larger than the library itself
             Format::JsonLd => oxrdfio::RdfFormat::JsonLd {
                 profile: oxrdfio::JsonLdProfile::Streaming.into(),
             },
@@ -248,14 +248,14 @@ fn dt(at: DateTime<Utc>) -> Literal {
     )
 }
 
-/// 世界时间按**当时量到的精度**落字面值：只知道年份就写 `xsd:gYear`。
-/// 一律写成 `xsd:date` 等于替账本补上它从来没有过的确定性
+/// World time is written as a literal at **the precision measured at the time**: if only the year is known, write `xsd:gYear`.
+/// Writing everything as `xsd:date` would give the ledger a certainty it never had
 fn world_time(at: DateTime<Utc>, precision: Option<&str>) -> Literal {
     let iso = at.format("%Y-%m-%d").to_string();
     match precision {
         Some("year") => Literal::new_typed_literal(iso[..4].to_string(), xsd::G_YEAR),
         Some("month") => Literal::new_typed_literal(iso[..7].to_string(), xsd::G_YEAR_MONTH),
-        // 小时以下（0024）：xsd:dateTime 说不出「到分为止」，精度由 emit_validity 另写一条
+        // Below the hour (0024): xsd:dateTime cannot express "accurate to the minute only", so emit_validity writes the precision separately as one more triple
         Some("hour" | "minute" | "second") => Literal::new_typed_literal(
             at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             xsd::DATE_TIME,
@@ -264,8 +264,8 @@ fn world_time(at: DateTime<Utc>, precision: Option<&str>) -> Literal {
     }
 }
 
-/// 小时以下的精度：XSD 的类型说不出来，另写一条 `utopia:*Precision`。日期粒度不用——
-/// gYear / gYearMonth / date 本身就是精度
+/// Precision below the hour: XSD's types cannot express it, so a separate `utopia:*Precision` is written. Date granularity is not needed:
+/// gYear / gYearMonth / date are already a precision
 fn sub_day(precision: Option<&str>) -> Option<&str> {
     precision.filter(|p| matches!(*p, "hour" | "minute" | "second"))
 }
@@ -282,7 +282,7 @@ fn flag(b: bool) -> Literal {
     Literal::new_typed_literal(if b { "true" } else { "false" }, xsd::BOOLEAN)
 }
 
-/// 一次导出里要反复查的东西：类与关系的 IRI、属性的值域。
+/// Things looked up repeatedly during one export: the IRIs of classes and relations, and the ranges of properties.
 pub struct Vocabulary {
     pub classes: Vec<(Uuid, NamedNode)>,
     pub relations: Vec<(Uuid, NamedNode, Option<String>, Option<String>)>,
@@ -389,7 +389,7 @@ pub fn emit_relation(
             &text(r.description.clone()),
         )?;
     }
-    // 公理照抄，一条不落：一致性检查就是按它们跑的，读的人要能自己复算
+    // Axioms are copied as they are, none dropped: the consistency check runs on them, and a reader must be able to recompute it themselves
     for (on, term) in [
         (r.functional, "FunctionalProperty"),
         (r.inverse_functional, "InverseFunctionalProperty"),
@@ -402,7 +402,7 @@ pub fn emit_relation(
             sink.r(&iri, &nn(rdf::TYPE.as_str()), &owl(term))?;
         }
     }
-    // 只复制已声明的边；不补反向声明或传递闭包，目标也只在本库词汇表中找。
+    // Only declared edges are copied; no inverse declarations or transitive closure are added, and targets are looked up only in this KB's vocabulary.
     for (target, predicate) in [
         (r.inverse_of, owl("inverseOf")),
         (r.sub_property_of, nn(rdfs::SUB_PROPERTY_OF.as_str())),
@@ -411,9 +411,9 @@ pub fn emit_relation(
             sink.r(&iri, &predicate, target)?;
         }
     }
-    // 时间语义也照抄（0031）：一个 event 谓词的事实两端是同一刻，一个 eternal 谓词的
-    // 事实没有日期——读的人不看这一条，会把前者读成一天的状态、后者读成从不知何时起。
-    // `state` 也写：导入把「没写」读成「不动」，不写它，改回 state 的关系重导入后还是 event
+    // Temporal semantics are copied too (0031): both ends of an event predicate's fact are the same moment, and an eternal predicate's
+    // fact has no date. A reader who ignores this would read the former as a one-day state and the latter as holding since an unknown time.
+    // `state` is written too: import reads "not written" as "does not move", so if a relation changed back to state and is re-imported without it, it becomes event
     sink.l(&iri, &utopia("temporal"), &text(r.temporal.clone()))?;
     emit_display_hints(sink, &iri, &r.display_hints)?;
     for d in &r.domains {
@@ -446,7 +446,7 @@ pub fn emit_entity(
         &nn(rdfs::LABEL.as_str()),
         &text(e.canonical_name.clone()),
     )?;
-    // 类型可以没有（0009）：没判出来就不写，而不是补一个 owl:Thing 充数
+    // A type may be absent (0009): when it was not determined, write nothing, rather than padding in an owl:Thing
     if let Some(t) = e.type_id.and_then(|t| vocab.class(t)) {
         let t = t.clone();
         sink.r(&iri, &nn(rdf::TYPE.as_str()), &t)?;
@@ -465,14 +465,14 @@ pub fn emit_document(sink: &mut Sink, names: &Names, d: &ExportDocument) -> std:
         sink.l(&iri, &schema("datePublished"), &world_time(t, Some("day")))?;
     }
     sink.l(&iri, &prov("generatedAtTime"), &dt(d.created_at))?;
-    // 删掉的文档仍在文件里：它的事实还挂着它当出处，抹掉出处等于抹掉证据链
+    // Deleted documents remain in the file: their facts still point at them as provenance, and erasing the provenance would erase the evidence chain
     if let Some(t) = d.deleted_at {
         sink.l(&iri, &prov("invalidatedAtTime"), &dt(t))?;
     }
     Ok(())
 }
 
-/// 一条事实：具体化语句（必出）+ 现行三元组（只在现在仍持有且仍有效时出）。
+/// One fact: the reified statement (always emitted) + the current triples (emitted only while it is still held and still valid).
 pub fn emit_fact(
     sink: &mut Sink,
     names: &Names,
@@ -488,9 +488,9 @@ pub fn emit_fact(
         (None, Some(v)) => {
             // An unbound statement still has an object; only its datatype is unknown.
             let datatype = f.predicate_id.and_then(|p| vocab.literal_shape(p).0);
-            // #821：解析不出来就别写，避免 rdf:object="" 这种空字面量把审计
-            // 工具误导成「事实无对象」。老代码的漏洞是 `v.get("value").unwrap_or(v)`
-            // 在 `{"summary": ...}` 形状里把整个对象序列化成字面文本（#831）。
+            // #821: if it does not parse, do not write it, so that an empty literal like rdf:object="" does not mislead the audit
+            // tool into saying "fact has no object". The old code's bug was `v.get("value").unwrap_or(v)`, which, for a `{"summary": ...}` shape,
+            // serialized the whole object as literal text (#831).
             literal_value(v, datatype).map(Term::from)
         }
         _ => None,
@@ -500,15 +500,15 @@ pub fn emit_fact(
     sink.r(&stmt, &nn(rdf::SUBJECT.as_str()), &subject)?;
     match (&predicate, &f.surface_predicate) {
         (Some(p), _) => sink.r(&stmt, &nn(rdf::PREDICATE.as_str()), p)?,
-        // 本体没接住这条关系（0010）：**不造一个谓词**。原话作为字面值留在这里，
-        // 读的人看得见「系统听见的是这个词，而词汇表里没有它」
+        // The ontology did not catch this relation (0010): **do not mint a predicate**. The original words are kept here as a literal,
+        // so a reader can see "the system heard this word, and the vocabulary has no such term"
         (None, Some(word)) => sink.l(&stmt, &utopia("proposedPredicate"), &text(word.clone()))?,
         (None, None) => {}
     }
     if let Some(o) = &object {
         sink.triple(TripleRef::new(stmt.as_ref(), rdf::OBJECT, o.as_ref()))?;
     }
-    // 只相对一件事给出的值（「触发日后 45 天」，#681 §4）：字面量是原文，这一行说它不是日期
+    // A value given relative to one event only ("45 days after the trigger date", #681 §4): the literal is the original text, and this line says it is not a date
     if f.object_value.as_ref().is_some_and(is_relative) {
         sink.l(&stmt, &utopia("relativeValue"), &flag(true))?;
     }
@@ -525,7 +525,7 @@ pub fn emit_fact(
         sink.l(&stmt, &prov("invalidatedAtTime"), &dt(t))?;
     }
     sink.l(&stmt, &utopia("confidence"), &confidence(f.confidence))?;
-    // 规则算出来的（0044 决定 3 第五片）：不是文档直接陈述的，审计的人要看得见这一层
+    // Derived by a rule (0044 decision 3, fifth slice): not stated directly by a document, and an auditor must be able to see this layer
     if f.implied {
         sink.l(&stmt, &utopia("implied"), &flag(true))?;
     }
@@ -540,18 +540,18 @@ pub fn emit_fact(
     for quote in &f.quotes {
         sink.l(&stmt, &utopia("quote"), &text(quote.clone()))?;
     }
-    // 引文从哪来（0040）：审计的人要不问我们就分得清一句原文和一段看图描述（0020）
+    // Where the quotation came from (0040): an auditor can tell a quoted sentence from a description of an image without asking us (0020)
     for origin in &f.quote_origins {
         sink.l(&stmt, &utopia("evidenceOrigin"), &text(origin.clone()))?;
     }
-    // 边上的属性（0037）：陈述节点上各多一行，谓词是属性的 IRI，字面量按它的 datatype
+    // Attributes on the edge (0037): one extra line on the statement node, the predicate is the attribute's IRI, and the literal follows its datatype
     for q in &f.qualifiers {
         let Some(p) = vocab.relation(q.qualifier_type_id) else {
             continue;
         };
         if let Some(v) = &q.value {
             let (datatype, _) = vocab.literal_shape(q.qualifier_type_id);
-            // #821 + #831：解析不出来就别写这条边上的属性，别塞个空字面量
+            // #821 + #831: if it does not parse, do not write the attribute on this edge, and do not stuff in an empty literal
             if let Some(lit) = literal_value(v, datatype) {
                 sink.l(&stmt, p, &lit)?;
             }
@@ -560,10 +560,10 @@ pub fn emit_fact(
         }
     }
 
-    // 现行三元组：**仍被持有，且现在仍成立**。区间已闭合或已撤回的不写这一条,
-    // 否则一个忽略具体化的消费者会读到「张三现在还管着那个项目」。
-    // 「现在成立」按读出来的区间判（0022）：没起点的从最早证据起，结束了不知哪天
-    // 的到说出它的那份文档为止。规则在 world_axis 里，这里只看投影出来的两端
+    // Current triples: **still held, and still true now**. An interval that has closed or been retracted does not write this one,
+    // otherwise a consumer that ignores reification would read "Zhang San still runs that project".
+    // "Still true now" is judged by the interval read out (0022): one with no start runs from the earliest evidence, and one that ended at an unknown
+    // time runs up to the document that stated it. The rules live in world_axis; here only the two projected ends are looked at
     let held = f.invalidated_at.is_none();
     let holds_now = f.holds_from.is_some_and(|t| t <= now) && f.holds_to.is_none_or(|t| t > now);
     if held && holds_now {
@@ -574,8 +574,8 @@ pub fn emit_fact(
     Ok(())
 }
 
-/// 派生事实（0002）。**不写现行三元组**：它是推出来的，不是谁断言的；
-/// 一个忽略具体化的消费者不该把引擎的结论当成文档里的话
+/// Derived fact (0002). **Current triples are not written**: it was inferred, not asserted by anyone;
+/// a consumer that ignores reification should not take the engine's conclusion for words in a document
 pub fn emit_derived(
     sink: &mut Sink,
     names: &Names,
@@ -583,12 +583,12 @@ pub fn emit_derived(
     d: &ExportDerived,
 ) -> std::io::Result<()> {
     let stmt = names.derived(d.id);
-    // 推理活动的身份：公理规则有自己的 id，业务规则用它的。两者都要有一个
-    // 稳定的 IRI，否则审计读到一条结论却指不出「凭什么」
+    // Identity of the reasoning activity: axiom rules have their own id, business rules use theirs. Both need
+    // a stable IRI, or an auditor reading a conclusion could not point to "what it is based on"
     let rule = match (d.rule_id, d.attribute_rule_id) {
         (Some(r), _) => names.rule(r),
         (None, Some(r)) => names.rule(r),
-        // 库里的 CHECK 保证不会两个都空；真到了这一步宁可跳过整条
+        // The CHECK in the DB guarantees both are not empty at once; if it ever got this far, skipping the whole entry is better
         (None, None) => return Ok(()),
     };
     sink.r(&stmt, &nn(rdf::TYPE.as_str()), &nn(rdf::STATEMENT.as_str()))?;
@@ -600,12 +600,12 @@ pub fn emit_derived(
     if let Some(p) = vocab.relation(d.predicate_id).cloned() {
         sink.r(&stmt, &nn(rdf::PREDICATE.as_str()), &p)?;
     }
-    // 宾语两条通道，与断言事实同一套：实体走 IRI，字面值结论走字面量（0021）
+    // Two channels for the object, same as for asserted facts: entities go by IRI, literal conclusions go as literals (0021)
     match (d.object_id, &d.object_value) {
         (Some(o), _) => sink.r(&stmt, &nn(rdf::OBJECT.as_str()), &names.entity(o))?,
         (None, Some(v)) => {
             let (datatype, _) = vocab.literal_shape(d.predicate_id);
-            // #821 + #831：解析不出来就别写这条宾语
+            // #821 + #831: if it does not parse, do not write this object
             if let Some(lit) = literal_value(v, datatype) {
                 sink.l(&stmt, &nn(rdf::OBJECT.as_str()), &lit)?;
             }
@@ -628,10 +628,10 @@ pub fn emit_derived(
     sink.l(&stmt, &utopia("confidence"), &confidence(d.confidence))?;
     sink.r(&stmt, &prov("wasGeneratedBy"), &rule)?;
     sink.r(&rule, &nn(rdf::TYPE.as_str()), &prov("Activity"))?;
-    // 规则的家族与身份（0020 的 2026-09-25 revision，#902）：读的人不再从标签里猜它来自
-    // 哪张表。公理规则再写出种类（闭合枚举）和声明所在的谓词——inverse 与 sub_property
-    // 时它不是结论的谓词，从导出的 owl:inverseOf / rdfs:subPropertyOf 反推是有歧义的。
-    // 业务规则的条件与表达式不导出：规则原地更新，这个 IRI 担保不了旧结论当时依据的定义
+    // The rule's family and identity (0020, the 2026-09-25 revision, #902): a reader no longer guesses which table it came from by its label.
+    // Axiom rules also write out their kind (a closed enumeration) and the predicate their declaration sits on: for inverse and sub_property
+    // the predicate is not the conclusion's, and inferring it back from the exported owl:inverseOf / rdfs:subPropertyOf would be ambiguous.
+    // Business rules' conditions and expressions are not exported: rules are updated in place, and this IRI cannot guarantee the definition the old conclusions were based on
     if d.rule_id.is_some() {
         sink.r(&rule, &nn(rdf::TYPE.as_str()), &utopia("AxiomRule"))?;
         sink.l(&rule, &utopia("axiomKind"), &text(d.rule.clone()))?;
@@ -641,14 +641,14 @@ pub fn emit_derived(
     } else {
         sink.r(&rule, &nn(rdf::TYPE.as_str()), &utopia("BusinessRule"))?;
     }
-    // 标签用规则自己的名字（业务规则），公理退回它的种类名——审计读到的是
-    // 「Gas-bearing well」而不是「business」
+    // The label uses the rule's own name (business rules); axioms fall back to their kind name, so the auditor reads
+    // "Gas-bearing well" rather than "business"
     sink.l(
         &rule,
         &nn(rdfs::LABEL.as_str()),
         &text(d.rule_name.clone().unwrap_or_else(|| d.rule.clone())),
     )?;
-    // 前提。审计顺着 prov:used 往下走一步就到断言，再走一步就到句子
+    // Premises. An auditor following prov:used takes one step to reach the assertions, and another to reach the sentences
     for premise in &d.premises {
         let p = names.fact(*premise);
         sink.r(&stmt, &prov("used"), &p)?;
@@ -660,11 +660,11 @@ pub fn emit_derived(
     Ok(())
 }
 
-/// 一条事实争议（0062）：同一槽位上的两条断言互不相让。
+/// A factual dispute (0062): two assertions on the same slot that do not give way to each other.
 ///
-/// `status` 照原样给：open 是「还在争」；resolved + `utopia:resolution` 是人的
-/// 裁决；`withdrawn` 不是裁决——一边作废了题就没了，`utopia:closedAt` 记的是
-/// 作废时刻（0051），不是有人打开过审核页的时刻
+/// `status` is given as-is: open means "still disputed"; resolved + `utopia:resolution` is a person's
+/// verdict; `withdrawn` is not a verdict: when one side is withdrawn the question is gone, and `utopia:closedAt` records
+/// the moment of withdrawal (0051), not the moment someone opened the review page
 pub fn emit_fact_conflict(
     sink: &mut Sink,
     names: &Names,
@@ -672,7 +672,7 @@ pub fn emit_fact_conflict(
 ) -> std::io::Result<()> {
     let iri = names.fact_conflict(c.id);
     sink.r(&iri, &nn(rdf::TYPE.as_str()), &utopia("FactConflict"))?;
-    // 两席分清方向：压着的断言与新到的那条不是对称的（0062）
+    // The two seats are kept apart by direction: the pressed assertion and the newly arrived one are not symmetric (0062)
     for (pred, fact) in [
         (utopia("priorStatement"), c.old_fact_id),
         (utopia("incomingStatement"), c.new_fact_id),
@@ -691,9 +691,9 @@ pub fn emit_fact_conflict(
     Ok(())
 }
 
-/// 一条公理违规发现（0062）。这是**可变的当前状态**，不是历史：`open` 的意思是
-/// 已对账于当前本体——所以判据只连在 open 行上，resolved 的行不假装知道自己是
-/// 按哪一版本体结案的
+/// An axiom violation finding (0062). This is **mutable current state**, not history: `open` means
+/// reconciled against the current ontology, so the criterion is attached only to open rows; resolved rows do not pretend to know
+/// which ontology version they were closed against
 pub fn emit_axiom_violation(
     sink: &mut Sink,
     names: &Names,
@@ -703,8 +703,8 @@ pub fn emit_axiom_violation(
     let iri = names.axiom_violation(v.id);
     sink.r(&iri, &nn(rdf::TYPE.as_str()), &utopia("AxiomViolation"))?;
     sink.l(&iri, &utopia("kind"), &text(v.kind.clone()))?;
-    // self_loop/signature 的左右是同一事实——RDF 集合语义下重发无害，但 Turtle
-    // 文件里会是一条重复三元组
+    // For self_loop/signature the left and right are the same fact: under RDF set semantics a repeat is harmless, but in a Turtle
+    // file it would be a duplicate triple
     let endpoints: &[Uuid] = if v.left_fact == v.right_fact {
         &[v.left_fact]
     } else {
@@ -713,8 +713,8 @@ pub fn emit_axiom_violation(
     for fact in endpoints {
         sink.r(&iri, &utopia("onStatement"), &names.fact(*fact))?;
     }
-    // 环是有序的证据链（0054）：拍扁成一组无序的 facts，「A→B→C→A」就读不回来了。
-    // rdf:List 是 Turtle/JSON-LD 都认的保序结构
+    // A cycle is an ordered chain of evidence (0054): flattening it into an unordered set of facts would make "A→B→C→A" impossible to read back.
+    // rdf:List is an order-preserving structure that both Turtle and JSON-LD understand
     if !v.path.is_empty() {
         let items: Vec<Term> = v.path.iter().map(|f| names.fact(*f).into()).collect();
         let head = emit_list(sink, &items)?;
@@ -732,9 +732,9 @@ pub fn emit_axiom_violation(
     if let Some(t) = v.decided_at {
         sink.l(&iri, &utopia("closedAt"), &dt(t))?;
     }
-    // 判据（0062 §4）：open = 已对账于当前本体，必然指得回一条关系与一个
-    // OWL/rdfs 词。signature 的判据是一对签名，两个词都发（行不记哪一侧破的）。
-    // resolved 的行不发——它的判据可能早已不在本体里
+    // Criterion (0062 §4): open = reconciled against the current ontology, so it must point back to one relation and one
+    // OWL/rdfs term. A signature's criterion is a pair, and both terms are emitted (the row does not record which side broke).
+    // Resolved rows do not emit it: their criterion may long since have left the ontology
     if v.status == "open" {
         for term in v.criterion_terms().unwrap_or(&[]) {
             sink.r(&iri, &utopia("criterion"), &criterion_node(term))?;
@@ -750,8 +750,8 @@ pub fn emit_axiom_violation(
     Ok(())
 }
 
-/// `utopia:criterion` 的词项：`criterion_terms` 只产 `owl:`/`rdfs:` 两种，
-/// 其余值不可能走到这里（export 侧已经拒导）
+/// Term for `utopia:criterion`: `criterion_terms` produces only `owl:`/`rdfs:`, and other values cannot reach here
+/// (the export side already refuses to export them)
 fn criterion_node(term: &str) -> NamedNode {
     if let Some(t) = term.strip_prefix("owl:") {
         owl(t)
@@ -764,8 +764,8 @@ fn criterion_node(term: &str) -> NamedNode {
     }
 }
 
-/// 一串有序资源写成 rdf:List，返回表头节点（空表返回 rdf:nil）。
-/// 从尾往前搭：每个空白节点落地时就知道自己的 rest
+/// Writes an ordered list of resources as rdf:List, returning the head node (an empty list returns rdf:nil).
+/// Built from the tail forward: each blank node knows its rest when it is emitted
 fn emit_list(sink: &mut Sink, items: &[Term]) -> std::io::Result<Term> {
     let mut head: Term = nn(rdf::NIL.as_str()).into();
     for item in items.iter().rev() {
@@ -798,20 +798,20 @@ fn emit_validity(
                 sink.l(stmt, &utopia("validThroughPrecision"), &text(p))?;
             }
         }
-        // 「结束了，但不知道哪天」——账本专门为它留了一个状态，导出不能把它
-        // 压成「至今仍成立」（那正是 valid_to 一列承载两个意思时的老毛病）
+        // "Ended, but not known which day": the ledger keeps a dedicated state for this, and the export must not flatten it
+        // into "still holds" (that is the old problem of valid_to carrying two meanings in one column)
         (None, Some("unknown")) => sink.l(stmt, &utopia("endedUnknown"), &flag(true))?,
         (None, _) => {}
     }
     Ok(())
 }
 
-/// 值上带着 `"relative": true`：原文只相对一件事给出它，没有日历上的日期
+/// The value carries `"relative": true`: the original text gives it only relative to one event, and there is no calendar date
 fn is_relative(v: &serde_json::Value) -> bool {
     v.get("relative").and_then(|r| r.as_bool()) == Some(true)
 }
 
-/// `{"value": …, "unit": …}` 或 `{"summary": …}` 等情况下抽出字面量。
+/// Extracts a literal from shapes such as `{"value": …, "unit": …}` or `{"summary": …}`.
 ///
 /// **Resolves the text first and returns `None` when nothing resolves.** The
 /// audit invariant #821 (`an_absent_object_is_not_an_empty_literal`) says that an
@@ -820,7 +820,7 @@ fn is_relative(v: &serde_json::Value) -> bool {
 /// a literal whose lexical form is `""`, since that turns into JSON serialisation
 /// for an object value and is a parser-puzzle for downstream consumers.
 ///
-/// 相对的值写成普通字符串：`"45 days after the Trigger Date"^^xsd:date` 是个不合法的字面量
+/// A relative value is written as a plain string: `"45 days after the Trigger Date"^^xsd:date` is an invalid literal
 fn literal_value(v: &serde_json::Value, datatype: Option<&str>) -> Option<Literal> {
     let (text, prose) = literal_text(v)?;
     if prose || is_relative(v) {
@@ -836,14 +836,14 @@ fn literal_value(v: &serde_json::Value, datatype: Option<&str>) -> Option<Litera
     })
 }
 
-/// JSON 数可以带指数，xsd:decimal 不可以。用已有的精确十进制类型展开文本，
-/// 不再过一次 f64，也不舍入；没有指数的写法（包括负零）原样保留。
+/// A JSON number may carry an exponent, but xsd:decimal may not. The text is expanded with the existing exact decimal type,
+/// without going through f64 again and without rounding; forms with no exponent (including negative zero) are kept as they are
 fn decimal_text(text: String) -> String {
     let Some((coefficient, exponent)) = text.split_once(['e', 'E']) else {
         return text;
     };
-    // 归一化后的有限 f64 指数只在这个范围内。其他字符串不一定经过归一化，
-    // 不让异常的大指数触发无界分配，也不顺手清洗 BigDecimal 能容忍的下划线等写法。
+    // The normalized finite f64 exponent is only within this range. Other strings are not necessarily normalized,
+    // so an unusually large exponent must not trigger unbounded allocation, and underscores and other forms that BigDecimal tolerates are not quietly cleaned up
     let supported_exponent = exponent
         .parse::<i32>()
         .is_ok_and(|exponent| (-324..=308).contains(&exponent));
@@ -858,11 +858,11 @@ fn decimal_text(text: String) -> String {
     text
 }
 
-/// 属性日期保留的是原文，不是世界时间区间。parse_time 会截掉小数秒、把无时区
-/// 钟点降到天，所以只在没有钟点时借它判断年/月/日；时钟和时区从原文规范化。
-/// 无法识别的文本由调用方沿用原输出；输入校验仍可能接受非日期的钟点文本，
-/// 本次不收紧它的规则。年份按字段格式化，不能按四个字符切片；chrono 在扩展
-/// 正年份前加的 `+` 也需去掉，因为 XSD 年份不允许正号。
+/// A date kept on a property is the original text, not a world-time interval. parse_time truncates fractional seconds and reduces a
+/// zone-less clock time to a day, so it is used to judge year/month/day only when there is no clock time; the clock and time zone are normalized from the original text.
+/// Text that is not recognized is passed through by the caller unchanged; input validation may still accept non-date clock text,
+/// and this change does not tighten its rules. The year is formatted by field and must not be sliced by four characters; chrono's
+/// `+` added before a positive year must also be stripped, since XSD years do not allow a plus sign.
 fn date_literal(value: &str) -> Option<Literal> {
     let Some((date, clock)) = value.split_once(['T', ' ']) else {
         let (date, precision) = utopia_extract::parse_time(value)?;
@@ -886,7 +886,7 @@ fn date_literal(value: &str) -> Option<Literal> {
         let (clock, zone) = clock.split_at(index);
         (clock, xsd_timezone(zone)?)
     } else {
-        // XSD 允许没有时区的 dateTime；不能替原文猜一个 UTC。
+        // XSD allows a dateTime without a time zone; a UTC cannot be guessed for the original text.
         (clock, String::new())
     };
     let parts: Vec<&str> = clock.split(':').collect();
@@ -915,13 +915,13 @@ fn date_literal(value: &str) -> Option<Literal> {
     let minute = minute.parse().ok()?;
     let second = second.parse().ok()?;
     chrono::NaiveTime::from_hms_opt(hour, minute, second)?;
-    // dateTime 必须有 HH:MM:SS；补零表示该小时/分钟的起点，类型本身不能表达
-    // 「只精确到小时/分钟」。小数秒不交给 chrono，避免超过纳秒的原文被截断。
+    // dateTime must have HH:MM:SS; zero-padding means the start of that hour/minute, which the type itself cannot express
+    // ("accurate to the hour/minute only"). Fractional seconds are not handed to chrono, so original text beyond nanoseconds is not truncated.
     let lexical = format!("{calendar_date}T{hour:02}:{minute:02}:{second:02}{fraction}{zone}");
     Some(Literal::new_typed_literal(lexical, xsd::DATE_TIME))
 }
 
-/// parse_time 也接受 ±HH 和 ±HHMM，XSD 时区则要求 ±HH:MM。
+/// parse_time also accepts ±HH and ±HHMM, while XSD time zones require ±HH:MM.
 fn xsd_timezone(zone: &str) -> Option<String> {
     if !zone.is_ascii() {
         return None;
@@ -947,20 +947,20 @@ fn xsd_timezone(zone: &str) -> Option<String> {
     Some(normalized)
 }
 
-/// 把事实的 `object_value` 形状抽出可写的字面文本，以及这段文本是不是人写的散文。
+/// Extracts writable literal text from a fact's `object_value` shape, and whether this text is prose written by a person.
 ///
-/// 认得的形态（其它都视作缺值）：
-/// 1. 直接给字符串 / 数字 / 布尔
-/// 2. `{"value": …}`：`value` 是标量就取它
-/// 3. `{"summary": …}`：`value` 缺席或为空时才看它（`models.rs` 把两者记作二选一，
-///    `api/tools.rs` 也是先 `value` 后 `summary`；这里不另立顺序）
-/// 4. `{"class": …}`：规则的分类结论（`reasoning.rs` 写的就是这个形状，五处按键读回）
+/// Shapes recognized (anything else is treated as a missing value):
+/// 1. A string / number / boolean given directly
+/// 2. `{"value": …}`: if `value` is a scalar, take it
+/// 3. `{"summary": …}`: looked at only when `value` is absent or empty (`models.rs` records the two as alternatives,
+///    and `api/tools.rs` also checks `value` first and then `summary`; no separate order is set here)
+/// 4. `{"class": …}`: a rule's classification conclusion (`reasoning.rs` writes this shape, and five places read it back by key)
 ///
-/// 老的行为是 `v.get("value").unwrap_or(v)`：键缺失时把整个对象当作字面值，于是
-/// `{"summary": …}` 会被序列化成 `{"summary":"…"}` 这种字面文本（#831）。新行为是先解析成
-/// 一段真实文字；解析不到（既不是标量，又没有认得的键）就返回 `None`，调用方就不写
-/// `rdf:object` 这条三元组。第二个返回值为 `true` 表示文本来自 `summary` / `class`：
-/// 那是给人读的散文或一个类名，不该套属性声明的 `xsd:decimal` / `xsd:date`
+/// The old behavior was `v.get("value").unwrap_or(v)`: when the key was missing, the whole object was taken as the literal, so
+/// `{"summary": …}` was serialized as literal text like `{"summary":"…"}` (#831). The new behavior parses it into
+/// real text; if nothing parses (neither a scalar nor a recognized key) it returns `None`, and the caller does not write
+/// the `rdf:object` triple. A second return value of `true` means the text came from `summary` / `class`:
+/// that is prose for people or a class name, and should not get the property's declared `xsd:decimal` / `xsd:date`
 fn literal_text(v: &serde_json::Value) -> Option<(String, bool)> {
     match v {
         serde_json::Value::Null => None,
@@ -1052,7 +1052,7 @@ mod tests {
             valid_from_precision: None,
             valid_to: None,
             valid_to_precision: None,
-            // 读出来的区间（0022）：没起点就从锚点起，这里让它与记下的时刻同一天
+            // The interval read out (0022): with no start, it starts from the anchor; here it is made to be the same day as the recorded moment
             holds_from: Some(at("2026-01-01T00:00:00Z")),
             holds_to: None,
             recorded_at: at("2026-01-01T00:00:00Z"),
@@ -1074,8 +1074,8 @@ mod tests {
         }
     }
 
-    /// 导出一遍再解析回来。**必须解析回来**：断言字符串里有没有某一段，
-    /// 证明不了文件语法是否合法；字面文本是否符合 XSD 类型仍须另行断言
+    /// Export, then parse back. **It must parse back**: asserting that a string contains some segment
+    /// does not prove the file's syntax is valid; whether literal text conforms to its XSD type must still be asserted separately
     fn export(format: Format, emit: impl FnOnce(&mut Sink, &Names, &Vocabulary)) -> Vec<Quad> {
         let names = Names::new(kb(), None).unwrap();
         let classes = vec![
@@ -1136,7 +1136,7 @@ mod tests {
     const OBJ: &str = "<urn:utopia:kb:01a06dc4-f40a-7013-b09f-1b499e2e7441:entity:0b0b0b0b-0b0b-0b0b-0b0b-0b0b0b0b0b0b>";
     const WORKS_FOR: &str = "https://schema.org/worksFor";
 
-    /// 同一个属性值穿过所有出口；RDF 能解析不代表 XSD 字面文本符合其类型。
+    /// The same property value passes through every exit; RDF parsing successfully does not mean the XSD literal text conforms to its type.
     fn assert_attribute_literal_exports(
         value: serde_json::Value,
         datatype: &str,
@@ -1251,13 +1251,13 @@ mod tests {
                 Some((expected, xsd::DECIMAL)),
             );
         }
-        // 已存的整数不能再经过 f64：这个值超过了双精度能逐个表示整数的范围。
+        // An integer already stored cannot go through f64 again: this value exceeds the range where a double can represent every integer.
         assert_attribute_literal_exports(
             serde_json::json!({"value": 9_007_199_254_740_993_u64}),
             "number",
             Some(("9007199254740993", xsd::DECIMAL)),
         );
-        // 最小次正规数和最大有限数：不能因固定小数位变成零，也不能溢出。
+        // Smallest subnormal and largest finite number: they must not become zero from fixed decimal places, nor overflow.
         for (input, expected) in [
             (f64::from_bits(1), format!("0.{}5", "0".repeat(323))),
             (f64::MAX, format!("17976931348623157{}", "0".repeat(292))),
@@ -1523,15 +1523,15 @@ mod tests {
         }
     }
 
-    /// #831：导出时如果 `object_value` 是 `{"summary": "..."}` 或 `{"value": "..."}` 这种带结构
-    /// 的对象，老代码 `v.get("value").unwrap_or(v)` 会把整个对象序列化成 JSON 字符串当字面量。
-    /// 修复后 `value` 优先，`summary` 是它的替补（与 `models.rs` 和 `api/tools.rs` 一致）；
-    /// `summary` 和 `class` 是散文或类名，落成 `xsd:string` 而不套属性声明的类型；
-    /// 解析失败就**没有 `rdf:object`**，和 #821 同一套原则。
+    /// #831: on export, if `object_value` is a structured object such as `{"summary": "..."}` or `{"value": "..."}`, the old code
+    /// `v.get("value").unwrap_or(v)` would serialize the whole object as a JSON string literal.
+    /// After the fix, `value` takes precedence, and `summary` is its fallback (consistent with `models.rs` and `api/tools.rs`);
+    /// `summary` and `class` are prose or class names, stored as `xsd:string` rather than with the property's declared type;
+    /// if parsing fails there is **no `rdf:object`**, the same principle as #821.
     ///
-    /// 七种情形：value 优先于 summary；只有 value；只有 summary（xsd:string）；
-    /// summary 为空时退回 value；null value 且无 summary → 不写；分类结论 `{"class": …}`
-    /// 落成 xsd:string；不认得的键 → 不写。
+    /// Seven cases: value takes precedence over summary; only value; only summary (xsd:string);
+    /// summary empty falls back to value; null value with no summary → not written; classification conclusion `{"class": …}`
+    /// stored as xsd:string; unrecognized key → not written.
     #[test]
     fn an_object_value_with_summary_or_value_does_not_emit_a_json_literal() {
         let cases: &[(&str, serde_json::Value, &[&str])] = &[
@@ -1593,21 +1593,21 @@ mod tests {
     #[test]
     fn an_imported_class_keeps_its_own_iri() {
         let quads = export(Format::Turtle, |_, _, _| {});
-        // 导入来的 schema.org 类导出去还是 schema:Person
+        // A class imported from schema.org still exports as schema:Person
         assert!(has(
             &quads,
             "<https://schema.org/Person>",
             "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
             "http://www.w3.org/2002/07/owl#Class"
         ));
-        // 本体自己长的用 key 铸 IRI，读得懂
+        // A class the ontology made itself is minted with its key, which is readable
         assert!(has(
             &quads,
             "<urn:utopia:kb:01a06dc4-f40a-7013-b09f-1b499e2e7441:class:team>",
             "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
             "http://www.w3.org/2002/07/owl#Class"
         ));
-        // 公理照抄：一致性检查按它跑，读的人要能自己复算
+        // Axioms copied as they are: the consistency check runs on them, and a reader must be able to recompute it themselves
         assert!(has(
             &quads,
             &format!("<{WORKS_FOR}>"),
@@ -1616,7 +1616,7 @@ mod tests {
         ));
     }
 
-    /// 改回 state 的关系重导入也得是 state：导入把没写的 `utopia:temporal` 读成「不动」
+    /// A relation changed back to state and re-imported must also be state: import reads an unwritten `utopia:temporal` as "does not move"
     #[test]
     fn a_state_relation_exports_its_temporal() {
         let quads = export(Format::Turtle, |_, _, _| {});
@@ -1706,13 +1706,13 @@ mod tests {
 
     #[test]
     fn a_closed_or_retracted_fact_is_a_statement_only() {
-        // 区间已闭合：世界轴上它已经结束
+        // Interval closed: on the world axis it has already ended
         let mut closed = fact(5);
         closed.valid_from = Some(at("2023-01-01T00:00:00Z"));
         closed.valid_from_precision = Some("day".into());
         closed.valid_to = Some(at("2024-07-01T00:00:00Z"));
         closed.valid_to_precision = Some("day".into());
-        // 读出来的区间随原文（0022）：两端都给了，就是它们
+        // The interval read out follows the original text (0022): if both ends are given, they are those
         closed.holds_from = Some(at("2023-01-01T00:00:00Z"));
         closed.holds_to = Some(at("2024-07-01T00:00:00Z"));
         let quads = export(Format::Turtle, |sink, names, vocab| {
@@ -1727,7 +1727,7 @@ mod tests {
             vec!["\"2024-07-01\"^^<http://www.w3.org/2001/XMLSchema#date>"]
         );
 
-        // 记录轴上被撤回：世界轴上它甚至还"开着"，但我们已经不这么认为了
+        // Withdrawn on the recording axis: on the world axis it may even still be "open", but we no longer consider it so
         let mut retracted = fact(5);
         retracted.invalidated_at = Some(at("2026-03-01T00:00:00Z"));
         let quads = export(Format::Turtle, |sink, names, vocab| {
@@ -1782,7 +1782,7 @@ mod tests {
         let quads = export(Format::Turtle, |sink, names, vocab| {
             emit_fact(sink, names, vocab, &coarse, at("2026-06-01T00:00:00Z")).unwrap();
         });
-        // 只量到年份就写 gYear。一律写成 xsd:date 等于替账本补上它没有过的确定性
+        // Only the year was measured, so write gYear. Writing everything as xsd:date would give the ledger a certainty it never had
         assert_eq!(
             objects(&quads, STMT, "https://schema.org/validFrom"),
             vec!["\"2023\"^^<http://www.w3.org/2001/XMLSchema#gYear>"]
@@ -1794,12 +1794,12 @@ mod tests {
         let mut ended = fact(5);
         ended.valid_to = None;
         ended.valid_to_precision = Some("unknown".into());
-        // 结束了不知哪天：读出来的终点是锚点（说出它的那份文档的日期），SQL 就这么投影
+        // Ended, but not known which day: the end read out is the anchor (the date of the document that stated it), which is how the SQL projects it
         ended.holds_to = ended.holds_from;
         let quads = export(Format::Turtle, |sink, names, vocab| {
             emit_fact(sink, names, vocab, &ended, at("2026-06-01T00:00:00Z")).unwrap();
         });
-        // 「结束了，但不知道哪天」不能压成「至今仍成立」
+        // "Ended, but not known which day" must not be flattened into "still holds"
         assert!(has(
             &quads,
             STMT,
@@ -1851,8 +1851,8 @@ mod tests {
         );
     }
 
-    /// 日期属性上相对的值（#681 §4）导出成普通字符串，陈述上另有一行说它是相对的——
-    /// 写成 xsd:date 的字面量不合法，严格的解析器会整份拒收
+    /// A relative value on a date property (#681 §4) is exported as a plain string, and the statement carries a separate line saying it is relative;
+    /// a literal written as xsd:date is invalid, and a strict parser would reject the whole file
     #[test]
     fn a_relative_deadline_is_a_string_that_says_it_is_relative() {
         let dated =
@@ -1883,12 +1883,12 @@ mod tests {
         ));
     }
 
-    /// 业务规则的结论也要出现在导出里，而且宾语是**字面值**。
+    /// Business-rule conclusions must also appear in the export, and their object is a **literal**.
     ///
-    /// 这一条挡的是一次静默丢失：取数那边原本 `JOIN rules`，而业务规则的
-    /// `rule_id` 是 NULL——整条结论会被内连接挡在文件之外，而 0020 承诺的正是
-    /// 「审计员不靠我们也能读全」。活动的标签也要是规则自己的名字，
-    /// 「business」对读的人没有意义
+    /// This one guards against a silent loss: the fact-fetching side used to `JOIN rules`, but the business rule's
+    /// `rule_id` is NULL, so the whole conclusion would be blocked out of the file by the inner join, while 0020 promises that
+    /// "an auditor can read everything without relying on us". The activity's label must also be the rule's own name,
+    /// since "business" means nothing to the reader
     #[test]
     fn a_rule_conclusion_reaches_the_export_as_a_literal() {
         let derived = ExportDerived {
@@ -1925,15 +1925,15 @@ mod tests {
             emit_derived(sink, names, vocab, &derived).unwrap();
         });
         let stmt = "<urn:utopia:kb:01a06dc4-f40a-7013-b09f-1b499e2e7441:derived:07070707-0707-0707-0707-070707070707>";
-        // 派生标记还在——它仍旧是推出来的，不是谁断言的
+        // The derived flag is still there: it is still inferred, not asserted by anyone
         assert!(has(
             &quads,
             stmt,
             "urn:utopia:ns:derived",
             "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>"
         ));
-        // 宾语是字面值而不是一个实体 IRI：分类结论 `{"class": …}` 按键解析成类名，
-        // 落成 xsd:string。老代码把整个对象序列化成 `{"class":"gas_well"}` 当字面量（#831）
+        // The object is a literal, not an entity IRI: the classification conclusion `{"class": …}` is resolved by key to a class name,
+        // and written as xsd:string. The old code serialized the whole object as a literal like `{"class":"gas_well"}` (#831)
         let obj = objects(
             &quads,
             stmt,
@@ -1945,7 +1945,7 @@ mod tests {
             "分类结论的宾语该是类名本身的字符串字面量，拿到的是 {}",
             obj[0]
         );
-        // 规则资源说出自己的家族（#902）：业务规则，没有公理种类可言
+        // The rule resource states its own family (#902): a business rule, with no axiom kind to speak of
         let rule = Names::new(kb(), None).unwrap().rule(id(9)).to_string();
         assert!(has(
             &quads,
@@ -1955,12 +1955,12 @@ mod tests {
         ));
         assert!(objects(&quads, &rule, "urn:utopia:ns:axiomKind").is_empty());
         assert!(objects(&quads, &rule, "urn:utopia:ns:declaredOn").is_empty());
-        // 前提照常挂着：审计顺着 prov:used 走得到那两条读数
+        // Premises still attached: an auditor following prov:used reaches the two readings
         assert_eq!(
             objects(&quads, stmt, "http://www.w3.org/ns/prov#used").len(),
             1
         );
-        // 活动的标签是规则的名字
+        // The activity's label is the rule's name
         let rule_iri =
             "<urn:utopia:kb:01a06dc4-f40a-7013-b09f-1b499e2e7441:rule:09090909-0909-0909-0909-090909090909>";
         assert_eq!(
@@ -2089,8 +2089,8 @@ mod tests {
                 !has(&quads, SUBJ, WORKS_FOR, OBJ),
                 "推出来的边不写成平铺三元组：那会让人把引擎的结论当成文档里的话"
             );
-            // 规则资源说出自己的家族、种类和声明所在的谓词（#902）：读的人不再
-            // 从 rdfs:label 里猜。这里声明谓词就是结论谓词（传递），指向同一个 IRI
+            // The rule resource states its own family, kind and the predicate its declaration sits on (#902): the reader no longer
+            // guesses from rdfs:label. Here the declared predicate is the conclusion's predicate (transitive), pointing at the same IRI
             let rule = Names::new(kb(), None).unwrap().rule(id(8)).to_string();
             assert!(has(
                 &quads,
@@ -2153,7 +2153,7 @@ mod tests {
             names.entity(id(10)).as_str(),
             "https://acme.example/utopia/kb/01a06dc4-f40a-7013-b09f-1b499e2e7441/entity/0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a"
         );
-        // 非 http 的 base 拒掉：拼出来的会是一份谁也解析不了的文件
+        // A non-http base is refused: the result would be a file nobody can resolve
         assert!(Names::new(kb(), Some("javascript:alert(1)")).is_err());
         assert!(Names::new(kb(), Some("https://acme.example/a b")).is_err());
     }
@@ -2214,7 +2214,7 @@ mod tests {
             "urn:utopia:ns:FactConflict"
         ));
         let names = Names::new(kb(), None).unwrap();
-        // 两席有方向：旧断言是 prior，新到的是 incoming
+        // The two seats have direction: the old assertion is prior, the newly arrived one is incoming
         assert_eq!(
             objects(&quads, CONFLICT, "urn:utopia:ns:priorStatement"),
             vec![names.fact(id(5)).to_string()]
@@ -2240,8 +2240,8 @@ mod tests {
         .is_empty());
         assert!(objects(&quads, CONFLICT, "urn:utopia:ns:closedAt").is_empty());
 
-        // 人裁过的带裁决词；作废的不是裁决——closedAt 记的是作废时刻（0051），
-        // 不带 resolution
+        // A person's verdict carries a verdict term; a withdrawn one is not a verdict: closedAt records the moment of withdrawal (0051),
+        // and carries no resolution
         for (status, resolution) in [("resolved", Some("kept_both")), ("withdrawn", None)] {
             let c = conflict(status, resolution);
             let quads = export(Format::Turtle, |sink, names, _| {
@@ -2282,7 +2282,7 @@ mod tests {
             2,
             "违规必须指回两条事实"
         );
-        // 判据 = OWL 词 + 住在哪条关系上（0062）
+        // Criterion = the OWL term + the relation it lives on (0062)
         assert_eq!(
             objects(&quads, VIOLATION, "urn:utopia:ns:criterion"),
             vec!["<http://www.w3.org/2002/07/owl#AsymmetricProperty>"]
@@ -2297,8 +2297,8 @@ mod tests {
 
     #[test]
     fn a_signature_violation_points_at_the_whole_signature() {
-        // signature 的判据是 domain+range 这一对（0062）：行不记哪一侧破的，
-        // 合同也就不装知道——两个词都发
+        // A signature's criterion is the pair of domain+range (0062): the row does not record which side broke,
+        // so the contract does not pretend to know; both terms are emitted
         let v = violation("signature", "open", None, vec![]);
         let quads = export(Format::Turtle, |sink, names, vocab| {
             emit_axiom_violation(sink, names, vocab, &v).unwrap();
@@ -2320,7 +2320,7 @@ mod tests {
 
     #[test]
     fn a_closed_violation_does_not_claim_a_criterion() {
-        // resolved 的行不连判据：促成它结案的本体可能早已不在（0062）
+        // Resolved rows do not carry the criterion: the ontology that closed them may long since be gone (0062)
         let v = violation("signature", "resolved", Some("criterion_changed"), vec![]);
         let quads = export(Format::Turtle, |sink, names, vocab| {
             emit_axiom_violation(sink, names, vocab, &v).unwrap();
@@ -2334,7 +2334,7 @@ mod tests {
         assert!(!objects(&quads, VIOLATION, "urn:utopia:ns:closedAt").is_empty());
     }
 
-    /// 顺着 rdf:List 走一遍，把成员按序收回来
+    /// Walks an rdf:List and collects the members back in order
     fn list_items(quads: &[Quad], violation_iri: &str) -> Vec<String> {
         let nil: Term = nn(rdf::NIL.as_str()).into();
         let head = quads
@@ -2406,8 +2406,8 @@ mod tests {
             jsonld.len(),
             "两种格式是同一张图的两种写法，三元组数目必须一样"
         );
-        // 空白节点在两种写法里各自匿名，集合同比不了——比所有非匿名的角，
-        // 环那份证据的顺序交给 a_cycle_keeps_its_facts_in_order 按格式各验一遍
+        // Blank nodes are anonymous in each of the two formats, so sets cannot be compared: rather than comparing all non-anonymous ends,
+        // the order of the cycle's evidence is checked by a_cycle_keeps_its_facts_in_order, once per format
         let named = |qs: &[Quad]| {
             qs.iter()
                 .filter(|q| q.subject.is_named_node() && !matches!(q.object, Term::BlankNode(_)))

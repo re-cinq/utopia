@@ -1,18 +1,18 @@
-//! 关系短语按签名绑到属性（0044 决定 3 的第二片；账本侧见 `utopia_store::phrase_bindings`，
-//! 合同见 `utopia_extract::phrase_align`）。
+//! Relation phrases bind to attributes by signature (the second slice of 0044 decision 3; for the ledger side see `utopia_store::phrase_bindings`,
+//! for the contract see `utopia_extract::phrase_align`).
 //!
-//! 签名 = 短语 × 主语的类 × 宾语的类（宾语是字面值时记「值」）。两端的类来自类别词绑定
-//! 写到实体上的 `type_id`，所以这一步排在类别词对齐之后。一个库里 distinct 的签名比陈述
-//! 少得多，每条只判一次：**两票一致**才绑（第二票候选倒序，防「选第一个」冒充一致），
-//! 不一致记 undecided 留给审核（#725 对齐队列），没有属性对得上记 none——陈述留在开放
-//! 图谱，什么都不丢，签名计入工作台的建议。绑定按属性的 `updated_at` 与库里最新的属性
-//! 判过期，本体一改只重判过期的。这一片只记判定；按绑定把陈述算成类型化事实是下一片。
+//! Signature = phrase × the class of the subject × the class of the object (a literal object is recorded as "value"). The classes at both ends come from the category-word bindings
+//! written onto entities as `type_id`, so this step runs after category-word alignment. The distinct signatures in a library are far fewer than the statements,
+//! and each is judged only once: a binding happens only on **two agreeing votes** (the second vote's candidates are reversed, so "picking the first" cannot pass as agreement);
+//! a disagreement is recorded as undecided for review (#725 alignment queue), and if no attribute matches it is recorded as none. The statement stays in the open
+//! graph, nothing is lost, and the signature counts toward the workbench's suggestions. A binding is judged stale against the attribute's `updated_at` and the newest attribute in the library,
+//! so when the ontology changes only the stale ones are judged again. This slice only records judgements; turning statements into typed facts by binding is the next slice.
 //!
-//! 候选属性怎么来：先按声明的定义域/值域筛——签名两端的类落在属性的域/值域里的，或者
-//! 属性没声明域/值域的（两个方向都算，绑定可以是反向的）。**一端没绑到类的签名，只有
-//! 没声明那一端的属性才算候选**：类别词还没绑上时把声明了域的属性也给模型，NVDA 四篇上
-//! 现金流量表的每一行都绑到了泛泛的 value（主语 NVIDIA 没类，value 的域是指标）——裁判
-//! 判成写错的一半是它。筛完仍超过上限就不判，瞎判比不判糟。
+//! Where candidate attributes come from: first filter by declared domain/range: attributes where both ends of the signature's classes fall within the domain/range, or
+//! where the attribute declares no domain/range (both directions count, since the binding can be reversed). **A signature with one end unbound to a class gets only
+//! the attributes that declare nothing on that end**: when category words are not yet bound, attributes that declare a domain are not given to the model, since on the four NVDA documents
+//! every row of the cash flow statement was bound to a generic value (the subject NVIDIA has no class, and value's domain is metrics); the judge
+//! ruling it wrong was half of that. If the list still exceeds the cap after filtering, do not judge: guessing is worse than not judging.
 
 use crate::extraction::chat_retrying_rate_limits_at;
 use crate::llm_util;
@@ -26,18 +26,18 @@ use utopia_extract::phrase_align::{
 use utopia_store::phrase_bindings::{self, Decision, PhraseSignature};
 use uuid::Uuid;
 
-/// 一次问多少条签名。
+/// How many signatures to ask about at a time.
 const BATCH: usize = 12;
-/// 筛过定义域/值域之后候选属性最多这么多，再多就不判。
+/// After filtering by domain/range, at most this many candidate attributes; if there are more, do not judge.
 const CANDIDATE_LIMIT: usize = 60;
 
-/// 一票：这条签名选了哪个属性、哪个方向，属性是状态时还有一刻标哪一端（#966）。
-/// None = 没有属性对得上
+/// One vote: which attribute this signature picked, in which direction, and, if the attribute is a state, which end a moment marks (#966).
+/// None = no attribute matched
 type Vote = Option<(String, Direction, Option<Marks>)>;
 
-/// 代理绑到状态属性、却从没问过一刻标哪一端的绑定（这一列之前的判定，#966）：指纹没变也问
-/// 一次，只问这一格，不重判绑定（0053 修订 2026-09-27）。问过的不再问，没得到值的列进对齐
-/// 队列等人。只进开跑时的 todo，不进收尾的「变了没有」
+/// A binding the agent made to a state attribute but never asked which end a moment marks (the judgements before this column, #966): even if the fingerprint is unchanged, asked once,
+/// asking only this cell, without re-judging the binding (0053 revision 2026-09-27). Those already asked are not asked again; a column that got no value goes to the alignment queue
+/// to wait for a person. It enters only the todo at the start of a run, not the "did anything change" check at the end
 fn awaits_marks(b: &phrase_bindings::Binding, props: &[RelationTypeView]) -> bool {
     b.status == "bound"
         && b.marks.is_none()
@@ -47,8 +47,8 @@ fn awaits_marks(b: &phrase_bindings::Binding, props: &[RelationTypeView]) -> boo
             .is_some_and(|p| p.temporal == "state")
 }
 
-/// 一个类连同它的全部祖先。候选按它命中：属性的定义域声明在 legal_entity 上，
-/// organization 是它的子类，这条属性对 organization 的签名就是候选（#807 第一条）。
+/// A class together with all its ancestors. Candidates are matched on it: an attribute whose domain is declared as legal_entity,
+/// with organization as its subclass, makes that attribute a candidate for organization signatures (#807 first item).
 pub(crate) type Closure = HashMap<Uuid, Vec<Uuid>>;
 
 pub(crate) fn closures<'a>(classes: impl IntoIterator<Item = (Uuid, &'a [Uuid])>) -> Closure {
@@ -59,7 +59,7 @@ pub(crate) fn closures<'a>(classes: impl IntoIterator<Item = (Uuid, &'a [Uuid])>
         .map(|(id, direct)| {
             let mut seen: Vec<Uuid> = vec![*id];
             let mut stack: Vec<Uuid> = direct.to_vec();
-            // 多继承与菱形：UNION 语义，同一个祖先只进一次；环不会有（编辑器不允许）
+            // Multiple inheritance and diamonds: UNION semantics, so the same ancestor enters only once; cycles cannot occur (the editor does not allow them)
             while let Some(p) = stack.pop() {
                 if seen.contains(&p) {
                     continue;
@@ -75,13 +75,13 @@ pub(crate) fn closures<'a>(classes: impl IntoIterator<Item = (Uuid, &'a [Uuid])>
         .collect()
 }
 
-/// 一条候选怎么命中的：`via` 是经继承命中的依据（空 = 直接命中或没声明）。
+/// How a candidate was matched: `via` is the basis of matching through inheritance (empty = matched directly, or nothing declared).
 struct Fit {
     via: Vec<(Uuid, Uuid)>,
 }
 
-/// 声明的类里有没有一个是这一端的类或其祖先。没声明不限；这一端没绑到类时只被没声明
-/// 的接受。返回命中的 (声明的类, 这一端的类) 当它不是直接命中时
+/// Whether one of the declared classes is this end's class or one of its ancestors. Nothing declared means unrestricted; when this end is not bound to a class, it is accepted only
+/// if nothing is declared there. Returns the matched (declared class, this end's class) when it is not a direct match.
 fn within(
     declared: &[Uuid],
     class: Option<Uuid>,
@@ -101,7 +101,7 @@ fn within(
         .map(|d| Some((*d, c)))
 }
 
-/// 结构上对得上（本体代理给每批裁词表时用的判据，同对齐的候选）
+/// Structurally matches (the criterion the ontology agent uses when given the word list for each batch, the same as the alignment candidates)
 pub(crate) fn structurally_fits(
     p: &RelationTypeView,
     sig: &PhraseSignature,
@@ -110,7 +110,7 @@ pub(crate) fn structurally_fits(
     fits(p, sig, closure).is_some()
 }
 
-/// 签名两端的类落在属性声明的域/值域里，经继承也算；正反两个方向都算。
+/// The classes at both ends of the signature fall within the attribute's declared domain/range, counting through inheritance too; both directions count.
 fn fits(p: &RelationTypeView, sig: &PhraseSignature, closure: &Closure) -> Option<Fit> {
     fits_direction(p, sig, closure, Direction::Forward)
         .or_else(|| fits_direction(p, sig, closure, Direction::Reverse))
@@ -133,10 +133,10 @@ fn fits_direction(
         return Some(Fit { via });
     }
     if p.kind == "attribute" {
-        // 宾语是实体的签名也能绑文本属性（0044 修订 2026-10-22）：法定代表人、注册地址的值
-        // 是个名字，抽取把它列成了东西；只认正向，名字就是值。数、日期、真假不是名字。
-        // 没声明定义域的不算（`known_as` 这类）：没声明是「不限」，它会出现在每一条关系签名
-        // 的候选里，同 NVDA 上泛泛的 value 属性吞掉现金流量表每一行的教训
+        // Signatures whose object is an entity can also bind text attributes (0044 revision 2026-10-22): the value of legal representative and registered address
+        // is a name, which extraction lists as a thing; only the forward direction is accepted, since the name is the value. Numbers, dates and true/false are not names.
+        // Attributes with no declared domain are not counted (`known_as` and the like): nothing declared means unrestricted, so it would appear in every relation signature's
+        // candidates, the lesson of the generic value attribute on NVDA swallowing every row of the cash flow statement
         if p.datatype.as_deref() != Some("text")
             || direction != Direction::Forward
             || p.domains.is_empty()
@@ -177,18 +177,18 @@ fn invalid_agent_direction(
             })
 }
 
-/// 这条关系叫这个短语：键或标签归一后与它相等（同类别词的归一）。像不算——
-/// 「validated by tests」不是 validated_by，那是模型的题
+/// This relation is called this phrase: equal to it after normalising the key or label (the same normalisation as category words). Similar is not enough:
+/// "validated by tests" is not validated_by; that is the model's problem
 fn named_by(p: &RelationTypeView, phrase: &str) -> bool {
     phrase_bindings::normalize(&p.key) == phrase || phrase_bindings::normalize(&p.label) == phrase
 }
 
-/// 签名的短语正好是一条声明了的关系（#1242）：它叫这个短语，主语的类落在声明的域里、
-/// 宾语的类落在值域里（经继承也算），只认正向。域或值域没声明的不算——没声明是「不限」，
-/// 不是「就是它」；一端没有类的也不算。状态关系不算：绑上它还得说只带一个日期的陈述那个
-/// 日期标哪一端（`marks`，#966），本体答不了，留给对齐器——它绑上、顺带问这一格，问不到的
-/// 进队列等人。叫这个短语、两端也都对得上的不止一条，谁也不认：两条关系叫得一样，该由人
-/// 或模型来挑
+/// A signature's phrase is exactly a declared relation (#1242): it is called this phrase, the subject's class falls within the declared domain,
+/// and the object's class falls within the range (counting through inheritance), forward direction only. A domain or range that is not declared does not count: nothing declared means unrestricted,
+/// not "exactly this one"; and a signature with no class at either end does not count either. State relations do not count: binding them would also need to say which end a statement carrying only one date marks
+/// (`marks`, #966), which the ontology cannot answer, so it is left to the aligner. It binds and asks about this cell as it goes; cells it cannot ask about
+/// go to the queue for a person. If more than one relation is called this phrase and both ends match, none is accepted: two relations with the same name should be picked between by a person or the model
+/// (see the note above)
 fn declared<'a>(
     sig: &PhraseSignature,
     props: &'a [RelationTypeView],
@@ -209,8 +209,8 @@ fn declared<'a>(
     fitting.next().is_none().then_some(only)
 }
 
-/// 对齐器不再判的判定：人的；本体判的、此刻仍是它声明的那条关系的。本体判的行没有指纹，
-/// 按指纹比永远「过期」——不先放过它，每轮都会把它送去问模型、收尾时又以为变了再排一份
+/// Judgements the aligner no longer makes: the person's, and those the ontology judged that are still the relation it declares. A row the ontology judged has no fingerprint,
+/// so comparing fingerprints would always call it "stale": if it is not let through first, every round sends it to the model, and at the end, thinking it had changed, queues another copy
 fn settled(
     b: &phrase_bindings::Binding,
     sig: &PhraseSignature,
@@ -223,9 +223,9 @@ fn settled(
             && declared(sig, props, closure).map(|p| p.id) == b.relation_type_id)
 }
 
-/// 这些签名里还要本体判的：本体判得了（`declared`），又还没有人判过、也没按此刻声明的
-/// 那条关系判过（`settled`）。两样都只看签名的键（短语、两端的类、宾语是不是字面值），
-/// 所以用不着先数全库的签名
+/// Among these signatures, those the ontology can judge (`declared`), and that no one has judged yet nor judged against the relation currently declared (`settled`).
+/// Both look only at the signature's keys (phrase, the classes at both ends, whether the object is a literal),
+/// so there is no need to count all the library's signatures first
 fn undecided(
     keys: HashSet<SignatureKey>,
     existing: &HashMap<SignatureKey, phrase_bindings::Binding>,
@@ -243,11 +243,11 @@ fn undecided(
         .collect()
 }
 
-/// 推送来的文档抽完（0054）：它的陈述落在的签名里，短语正好是一条声明了的关系的，由本体
-/// 直接绑上，记成本体判的（#1242）。不问模型，没配对话模型也照判；别的签名照旧留给对齐器。
-/// 判定照旧是签名上的一行（0044 决定 3），人看得见、改得了；人的判定不动（`decide_on`
-/// 的规矩），已经由本体按同一条关系判过的不重写——判定时刻和回归记录不该随每次推送翻新。
-/// 返回写下的判定数
+/// After a pushed document is extracted (0054): among the signatures its statements fall on, those whose phrase is exactly a declared relation are bound by the ontology
+/// directly and recorded as ontology-judged (#1242). The model is not asked, and this runs even without a dialogue model configured; other signatures remain for the aligner.
+/// The judgement stays a row on the signature (0044 decision 3), visible and editable by people; a person's judgement is untouched (the `decide_on` rule),
+/// and one already judged by the ontology against the same relation is not rewritten: the moment of judgement and the regression record should not be refreshed on every push.
+/// Returns the number of judgements written
 pub(crate) async fn bind_declared(
     pool: &sqlx::PgPool,
     kb_id: Uuid,
@@ -260,7 +260,7 @@ pub(crate) async fn bind_declared(
             .into_iter()
             .filter(|(phrase, ..)| props.iter().any(|p| named_by(p, phrase)))
             .collect();
-    // 多数推送没有一个短语叫得出关系的名字：库级的签名就不必数了
+    // Most pushes have no phrase that names a relation: then there is no need to count the library-level signatures
     if keys.is_empty() {
         return Ok(0);
     }
@@ -271,7 +271,7 @@ pub(crate) async fn bind_declared(
         .into_iter()
         .map(|b| (b.key(), b))
         .collect();
-    // 推送落在的签名本体判不了、或第一篇之后已经判过：不数全库的签名也知道没有要判的（#1296）
+    // The signatures this push landed on cannot be judged by the ontology, or were already judged after the first document: even without counting the library's signatures we know there is nothing to judge (#1296)
     let keys = undecided(keys, &existing, &props, &closure);
     if keys.is_empty() {
         return Ok(0);
@@ -308,10 +308,10 @@ pub(crate) async fn bind_declared(
     Ok(written)
 }
 
-/// 签名的键：短语 + 两端的类 + 宾语是不是字面值（与 `PhraseSignature::key` 同形）
+/// The signature's key: phrase + the classes at both ends + whether the object is a literal (same shape as `PhraseSignature::key`)
 type SignatureKey = (String, Option<Uuid>, Option<Uuid>, bool);
 
-/// 只有键的签名：`settled` 只看键上的这几格，不必为它把库里的签名数一遍
+/// A signature with only its key: `settled` looks only at these cells on the key, so it need not count the library's signatures for it
 fn keyed(
     (phrase, subject_type_id, object_type_id, object_is_value): &SignatureKey,
 ) -> PhraseSignature {
@@ -329,11 +329,11 @@ fn keyed(
     }
 }
 
-/// 每条签名此刻的候选与指纹
+/// This moment's candidates and fingerprint for each signature
 type Considered<'a> = HashMap<SignatureKey, (Vec<&'a RelationTypeView>, String)>;
 
-/// 每条活着的签名此刻的候选（经继承命中）与指纹（0053）。开跑时算一次决定要判谁，
-/// 收尾时用重新加载的输入再算一次决定要不要再排——两次之间世界可能变了
+/// Each live signature's candidates at this moment (matched through inheritance) and fingerprint (0053). Computed once at the start to decide whom to judge,
+/// and recomputed at the end with reloaded inputs to decide whether to queue again: the world may have changed between the two
 fn consider<'a>(
     sigs: &[PhraseSignature],
     props: &'a [RelationTypeView],
@@ -348,7 +348,7 @@ fn consider<'a>(
                 .iter()
                 .filter(|p| fits(p, s, closure).is_some())
                 .collect();
-            // 结构对得上的太多时只留最近的几条（见 `shortlist`），按相关度排：第一票先看最像的
+            // When too many structurally match, keep only the nearest few (see `shortlist`), ranked by relevance: the first vote looks at the most similar first
             if let Some(keep) = shortlist.and_then(|m| m.get(&s.key())) {
                 fitting.retain(|p| keep.contains(&p.id));
                 fitting.sort_by_key(|p| keep.iter().position(|k| *k == p.id));
@@ -373,35 +373,35 @@ fn consider<'a>(
         .collect()
 }
 
-/// 第二票要不要投。第二票防的是「选第一个」冒充一致，要两票一致的是**绑定**；第一票
-/// 说没有一条对得上的签名，第二票怎么答都绑不上：答没有是「无」，答了一条是「拿不定」。
-/// 测量库一轮 864 条签名里第一票说没有的 317 条，没有一条最后绑上（bench README，
-/// 2026-09-28），这一票省下。第一票没答到的也不投：少一票本来就不下结论。
-/// 补问 marks 的照旧投两票：它要两票说同一个值
+/// Whether to cast the second vote. The second vote guards against "picking the first" passing as agreement; what needs two agreeing votes is the **binding**. If the first vote
+/// says no signature matches, the second vote cannot bind it however it answers: answering "none" is "none", answering with one is "cannot decide".
+/// Of the 864 signatures in one library's bench run, the 317 the first vote said matched none, none was bound in the end (bench README,
+/// 2026-09-28), so this vote is saved. Those the first vote did not answer do not get a vote either: with one vote missing, no conclusion can be drawn anyway.
+/// A re-ask for marks still casts two votes: it requires two votes saying the same value
 fn second_vote_is_due(first: &Vote, first_answered: bool, marks_only: bool) -> bool {
     marks_only || (first_answered && first.is_some())
 }
 
-/// 类别词规则的宾语是从类别词自己的字里读出来的（「british film」读出英国），只有中心词
-/// 的类别词（「state」「ship」）没有可读的字：一轮 159 个类别词里 127 个是单个词，提出
-/// 的 8 条规则没有一条读得出宾语（bench README，2026-09-28）。这种不问。
+/// The object of a category-word rule is read from the category word's own characters ("british film" reads as British). Category words whose
+/// head word ("state", "ship") has no readable characters: of 159 category words in one round, 127 are single words, and none of the 8 rules proposed could read an object (bench README, 2026-09-28).
+/// These are not asked about.
 ///
-/// 只认得出用空格分词的写法：一串 ASCII 字母是一个词。带连字符、数字的（「1968」、
-/// 「british-governed」）和不分词的文字（「英国电影」）看不出有没有修饰语，照旧问
+/// Only writing split by spaces is recognised: a run of ASCII letters is one word. Hyphenated or numeric forms ("1968", "british-governed") and unspaced text
+/// (such as a Chinese film title) cannot be seen to have modifiers, so they are still asked
 fn has_modifier(kind_word: &str) -> bool {
     !kind_word.trim().chars().all(|c| c.is_ascii_alphabetic())
 }
 
-/// 把签名分成批，候选相近的放在一起。返回每批里签名的下标。
+/// Splits signatures into batches, putting those with similar candidates together. Returns the index of each signature in each batch.
 ///
-/// 属性定义表在一批里只写一遍，占一次调用输入的将近一半：按到来的次序每十二条切一批时，
-/// 同批的签名互不相干（一条讲出生地、一条讲导演、一条讲所属球队），各自十条候选几乎不
-/// 重叠，合起来就是本体的一半（测量库上九十六条属性里约五十条）。这里只改排法：每条签名
-/// 看到的候选一条不少，判断一字不变。
+/// The attribute definition table is written once per batch and takes nearly half of one call's input: when cut every twelve in arrival order,
+/// signatures in the same batch are unrelated (one covers birthplace, one covers director, one covers club), each with ten candidates that barely
+/// overlap, adding up to half the ontology (about fifty of the ninety-six attributes in the measurement library). This changes only the ordering: each signature
+/// sees every one of its candidates, and the judgement is unchanged.
 ///
-/// 贪心：每批从还没排的第一条起，每次加进让这一批的候选并集长得最少的那一条，并列时取
-/// 靠前的——结果只由输入决定，同样的签名每次排成同样的批。没有候选的签名不问模型，
-/// 排在最后，不占有候选的批里的位置
+/// Greedy: each batch starts from the first signature not yet placed, and each time adds the signature that keeps the union of the batch's candidates smallest; on a tie take
+/// the earlier one. The result is determined only by the input, so the same signatures always form the same batches. Signatures with no candidates are not asked of the model,
+/// placed last, not taking up room in a batch that has candidates
 fn batch_by_candidates<K: Copy + Eq + std::hash::Hash>(
     sets: &[Vec<K>],
     size: usize,
@@ -431,7 +431,7 @@ fn batch_by_candidates<K: Copy + Eq + std::hash::Hash>(
     out
 }
 
-/// 日志里放得下的一段回复：空白折成一个空格，最多这么多字符。
+/// A reply segment that fits in the log: whitespace folded into one space, at most this many characters.
 const SNIPPET_CHARS: usize = 240;
 
 fn snippet(text: &str) -> String {
@@ -443,25 +443,25 @@ fn snippet(text: &str) -> String {
     out
 }
 
-/// 一条签名结构对得上的属性多过这个数，就按相关度只留这么多给模型看。第一次真跑里每条
-/// 签名平均拖着几十条候选（六个粗类切不掉什么），一次请求 1.8 万 token，对齐占了一轮
-/// 八成的用量（bench README，2026-09-24）；十条里若没有对的，多半是本体里就没有
+/// If a signature structurally matches more attributes than this number, only this many by relevance are shown to the model. In the first real run each
+/// signature dragged along dozens of candidates on average (six coarse classes cut nothing), 18,000 tokens per request, and alignment took
+/// eighty percent of a round's usage (bench README, 2026-09-24); if none of the ten is right, most likely the ontology simply has none
 const SHORTLIST: usize = 10;
-/// 同时在飞的对齐批次数；模型闸门（工作区的并发上限）在下面再限一次
+/// Number of alignment batches in flight at once; the model gate (the workspace's concurrency cap) limits it again below
 const PARALLEL_BATCHES: usize = 4;
-/// 一次嵌入多少条签名的文本
+/// How many signatures' text to embed at once
 const SHORTLIST_EMBED_BATCH: usize = 32;
 
-/// 签名 → 留给模型看的候选 id（按相关度）。没进表的签名照旧看全部结构候选
+/// Signature → candidate ids shown to the model (by relevance). Signatures not in the table still see all structural candidates
 type Shortlist = HashMap<SignatureKey, Vec<Uuid>>;
 
-/// 按相关度给候选多的签名开短名单：签名的文本（短语加一条例句）嵌入后，与属性的向量比
-/// 近（`embed_ontology` 建的那份），留最近的 [`SHORTLIST`] 条；标签里的词出现在短语里的
-/// 属性无论远近都留着（"based in" 对 "based in"）。没配嵌入模型、属性还没向量、或候选本来
-/// 就不多的签名不进表——那时模型看的还是全部结构候选。
+/// Give a short list to signatures with many candidates, ranked by relevance: the signature's text (the phrase plus one example sentence) is embedded and compared with the attribute vectors
+/// (the set built by `embed_ontology`); the nearest [`SHORTLIST`] are kept. Attributes whose label words appear in the phrase
+/// are kept regardless of distance ("based in" against "based in"). Without an embedding model, with attributes that have no vectors yet, or with few candidates to begin with,
+/// signatures are not in the table: the model then still sees all structural candidates.
 ///
-/// 签名的向量按 (库, 嵌入模型, 文本的哈希) 存在 `signature_vectors` 里，一轮只嵌没见过的
-/// 文本（#1097）：签名的文本两轮之间几乎不变，从前每轮全部重嵌，判的可能只是新来的几十条
+/// A signature's vector is stored in `signature_vectors` by (library, embedding model, hash of the text); each round only embeds texts not seen before
+/// (#1097): a signature's text barely changes between rounds, whereas previously all were re-embedded every round, when only dozens of new ones needed judging
 async fn shortlist(
     state: &AppState,
     settings: &utopia_core::models::LlmSettings,
@@ -486,15 +486,15 @@ async fn shortlist(
         .iter()
         .map(|t| Sha256::digest(t.as_bytes()).to_vec())
         .collect();
-    // 这一轮不再出现的文本、别的模型嵌的向量删掉。按全部候选多的签名留，不只按下面嵌了的：
-    // 一批嵌入失败时，上一轮存好的不跟着丢
+    // Remove text no longer present this round, and vectors embedded by other models. Signatures with many candidates are kept, not only those embedded below:
+    // when one batch's embedding fails, what was stored last round is not lost with it
     utopia_store::signature_vectors::prune(pool, kb_id, model, &hashes).await?;
     if wide.is_empty() {
         return Ok(out);
     }
-    // 先问这一类属性有没有向量，没有的签名不嵌：嵌了最近邻也是空，照样看全部。一个没跑过
-    // `embed_ontology` 的库从前每轮把一万七千条签名送去嵌入、短名单一条没开（#1097）。
-    // 一类问一句，至多两句
+    // First ask whether this class of attributes has vectors; signatures without are not embedded, since the nearest neighbours would be empty anyway and everything is seen. A library that has never run
+    // `embed_ontology` used to send seventeen thousand signatures to embedding every round, with not one shortlisted (#1097).
+    // Ask one question per class, at most two sentences
     let mut has_vectors = HashMap::new();
     for kind in ["relation", "attribute"] {
         if wide.iter().any(|s| property_kind(s) == kind) {
@@ -509,7 +509,7 @@ async fn shortlist(
     let wanted: Vec<Vec<u8>> = usable.iter().map(|&i| hashes[i].clone()).collect();
     let mut vectors = utopia_store::signature_vectors::get(pool, kb_id, model, &wanted).await?;
     let reused = vectors.len();
-    // 没存过的才嵌；两条签名文本相同（例句、引文都一样）只嵌一次
+    // Only embed what has never been stored; two signatures with the same text (same example, same quote) are embedded once
     let mut queued = HashSet::new();
     let missing: Vec<usize> = usable
         .iter()
@@ -527,8 +527,8 @@ async fn shortlist(
                     tracing::warn!(%kb_id, sent = batch.len(), got = v.len(), "签名向量数量对不上，这一批不开短名单");
                     continue;
                 }
-                // 欠费不是这一批的事：跳过它，后面每批、下一份对齐都撞同一个 429，而任务
-                // 照样 done、告警不响、马上再排一份（#1360）。带着类型出去，`alerting::hopeless` 才看得见
+                // Running out of credit is not this batch's concern: skip it; every later batch and the next alignment hit the same 429, and the task
+                // still finishes done, no alert fires, and another is queued straight away (#1360). Carry it out with its type, so `alerting::hopeless` can see it
                 Err(e) if utopia_llm::out_of_credit(&e).is_some() => return Err(e),
                 Err(e) => {
                     tracing::warn!(%kb_id, error = %e, "签名向量没算出来，这一批不开短名单");
@@ -544,12 +544,12 @@ async fn shortlist(
     }
     for &i in &usable {
         let s = wide[i];
-        // 这一批没嵌出来：不开短名单，模型看全部
+        // This batch could not be embedded: do not open the shortlist, the model sees all
         let Some(vector) = vectors.get(&hashes[i]) else {
             continue;
         };
         let (fitting, _) = &full[&s.key()];
-        // 字面值的签名只绑属性；宾语是实体的两种都可能（关系，或文本属性），不按类筛
+        // Literal-valued signatures bind only attributes; signatures whose object is an entity could be either (a relation, or a text attribute), so do not filter by class
         let near = utopia_store::ontology::nearest_relation_type_ids(
             pool,
             kb_id,
@@ -559,7 +559,7 @@ async fn shortlist(
         )
         .await?;
         if near.is_empty() {
-            // 属性还没有向量：不开短名单，模型看全部
+            // No vectors for the attributes yet: do not open the shortlist, the model sees all
             continue;
         }
         let fitting_ids: Vec<Uuid> = fitting.iter().map(|p| p.id).collect();
@@ -585,8 +585,8 @@ async fn shortlist(
     Ok(out)
 }
 
-/// 嵌入用的签名文本：短语加第一条例句和它的引文。缓存按它的哈希认，改了这里旧向量都对不上，
-/// 下一轮全部重嵌一次
+/// The signature text to embed: the phrase plus the first example sentence and its quote. The cache keys on its hash, so changing this makes old vectors mismatch,
+/// and every text is re-embedded once next round
 fn signature_text(s: &PhraseSignature) -> String {
     match (s.examples.first(), s.quotes.first()) {
         (Some(e), Some(q)) => format!("{} · {e} · {q}", s.phrase),
@@ -595,7 +595,7 @@ fn signature_text(s: &PhraseSignature) -> String {
     }
 }
 
-/// 签名能绑的是哪一类属性：宾语是字面值的绑属性，否则绑关系
+/// Which class of attribute a signature can bind: a literal-valued object binds attributes, otherwise it binds relations
 fn property_kind(s: &PhraseSignature) -> &'static str {
     if s.object_is_value {
         "attribute"
@@ -604,8 +604,8 @@ fn property_kind(s: &PhraseSignature) -> &'static str {
     }
 }
 
-/// 类别词 → 留给提规则看的属性 id（按相关度）。词的文本加几个例名嵌入，取最近的
-/// [`SHORTLIST`] 条；没配嵌入模型、属性没向量的不进表
+/// Category word → attribute ids shown to the rule-proposer (by relevance). The word's text plus some example names is embedded, and the nearest
+/// [`SHORTLIST`] are taken; without an embedding model, or with attributes that have no vectors, it is not in the table
 async fn shortlist_kind_words(
     state: &AppState,
     settings: &utopia_core::models::LlmSettings,
@@ -616,7 +616,7 @@ async fn shortlist_kind_words(
     let Some(client) = llm_util::embed_client(settings) else {
         return Ok(out);
     };
-    // 一条带向量的属性都没有，嵌了也是空手而回（理由同 `shortlist`）
+    // Not one attribute has a vector: embedding would return nothing either (same reason as `shortlist`)
     if words.is_empty()
         || !utopia_store::ontology::has_relation_type_vectors(&state.pool, kb_id, None).await?
     {
@@ -631,7 +631,7 @@ async fn shortlist_kind_words(
             let _permit = llm_util::acquire_embed(state, settings).await;
             match client.embed(&texts).await {
                 Ok(v) if v.len() == batch.len() => v,
-                // 同 `shortlist`：欠费停下整轮
+                // Same as `shortlist`: running out of credit stops the whole round
                 Err(e) if utopia_llm::out_of_credit(&e).is_some() => return Err(e),
                 Ok(_) | Err(_) => {
                     tracing::warn!(%kb_id, "类别词向量没算出来，这一批看全部候选");
@@ -656,7 +656,7 @@ async fn shortlist_kind_words(
     Ok(out)
 }
 
-/// 标签里有一个像样的词（四个字母以上）出现在短语里
+/// A decent word in the label (four letters or more) appears in the phrase
 fn label_in_phrase(label: &str, phrase: &str) -> bool {
     let phrase = phrase.to_lowercase();
     label
@@ -665,7 +665,7 @@ fn label_in_phrase(label: &str, phrase: &str) -> bool {
         .any(|w| w.len() >= 4 && phrase.contains(w))
 }
 
-/// 短名单：先是标签对上的（无论远近），再按向量距离补到上限；都是结构对得上的
+/// Shortlist: first those whose labels match (however far), then topped up to the cap by vector distance; all of them structurally match
 fn pick_shortlist(near: &[Uuid], fitting: &[Uuid], must_keep: &[Uuid], limit: usize) -> Vec<Uuid> {
     let mut out: Vec<Uuid> = must_keep
         .iter()
@@ -683,13 +683,13 @@ fn pick_shortlist(near: &[Uuid], fitting: &[Uuid], must_keep: &[Uuid], limit: us
     out
 }
 
-/// 一轮里没判完的（调用失败、回复读不出、模型漏答）自己再排几次；超过这个数就等
-/// 下一篇文档或本体的改动再问。不设上限的话，温度为零下一段每次都读不出的回复会让
-/// 任务每隔几十秒把同一段提示词再送一遍，没有尽头（同类别词对齐）
+/// Those not finished in a round (call failed, reply unreadable, the model skipped some) are queued again a few times; past this number, wait
+/// for the next document or an ontology change before asking again. Without a cap, a reply that is unreadable every time at temperature zero would make
+/// the task send the same prompt again every few dozen seconds, with no end (same as category-word alignment)
 pub(crate) const MAX_REASK: u32 = 3;
 
-/// 对一个库跑一遍：新出现的和过期的签名各判一次。
-/// `reask` 是这份任务已经是第几次自己排的（文档、本体、类别词对齐排的是 0）。
+/// Run over a library once: new and stale signatures are each judged once.
+/// `reask` is how many times this task has already queued itself (documents, ontology and category-word alignment queue 0)
 pub async fn align_phrases_reasking(
     state: &AppState,
     kb_id: Uuid,
@@ -703,16 +703,16 @@ pub async fn align_phrases_reasking(
     let settings = utopia_store::settings::get(pool, kb.workspace_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Chat model not configured; cannot align phrases"))?;
-    // 对齐是判断题：让模型按端点默认的强度想，不用工作区给抽取设的 minimal
+    // Alignment is a judgement call: let the model think at the endpoint's default strength, not the minimal the workspace sets for extraction
     let client = llm_util::chat_client(&settings)
         .ok_or_else(|| anyhow::anyhow!("Chat model not configured; cannot align phrases"))?;
-    // 类别词对齐还排着或跑着：两端的类还没定，现在判的签名指纹马上就变，判了也是重判。
-    // 等它收尾再来——排一份半分钟后的，排着的至多一份。别的入口（本体页、审核页、每篇文档
-    // 抽完）排的短语对齐也从这里过，所以这一道守住就够。
+    // Category-word alignment is still queued or running: the classes at both ends are not settled yet, so the fingerprints of the signatures judged now will change at once; judging now would be re-judging.
+    // Wait for it to finish and come back: at most one queued, queued half a minute later. Phrase alignment queued from other entry points (the ontology page, the review page, after each document
+    // is extracted) also goes through here, so this one guard is enough.
     //
-    // 本体向量还在补也等：编辑器建了属性先排 `embed_ontology` 再排这个任务，没向量的属性
-    // 进不了短名单，形状的指纹不变，现在判了它照样不在候选里（`bordered_by` 第一次真跑
-    // 就是这么漏的）。补齐任务几秒到几分钟，等得起
+    // Waiting also applies while ontology vectors are still being filled: when the editor creates an attribute it queues `embed_ontology` first and then this task; an attribute without a vector
+    // cannot enter the shortlist, so the shape's fingerprint does not change, and judging now would still leave it out of the candidates (this is how `bordered_by` slipped through on its first real run).
+    // The fill task takes seconds to minutes, so waiting is fine.
     let waiting_on = if utopia_store::jobs::pending_for_kb(pool, "align_types", kb_id).await? {
         Some("类别词对齐")
     } else if utopia_store::jobs::pending_for_kb(pool, "embed_ontology", kb_id).await? {
@@ -736,7 +736,7 @@ pub async fn align_phrases_reasking(
         .await?;
         return Ok(());
     }
-    // 一个库同时只跑一份，理由同类别词对齐（并行跑会把端点打出 502）
+    // Only one run per library at a time, for the same reason as category-word alignment (running in parallel makes the endpoint return 502)
     let mut guard = pool.acquire().await?;
     let locked: bool =
         sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtext('align_phrases'), hashtext($1))")
@@ -744,8 +744,8 @@ pub async fn align_phrases_reasking(
             .fetch_one(&mut *guard)
             .await?;
     if !locked {
-        // 正在跑的那份结束时会自己看一眼有没有新东西（见 align_phrases_locked 末尾）；这里
-        // 不排——排回去会和跑着的那份互相踢成死循环
+        // A run in progress checks by itself at the end whether anything new has arrived (see the end of align_phrases_locked); here
+        // it does not queue: queuing back would make it and the running one kick each other into a deadlock loop
         tracing::info!(%kb_id, "短语对齐已有一份在跑，这次跳过");
         return Ok(());
     }
@@ -757,9 +757,9 @@ pub async fn align_phrases_reasking(
     result
 }
 
-/// 对齐收尾：没绑上的形状够多，叫本体代理来看（0061 决定 2）。代理自己跳过提过的，
-/// 所以这里只数不筛；一分钟的去抖让连着几篇文档只叫一次。有属性没属性都从这里过——
-/// 空本体的签名全判「没有」，正是代理该来的时候
+/// Alignment wrap-up: if enough shapes went unbound, call the ontology agent to look (0061 decision 2). The agent skips those it has already raised,
+/// so here we only count and do not filter; a one-minute debounce means several documents in a row call it only once. Both with and without attributes pass through here:
+/// signatures in an empty ontology all judge "none", which is exactly when the agent should come
 async fn queue_ontology_agent_if_unbound(pool: &sqlx::PgPool, kb_id: Uuid) -> anyhow::Result<()> {
     let unbound = phrase_bindings::bindings(pool, kb_id)
         .await?
@@ -799,14 +799,14 @@ async fn align_phrases_locked(
         .into_iter()
         .map(|b| (b.key(), b))
         .collect();
-    // 每条活着的签名此刻的候选与指纹。候选按继承命中，多了再按相关度开短名单；指纹是判定
-    // 看到的全部输入（0053），短名单也算在内——名单变了就再问
+    // The candidates and fingerprint of each live signature at this moment. Candidates are matched through inheritance; if there are many, they are cut to a short list by relevance; the fingerprint covers all
+    // inputs to the judgement (0053), and the short list is included: if the list changes, ask again
     let full = consider(&sigs, &props, &closure, &versions, None);
     let short = shortlist(state, settings, kb_id, &sigs, &full).await?;
     let considered = consider(&sigs, &props, &closure, &versions, Some(&short));
-    // 过期 = 存下的指纹和此刻的不一样（没有指纹的是这一列出现前判的，各重判一次）。
-    // 不再按时间戳：父边的增删、请求途中的编辑（#795）时间戳看不见。人的判定、本体仍认的
-    // 判定（`settled`）不重判。绑到状态属性、从没问过一刻标哪一端的代理判定也问（`awaits_marks`，#966）
+    // Stale = the stored fingerprint differs from this moment's (those judged before this column existed are each judged again).
+    // No longer by timestamp: timestamps cannot see parent-edge additions and removals, or edits during a request (#795). A person's judgement, and ones the ontology still
+    // stands by (`settled`), are not judged again. A signature bound to a state attribute that was never asked which end a moment marks is also asked (`awaits_marks`, #966)
     let todo: Vec<&PhraseSignature> = sigs
         .iter()
         .filter(|s| match existing.get(&s.key()) {
@@ -820,8 +820,8 @@ async fn align_phrases_locked(
         })
         .collect();
     let attempted: HashSet<_> = todo.iter().map(|s| s.key()).collect();
-    // 其中指纹没变、只为补问 marks 进来的：这一问只能写 marks，绑定原样（0053 修订 2026-09-27）。
-    // 从前整条重判，两票没选属性就把绑上的签名判成 none，它的类型化行跟着作废
+    // Among these, those whose fingerprint is unchanged and that came in only to ask about marks: this ask can write marks only, the binding stays as it is (0053 revision 2026-09-27).
+    // Previously the whole binding was judged again; with two votes not picking an attribute, a signature that was bound got judged none, and its typed rows went with it
     let marks_only: HashMap<_, &phrase_bindings::Binding> = todo
         .iter()
         .filter_map(|s| {
@@ -834,7 +834,7 @@ async fn align_phrases_locked(
         .collect();
     tracing::info!(%kb_id, signatures = sigs.len(), to_decide = todo.len(), properties = props.len(), "短语对齐开始");
 
-    // 没有属性可绑：每条都是「没有」；属性出现后指纹变了，它们会再交回来
+    // No attribute to bind to: each is "none"; once an attribute appears the fingerprint changes, and they will be handed back
     if props.is_empty() {
         for s in &todo {
             phrase_bindings::decide(
@@ -854,7 +854,7 @@ async fn align_phrases_locked(
             )
             .await?;
         }
-        // 空本体正是需要本体代理的时候：照样数未绑签名、够了就排它，本体才长得出来
+        // An empty ontology is exactly when the ontology agent is needed: still count the unbound signatures, and queue it once there are enough, so the ontology can grow
         queue_ontology_agent_if_unbound(pool, kb_id).await?;
         return Ok(());
     }
@@ -865,18 +865,18 @@ async fn align_phrases_locked(
             .collect()
     };
     let (mut bound, mut none, mut undecided, mut skipped) = (0usize, 0usize, 0usize, 0usize);
-    // 调用或解析失败的批次：这轮跳过，结束时自己再排一次
+    // Batches that failed to call or parse: skipped this round, and queued once more at the end
     let mut failed = 0usize;
-    // 问了、模型也答了、却没答到的签名：两票缺一票就不下结论
+    // Signatures asked of the model that it answered without covering: with one of two votes missing, no conclusion is drawn
     let mut unanswered = 0usize;
-    // marks：补问写下了值的；问过却没得到两票同一个值、列进对齐队列的
+    // marks: where a re-ask wrote a value; where it was asked but two votes did not give the same value, the row goes to the alignment queue
     let (mut marked, mut unsettled) = (0usize, 0usize);
-    // 批与批并行（[`PARALLEL_BATCHES`] 个在飞，模型闸门再限一次）：一批两票串行要等模型
-    // 想两回，串着跑 22 批就是半小时，其中一次卡住的调用能把整轮拖住 18 分钟（bench README，
-    // 2026-09-24）。每批各记各的数，回来再加
+    // Batches run in parallel ([`PARALLEL_BATCHES`] in flight; the model gate limits it again): running two votes per batch in series makes the model think twice
+    // each time, so running 22 batches one after another takes half an hour, and one stuck call among them can hold the whole round for 18 minutes (bench README,
+    // 2026-09-24). Each batch records its own counts, which are added up on return
     {
         use futures_util::StreamExt;
-        // 只把引用搬进各批的 future
+        // Only move the references into each batch's future
         let (considered, full, closure, class_key, by_key, marks_only) = (
             &considered,
             &full,
@@ -885,10 +885,10 @@ async fn align_phrases_locked(
             &by_key,
             &marks_only,
         );
-        // 先把每批的 future 造出来再排队：直接在 map 里返回 async 块会让借用的生命周期
-        // 满足不了 tokio::spawn 要的 Send
-        // 候选相近的签名排进同一批（见 `batch_by_candidates`）：属性表一批只写一遍，同批的
-        // 签名候选重叠得越多，这张表越短
+        // Build each batch's future first and then queue them: returning an async block directly from map leaves the borrowed lifetimes unable
+        // to satisfy the Send that tokio::spawn requires
+        // Signatures with similar candidates are put into the same batch (see `batch_by_candidates`): the attribute table is written once per batch, and the more
+        // the signatures in a batch overlap in candidates, the shorter this table is
         let sets: Vec<Vec<Uuid>> = todo
             .iter()
             .map(|s| {
@@ -911,8 +911,8 @@ async fn align_phrases_locked(
                 let (mut bound, mut none, mut undecided, mut skipped, mut failed, mut unanswered) =
                     (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
                 let (mut marked, mut unsettled) = (0usize, 0usize);
-        // 候选超过上限的不问模型：记成 undecided 交给人，指纹照记——属性少下去指纹就变，
-        // 到时再问。从前超限和无候选一样静默跳过，签名永远排着又永远不可执行（#807）
+        // Signatures with candidates over the cap are not asked of the model: recorded as undecided for a person, with the fingerprint recorded too, since as attributes shrink the fingerprint changes,
+        // and they are asked then. Previously exceeding the cap was skipped silently, like having no candidates, so a signature stayed queued forever and could never execute (#807)
         let cands: Vec<Vec<&RelationTypeView>> = batch
             .iter()
             .map(|s| {
@@ -926,7 +926,7 @@ async fn align_phrases_locked(
             .collect();
         let mut votes: Vec<(Vote, Vote)> = vec![(None, None); batch.len()];
         let mut answered = vec![(false, false); batch.len()];
-        // 读得出回复的遍数：补问 marks 时，两遍的回复都回来了才算问过
+        // Number of rounds whose reply could be read: for a re-ask of marks, it counts as asked only when both rounds' replies have come back
         let mut replied = 0usize;
         for pass in 0..2 {
             let items: Vec<PhraseItem<'_>> = batch
@@ -974,7 +974,7 @@ async fn align_phrases_locked(
                                     .unwrap_or_default(),
                             })
                             .collect(),
-                        // 结构对得上却没进短名单的键：模型若从批里的属性表选了它，算票
+                        // A key that matches structurally but is not in the short list: if the model picks it from the batch's attribute table, it counts as a vote
                         also_allowed: full[&s.key()]
                             .0
                             .iter()
@@ -993,8 +993,8 @@ async fn align_phrases_locked(
                     .await
                 {
                     Ok(r) => r,
-                    // 欠费：这一批的 future 带着错误返回，下面的 `r?` 让整轮失败一次、告警响起，
-                    // 不按 failed 记——记了只会自己再排一份，撞同一个 429（#1360）
+                    // Out of credit: this batch's future returns an error; the `r?` below fails the whole round once and sets off the alert,
+                    // and it is not recorded as failed, since recording it would only queue another copy that hits the same 429 (#1360)
                     Err(e) if utopia_llm::out_of_credit(&e).is_some() => return Err(e),
                     Err(e) => {
                         tracing::warn!(%kb_id, error = %e, "短语对齐调用失败，这一批留到下次");
@@ -1012,10 +1012,10 @@ async fn align_phrases_locked(
             };
             skipped += malformed;
             if choices.is_empty() {
-                // 解出来了却一条都没读到：回复的形状不是我们认得的。这和解析失败是一回事，
-                // 按失败算、留到下次。从前这里什么都不说，每一条签名都当「有一票没答到」
-                // 静静跳过，日志里只有一串「完成 bound=0」——回复的开头要进日志，下次才
-                // 知道它长什么样（同类别词对齐）
+                // Decoded but not a single one read: the reply's shape is not one we recognise. This is the same as a parse failure,
+                // counted as a failure and left for next time. Previously this said nothing, each signature was quietly skipped as "one vote missing",
+                // and the log held only a string of "finished bound=0": the start of the reply has to go into the log, so next time we
+                // know what it looks like (same as category-word alignment)
                 tracing::warn!(
                     %kb_id,
                     pass,
@@ -1033,7 +1033,7 @@ async fn align_phrases_locked(
             }
             replied += 1;
             if malformed > 0 {
-                // 坏票长什么样得看得见：第一次真跑里一半签名被判坏票，查了一天才知道模型答的是标签
+                // What a bad vote looks like has to be visible: on the first real run half the signatures were judged bad votes, and it took a day to learn the model was answering with the label
                 tracing::info!(%kb_id, malformed, reply = %snippet(&reply.text), "短语对齐的回复里有坏票");
             }
             for c in choices {
@@ -1055,15 +1055,15 @@ async fn align_phrases_locked(
         for (i, s) in batch.iter().enumerate() {
             let basis = considered[&s.key()].1.as_str();
             if let Some(asked) = marks_only.get(&s.key()) {
-                // 补问 marks（0053 修订 2026-09-27）：两票都认这条绑定的属性与方向、又说了同一个
-                // 值，写下它；别的答案——没选属性、选了别的、没说或说得不一样——都让绑定原样。
-                // 两种都记下问过：不再问，没有值的列进对齐队列等人。回复没回来不算问过，
-                // 下次再问（同没答到的签名）；问不了的（候选超限）直接交给人
+                // Re-ask marks (0053 revision 2026-09-27): both votes name this binding's attribute and direction and give the same
+                // value, which is written down; any other answer (no attribute picked, a different one picked, nothing said, or said differently) leaves the binding as it is.
+                // Both record that it was asked: it is not asked again, and a column with no value goes to the alignment queue to wait for a person. A reply that did not come back does not count as asked,
+                // so it is asked again next time (same as signatures that got no answer); one that cannot be asked (candidates over the cap) goes straight to a person
                 if !cands[i].is_empty() && replied < 2 {
                     unanswered += 1;
                     continue;
                 }
-                // 这一票认的是这条绑定，又说了值：认了就是它说的值
+                // This vote names this binding's attribute and gave a value: if so, the value it gave is the value
                 let value_of = |v: &Vote| match v {
                     Some((k, d, m)) => m.filter(|_| {
                         by_key.get(k.as_str()).map(|p| p.id) == asked.relation_type_id
@@ -1086,9 +1086,9 @@ async fn align_phrases_locked(
             }
             if cands[i].is_empty() {
                 let fitting = considered[&s.key()].0.len();
-                // 两种「没问模型」各自落库，投影才退得掉、队列才收得住：
-                // 没有一条属性对得上 → none（绑过的签名失去支撑，类型化行随物化作废）；
-                // 对得上的太多 → undecided 交给人，不再每轮重排
+                // The two kinds of "did not ask the model" are each written to the database, so the projection can retire them and the queue can settle:
+                // no attribute matches → none (a bound signature loses its support, and typed rows are voided along with materialisation);
+                // too many match → undecided, handed to a person, not re-sorted every round
                 let (status, votes) = if fitting == 0 {
                     ("none", serde_json::json!({ "reason": "no_candidates" }))
                 } else {
@@ -1126,10 +1126,10 @@ async fn align_phrases_locked(
             }
             let (a, b) = &votes[i];
             let (ans_a, ans_b) = answered[i];
-            // 第一票说没有的不投第二票（见 `second_vote_is_due`）：结论就是没有
+            // A signature the first vote said matched nothing does not get a second vote (see `second_vote_is_due`): the conclusion is none
             let asked_twice = second_vote_is_due(a, ans_a, false);
             if !ans_a || (asked_twice && !ans_b) {
-                // 有一票没答到：不下结论，下次再问
+                // One vote got no answer: no conclusion, ask again next time
                 unanswered += 1;
                 continue;
             }
@@ -1155,7 +1155,7 @@ async fn align_phrases_locked(
                 // semantic none nor permission to silently flip the model's answer.
                 record["reason"] = serde_json::json!("invalid_direction");
             }
-            // 两票选的属性与方向（或都说没有）是否一致
+            // Whether the attribute and direction the two votes picked (or both said none) agree
             let agree = match (a, b) {
                 (Some((ka, da, _)), Some((kb, db, _))) => ka == kb && da == db,
                 (None, None) => true,
@@ -1181,10 +1181,10 @@ async fn align_phrases_locked(
                 undecided += 1;
                 continue;
             }
-            // 属性是状态时，两票还说一刻标哪一端（#966）：说了同一个值才写下它。没说、或说得
-            // 不一样，绑定照绑、这一格空着，记下问过——不再问，列进对齐队列等人（0053 修订
-            // 2026-09-27）。从前没说的算没答到，模型一直只答三格时每轮重问、永远绑不上。
-            // 事件与恒常不问这一格
+            // Where the attribute is a state, the two votes also say which end a moment marks (#966): only when they say the same value is it written down. If nothing was said, or
+            // it differs, the binding stays, this cell is left empty, and it is recorded as asked: it is not asked again and goes to the alignment queue for a person (0053 revision
+            // 2026-09-27). Previously not saying anything counted as not answered, so when the model only ever answered three cells, it was asked again every round and never bound.
+            // Events and constants do not ask this cell
             let state = a
                 .as_ref()
                 .and_then(|(k, _, _)| by_key.get(k.as_str()))
@@ -1331,9 +1331,9 @@ async fn align_phrases_locked(
     if unanswered > 0 {
         tracing::warn!(%kb_id, unanswered, "短语对齐有签名模型没答到，这些签名这轮没有结论");
     }
-    // 提规则（0044 决定 3 第五片）：本轮刚判过的签名，和带类别词的东西，问模型「这种形状
-    // 还蕴含什么」。只问本轮判过的：指纹没变的形状上一轮已经问过，答案（提案或代理驳回）
-    // 还在 implication_rules 里；指纹变了它就在 todo 里，自然再问
+    // Rule proposal (0044 decision 3, fifth slice): for the signatures judged this round, and things with category words, ask the model "what else does this shape
+    // entail?". Only those judged this round are asked: shapes whose fingerprint is unchanged were already asked last round, and the answer (a proposal or the agent's rejection)
+    // is still in implication_rules; if the fingerprint changes it is in the todo, and it is asked again naturally
     {
         let decided_now: HashMap<_, _> = phrase_bindings::bindings(pool, kb_id)
             .await?
@@ -1349,15 +1349,15 @@ async fn align_phrases_locked(
             .collect();
         let mut asks: Vec<crate::implication::RuleAsk<'_>> = Vec::new();
         for s in &todo {
-            // 只补问了 marks 的没有重判：指纹没变，它的规则上一轮问过
+            // Only re-asked for marks and not re-judged: the fingerprint is unchanged, and its rules were asked last round
             if marks_only.contains_key(&s.key()) {
                 continue;
             }
             let Some(b) = decided_now.get(&s.key()) else {
                 continue;
             };
-            // 只问绑上的签名：判「无」的形状一轮 1121 条问下来提了不到 1% 的规则，却占了
-            // 提规则一半以上的调用（bench README，2026-09-24）；拿不定的等人先定
+            // Only signatures that did bind are asked: shapes judged none produced, over a round of 1121 of them, under 1% of the rules proposed, yet took more than half
+            // of the rule-proposing calls (bench README, 2026-09-24); the undecided ones wait for a person to settle them first
             if b.status != "bound" {
                 continue;
             }
@@ -1378,7 +1378,7 @@ async fn align_phrases_locked(
                 basis,
             });
         }
-        // 类别词：每个词问一次；候选是主语能落在它绑到的类（或没声明）的关系属性
+        // Category words: each word is asked once; candidates are the relation attributes whose subject can fall within the class it is bound to (or that declare nothing)
         let kind_basis: Vec<String> = kind_words
             .iter()
             .map(|k| {
@@ -1394,7 +1394,7 @@ async fn align_phrases_locked(
                     + &k.kind_word
             })
             .collect();
-        // 类别词的候选也开短名单：词加例名嵌入后取最近的属性；没有向量时看全部
+        // Category-word candidates also get a short list: after the word is embedded with some example names, take the nearest attributes; with no vectors, look at all
         let fresh: Vec<&utopia_store::type_bindings::KindWordSignature> = kind_words
             .iter()
             .filter(|k| !asked_kind.contains(k.kind_word.as_str()) && has_modifier(&k.kind_word))
@@ -1436,26 +1436,26 @@ async fn align_phrases_locked(
             }
         }
     }
-    // 绑定定了，视图跟着算：绑上的签名下的陈述成类型化行，绑定变了的行作废（0067）
+    // Once the binding is settled, the view follows: signatures' statements that are bound become typed rows, and rows whose binding changed are voided (0067)
     let typed = utopia_store::materialize::materialize(pool, kb_id).await?;
     tracing::info!(%kb_id, added = typed.added, merged = typed.merged, retired = typed.retired, "类型化事实按绑定算完");
     if typed.added > 0 || typed.merged > 0 || typed.retired > 0 {
         state.emit_graph(kb_id);
     }
-    // 这一轮跑着的时候世界没停：新文档带来新签名，改了的属性、动了的父边让刚判的绑定
-    // 过期，本轮没排上的触发也都落在这里。有没试过的新签名、有本轮判完指纹又变了的绑定
-    // （请求途中的编辑，#795），就再排一次（从头算一份，新签名换了提示词）。
-    // 只看**活着的**签名：端点的类换了，旧签名的行没有陈述可判，它永远「过期」却永远
-    // 不可执行——从前 `stale` 把这种孤儿每轮交回来，一条孤儿排一次 job，三轮三次（#807）
+    // The world did not stop while this round ran: new documents bring new signatures, and changed attributes or moved parent edges make the bindings just judged
+    // stale; triggers that did not get queued this round also land here. Signatures never tried, and bindings whose fingerprint changed after this round's judgement
+    // (edits made mid-request, #795), are queued again (computed from scratch, since new signatures change the prompt).
+    // Only **live** signatures are considered: when the endpoint's class changes, the rows of old signatures have no statements left to judge; they would be "stale" forever yet
+    // never executable. Previously `stale` handed these orphans back every round, one job queued per orphan, three rounds three times (#807)
     let changed = {
-        // **重新加载**，不是拿开跑时的快照比：快照就是判定写下的那份指纹，跟它比永远
-        // 相等。模型答着的时候改了定义（#795）、加了父边、来了新文档，只有再读一遍才看得见
+        // **Reload**, rather than comparing with the snapshot from the start of the run: the snapshot is the fingerprint the judgement wrote, and comparing with it would always
+        // be equal. If the definition was edited while the model was answering (#795), a parent edge was added, or a new document came in, only reading again sees it
         let props = utopia_store::ontology::relation_type_views(pool, kb_id).await?;
         let classes = utopia_store::graph::entity_types(pool, kb_id).await?;
         let closure = closures(classes.iter().map(|c| (c.id, c.parents.as_slice())));
         let versions = phrase_bindings::property_versions(pool, kb_id).await?;
         let sigs = phrase_bindings::signatures(pool, kb_id).await?;
-        // 短名单沿用开跑时算的那份：向量没变，名单就没变；变了的签名本轮之后自然再问
+        // The short list keeps the one computed at the start: if the vectors have not changed, the list has not; signatures that changed will be asked naturally later
         let now_considered = consider(&sigs, &props, &closure, &versions, Some(&short));
         let now: HashMap<_, _> = phrase_bindings::bindings(pool, kb_id)
             .await?
@@ -1470,10 +1470,10 @@ async fn align_phrases_locked(
             }
         })
     };
-    // 本轮没判完的（调用失败、回复读不出、模型漏答了几条）自己再排，最多 MAX_REASK 次，
-    // 每次多等一会。从前只有失败的批次会再排，读不出的回复解成「零条、零坏」不算失败，
-    // 漏答的签名就只能等下一篇文档来排——最后一篇之后没有下一篇，它们就永远没有结论；
-    // 而漏答不写任何行，审核队列也看不见（同类别词对齐）
+    // Those this round did not finish (call failed, reply unreadable, the model skipped some) queue themselves again, at most MAX_REASK times,
+    // waiting a little longer each time. Previously only failed batches queued again; a reply that could not be read counted as "zero items, zero bad" and not as failure,
+    // and a signature the model skipped could only wait for the next document to queue it. After the last document there is no next, so they never got a conclusion;
+    // and a skip writes no row, so the review queue cannot see it either (same as category-word alignment)
     let unfinished = failed > 0 || unanswered > 0;
     if !changed && !unfinished {
         queue_ontology_agent_if_unbound(pool, kb_id).await?;
@@ -1529,7 +1529,7 @@ mod tests {
 
     #[test]
     fn signatures_with_the_same_candidates_share_a_batch() {
-        // 六条签名、三种候选集，交错着来；每批两条
+        // Six signatures, three candidate sets, interleaved; two per batch
         let sets: Vec<Vec<u32>> = vec![
             vec![1, 2],
             vec![7, 8],
@@ -1539,15 +1539,15 @@ mod tests {
             vec![1, 2, 3],
         ];
         let batches = batch_by_candidates(&sets, 2);
-        // 每条签名恰好出现一次
+        // Each signature appears exactly once
         let mut all: Vec<usize> = batches.iter().flatten().copied().collect();
         all.sort_unstable();
         assert_eq!(all, vec![0, 1, 2, 3, 4, 5]);
-        // 候选一样的排在一起，没有候选的在最后
+        // Those with the same candidates are placed together; those with no candidates go last
         assert_eq!(batches, vec![vec![0, 3], vec![1, 4], vec![5], vec![2]]);
-        // 同样的输入排成同样的批
+        // The same input gives the same batches
         assert_eq!(batch_by_candidates(&sets, 2), batches);
-        // 一批的候选并集比按次序切的小
+        // The union of candidates in a batch is smaller than when cut in arrival order
         let union = |b: &Vec<usize>| {
             b.iter()
                 .flat_map(|i| sets[*i].iter())
@@ -1562,7 +1562,7 @@ mod tests {
     #[test]
     fn a_shortlist_keeps_label_matches_and_fills_by_distance_within_the_fitting_set() {
         let ids: Vec<Uuid> = (0..6).map(|_| Uuid::now_v7()).collect();
-        // near 按距离：ids[3] 最近，但不在结构候选里；ids[5] 标签对上，排在最后也留
+        // near by distance: ids[3] is nearest but not among the structural candidates; ids[5] matches the label, and is kept even though it sits last
         let near = vec![ids[3], ids[0], ids[1], ids[2], ids[4], ids[5]];
         let fitting = vec![ids[0], ids[1], ids[2], ids[4], ids[5]];
         let picked = pick_shortlist(&near, &fitting, &[ids[5]], 3);
@@ -1622,11 +1622,11 @@ mod tests {
         }
     }
 
-    /// 域/值域筛候选：声明了的要落在里面（正反都算），没声明的不限，类为空的一端不限
+    /// Filter candidates by domain/range: a declared one must fall within it (both directions count); undeclared is unrestricted; an empty class at one end is unrestricted
     #[test]
     fn a_property_fits_a_signature_by_its_declared_ends_in_either_direction() {
         let (org, place, person) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        // 没有父边时闭包为空：每个类只等于它自己，行为与从前一样
+        // With no parent edges the closure is empty: each class equals only itself, behaving the same as before
         let ok = |p: &RelationTypeView, s: &PhraseSignature| fits(p, s, &Closure::new()).is_some();
         let hq = view("relation", vec![org], vec![place]);
         assert!(ok(&hq, &sig(Some(org), Some(place), false)));
@@ -1655,7 +1655,7 @@ mod tests {
             "属性只接字面值"
         );
     }
-    /// 声明在祖先上的属性经继承命中子类的签名（#807 第一条）；依据要能说给模型听
+    /// An attribute declared on an ancestor matches a subclass's signatures through inheritance (#807 first item); the basis must be explainable to the model
     #[test]
     fn a_property_declared_on_an_ancestor_fits_a_subclass_by_inheritance() {
         let (legal_entity, org, place) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
@@ -1731,7 +1731,7 @@ mod tests {
         }
     }
 
-    /// 闭包：多继承与菱形，每个祖先只出现一次，且含自己
+    /// Closure: multiple inheritance and diamonds, each ancestor appears once, and it includes itself
     #[test]
     fn closures_walk_the_hierarchy_once_per_ancestor() {
         let (thing, agent, legal, org) = (
@@ -1740,7 +1740,7 @@ mod tests {
             Uuid::now_v7(),
             Uuid::now_v7(),
         );
-        // org ⊂ agent ⊂ thing 且 org ⊂ legal ⊂ thing：菱形
+        // org ⊂ agent ⊂ thing and org ⊂ legal ⊂ thing: a diamond
         let (a, l, o) = ([thing], [thing], [agent, legal]);
         let c = closures([
             (thing, &[][..]),

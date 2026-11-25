@@ -30,7 +30,7 @@ fn zero_is_permanent_and_representable_positive_days_are_accepted() {
         assert_eq!(expires_at.signed_duration_since(now), Duration::days(days));
     }
 
-    // 上限来自日期能否表示，不是任意的业务天数限制。
+    // The limit comes from whether the date can be represented, not from an arbitrary business-day limit.
     let last_valid_days = DateTime::<Utc>::MAX_UTC
         .signed_duration_since(now)
         .num_days();
@@ -146,7 +146,7 @@ async fn issue_route_validates_expiration_before_writing_tokens_or_success_audit
                 } else {
                     let expires_at =
                         expires_at.ok_or_else(|| anyhow::anyhow!("missing expiration"))?;
-                    // PostgreSQL 保留微秒，比较时使用同一精度。
+                    // PostgreSQL keeps microseconds, so the same precision is used for comparison.
                     let earliest = (before + Duration::days(days)).timestamp_micros();
                     let latest = (after + Duration::days(days)).timestamp_micros();
                     anyhow::ensure!((earliest..=latest).contains(&expires_at.timestamp_micros()));
@@ -188,7 +188,7 @@ async fn issue_route_validates_expiration_before_writing_tokens_or_success_audit
     }
     .await;
 
-    // 审计只追加，保留在专用测试库中；随机用户 ID 隔离每次运行的计数。
+    // Audit is append-only, kept in a dedicated test database; random user IDs isolate the count of each run.
     sqlx::query("DELETE FROM organizations WHERE id = $1")
         .bind(org_id)
         .execute(&pool)

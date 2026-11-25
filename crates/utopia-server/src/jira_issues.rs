@@ -1,46 +1,46 @@
-//! Jira 工单来源：一张工单 = 一篇文档，正文里带**字段级的变更史**。
+//! Jira ticket source: one ticket = one document, and its body carries the **field-level change history**.
 //!
-//! 与 [`crate::github_issues`] 是同一个判断（别取现在，取变化），但 Jira 给的
-//! 原料更强，取法也更省：
+//! It is the same judgement as [`crate::github_issues`] (take the change, not the current state), but the Jira raw material is
+//! richer, and it is cheaper to fetch:
 //!
-//! ## 一次调用就够
+//! ## One call is enough
 //!
-//! GitHub 那边要三次拉取，事件还被迫走逐工单（`issues/events` 不支持 `since`，
-//! 且会被 PR 事件淹没）。Jira 的 `search` 一次就能带回全部：
+//! GitHub needs three fetches, and events are forced onto a per-ticket path (`issues/events` does not support `since`,
+//! and it is drowned by PR events). Jira's `search` returns everything in one go:
 //!
 //! ```text
 //! GET /rest/api/2/search?jql=…&expand=changelog&fields=…,comment
 //! ```
 //!
-//! 工单本体、完整变更史、评论一并返回，**没有 N+1**。
+//! the ticket itself, the full change history and the comments all come back together, **with no N+1**.
 //!
-//! ## 变更史是字段级的 from → to
+//! ## The change history is field-level from → to
 //!
-//! GitHub 的事件只说"发生了 labeled"，Jira 直接说"哪个字段从什么变成什么"：
+//! GitHub events only say "labeled happened"; Jira says directly "which field changed from what to what":
 //!
 //! ```text
-//! 2026-08-24  Mickael Maison  Version: (空) → 4.1.0
+//! 2026-08-24  Mickael Maison  Version: (empty) → 4.1.0
 //! 2026-08-24  Luke Chen       status: Patch Available → Resolved
 //! ```
 //!
-//! 对账本来说这是更好的原料——`from`/`to` 本身就是一次认知变更的两端。
+//! For reconciliation this is better raw material: `from` and `to` are themselves the two ends of one cognitive change.
 //!
-//! ## 增量靠 JQL，不靠 since 参数
+//! ## Incrementality comes from JQL, not a since parameter
 //!
-//! Jira 没有 `since`，但 JQL 能表达：`updated >= "2026-08-30 12:00"`。
-//! 时间格式必须是 Jira 认的那种（不是 RFC3339），且**要带引号**——
-//! 这两点写错的症状都是 400，而不是"查不到"。
+//! Jira has no `since`, but JQL can express it: `updated >= "2026-08-30 12:00"`.
+//! The time format must be the one Jira accepts (not RFC3339), and it **must be quoted**:
+//! getting either of these wrong shows up as a 400, not as "nothing found".
 //!
-//! ## Server/DC 与 Cloud 的差别
+//! ## The difference between Server/DC and Cloud
 //!
-//! 本模块按 **API v2**（Jira Server/DC）写。Cloud 的 v3 把 `description` 与
-//! 评论正文换成了 ADF（一棵 JSON 树而非字符串）——那需要一个渲染器，是另一件事。
-//! v2 在 Cloud 上通常仍可用且返回字符串，所以先只做 v2；真遇到只有 v3 的实例
-//! 再补，那时才知道 ADF 的哪些节点是必须处理的。
+//! This module is written against **API v2** (Jira Server/DC). Cloud's v3 turns `description` and
+//! comment bodies into ADF (a JSON tree rather than a string), which needs a renderer, a separate job.
+//! v2 usually still works on Cloud and returns strings, so only v2 is done first; a v3-only instance
+//! will be added when one is actually encountered, and only then will we know which ADF nodes must be handled.
 //!
-//! 但 Cloud 撤掉了 `search`（410 Gone，CHANGE-2046），只剩 `search/jql`：
-//! 按 `nextPageToken` 翻页、`isLast` 收尾，没有 `startAt` 也没有 `total`。
-//! Server/DC 仍只有旧端点，所以只对 Cloud 站点换。
+//! But Cloud has withdrawn `search` (410 Gone, CHANGE-2046), leaving only `search/jql`:
+//! paged by `nextPageToken` and finished by `isLast`, with no `startAt` and no `total`.
+//! Server/DC still has only the old endpoint, so the switch is made only for Cloud sites.
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -49,13 +49,13 @@ use std::time::Duration;
 
 use crate::ticket::stamp;
 
-/// 达到列表预算后仍读完当前时间组，下次从完整组之后继续。
+/// After the list budget is reached, the current time group is still read to the end; the next round continues after the complete group.
 const MAX_PAGES: u32 = 10;
 const PAGE_SIZE: u32 = 50;
 const MAX_RATE_LIMIT_RETRIES: u32 = 3;
 
-/// 想要的字段。**必须显式列**：不列 `comment` 就不返回评论，
-/// 而默认返回全部字段会把响应撑到几百 KB 一条。
+/// The fields wanted. **They must be listed explicitly**: without `comment` no comments are returned,
+/// and returning all fields by default would bloat the response to hundreds of KB per ticket.
 const FIELDS: &str = "summary,status,issuetype,priority,created,updated,resolutiondate,\
                       labels,assignee,reporter,description,comment";
 
@@ -63,11 +63,11 @@ const FIELDS: &str = "summary,status,issuetype,priority,created,updated,resoluti
 pub struct SearchPage {
     #[serde(default)]
     pub issues: Vec<Issue>,
-    // total 用来识别提前结束的分页，缺失时不能把空页当作完整结果。
+    // total is used to recognise a page sequence that ended early; when it is missing, an empty page must not be taken as a complete result.
     pub total: i64,
 }
 
-/// Cloud `search/jql` 的一页：没有 total，只能靠 token 与 isLast 判断是否读完。
+/// One page of Cloud `search/jql`: there is no total, so whether reading is finished can only be judged by the token and isLast.
 #[derive(Debug, Deserialize)]
 pub struct JqlSearchPage {
     #[serde(default)]
@@ -78,7 +78,7 @@ pub struct JqlSearchPage {
     pub is_last: bool,
 }
 
-/// 只有 Cloud 撤掉了旧 `search`；Server/DC 站点换过去反而会 404。
+/// Only Cloud has withdrawn the old `search`; switching Server/DC sites to it would return 404.
 pub fn is_jira_cloud(base_url: &str) -> bool {
     reqwest::Url::parse(base_url).is_ok_and(|url| match url.host_str() {
         Some("api.atlassian.com") => url.path().starts_with("/ex/jira"),
@@ -91,7 +91,7 @@ pub fn is_jira_cloud(base_url: &str) -> bool {
 pub struct Issue {
     pub key: String,
     pub fields: Fields,
-    /// 只有 `expand=changelog` 时才有
+    /// Only present with `expand=changelog`
     #[serde(default)]
     pub changelog: Option<Changelog>,
 }
@@ -113,8 +113,8 @@ pub struct Fields {
     pub comment: Option<Comments>,
 }
 
-/// Jira 的时间戳是 `2026-08-24T11:11:52.944+0000`——**没有冒号的时区偏移**，
-/// 不是 RFC3339。chrono 的 `DateTime<Utc>` 默认解不了它。
+/// Jira's timestamps are `2026-08-24T11:11:52.944+0000`: **a timezone offset without a colon**,
+/// not RFC3339. chrono's `DateTime<Utc>` cannot parse it by default.
 #[derive(Debug, Clone, Copy)]
 pub struct JiraTime(pub DateTime<Utc>);
 
@@ -184,12 +184,12 @@ fn who(u: &Option<User>) -> &str {
         .unwrap_or("?")
 }
 
-/// 把一张工单排成一篇文档。**纯函数，不联网**——取回与组织分开，组织这一半测得动。
+/// Lay one ticket out as one document. **A pure function, no network**: fetching and organising are separated, so the organising half is testable.
 pub fn render(issue: &Issue) -> String {
     let f = &issue.fields;
-    // 抬头写成带日期的陈述句，不是键值对：抽取器读的是句子，
-    // "Reported by X on 2026-08-24T11:11:52Z" 能抽出带 valid_from 的事实。
-    // Jira 给的毫秒不写，抽取器也只认到秒
+    // The header is written as a dated declarative sentence, not as key-value pairs: the extractor reads sentences,
+    // and "Reported by X on 2026-08-24T11:11:52Z" can yield a fact with valid_from.
+    // Jira's milliseconds are not written, and the extractor only recognises down to seconds
     let mut sentences = Vec::new();
     if let (Some(r), Some(c)) = (&f.reporter, &f.created) {
         sentences.push(format!(
@@ -222,8 +222,8 @@ pub fn render(issue: &Issue) -> String {
         sentences.push(format!("Labelled {}.", f.labels.join(", ")));
     }
 
-    // **字段级变更史。** Jira 比 GitHub 多给的正是这个：不只是"发生了什么事件"，
-    // 而是"哪个字段从什么变成了什么"——from/to 本身就是一次认知变更的两端
+    // **Field-level change history.** This is exactly what Jira gives beyond GitHub: not just "what event happened",
+    // Rather than "which field changed from what to what": from/to are themselves the two ends of one cognitive change
     let mut history = Vec::new();
     for h in issue.changelog.iter().flat_map(|c| c.histories.iter()) {
         let Some(at) = h.created else { continue };
@@ -259,8 +259,8 @@ pub fn render(issue: &Issue) -> String {
     })
 }
 
-/// 增量用的 JQL。**时间格式是 Jira 自己的**（`yyyy-MM-dd HH:mm`），不是 RFC3339，
-/// 而且要带引号——两点写错的症状都是 400，不是"查不到"。
+/// The JQL used for increments. **The time format is Jira's own** (`yyyy-MM-dd HH:mm`), not RFC3339,
+/// and it must be quoted: getting either of these wrong shows up as a 400, not as "nothing found".
 pub fn jql(project: &str, since: Option<DateTime<Utc>>) -> String {
     let mut q = format!("project = {project}");
     if let Some(t) = since {
@@ -278,8 +278,8 @@ pub struct IssueWindow {
     pub checkpoint: Option<DateTime<Utc>>,
 }
 
-/// 复读固定的已选前缀，检测更新导致的 offset 位移；变化时不确认本轮 checkpoint。
-/// `cloud` 由调用方按 [`is_jira_cloud`] 给出，测试的本地 mock 才能走 Cloud 的翻页。
+/// Re-reads the fixed selected prefix to detect the offset shift caused by updates; when it changes, this round's checkpoint is not confirmed.
+/// `cloud` is given by the caller via [`is_jira_cloud`], so that the test's local mock can exercise Cloud paging.
 pub async fn fetch_window(
     http: &reqwest::Client,
     base_url: &str,
@@ -356,7 +356,7 @@ async fn fetch_window_pass(
         }
         let (issues, more) = if cloud {
             let page_data: JqlSearchPage = fetch_page(http, url, auth).await?;
-            // 没有 total 可对账：未到末页却给空页或不给 token，都不能当作读完。
+            // There is no total to reconcile against: an empty page before the last page, or no token, must not count as having read everything.
             anyhow::ensure!(
                 page_data.is_last
                     || (!page_data.issues.is_empty() && page_data.next_page_token.is_some()),
@@ -398,7 +398,7 @@ async fn fetch_window_pass(
             if stop_after.is_some_and(|boundary| updated > boundary) {
                 return Ok((window, positions));
             }
-            // 分钟取整返回的旧记录也可能改变 offset，复读时不能只比较新记录。
+            // Old records returned by minute truncation can also shift the offset, so on re-read, comparing only the new records is not enough.
             anyhow::ensure!(
                 positions.insert(issue.key.clone(), updated).is_none(),
                 "Jira issue repeated during pagination; retry the previous checkpoint"
@@ -444,7 +444,7 @@ async fn fetch_page<T: serde::de::DeserializeOwned>(
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS && retries < MAX_RATE_LIMIT_RETRIES {
             if let Some(delay) = rate_limit_delay(resp.headers(), Utc::now()) {
-                // 保留已读取的组和当前页，不能把限流变成从头扫描的循环。
+                // Keep the groups already read and the current page; rate limiting must not turn into a loop that scans from the beginning.
                 let delay = delay.max(Duration::from_secs(1 << retries));
                 retries += 1;
                 tracing::info!(
@@ -457,7 +457,7 @@ async fn fetch_page<T: serde::de::DeserializeOwned>(
                 continue;
             }
         }
-        // Jira 把 JQL 语法错误也报成 400，正文里才是原因。
+        // Jira reports JQL syntax errors as 400 too; the cause is in the body.
         let detail = resp.text().await.unwrap_or_default();
         anyhow::bail!(
             "HTTP {status} from Jira: {}",
@@ -481,7 +481,7 @@ fn rate_limit_delay(headers: &reqwest::header::HeaderMap, now: DateTime<Utc>) ->
                 .ok()
                 .map(|at| at.signed_duration_since(now).to_std().unwrap_or_default())
         })?;
-    // shortcut: 长等待走普通失败重试；严格遵循跨任务的 Retry-After 需要持久化调度时间。
+    // shortcut: long waits go through the ordinary failure retry; strictly honouring a cross-task Retry-After would need the scheduled time persisted.
     (delay <= Duration::from_secs(30)).then_some(delay)
 }
 
@@ -860,7 +860,7 @@ mod tests {
             Some("2026-01-03T00:00:00Z".parse().unwrap())
         );
 
-        // 末页之前不给 token，不能当作读完而确认 checkpoint
+        // Without a token before the last page, it cannot count as read, so the checkpoint is not confirmed
         server.reset().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
@@ -876,18 +876,18 @@ mod tests {
             .contains("no next page before its last page"));
     }
 
-    /// **Jira 的时间戳不是 RFC3339。** `+0000` 没有冒号，chrono 的默认实现解不了。
-    /// 这一条是整个模块最容易悄悄坏掉的地方：解不出来就是整页工单丢掉。
+    /// **Jira's timestamps are not RFC3339.** `+0000` has no colon, and chrono's default implementation cannot parse it.
+    /// This is the easiest place in the whole module to break silently: if it fails to parse, the whole page of tickets is dropped.
     #[test]
     fn jira_timestamps_are_not_rfc3339() {
         let t: JiraTime = serde_json::from_str("\"2026-08-24T11:11:52.944+0000\"").unwrap();
         assert_eq!(t.0.format("%Y-%m-%d %H:%M").to_string(), "2026-08-24 11:11");
-        // 真 RFC3339 也要能收（Cloud 某些端点会给这种）
+        // Real RFC3339 must also be accepted (some Cloud endpoints return this form)
         let t2: JiraTime = serde_json::from_str("\"2026-08-24T11:11:52.944+00:00\"").unwrap();
         assert_eq!(t2.0.format("%Y-%m-%d").to_string(), "2026-08-24");
     }
 
-    /// JQL 的时间格式与引号：两点写错都报 400，而不是"查不到"。
+    /// The JQL time format and quoting: getting either wrong gives a 400, not "nothing found".
     #[test]
     fn the_incremental_jql_uses_jiras_own_time_format() {
         let t = DateTime::parse_from_rfc3339("2026-08-30T12:34:56Z")
@@ -903,11 +903,11 @@ mod tests {
         );
     }
 
-    /// **拿真实响应钉住字段形状。**
+    /// **Pin the field shapes with a real response.**
     ///
-    /// 手写 JSON 只能证明"我以为的形状"。夹具取自 issues.apache.org（匿名可读），
-    /// 与 GitHub 那份同一个道理——而且这次它要钉的东西更多：Jira 的驼峰命名
-    /// （`fromString`/`displayName`）、非 RFC3339 的时间、以及 changelog 的嵌套。
+    /// Hand-written JSON only proves "the shape I believe in". The fixture is taken from issues.apache.org (readable anonymously),
+    /// the same reasoning as the GitHub one, and this time it has more to pin down: Jira's camelCase naming
+    /// (`fromString` / `displayName`), non-RFC3339 timestamps, and the nesting of changelog.
     #[test]
     fn the_real_jira_shapes_still_parse() {
         let raw = include_str!("../tests/fixtures/jira_issues.json");
@@ -919,8 +919,8 @@ mod tests {
             assert!(doc.starts_with(&format!("# {} ", issue.key)), "{doc}");
         }
 
-        // 变更史是这个来源存在的理由。夹具里至少有一张带 changelog 的，
-        // 且必须排成"字段: 旧值 → 新值"——只写"发生了变更"等于没说
+        // The change history is the reason this source exists. The fixture has at least one ticket with a changelog,
+        // and it must be rendered as "field: old value → new value": writing only "a change happened" says nothing
         let with_log = page
             .issues
             .iter()
@@ -936,7 +936,7 @@ mod tests {
         assert!(doc.contains(" → "), "缺少 from → to：{doc}");
     }
 
-    /// 正文里的时刻写到秒、带 `Z`，毫秒不写；抽取器读回来是 second 精度（#691）
+    /// Times in the body are written to the second with `Z`, without milliseconds; the extractor reads them back at second precision (#691)
     #[test]
     fn a_time_in_the_document_is_written_to_the_second() {
         let issue: Issue = serde_json::from_value(serde_json::json!({
@@ -960,7 +960,7 @@ mod tests {
         assert_eq!(precision, "second");
     }
 
-    /// 空评论不该留下一个只有标题的空节（与 GitHub 那边同一个口径）。
+    /// An empty comment should not leave behind an empty section that holds only a heading (same convention as the GitHub side).
     #[test]
     fn an_empty_comment_leaves_no_stub() {
         let issue: Issue = serde_json::from_value(serde_json::json!({

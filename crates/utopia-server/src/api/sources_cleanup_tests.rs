@@ -1,9 +1,9 @@
-//! 墓碑清理之后，派生要跟上（#875）。`DELETE /documents/{id}` 删完一篇就按库的开关重推一遍
-//! （`settle_derivations`：删除、撤销、同步复活共用）；`POST .../missing/cleanup` 一次删一批
-//! 墓碑文档，从前删完却不重推——凭这些文档成立的结论照旧挂着，直到下一轮定时推导。
-//! 同一份夹具两条路各走一遍，单篇删除是对照。
+//! After tombstone cleanup, derivations must catch up (#875). `DELETE /documents/{id}` re-pushes derivations per the library's switch after deleting one document
+//! (`settle_derivations`, shared by deletion, revocation and sync revival); `POST .../missing/cleanup` deletes a batch of
+//! tombstone documents at once. Previously, deleting them did not re-push: conclusions resting on those documents stayed in place until the next scheduled derivation run.
+//! The same fixture walks both paths; single-document deletion is the control.
 //!
-//! 连库的测试，没有 `UTOPIA_DATABASE_URL` 就跳过（同 documents_routes_tests）。
+//! A test that connects to the database; skipped without `UTOPIA_DATABASE_URL` (same as documents_routes_tests).
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -139,7 +139,7 @@ impl Fixture {
         }))
     }
 
-    /// 一样东西、一份挂在来源下的文档、一条以那份文档为唯一证据的读数「在桌上」
+    /// A thing, one document attached under a source, and one reading whose only evidence is that document, "on the table"
     async fn reading(&self, name: &str) -> anyhow::Result<(Uuid, Uuid, Uuid)> {
         let (doc, chunk, thing) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
         sqlx::query(
@@ -206,7 +206,7 @@ impl Fixture {
         ))
     }
 
-    /// 这样东西此刻还挂着规则的结论吗
+    /// Does this thing still carry a rule-derived conclusion right now?
     async fn concluded(&self, thing: Uuid) -> anyhow::Result<bool> {
         let (n,): (i64,) = sqlx::query_as(
             "SELECT count(*) FROM derived_facts WHERE subject_id = $1 AND invalidated_at IS NULL",
@@ -227,7 +227,7 @@ impl Fixture {
     }
 
     async fn cleanup(self) -> anyhow::Result<()> {
-        // 库先走：删除记录（document_deletions）随库级联，它记着删的人，人要留到最后
+        // Library first: the deletion records (document_deletions) cascade with the library, and they remember who deleted, so that person must be kept until last
         sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
             .bind(self.kb)
             .execute(&self.pool)
@@ -256,7 +256,7 @@ async fn a_cleanup_retires_what_its_documents_concluded() -> anyhow::Result<()> 
         let unrelated_before = f.conclusion_ids(unrelated).await?;
         assert_eq!(unrelated_before.len(), 1);
 
-        // 对照：删一篇，删完即按开关重推
+        // Control: delete one document, re-push per the switch right after deleting
         let (status, body) = f
             .call("DELETE", &format!("/api/v1/documents/{deleted}"))
             .await?;
@@ -268,7 +268,7 @@ async fn a_cleanup_retires_what_its_documents_concluded() -> anyhow::Result<()> 
         assert_eq!(f.conclusion_ids(by_cleanup).await?, cleanup_before);
         assert_eq!(f.conclusion_ids(unrelated).await?, unrelated_before);
 
-        // 墓碑 + 清理：同一件事按批做
+        // Tombstone + cleanup: the same thing, done as a batch
         utopia_store::documents::mark_missing_keys(&f.pool, f.source, &["api:cup-2".into()])
             .await?;
         let (status, body) = f

@@ -1,9 +1,9 @@
-//! 失败任务回队列（#216）。
+//! Failed jobs go back onto the queue (#216).
 //!
-//! 一个失败任务原本只能通过它属的对象再跑：文档能重抽、来源能重同步；`bootstrap_ontology`、
-//! `adjudicate_entities` 这些没有对象可点。余额耗尽（#201 让它第一次就 failed）一批文档
-//! 全停，充值之后要逐个点。这里给两个入口：库内（Editor）与全局（管理员），范围可按
-//! 种类与失败时间收窄——告警上的「再跑一遍」传的就是那次故障的时间窗。
+//! A failed job could previously only be re-run through the object it belonged to: documents could be re-extracted and sources re-synced, but `bootstrap_ontology`,
+//! `adjudicate_entities` had no object to click. Running out of balance (#201 makes the first attempt fail) halted a whole batch of documents,
+//! and each had to be clicked again after topping up. Two entry points here: within a library (Editor) and global (admin); the scope can be narrowed by
+//! kind and failure time: the "run again" on an alert passes the time window of that very failure.
 
 use axum::extract::{Path, State};
 use axum::Json;
@@ -36,7 +36,7 @@ mod tests;
 pub struct RequeueBody {
     #[serde(default)]
     pub kind: Option<String>,
-    /// 只排这个时刻之后失败的
+    /// Only queue jobs that failed after this moment
     #[serde(default)]
     pub failed_since: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -51,9 +51,9 @@ pub async fn failed_in_kb(
     Ok(Json(json!({ "failed": failed })))
 }
 
-/// 一个任务跑完了没（0051）。人定一条短语签名时拿到的是 job id 而不是结果，
-/// 结果要么从 `review` / `graph` 事件里等到，要么来这里问。Viewer 就能问：
-/// 任务属于这个库才答，否则 404，与库里看不见的东西一个口径
+/// Whether a job has finished (0051). When a person sets a short-phrase signature they get a job id rather than a result;
+/// the result is either awaited from the `review` / `graph` events, or asked here. A Viewer can ask:
+/// it answers only if the job belongs to this library; otherwise 404, the same convention as for things invisible in the library
 pub async fn job_in_kb(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -95,7 +95,7 @@ pub async fn requeue_in_kb(
     Ok(Json(json!({ "requeued": requeued })))
 }
 
-/// 全局重排：系统级告警（没有库的）从这里走。只给管理员——它碰的是所有库的任务
+/// Global re-queue: system-level alerts (those with no library) go through here. Admin only: it touches jobs across all libraries
 pub async fn requeue_all(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
