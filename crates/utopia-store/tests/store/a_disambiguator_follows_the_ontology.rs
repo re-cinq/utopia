@@ -234,6 +234,6 @@ async fn a_suffix_comes_from_the_ontology_not_a_word_list() -> anyhow::Result<()
         .bind(f.org)
         .execute(&pool)
         .await?;
-    assert_eq!(gone.rows_affected(), 1, "一次性 org 没删掉");
+    assert_eq!(gone.rows_affected(), 1, "one-off org was not deleted");
     Ok(())
 }

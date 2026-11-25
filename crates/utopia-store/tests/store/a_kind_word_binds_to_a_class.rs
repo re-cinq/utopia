@@ -194,9 +194,9 @@ async fn a_kind_word_is_counted_once_bound_once_and_applied_to_its_entities() ->
         let proposal = &sigs[2];
         assert_eq!(proposal.count, 1);
         assert_eq!(proposal.words, ["stockholder proposal"]);
-        assert_eq!(proposal.examples, [PROPOSAL], "没有名字的以描述为例");
+        assert_eq!(proposal.examples, [PROPOSAL], "unnamed one uses its description as the example");
         assert!(proposal.phrases.is_empty());
-        assert_eq!(sigs[1].count, 2, "Carol 与 Dave");
+        assert_eq!(sigs[1].count, 2, "Carol and Dave");
 
         // 2. Bind and write onto the entities: both companies become organization; what a person decided is left alone
         assert!(

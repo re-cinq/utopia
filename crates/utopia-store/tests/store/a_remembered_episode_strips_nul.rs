@@ -49,7 +49,7 @@ async fn a_nul_in_a_remembered_episode_is_stripped_before_chunks_text() -> anyho
             .fetch_one(&pool)
             .await?;
 
-    assert!(!text.contains('\0'), "入库后还剩 NUL：{text:?}");
+    assert!(!text.contains('\0'), "NUL remains after storing: {text:?}");
     // The `[YYYY-MM-DD HH:MM] ` prefix is generated from the time at the moment; the assertion checks only what comes **after** it:
     // once the words are stripped they should be joined back as they were, with the whole NUL run gone, and the NULs between words gone too.
     let stripped = text.split_once("] ").map(|(_, rest)| rest).unwrap_or("");

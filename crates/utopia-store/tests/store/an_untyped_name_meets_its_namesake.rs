@@ -47,7 +47,7 @@ async fn an_untyped_mention_attaches_to_its_untyped_namesake() -> anyhow::Result
         &[],
     )
     .await?;
-    assert!(first.created, "第一次提及要建实体");
+    assert!(first.created, "the first mention must create an entity");
     let again = utopia_store::resolution::resolve_mention(
         &pool,
         kb,

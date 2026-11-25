@@ -131,7 +131,10 @@ async fn a_near_name_creates_an_entity_and_proposes_a_pair() -> anyhow::Result<(
             &[],
         )
         .await?;
-        assert!(r.created, "字面碰不上，mention 该新建实体");
+        assert!(
+            r.created,
+            "no literal match, mention should create a new entity"
+        );
         assert_ne!(
             r.entity_id, f.probe,
             "向量召回只提议，不能直接归并到 海洋探测器1号"
@@ -347,7 +350,7 @@ async fn a_new_name_is_pending_until_its_vector_is_set() -> anyhow::Result<()> {
         assert!(pending.iter().all(|(_, eid, _)| *eid != f.probe && *eid != f.captain));
         name_vectors::set(&pool, f.kb, &[(fact, fresh, vec![0.0, 0.0, 1.0])]).await?;
         let after = name_vectors::pending(&pool, f.kb, 100).await?;
-        assert!(after.iter().all(|(fid, _, _)| *fid != fact), "写了向量就不该再待补");
+        assert!(after.iter().all(|(fid, _, _)| *fid != fact), "once a vector is written it should not be pending backfill");
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -442,7 +445,10 @@ async fn a_pair_kept_apart_is_not_proposed_again() -> anyhow::Result<()> {
             .await?;
 
         let again = mention().await?;
-        assert!(!again.created, "同一个字面名字归到上一轮建的实体");
+        assert!(
+            !again.created,
+            "the same literal name goes to the entity created in the previous round"
+        );
         assert_eq!(again.entity_id, first.entity_id);
         let proposed: Vec<Uuid> = vector_reviews(&again)
             .into_iter()

@@ -133,7 +133,7 @@ async fn a_corrected_time_keeps_its_statements() -> anyhow::Result<()> {
         let rows = zhang_rows(pool.clone()).await?;
         assert_eq!(rows.len(), 1);
         let (closed, _, to) = rows[0];
-        assert_eq!(to, Some(t("2024-07-05T00:00:00Z")), "交接日关上前任");
+        assert_eq!(to, Some(t("2024-07-05T00:00:00Z")), "handover day closes the predecessor");
 
         // A person changes the start, the end unchanged; the same path as PATCH /facts/{id}: after editing, reconcile again through the move
         let corrected = utopia_store::temporal::correct_interval(

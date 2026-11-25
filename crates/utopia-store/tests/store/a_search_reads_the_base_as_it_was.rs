@@ -163,7 +163,10 @@ async fn a_superseded_chunk_keeps_its_vector_and_answers_as_of_then() -> anyhow:
     let query = vec![1.0_f32, 0.0, 0.0];
     let now_hits =
         utopia_store::documents::vector_search(&pool, f.kb, &query, 10, None, None).await?;
-    assert!(!now_hits.contains(&f.old_chunk), "现行检索不该翻出旧版本");
+    assert!(
+        !now_hits.contains(&f.old_chunk),
+        "current search must not surface old versions"
+    );
     assert!(now_hits.contains(&f.new_chunk));
 
     // 3. March: then the old chunk was current and the new chunk did not yet exist
@@ -240,6 +243,6 @@ async fn cleanup(pool: &PgPool, f: &Fixture) -> anyhow::Result<()> {
         .bind(f.org)
         .execute(pool)
         .await?;
-    assert_eq!(gone.rows_affected(), 1, "一次性 org 没删掉");
+    assert_eq!(gone.rows_affected(), 1, "one-off org was not deleted");
     Ok(())
 }

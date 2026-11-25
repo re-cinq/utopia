@@ -359,12 +359,12 @@ pub async fn listen_for_jobs(pool: &PgPool) -> Option<PgListener> {
     let mut listener = match PgListener::connect_with(pool).await {
         Ok(listener) => listener,
         Err(e) => {
-            tracing::error!(error = %e, "jobs worker 建立通知监听失败，退回轮询");
+            tracing::error!(error = %e, "jobs worker failed to set up notification listener, falling back to polling");
             return None;
         }
     };
     if let Err(e) = listener.listen(JOB_CHANNEL).await {
-        tracing::error!(error = %e, "jobs worker 监听通知失败，退回轮询");
+        tracing::error!(error = %e, "jobs worker failed to listen for notifications, falling back to polling");
         return None;
     }
     Some(listener)
@@ -383,7 +383,7 @@ pub async fn wait_for_work(listener: Option<&mut PgListener>, poll: Duration) ->
     match tokio::time::timeout(poll, listener.recv()).await {
         Ok(Ok(_)) => Wake::Notified,
         Ok(Err(e)) => {
-            tracing::warn!(error = %e, "jobs worker 通知监听失败，继续轮询");
+            tracing::warn!(error = %e, "jobs worker notification listen failed, continuing to poll");
             tokio::time::sleep(poll).await;
             Wake::Polled
         }
@@ -676,7 +676,7 @@ async fn persist_with_retry(
         }
         let result = tokio::select! {
             _ = pool.close_event() => {
-                tracing::warn!(job_id = job.id, "数据库连接池已关闭，未确认的任务留待启动回收");
+                tracing::warn!(job_id = job.id, "database connection pool closed, unacknowledged jobs left for startup recovery");
                 return;
             }
             result = persist_outcome(pool, job, outcome, completed_at) => result,
@@ -693,7 +693,7 @@ async fn persist_with_retry(
                 return;
             }
             Err(e) => {
-                tracing::error!(job_id = job.id, error = %e, retry_in_secs = delay.as_secs(), "任务状态写回失败，将重试同一结果");
+                tracing::error!(job_id = job.id, error = %e, retry_in_secs = delay.as_secs(), "failed to write back job status, will retry the same result");
             }
         }
         tokio::select! {
@@ -772,7 +772,7 @@ where
             );
         }
         Ok(_) => {}
-        Err(e) => tracing::error!(error = %e, "孤儿任务回收失败"),
+        Err(e) => tracing::error!(error = %e, "failed to reclaim orphaned jobs"),
     }
     tracing::info!(
         concurrency = concurrency.load(Ordering::Relaxed),
@@ -790,8 +790,8 @@ where
             tokio::spawn(async move {
                 match prune_done(&pool, DONE_JOB_RETENTION).await {
                     Ok(0) => {}
-                    Ok(count) => tracing::info!(count, "清理已完成的旧任务"),
-                    Err(e) => tracing::error!(error = %e, "清理已完成的旧任务失败"),
+                    Ok(count) => tracing::info!(count, "cleaning up old completed jobs"),
+                    Err(e) => tracing::error!(error = %e, "failed to clean up old completed jobs"),
                 }
             });
         }
@@ -822,15 +822,15 @@ where
                     };
                     let result = match inner.await {
                         Ok(r) => r,
-                        Err(join) => {
-                            Err(anyhow::anyhow!("任务处理器 panic（详情见 stderr）：{join}"))
-                        }
+                        Err(join) => Err(anyhow::anyhow!(
+                            "job handler panicked (see stderr for details): {join}"
+                        )),
                     };
                     let completed_at = Utc::now();
                     let outcome = match result {
                         Ok(()) => JobOutcome::Done,
                         Err(e) => {
-                            tracing::warn!(job_id = job.id, kind = %job.kind, error = %e, "任务执行失败");
+                            tracing::warn!(job_id = job.id, kind = %job.kind, error = %e, "job execution failed");
                             JobOutcome::failed(&job, &e)
                         }
                     };
@@ -844,7 +844,7 @@ where
                 wait_for_work(listener.as_mut(), IDLE_POLL).await;
             }
             Err(e) => {
-                tracing::error!(error = %e, "任务认领失败，5s 后重试");
+                tracing::error!(error = %e, "failed to claim job, retrying in 5s");
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }

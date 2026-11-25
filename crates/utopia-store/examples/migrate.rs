@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
     let url = std::env::var("UTOPIA_DATABASE_URL")
         .ok()
         .filter(|u| !u.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("UTOPIA_DATABASE_URL 未设置"))?;
+        .ok_or_else(|| anyhow::anyhow!("UTOPIA_DATABASE_URL is not set"))?;
     // Creating tables and triggers needs more privilege than runtime, so like utopia-server's startup, open one small pool and close it when done
     let pool = utopia_store::db::connect(&url, Some(2)).await?;
     utopia_store::db::migrate(&pool).await?;

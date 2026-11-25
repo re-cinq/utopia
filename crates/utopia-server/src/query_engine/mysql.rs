@@ -252,7 +252,7 @@ impl QueryEngine for MysqlEngine {
         let keys = match keys(&pool).await {
             Ok(k) => k,
             Err(e) => {
-                tracing::warn!(error = %e, "读不出 MySQL 主键/外键，schema 不带键标记");
+                tracing::warn!(error = %e, "could not read MySQL primary/foreign keys, schema has no key markers");
                 Keys::default()
             }
         };
@@ -485,7 +485,7 @@ mod tests {
         // The row with all NULLs: every cell should be JSON null, not a zero value of some type
         let third: serde_json::Value = serde_json::from_str(&r.rows[2]).unwrap();
         for k in ["region", "amount", "qty", "flag", "placed_on"] {
-            assert_eq!(third[k], serde_json::Value::Null, "{k} 该是 null");
+            assert_eq!(third[k], serde_json::Value::Null, "{k} should be null");
         }
 
         // The write path is still blocked by the gate (layer 1); the read-only session is layer 3
@@ -659,7 +659,10 @@ mod tests {
         assert!(!note.is_primary_key && note.references_table.is_none());
         for c in ["order_id", "ordinal"] {
             let member = col(&cols, a.trim_matches('`'), "line", c);
-            assert!(!member.is_primary_key, "组合主键的成员 line.{c} 不标");
+            assert!(
+                !member.is_primary_key,
+                "composite primary key member line.{c} is not marked"
+            );
             let fk_member = col(&cols, a.trim_matches('`'), "line_note", c);
             assert!(
                 fk_member.references_table.is_none(),
@@ -693,11 +696,23 @@ mod tests {
         let target = |s: &str, t: &str, c: &str| col(&cols, s, t, c).references_table.clone();
         let p1 = format!("{au}.p1");
         let p2 = format!("{au}.p2");
-        assert_eq!(target(au, "p1", "parent"), Some(p1.clone()), "自引用");
+        assert_eq!(
+            target(au, "p1", "parent"),
+            Some(p1.clone()),
+            "self-reference"
+        );
         assert_eq!(target(au, "c1", "x"), Some(p1.clone()));
-        assert_eq!(target(au, "c2", "y"), Some(p2.clone()), "c2 指 p2 不是 p1");
+        assert_eq!(
+            target(au, "c2", "y"),
+            Some(p2.clone()),
+            "c2 points to p2, not p1"
+        );
         assert_eq!(target(au, "c3", "z"), Some(p1.clone()));
-        assert_eq!(target(bu, "orders", "item_id"), Some(p2.clone()), "跨库");
+        assert_eq!(
+            target(bu, "orders", "item_id"),
+            Some(p2.clone()),
+            "cross-database"
+        );
         assert_eq!(
             target(au, "dual_fk", "x"),
             Some(p1.clone()),

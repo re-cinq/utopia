@@ -209,7 +209,7 @@ async fn paths_come_shortest_first_and_stop_at_max_hops() -> anyhow::Result<()> 
             ..Limits::default()
         };
         let two = paths_between(&pool, f.kb, f.acme, f.beta, None, None, limits(2)).await?;
-        assert_eq!(two.len(), 3, "两跳以内没有 Carol 那条");
+        assert_eq!(two.len(), 3, "no Carol path within two hops");
         let one = paths_between(&pool, f.kb, f.acme, f.beta, None, None, limits(1)).await?;
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].edges[0].fact_id, f.direct);
@@ -245,7 +245,11 @@ async fn a_path_holds_only_when_every_edge_holds() -> anyhow::Result<()> {
             Limits::default(),
         )
         .await?;
-        assert_eq!(paths.len(), 1, "Bob 已离开、Dan 已离开、直连还没签");
+        assert_eq!(
+            paths.len(),
+            1,
+            "Bob has left, Dan has left, direct link not signed yet"
+        );
         assert_eq!(via(&paths[0]), vec![f.carol, f.gamma]);
 
         let in_2018 = Some(t("2018-06-15T00:00:00Z"));
@@ -259,7 +263,10 @@ async fn a_path_holds_only_when_every_edge_holds() -> anyhow::Result<()> {
             Limits::default(),
         )
         .await?;
-        assert!(none.is_empty(), "2018 年 Beta 还没被谁创办，什么都连不上");
+        assert!(
+            none.is_empty(),
+            "in 2018 Beta has not been founded by anyone, nothing connects"
+        );
         anyhow::Ok(())
     }
     .await;
@@ -281,7 +288,7 @@ async fn a_hub_is_not_walked_through() -> anyhow::Result<()> {
             ..Limits::default()
         };
         let before = paths_between(&pool, f.kb, f.acme, f.beta, None, None, tight).await?;
-        assert_eq!(before.len(), 4, "Carol 两条边，不算枢纽");
+        assert_eq!(before.len(), 4, "Carol has two edges, not a hub");
         // Carol advises three more firms: degree 5, above the cap
         for _ in 0..3 {
             let other = Uuid::now_v7();
@@ -304,11 +311,15 @@ async fn a_hub_is_not_walked_through() -> anyhow::Result<()> {
             .await?;
         }
         let after = paths_between(&pool, f.kb, f.acme, f.beta, None, None, tight).await?;
-        assert_eq!(after.len(), 3, "经 Carol 的三跳没了");
+        assert_eq!(after.len(), 3, "the three-hop path through Carol is gone");
         assert!(after.iter().all(|p| !via(p).contains(&f.carol)));
         let loose =
             paths_between(&pool, f.kb, f.acme, f.beta, None, None, Limits::default()).await?;
-        assert_eq!(loose.len(), 4, "默认上限下她还只是个普通节点");
+        assert_eq!(
+            loose.len(),
+            4,
+            "under the default cap she is still just an ordinary node"
+        );
         // Two-hop paths are not subject to the hub limit: Bob's and Dan's degrees do not enter this judgment, and the endpoints even less
         let _ = (f.employee, f.founder, f.partner, f.bob, f.dan);
         anyhow::Ok(())
@@ -346,11 +357,15 @@ async fn a_path_reads_the_base_as_it_was() -> anyhow::Result<()> {
             Limits::default(),
         )
         .await?;
-        assert_eq!(then.len(), 3, "直连那条今天才进账本");
+        assert_eq!(
+            then.len(),
+            3,
+            "the direct link only entered the ledger today"
+        );
         assert!(then.iter().all(|p| p.hops() >= 2));
         let today =
             paths_between(&pool, f.kb, f.acme, f.beta, None, None, Limits::default()).await?;
-        assert_eq!(today.len(), 4, "不带 as_of 是此刻的记录");
+        assert_eq!(today.len(), 4, "without as_of it is the record as of now");
         anyhow::Ok(())
     }
     .await;

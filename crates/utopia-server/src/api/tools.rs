@@ -66,7 +66,7 @@ impl ToolCtx<'_> {
             Ok(mut v) if !v.is_empty() => Some(v.remove(0)),
             Ok(_) => None,
             Err(e) => {
-                tracing::warn!(error = %e, "嵌入失败，图谱工具按子串匹配");
+                tracing::warn!(error = %e, "embedding failed, graph tool falls back to substring matching");
                 None
             }
         }

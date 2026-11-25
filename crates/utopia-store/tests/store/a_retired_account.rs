@@ -73,7 +73,10 @@ async fn a_retired_account_cannot_get_back_in() -> anyhow::Result<()> {
             .bind(b)
             .fetch_one(&pool)
             .await?;
-        assert_eq!(still_there, 1, "软删除不该把行删掉——审计要靠它");
+        assert_eq!(
+            still_there, 1,
+            "soft delete should not remove the row, audit depends on it"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;

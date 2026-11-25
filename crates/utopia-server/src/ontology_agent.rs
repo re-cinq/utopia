@@ -88,7 +88,7 @@ pub async fn propose_with(
     .fetch_one(&mut *guard)
     .await?;
     if !locked {
-        tracing::info!(%kb_id, "本体代理已有一份在跑，这次跳过");
+        tracing::info!(%kb_id, "ontology agent already has a run in progress, skipping this one");
         return Ok(());
     }
     let result = propose_locked(state, &kb, &settings, &client, full_glossary).await;
@@ -266,7 +266,7 @@ async fn propose_locked(
         .div_ceil(SIGNATURES_PER_CALL)
         .max(open_words.len().div_ceil(KIND_WORDS_PER_CALL));
     if calls == 0 {
-        tracing::info!(%kb_id, "本体代理：没有新的形状要看");
+        tracing::info!(%kb_id, "ontology agent: no new shapes to review");
         return Ok(());
     }
     open_words.truncate(calls * KIND_WORDS_PER_CALL);
@@ -274,7 +274,7 @@ async fn propose_locked(
     // A KB with no questions at all (decision 1): have the agent raise questions first; the answer counts once a person accepts them; this round still proposes by phrase as before
     if competency_questions::list(pool, kb_id).await?.is_empty() {
         if let Err(e) = propose_questions_with(state, kb_id, settings, client).await {
-            tracing::warn!(%kb_id, error = %e, "本体代理：提问题失败，这一轮不带问题");
+            tracing::warn!(%kb_id, error = %e, "ontology agent: asking questions failed, this round goes without questions");
         }
     }
     let questions = competency_questions::accepted(pool, kb_id).await?;
@@ -320,7 +320,7 @@ async fn propose_locked(
                 .map(|cands| cands.into_iter().map(|c| c.id).collect())
                 .collect(),
             Err(e) => {
-                tracing::warn!(%kb_id, error = %e, "本体代理：形状向量没算出来，词表按结构裁");
+                tracing::warn!(%kb_id, error = %e, "ontology agent: shape vectors were not computed, vocabulary trimmed by structure");
                 vec![Vec::new(); open.len()]
             }
         }
@@ -438,25 +438,31 @@ async fn propose_locked(
             &q_items,
             &kb.ontology_lang,
         );
-        let reply =
-            match chat_retrying_rate_limits_at(state, settings, client, &messages, Some(0.0)).await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    if utopia_core::error::is_terminal(&e) {
-                        return Err(e);
-                    }
-                    failed += 1;
-                    tracing::warn!(%kb_id, batch = b, error = %e, "本体代理：这一批调用失败");
-                    continue;
+        let reply = match chat_retrying_rate_limits_at(
+            state,
+            settings,
+            client,
+            &messages,
+            Some(0.0),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if utopia_core::error::is_terminal(&e) {
+                    return Err(e);
                 }
-            };
+                failed += 1;
+                tracing::warn!(%kb_id, batch = b, error = %e, "ontology agent: this batch of calls failed");
+                continue;
+            }
+        };
         let parsed = match agent::parse_proposal_response(&reply.text, &sig_ids, &word_ids, &q_ids)
         {
             Ok(p) => p,
             Err(e) => {
                 failed += 1;
-                tracing::warn!(%kb_id, batch = b, error = %e, "本体代理：回复读不出");
+                tracing::warn!(%kb_id, batch = b, error = %e, "ontology agent: reply could not be read");
                 continue;
             }
         };
@@ -719,7 +725,7 @@ async fn propose_locked(
                 }
             }
             Err(e) => {
-                tracing::warn!(%kb_id, error = %e, "本体代理：最近的已有元素没算出来，提案不带这一格");
+                tracing::warn!(%kb_id, error = %e, "ontology agent: nearest existing element was not computed, proposal leaves this cell out");
             }
         }
     }
@@ -1590,7 +1596,7 @@ async fn propose_questions_with(
         .map(|q| q.question.as_str())
         .collect();
     if top_sigs.is_empty() && top_words.is_empty() && top_entities.is_empty() {
-        tracing::info!(%kb_id, "提问题：库里还没有东西可问");
+        tracing::info!(%kb_id, "asking questions: nothing in the library to ask about yet");
         return Ok(0);
     }
     let messages = qa::build_question_messages(
@@ -1626,7 +1632,7 @@ async fn propose_questions_with(
         .await?;
         written += 1;
     }
-    tracing::info!(%kb_id, proposed = proposed.len(), written, malformed, "提问题结束");
+    tracing::info!(%kb_id, proposed = proposed.len(), written, malformed, "asking questions finished");
     if written > 0 {
         state.emit_pending(kb_id);
     }

@@ -181,7 +181,10 @@ async fn a_qualifier_on_a_merged_entity_fails_closed() -> anyhow::Result<()> {
 
     let err = utopia_store::export::provenance_integrity(&mut pool.begin().await?, f.kb).await;
     let msg = format!("{err:?}");
-    assert!(err.is_err(), "qualifier→merged 的体检必须拒导");
+    assert!(
+        err.is_err(),
+        "health check for qualifier→merged must refuse the export"
+    );
     assert!(
         msg.contains("qualifier.entity(merged)"),
         "要报 qualifier.entity(merged): {msg}"
@@ -213,7 +216,10 @@ async fn a_derived_on_a_merged_entity_fails_closed() -> anyhow::Result<()> {
     let d_subj = insert_derived(&pool, &f, f.merged, f.survivor).await?;
     let err = utopia_store::export::provenance_integrity(&mut pool.begin().await?, f.kb).await;
     let msg = format!("{err:?}");
-    assert!(err.is_err(), "derived.subject→merged 的体检必须拒导");
+    assert!(
+        err.is_err(),
+        "health check for derived.subject→merged must refuse the export"
+    );
     assert!(
         msg.contains("derived.subject(merged)"),
         "要报 derived.subject(merged): {msg}"
@@ -226,7 +232,10 @@ async fn a_derived_on_a_merged_entity_fails_closed() -> anyhow::Result<()> {
     let d_obj = insert_derived(&pool, &f, f.survivor, f.merged).await?;
     let err = utopia_store::export::provenance_integrity(&mut pool.begin().await?, f.kb).await;
     let msg = format!("{err:?}");
-    assert!(err.is_err(), "derived.object→merged 的体检必须拒导");
+    assert!(
+        err.is_err(),
+        "health check for derived.object→merged must refuse the export"
+    );
     assert!(
         msg.contains("derived.object(merged)"),
         "要报 derived.object(merged): {msg}"
@@ -267,7 +276,10 @@ async fn a_fact_on_a_merged_entity_fails_closed() -> anyhow::Result<()> {
 
     let err = utopia_store::export::provenance_integrity(&mut pool.begin().await?, f.kb).await;
     let msg = format!("{err:?}");
-    assert!(err.is_err(), "fact.object→merged 的体检必须拒导");
+    assert!(
+        err.is_err(),
+        "health check for fact.object→merged must refuse the export"
+    );
     assert!(
         msg.contains("fact.object(merged)"),
         "要报 fact.object(merged): {msg}"

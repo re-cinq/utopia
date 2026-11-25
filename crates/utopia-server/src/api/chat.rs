@@ -1129,7 +1129,7 @@ pub async fn chat(
                     // went down this path: a network blip to SiliconFlow was recorded as
                     // "tool-calling unavailable", and then RAG died on the same blip
                     if rejected && answer_acc.is_empty() && steps_acc.is_empty() {
-                        tracing::warn!(error = %failure.message, "端点拒绝工具调用，降级为一次性 RAG");
+                        tracing::warn!(error = %failure.message, "endpoint rejected tool calls, falling back to one-shot RAG");
                         let mut legacy = std::pin::pin!(legacy_rag(
                             state.clone(),
                             kb_id,
@@ -1706,7 +1706,10 @@ mod tests {
         let tools = tools_schema(false, &[]);
         let err = check_call(&tools, "search_chunks", "{\"query\": \"Acme reven")
             .expect_err("残缺 JSON 必须拒绝，而不是回落");
-        assert_eq!(err.1["kind"], "tool", "轨迹上要显示成一次没做成的调用");
+        assert_eq!(
+            err.1["kind"], "tool",
+            "the trace must show it as a call that did not go through"
+        );
         assert_eq!(err.1["detail"], "bad arguments");
         assert!(
             err.0.contains("not valid JSON") && err.0.contains("again"),
@@ -1727,7 +1730,7 @@ mod tests {
             "{\"query\": null}",
         ] {
             let Err(err) = check_call(&tools, "search_chunks", raw) else {
-                panic!("{raw} 应当被拒");
+                panic!("{raw} should be rejected");
             };
             assert_eq!(err.1["detail"], "missing query", "{raw}");
         }
@@ -1771,7 +1774,7 @@ mod tests {
             "query_data",
             "{\"data_source\": \"warehouse\", \"sql\": \"SELECT 1\"}",
         )
-        .expect("两个都给了就该放行");
+        .expect("both given should pass");
     }
 
     /// A compliant call passes through unchanged, **with not one optional parameter dropped**.
@@ -1786,8 +1789,11 @@ mod tests {
             "entity_facts",
             "{\"entity_id\": \"1f8ac10b-58cc-4372-a567-0e02b2c3d479\", \"at\": \"2026-03-15\"}",
         )
-        .expect("必填给了就该放行");
-        assert_eq!(args["at"], "2026-03-15", "可选参数不能在这一关被吃掉");
+        .expect("required value given should pass");
+        assert_eq!(
+            args["at"], "2026-03-15",
+            "optional parameter must not be swallowed at this check"
+        );
     }
 
     /// Full text can only be read by id, and the id is something the model copied from the retrieval results: a wrong copy or a missed one
@@ -1809,7 +1815,7 @@ mod tests {
             "{\"document_id\": \"1f8ac10b-58cc-4372\"}",
         ] {
             let Err(err) = check_call(&tools, "get_document", raw) else {
-                panic!("{raw} 应当被拒");
+                panic!("{raw} should be rejected");
             };
             assert_eq!(err.1["detail"], "invalid document_id", "{raw}");
         }
@@ -1818,7 +1824,7 @@ mod tests {
             "get_document",
             "{\"document_id\": \"1f8ac10b-58cc-4372-a567-0e02b2c3d479\"}",
         )
-        .expect("真的 uuid 就该放行");
+        .expect("a real uuid should pass");
     }
 
     /// `changes` already refused a missing `since` in its own branch — **it is the only one that got it right**.
@@ -1829,7 +1835,7 @@ mod tests {
         let tools = tools_schema(false, &[]);
         assert!(check_call(&tools, "changes", "{}").is_err());
         check_call(&tools, "changes", "{\"since\": \"2026-13-45\"}")
-            .expect("格式错的日期不归这一关管，交给 changes_window");
+            .expect("a malformed date is not this check's job, leave it to changes_window");
     }
 
     /// Descriptions are written for the model to read; they are sent with every round, and MCP clients print the tool list too:

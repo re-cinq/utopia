@@ -350,7 +350,7 @@ async fn a_dated_value_with_no_start_takes_over_from_its_date() -> anyhow::Resul
         .bind(later)
         .fetch_one(&pool)
         .await?;
-        assert!(still_open, "BBHQ1 没被关在 2016 年");
+        assert!(still_open, "BBHQ1 is not confined to 2016");
         let earlier: (
             Option<String>,
             Option<String>,
@@ -381,7 +381,10 @@ async fn a_dated_value_with_no_start_takes_over_from_its_date() -> anyhow::Resul
                 .bind(f.kb)
                 .fetch_one(&pool)
                 .await?;
-        assert_eq!(conflicts, 0, "排得出先后，就不用人看");
+        assert_eq!(
+            conflicts, 0,
+            "if the order can be worked out, no human review is needed"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -423,7 +426,7 @@ async fn a_deadline_stated_relative_to_an_event_still_ends_the_dated_one_before_
         .bind(relative)
         .fetch_one(&pool)
         .await?;
-        assert!(open, "相对的截止日是现在的截止日");
+        assert!(open, "the relative deadline is today's deadline");
         let before: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
             "SELECT to_char(valid_to, 'YYYY-MM-DD'), valid_to_precision,
                     to_char(attested_to, 'YYYY-MM-DD')

@@ -143,7 +143,7 @@ async fn new_cross_kb_writes_are_rejected() -> anyhow::Result<()> {
     .bind(f.doc_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "fact→foreign chunk 必须被拒");
+    assert!(err.is_err(), "fact→foreign chunk must be rejected");
 
     // Only the chunk side is bad: the chunk is in the same KB, the document is in another
     let err = sqlx::query(
@@ -155,7 +155,7 @@ async fn new_cross_kb_writes_are_rejected() -> anyhow::Result<()> {
     .bind(f.doc_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "evidence.document→foreign 必须被拒");
+    assert!(err.is_err(), "evidence.document→foreign must be rejected");
 
     // Chunk hangs under another KB's document
     let err = sqlx::query(
@@ -167,11 +167,14 @@ async fn new_cross_kb_writes_are_rejected() -> anyhow::Result<()> {
     .bind(f.doc_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "chunk→foreign document 必须被拒");
+    assert!(err.is_err(), "chunk→foreign document must be rejected");
 
     // The same constraint on the authoritative write path: add_evidence through the store API is rejected too
     let err = utopia_store::graph::add_evidence(&pool, f.fact_a, f.chunk_b, Some("x"), None).await;
-    assert!(err.is_err(), "add_evidence 的跨库配对必须被拒");
+    assert!(
+        err.is_err(),
+        "a cross-KB pairing in add_evidence must be rejected"
+    );
 
     // Transfer: moving a document to another KB is the same as making every row pointing at it bad at once
     let err = sqlx::query("UPDATE documents SET kb_id = $2 WHERE id = $1")
@@ -179,13 +182,16 @@ async fn new_cross_kb_writes_are_rejected() -> anyhow::Result<()> {
         .bind(f.b)
         .execute(&pool)
         .await;
-    assert!(err.is_err(), "documents.kb_id 过户必须被拒");
+    assert!(
+        err.is_err(),
+        "transferring documents.kb_id must be rejected"
+    );
     let err = sqlx::query("UPDATE facts SET kb_id = $2 WHERE id = $1")
         .bind(f.fact_a)
         .bind(f.b)
         .execute(&pool)
         .await;
-    assert!(err.is_err(), "facts.kb_id 过户必须被拒");
+    assert!(err.is_err(), "transferring facts.kb_id must be rejected");
 
     // Same-KB normal writes are unaffected (guards against false positives)
     sqlx::query(
@@ -248,7 +254,7 @@ async fn malformed_existing_rows_fail_the_export_closed() -> anyhow::Result<()> 
     // Health check: KB A is bad at evidence.chunk, KB B is bad at evidence.document and chunk.document
     let err_a = utopia_store::export::provenance_integrity(&mut pool.begin().await?, f.a).await;
     let msg_a = format!("{err_a:?}");
-    assert!(err_a.is_err(), "库 A 的体检必须拒导");
+    assert!(err_a.is_err(), "KB A's health check must refuse export");
     assert!(
         msg_a.contains("evidence.chunk"),
         "库 A 该报 evidence.chunk: {msg_a}"
@@ -256,7 +262,7 @@ async fn malformed_existing_rows_fail_the_export_closed() -> anyhow::Result<()> 
 
     let err_b = utopia_store::export::provenance_integrity(&mut pool.begin().await?, f.b).await;
     let msg_b = format!("{err_b:?}");
-    assert!(err_b.is_err(), "库 B 的体检必须拒导");
+    assert!(err_b.is_err(), "KB B's health check must refuse export");
     assert!(
         msg_b.contains("evidence.document"),
         "库 B 该报 evidence.document: {msg_b}"

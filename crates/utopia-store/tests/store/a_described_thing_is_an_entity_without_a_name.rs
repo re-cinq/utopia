@@ -65,9 +65,9 @@ async fn a_described_thing_has_a_description_and_no_name() -> anyhow::Result<()>
         .bind(id)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(desc.as_deref(), Some(description), "描述是它的身份");
-        assert_eq!(canonical, description, "显示名就是描述本身");
-        assert!(type_id.is_none(), "文档的类别词不是本体的类");
+        assert_eq!(desc.as_deref(), Some(description), "the description is its identity");
+        assert_eq!(canonical, description, "the display name is the description itself");
+        assert!(type_id.is_none(), "the document's category word is not the entity's class");
         assert_eq!(specific.as_deref(), Some("subsidiary"));
 
         // No fact has it as subject — in particular no known_as
@@ -75,7 +75,7 @@ async fn a_described_thing_has_a_description_and_no_name() -> anyhow::Result<()>
             .bind(id)
             .fetch_one(&pool)
             .await?;
-        assert_eq!(facts, 0, "描述不写成名字事实");
+        assert_eq!(facts, 0, "a description is not written as a name fact");
         assert!(
             names::for_entity(&pool, f.kb, id, None).await?.is_empty(),
             "名字栏是空的"
@@ -101,7 +101,7 @@ async fn a_described_thing_has_a_description_and_no_name() -> anyhow::Result<()>
         // A later mention with the same wording goes through resolution: a separate one is created, not attached to the described one
         let later =
             resolution::resolve_mention(&pool, f.kb, None, description, None, None, None, &[]).await?;
-        assert!(later.created, "描述不是桥，提及不归到它身上");
+        assert!(later.created, "a description is not a bridge, mentions are not attributed to it");
         assert_ne!(later.entity_id, id);
 
         // Creating the same description again is another entity: the KB does not deduplicate; merging within the same document is the caller's job

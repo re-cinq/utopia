@@ -66,7 +66,7 @@ async fn a_name_created_twice_at_once_is_one_entity() -> anyhow::Result<()> {
     .bind(&name)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(rows, 1, "库里只有一个这个名字");
+    assert_eq!(rows, 1, "the database has only one entity with this name");
 
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(kb)

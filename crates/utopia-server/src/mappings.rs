@@ -155,7 +155,7 @@ async fn describe_data(
         );
     };
     utopia_store::kbs::set_data_description(&state.pool, kb.id, &description, &questions).await?;
-    tracing::info!(kb_id = %kb.id, lines = description.lines().count(), questions = questions.len(), "数据描述已写");
+    tracing::info!(kb_id = %kb.id, lines = description.lines().count(), questions = questions.len(), "data description was written");
     Ok(())
 }
 
@@ -275,7 +275,7 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
     // if the proposal step fails to parse, the whole round errors after the description has already landed; conversely, a failure to write the description
     // should not sink the proposals -- it is a side task, so warn and continue
     if let Err(e) = describe_data(state, &client, &settings, &kb, &schema_txt).await {
-        tracing::warn!(%kb_id, error = %e, "数据描述没写成，提议照常");
+        tracing::warn!(%kb_id, error = %e, "data description was not written, proposal goes ahead anyway");
     }
 
     // Existing concepts (for merge reuse, avoiding duplicate names)
@@ -486,7 +486,7 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
     .await
     {
         // Failing to record the ledger should not make the proposals run in vain, but it also must not pretend it was recorded: leave it in the log
-        tracing::warn!(%kb_id, run = %run, error = %e, "探索账没记上");
+        tracing::warn!(%kb_id, run = %run, error = %e, "exploration ledger entry was not recorded");
     }
     tracing::info!(
         %kb_id,
@@ -525,7 +525,7 @@ async fn explore(state: &AppState, kb_id: Uuid, run: Uuid) -> anyhow::Result<()>
         )
         .await
         {
-            tracing::warn!(%kb_id, error = %e, "映射探索空结果的告警没写进去");
+            tracing::warn!(%kb_id, error = %e, "warning for empty mapping exploration result was not written");
         }
         state.emit_alert();
     }

@@ -78,7 +78,11 @@ async fn a_qualifier_is_added_to_the_same_edge_and_never_overwritten() -> anyhow
         .find(|r| r.id == invested)
         .map(|r| r.qualifiers)
         .unwrap_or_default();
-    assert_eq!(declared, vec![amount], "声明要能从关系上读回来");
+    assert_eq!(
+        declared,
+        vec![amount],
+        "the declaration must be readable back from the relation"
+    );
     assert!(
         utopia_store::ontology::set_relation_qualifiers(&pool, kb, invested, &[invested])
             .await
@@ -116,7 +120,11 @@ async fn a_qualifier_is_added_to_the_same_edge_and_never_overwritten() -> anyhow
         .find(|r| r.id == invested)
         .map(|r| r.qualifiers)
         .unwrap_or_default();
-    assert_eq!(again, vec![amount], "追加同一个不重复、不覆盖");
+    assert_eq!(
+        again,
+        vec![amount],
+        "appending the same one does not duplicate or overwrite"
+    );
     assert!(
         utopia_store::ontology::add_relation_qualifier(&pool, kb, invested, other_rel)
             .await
@@ -168,7 +176,11 @@ async fn a_qualifier_is_added_to_the_same_edge_and_never_overwritten() -> anyhow
     let q = &read[&fact];
     assert_eq!(q.len(), 1);
     assert_eq!(q[0].key, "amount");
-    assert_eq!(q[0].value, Some(five), "打架时先写者留着，不覆盖");
+    assert_eq!(
+        q[0].value,
+        Some(five),
+        "on conflict, the earlier writer is kept, not overwritten"
+    );
     assert!(q[0].entity_id.is_none());
 
     // Cleanup: deleting the database cascades and takes everything along

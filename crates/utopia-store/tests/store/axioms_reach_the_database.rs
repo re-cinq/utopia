@@ -86,7 +86,7 @@ async fn every_axiom_survives_the_bulk_insert() -> anyhow::Result<()> {
         let t = got
             .iter()
             .find(|r| r.0 == "all_true")
-            .expect("all_true 落库");
+            .expect("all_true written to the database");
         assert!(
             t.1 && t.2 && t.3 && t.4 && t.5 && t.6,
             "六个公理位都该照写下去，实得 {t:?}"
@@ -94,7 +94,7 @@ async fn every_axiom_survives_the_bulk_insert() -> anyhow::Result<()> {
         let f = got
             .iter()
             .find(|r| r.0 == "all_false")
-            .expect("all_false 落库");
+            .expect("all_false written to the database");
         assert!(
             !f.1 && !f.2 && !f.3 && !f.4 && !f.5 && !f.6,
             "没声明的公理不该凭空为真，实得 {f:?}"

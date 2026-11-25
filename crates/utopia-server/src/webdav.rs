@@ -151,7 +151,7 @@ fn parse_multistatus(xml: &str) -> anyhow::Result<Vec<Entry>> {
                 text.clear();
             }
             Ok(Event::Eof) => break,
-            Err(e) => return Err(anyhow::anyhow!("PROPFIND 响应解析失败: {e}")),
+            Err(e) => return Err(anyhow::anyhow!("PROPFIND response parse failed: {e}")),
             _ => {}
         }
         buf.clear();
@@ -215,7 +215,7 @@ pub async fn fetch(
 
     while let Some((dir, request_dir, depth)) = queue.pop() {
         if depth > MAX_DEPTH {
-            tracing::warn!(%dir, "目录太深，不再往下");
+            tracing::warn!(%dir, "directory too deep, going no further");
             continue;
         }
         let url = format!("{base}{request_dir}");
@@ -231,9 +231,9 @@ pub async fn fetch(
             .await
             .with_context(|| format!("PROPFIND {url}"))?;
         if !resp.status().is_success() {
-            anyhow::bail!("PROPFIND {url} 回了 {}", resp.status());
+            anyhow::bail!("PROPFIND {url} returned {}", resp.status());
         }
-        let xml = resp.text().await.context("读取 PROPFIND 响应")?;
+        let xml = resp.text().await.context("reading PROPFIND response")?;
 
         for e in parse_multistatus(&xml)? {
             // Send the original escaped path: decoding %23/%3F turns filename
@@ -273,7 +273,7 @@ pub async fn fetch(
                 Ok(b) => b,
                 Err(err) => {
                     unreadable += 1;
-                    tracing::warn!(%path, error = %err, "文件取不回来，跳过");
+                    tracing::warn!(%path, error = %err, "file could not be fetched, skipping");
                     continue;
                 }
             };
@@ -290,7 +290,7 @@ pub async fn fetch(
         }
     }
     if unreadable > 0 {
-        tracing::warn!(unreadable, "有文件没能取回");
+        tracing::warn!(unreadable, "some files could not be fetched");
     }
     Ok((out, truncated))
 }
@@ -384,8 +384,11 @@ mod tests {
         ] {
             let e = parse_multistatus(&xml).unwrap();
             assert_eq!(e.len(), 1);
-            assert_eq!(e[0].len, 5, "空的那次把长度盖成了 0：{xml}");
-            assert!(e[0].modified.is_some(), "空的那次把时间盖没了");
+            assert_eq!(
+                e[0].len, 5,
+                "the empty run overwrote the length with 0: {xml}"
+            );
+            assert!(e[0].modified.is_some(), "the empty run wiped out the time");
         }
     }
 
@@ -398,8 +401,8 @@ mod tests {
             <response><href>/docs/c.txt</href><propstat><prop>
               <getcontentlength>7</getcontentlength></prop></propstat></response>
             </multistatus>"#;
-        let e = parse_multistatus(xml).expect("一个怪实体不该让整张列表失败");
-        assert_eq!(e.len(), 2, "另一条也跟着没了");
+        let e = parse_multistatus(xml).expect("one odd entity should not fail the whole listing");
+        assert_eq!(e.len(), 2, "the other one was lost too");
         assert_eq!(e[1].href, "/docs/c.txt");
     }
 
@@ -645,7 +648,7 @@ mod tests {
         let with_ns0 = with_d.replace("D:", "ns0:");
         let a = parse_multistatus(with_d).unwrap();
         let b = parse_multistatus(&with_ns0).unwrap();
-        assert_eq!(a, b, "换个前缀就解不出来了");
+        assert_eq!(a, b, "cannot be parsed again under a different prefix");
         assert_eq!(a.len(), 1);
         assert_eq!(a[0].href, "/docs/a.txt");
         assert_eq!(a[0].len, 5);
@@ -665,7 +668,7 @@ mod tests {
   <propstat><prop><resourcetype><collection/></resourcetype></prop></propstat>
 </response></multistatus>"#;
         let e = parse_multistatus(xml).unwrap();
-        assert!(e[0].is_dir, "自闭合的 collection 没被认出来");
+        assert!(e[0].is_dir, "self-closing collection was not recognized");
     }
 
     /// hrefs are percent-escaped: a URL built by concatenating a path with Chinese characters would 404.

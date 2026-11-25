@@ -136,12 +136,12 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
 
         // 1. The proposal does not go onto the graph
         let first = propose(f.shenzhen, "2026-03-15").await?;
-        assert!(matches!(first, Outcome::Proposed(_)), "第一次该进队列");
-        assert_eq!(live_facts(&pool, f.kb).await?, 0, "提议阶段图上不能有活边");
+        assert!(matches!(first, Outcome::Proposed(_)), "first time should enter the queue");
+        assert_eq!(live_facts(&pool, f.kb).await?, 0, "no live edges in the graph during the proposal stage");
         let queued = pending::for_chunk(&pool, f.kb, f.chunk).await?;
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].subject_name, "Acme");
-        assert!(queued[0].quote.contains("Acme moved its headquarters"), "原句要跟着提议一起给人看");
+        assert!(queued[0].quote.contains("Acme moved its headquarters"), "the original sentence must be shown to the person along with the proposal");
 
         // 2. Re-extracting the same sentence does not propose it again
         assert_eq!(propose(f.shenzhen, "2026-03-15").await?, Outcome::AlreadyPending);
@@ -149,7 +149,7 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
         // 3. Nod: it enters the ledger, evidence points back at the sentence, and the queue is emptied
         let Outcome::Proposed(id) = first else { unreachable!() };
         let done = pending::confirm(&pool, f.kb, id).await?;
-        assert!(done.created, "确认该落一条新事实");
+        assert!(done.created, "confirmation should land one new fact");
         assert_eq!(live_facts(&pool, f.kb).await?, 1);
         let (ev_chunk, ev_proposed): (Uuid, Option<String>) = sqlx::query_as(
             "SELECT chunk_id, proposed_predicate FROM fact_evidence WHERE fact_id = $1",
@@ -157,7 +157,7 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
         .bind(done.fact_id)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(ev_chunk, f.chunk, "证据要指回那句记忆");
+        assert_eq!(ev_chunk, f.chunk, "evidence must point back to that memory sentence");
         assert_eq!(ev_proposed.as_deref(), Some("moved headquarters to"));
         assert!(pending::for_chunk(&pool, f.kb, f.chunk).await?.is_empty());
 
@@ -166,11 +166,11 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
 
         // 5. A shake of the head is remembered: a triple that was refused is not proposed in the next round
         let Outcome::Proposed(bad) = propose(f.shanghai, "2020-01-01").await? else {
-            panic!("换一个宾语该是新提议");
+            panic!("a different object should be a new proposal");
         };
         pending::reject(&pool, f.kb, bad, None).await?;
         assert_eq!(propose(f.shanghai, "2020-01-01").await?, Outcome::Rejected);
-        assert_eq!(live_facts(&pool, f.kb).await?, 1, "拒绝不碰图");
+        assert_eq!(live_facts(&pool, f.kb).await?, 1, "rejection does not touch the graph");
 
         // 6. A nod goes through the extraction path: for a functional relation, the new value closes the old one.
         //    Refusal records are looked up by (subject, predicate, object), so the same object with a changed date is still blocked —
@@ -182,11 +182,11 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
             .execute(&pool)
             .await?;
         let Outcome::Proposed(next) = propose(beijing, "2027-01-01").await? else {
-            panic!("接任该是新提议");
+            panic!("a succession should be a new proposal");
         };
         let moved = pending::confirm(&pool, f.kb, next).await?;
         assert!(moved.created);
-        assert_eq!(moved.conflicts, 0, "先后清楚、置信够高，该自动闭合而不是进冲突");
+        assert_eq!(moved.conflicts, 0, "order is clear and confidence high enough, should close automatically rather than enter a conflict");
         let (closed,): (i64,) = sqlx::query_as(
             "SELECT count(*) FROM facts
               WHERE kb_id = $1 AND object_id = $2 AND invalidated_at IS NULL AND valid_to IS NOT NULL",
@@ -195,7 +195,7 @@ async fn a_remembered_fact_waits_for_a_nod() -> anyhow::Result<()> {
         .bind(f.shenzhen)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(closed, 1, "深圳那条该被闭合成有终点的区间");
+        assert_eq!(closed, 1, "the Shenzhen one should be closed into an interval with an end point");
         Ok::<_, anyhow::Error>(())
     }
     .await;

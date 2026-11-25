@@ -583,7 +583,7 @@ async fn sync_urls(state: &AppState, source: &Source) -> anyhow::Result<SyncStat
                 stats.absorb(action);
             }
             Err(e) => {
-                tracing::warn!(%url, error = %e, "抓取失败");
+                tracing::warn!(%url, error = %e, "fetch failed");
                 last_err = Some(format!("{url}: {e}"));
             }
         }
@@ -618,7 +618,7 @@ async fn fetch_page(url: &str) -> anyhow::Result<(String, String, Vec<u8>)> {
     // The identity is still **the URL in the config** (the same page under a new address should not become a new document),
     // but landing somewhere else is worth a line
     if page.final_url.as_str() != url {
-        tracing::debug!(from = url, to = %page.final_url, "页面跟着重定向落在别处");
+        tracing::debug!(from = url, to = %page.final_url, "page redirected to somewhere else");
     }
     let filename = filename_from_url(url, &mime);
     Ok((filename, mime, page.bytes))
@@ -1116,7 +1116,7 @@ async fn sync_github_repo_with_client(
     }
     if truncated {
         // Do not decide "who disappeared" when the tree is incomplete: absence may just mean it has not been listed yet
-        tracing::warn!(%repo, "GitHub 文件树被截断，本轮只摄入列出的文件，不做不在来源中对账");
+        tracing::warn!(%repo, "GitHub file tree was truncated, so this round ingests only the listed files and does not reconcile files absent from the source");
     } else {
         utopia_store::documents::reconcile_missing(&state.pool, source.id, &keys)
             .await
@@ -1152,7 +1152,7 @@ pub(crate) async fn gitlab_checked(
     let resp = req.send().await?;
     let status = resp.status();
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        anyhow::bail!("GitLab 限流：请求太多，稍后再同步；未认证的配额更低，配一个 read_api 令牌");
+        anyhow::bail!("GitLab rate limit: too many requests, sync later; unauthenticated quota is lower, configure a read_api token");
     }
     if !status.is_success() {
         anyhow::bail!("HTTP {status} from GitLab");
@@ -1350,7 +1350,7 @@ async fn sync_gitlab_repo_with_client(
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<i64>().ok());
         let Some(size) = size else {
-            tracing::warn!(%project, path = %entry.path, "GitLab 没有给出文件大小，跳过这个文件");
+            tracing::warn!(%project, path = %entry.path, "GitLab gave no file size, skipping this file");
             continue;
         };
         if !filter.size_ok(size) {
@@ -1391,7 +1391,7 @@ async fn sync_gitlab_repo_with_client(
         stats.absorb(action);
     }
     if truncated {
-        tracing::warn!(%project, pages = gl::MAX_TREE_PAGES, "GitLab 文件树没翻完，本轮只摄入列出的文件，不做不在来源中对账");
+        tracing::warn!(%project, pages = gl::MAX_TREE_PAGES, "GitLab file tree not fully paged, so this round ingests only the listed files and does not reconcile files absent from the source");
     } else {
         utopia_store::documents::reconcile_missing(&state.pool, source.id, &keys)
             .await
@@ -1563,11 +1563,11 @@ async fn sync_custom(
             break;
         }
         let Some(id) = item["id"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
-            tracing::warn!(source_id = %source.id, "custom item 缺少 id，跳过");
+            tracing::warn!(source_id = %source.id, "custom item missing id, skipping");
             continue;
         };
         let Some(content) = item["content"].as_str().filter(|s| !s.trim().is_empty()) else {
-            tracing::warn!(source_id = %source.id, %id, "custom item 缺少 content，跳过");
+            tracing::warn!(source_id = %source.id, %id, "custom item missing content, skipping");
             continue;
         };
         let title = item["title"]
@@ -1621,7 +1621,7 @@ async fn sync_custom(
         let n = utopia_store::documents::mark_missing_keys(&state.pool, source.id, &tombstones)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        tracing::info!(source_id = %source.id, count = n, "custom 墓碑：标记不在来源中");
+        tracing::info!(source_id = %source.id, count = n, "custom tombstone: marking as absent from source");
     }
     Ok(stats)
 }
@@ -1708,7 +1708,11 @@ async fn sync_webdav(state: &AppState, source: &Source) -> anyhow::Result<SyncSt
     .await?;
     let (files, truncated) = crate::webdav::fetch(&http, base, root, auth).await?;
     if truncated {
-        tracing::warn!(base, root, "文件数到达单次上限，其余留给下一次同步");
+        tracing::warn!(
+            base,
+            root,
+            "file count reached the per-run limit, the rest is left for the next sync"
+        );
     }
 
     let mut stats = SyncStats::default();
@@ -1748,7 +1752,7 @@ async fn sync_notion(state: &AppState, source: &Source) -> anyhow::Result<SyncSt
 
     let (pages, truncated, unread) = crate::notion::fetch(token, query).await?;
     if truncated {
-        tracing::warn!("页面数到达单次上限，其余留给下一次同步");
+        tracing::warn!("page count reached the per-run limit, the rest is left for the next sync");
     }
 
     let mut stats = SyncStats::default();

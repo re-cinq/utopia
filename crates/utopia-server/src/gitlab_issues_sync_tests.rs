@@ -83,7 +83,7 @@ async fn a_gitlab_ticket_sync_takes_each_ticket_with_its_history_once() -> anyho
         anyhow::ensure!(first.created == 2, "第一轮建了 {}", first.created);
         // Keep the checkpoint's milliseconds: if truncated, a later ticket in the same second would be treated as unread again next round
         anyhow::ensure!(first.checkpoint == Some(time("2026-11-14T21:36:10.304Z")));
-        let issue = doc("#1").await?.expect("工单 #1 该收");
+        let issue = doc("#1").await?.expect("ticket #1 should be pulled in");
         // Truncate the document timestamp to seconds
         anyhow::ensure!(issue.doc_time == Some(time("2026-11-14T21:36:07Z")));
         let body = String::from_utf8(state.blob.get(&issue.sha256).await?)?;
@@ -144,7 +144,7 @@ async fn a_gitlab_ticket_sync_takes_each_ticket_with_its_history_once() -> anyho
         let third = sync_gitlab_issues_with_client(&state, &source, since, &http, &uri).await?;
         anyhow::ensure!(third.created == 2 && third.updated == 0);
         anyhow::ensure!(third.checkpoint == Some(time("2026-11-14T21:36:20.069Z")));
-        let merged = doc("!1").await?.expect("合并请求 !1 该收");
+        let merged = doc("!1").await?.expect("merge request !1 should be pulled in");
         let body = String::from_utf8(state.blob.get(&merged.sha256).await?)?;
         anyhow::ensure!(
             body.contains("Merged on 2026-11-14T21:36:15Z.") && !body.contains("mentioned in commit"),

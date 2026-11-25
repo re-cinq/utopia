@@ -195,7 +195,7 @@ pub async fn fetch(
             continue;
         }
         if meta.size > MAX_OBJECT_BYTES {
-            tracing::info!(%key, size = meta.size, "对象太大，跳过");
+            tracing::info!(%key, size = meta.size, "object too large, skipping");
             continue;
         }
         if out.len() >= MAX_OBJECTS_PER_SYNC {
@@ -215,7 +215,7 @@ pub async fn fetch(
             Ok(b) => b,
             Err(e) => {
                 unreadable += 1;
-                tracing::warn!(%key, error = %e, "对象取不回来，跳过");
+                tracing::warn!(%key, error = %e, "object could not be fetched, skipping");
                 continue;
             }
         };
@@ -228,7 +228,7 @@ pub async fn fetch(
         });
     }
     if unreadable > 0 {
-        tracing::warn!(unreadable, bucket, "有对象没能取回");
+        tracing::warn!(unreadable, bucket, "some objects could not be fetched");
     }
     Ok((out, truncated))
 }
@@ -344,24 +344,28 @@ mod tests {
         let store = client("s3", &cfg)?;
 
         let (objs, truncated) = fetch("s3", store.as_ref(), bucket, Some("docs")).await?;
-        assert!(!truncated, "三个对象不该触发上限");
+        assert!(!truncated, "three objects should not hit the limit");
 
         let keys: Vec<&str> = objs.iter().map(|o| o.external_key.as_str()).collect();
         for want in [
             "s3://utopia-conn-test/docs/a.txt",
             "s3://utopia-conn-test/docs/b.md",
         ] {
-            assert!(keys.contains(&want), "少了 {want}：{keys:?}");
+            assert!(keys.contains(&want), "missing {want}: {keys:?}");
         }
 
         // **This guards a bug that really blew up.** The bucket has a `docs/` directory placeholder object,
         // and `object_store` normalised the trailing slash away, so it entered
         // the loop as `docs`, GET returned 404, and the whole sync failed. None of the three unit tests
         // that construct a client can detect this; only a real connection to a bucket that holds a "folder" will show it.
-        assert_eq!(objs.len(), 2, "目录占位对象没被滤掉：{keys:?}");
+        assert_eq!(
+            objs.len(),
+            2,
+            "directory placeholder objects were not filtered out: {keys:?}"
+        );
 
         let a = objs.iter().find(|o| o.filename == "a.txt").expect("a.txt");
-        assert_eq!(a.bytes, b"hello", "取回的内容不对");
+        assert_eq!(a.bytes, b"hello", "fetched content is wrong");
         assert!(
             a.last_modified.is_some(),
             "LastModified 是 doc_time 的唯一来源"

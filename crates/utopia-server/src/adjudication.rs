@@ -635,7 +635,10 @@ mod tests {
             !needs_second_look(&it, &p, Some(false), 0.9),
             "分开是安全方向，照旧落地"
         );
-        assert!(needs_second_look(&it, &p, None, 0.5), "没定的本来就要再看");
+        assert!(
+            needs_second_look(&it, &p, None, 0.5),
+            "undecided ones are re-examined anyway"
+        );
     }
 
     /// When the second look did not run: a same from a similar-name proposal is not applied nor cached; the rest follow the batch's verdict
@@ -666,6 +669,9 @@ mod tests {
         let p = gov::Precedents::default();
         let it = item("ambiguous_name|0.41");
         assert!(!needs_second_look(&it, &p, Some(true), 0.9));
-        assert!(needs_second_look(&it, &p, Some(true), 0.6), "不到线才再看");
+        assert!(
+            needs_second_look(&it, &p, Some(true), 0.6),
+            "re-examined only when below the threshold"
+        );
     }
 }

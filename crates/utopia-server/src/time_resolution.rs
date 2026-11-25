@@ -610,7 +610,7 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
                 if todo.is_empty() {
                     break;
                 }
-                tracing::info!(%document_id, unanswered = todo.len(), "时间解释有没答到的，再问一次");
+                tracing::info!(%document_id, unanswered = todo.len(), "some time interpretations got no answer, asking again");
             }
             for batch in todo.clone().chunks(BATCH) {
                 let inputs: Vec<MentionInput<'_>> = batch
@@ -634,21 +634,21 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
                 {
                     Ok(r) => r,
                     Err(e) => {
-                        tracing::warn!(%document_id, error = %e, "时间解释调用失败，这一批留作未解析");
+                        tracing::warn!(%document_id, error = %e, "time interpretation call failed, this batch is left unresolved");
                         continue;
                     }
                 };
                 let (interps, skipped) = match parse_interpretation_response(&reply.text, &ids) {
                     Ok(x) => x,
                     Err(e) => {
-                        tracing::warn!(%document_id, error = %e, "时间解释回复解析失败，这一批留作未解析");
+                        tracing::warn!(%document_id, error = %e, "time interpretation reply failed to parse, this batch is left unresolved");
                         continue;
                     }
                 };
                 malformed += skipped;
                 if skipped > 0 {
                     // Bad entries must show which one is bad and what is wrong with it: reporting only a count, "last week" with no date three times over could not be explained
-                    tracing::warn!(%document_id, skipped, reply = %reply.text.chars().take(600).collect::<String>(), "时间解释里有读不了的条目");
+                    tracing::warn!(%document_id, skipped, reply = %reply.text.chars().take(600).collect::<String>(), "time interpretation contains entries that could not be read");
                 }
                 received.extend(interps.iter().map(|interp| interp.id));
                 interpretations.extend(interps);
@@ -1106,7 +1106,10 @@ mod tests {
         assert_eq!(skipped, 0);
         let before = resolve_interpretations(&interpretations, |_| DocumentDating::default());
         assert_eq!(before, HashMap::from([(1, UNRESOLVED), (2, UNRESOLVED)]));
-        assert!(!before.contains_key(&0), "未回答与已回答但未解析的提及不同");
+        assert!(
+            !before.contains_key(&0),
+            "unanswered and answered-but-unresolved mentions differ"
+        );
 
         let later_batch = r#"{"m": [
             [40, "point", {"kind": "anchored", "anchor": {"kind": "mention", "id": 0}, "offset": {"count": 1, "unit": "day", "direction": "after"}}, "day"]

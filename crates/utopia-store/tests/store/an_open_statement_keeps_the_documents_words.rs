@@ -182,7 +182,10 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
         .await?;
         assert_eq!(row.layer, "open");
         assert_eq!(row.phrase.as_deref(), Some("acquired"));
-        assert!(row.predicate_id.is_none(), "开放陈述没有谓词");
+        assert!(
+            row.predicate_id.is_none(),
+            "open statement has no predicate"
+        );
         assert!(
             row.valid_from.is_none() && row.valid_to.is_none(),
             "开放陈述在世界轴上还没有位置"
@@ -195,7 +198,10 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
             .find(|e| e.id == fact)
             .expect("overview shows it");
         assert_eq!(e.label.as_deref(), Some("acquired"));
-        assert!(e.inferred, "名字来自原文，不是本体认下的关系");
+        assert!(
+            e.inferred,
+            "the name comes from the source text, not from a relation the ontology confirmed"
+        );
         // Role-word attributes are read back along the edge (#1267), not mixed into the qualifiers recorded by ontology attributes
         let amount = |q: &[utopia_core::models::StatementQualifier]| {
             serde_json::to_value(q).unwrap()
@@ -266,7 +272,10 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
             0.8,
         )
         .await?;
-        assert_eq!(again, fact, "同 (主语, 短语, 宾语) 复用那一行");
+        assert_eq!(
+            again, fact,
+            "the same (subject, phrase, object) reuses that row"
+        );
         assert!(!created);
         let quote_b = "Acme acquired Beta.";
         graph::add_evidence_located(
@@ -285,7 +294,11 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
         .bind(fact)
         .fetch_all(&pool)
         .await?;
-        assert_eq!(evidence.len(), 2, "第二块的证据累积到同一行上");
+        assert_eq!(
+            evidence.len(),
+            2,
+            "evidence from the second block accumulates on the same row"
+        );
         assert_eq!(evidence[0], (f.chunk_a, Some(0), Some(TEXT_A.len() as i32)));
         let (b_start, b_end) = span_of(TEXT_B, quote_b);
         assert_eq!(evidence[1], (f.chunk_b, Some(b_start), Some(b_end)));
@@ -296,7 +309,7 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
         .bind(f.kb)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(live, 1, "两次观察一行");
+        assert_eq!(live, 1, "two observations, one row");
 
         // A different object is a different row: the dedup key includes the object
         let (other, created) = graph::insert_open_statement(
@@ -393,7 +406,7 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
         .bind(f.beta)
         .execute(&pool)
         .await;
-        assert!(bad.is_err(), "开放行必须带短语");
+        assert!(bad.is_err(), "open rows must carry a phrase");
         let bad = sqlx::query(
             "INSERT INTO facts (id, kb_id, subject_id, layer, phrase, predicate_id, object_id)
              SELECT $1, $2, $3, 'open', 'acquired', r.id, $4

@@ -237,7 +237,7 @@ mod live_tests {
             .iter()
             .find(|c| c.table == "region" && c.column == "name")
             .expect("tpch.tiny.region.name in information_schema");
-        assert_eq!(name.schema, "tiny", "schema 段应被限定");
+        assert_eq!(name.schema, "tiny", "schema segment should be qualified");
         assert!(
             name.data_type.starts_with("varchar"),
             "data_type 要给出真形态，拿到的是 {}",
@@ -250,7 +250,7 @@ mod live_tests {
             .execute("SELECT regionkey, name FROM tpch.tiny.region ORDER BY regionkey")
             .await
             .expect("execute");
-        assert_eq!(r.rows.len(), 5, "region 有五行");
+        assert_eq!(r.rows.len(), 5, "region has five rows");
         let first: serde_json::Value = serde_json::from_str(&r.rows[0]).unwrap();
         assert_eq!(first["regionkey"], serde_json::json!(0));
         assert_eq!(first["name"], serde_json::json!("AFRICA"));

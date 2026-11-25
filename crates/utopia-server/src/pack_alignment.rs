@@ -209,7 +209,7 @@ mod tests {
     fn renamed_keys_are_valid() {
         for (_, _, al) in TABLE {
             if let Alignment::Rename(k) = al {
-                assert!(k.len() <= 40, "{k} 超过 40 字符");
+                assert!(k.len() <= 40, "{k} is over 40 characters");
                 assert!(
                     k.chars()
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
@@ -225,7 +225,11 @@ mod tests {
         let n = seen.len();
         seen.sort_unstable();
         seen.dedup();
-        assert_eq!(seen.len(), n, "对齐表里有重复的 (进来, 已占) 组合");
+        assert_eq!(
+            seen.len(),
+            n,
+            "alignment table has a duplicate (incoming, taken) pair"
+        );
     }
 
     /// The FOAF constants are not referenced outside the tests; this confirms they are spelled correctly
@@ -252,7 +256,8 @@ mod against_real_packs {
         for p in crate::ontology_packs::PACKS {
             let bytes = crate::ontology_packs::bytes(p).expect(p.id);
             let fmt = RdfFormat::detect(p.filename, &bytes);
-            let proj = project(&bytes, fmt).unwrap_or_else(|e| panic!("{} 投影失败：{e}", p.id));
+            let proj =
+                project(&bytes, fmt).unwrap_or_else(|e| panic!("{} projection failed: {e}", p.id));
             out.extend(proj.classes.iter().map(|c| c.iri.clone()));
             out.extend(proj.properties.iter().map(|p| p.iri.clone()));
         }

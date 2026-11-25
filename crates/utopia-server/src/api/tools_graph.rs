@@ -580,7 +580,12 @@ async fn aligned_predicates(ctx: &ToolCtx<'_>, sink: &mut ToolSink, word: &str) 
     .await
     .unwrap_or_default();
     for c in &near {
-        tracing::debug!(word, key = c.key, distance = c.distance, "谓词对齐候选");
+        tracing::debug!(
+            word,
+            key = c.key,
+            distance = c.distance,
+            "predicate alignment candidates"
+        );
     }
     near.into_iter()
         .filter(|c| c.distance <= PREDICATE_DISTANCE)
@@ -1445,7 +1450,7 @@ mod tests {
             ["Acme", "Acme lawsuit"],
             "叫这个名字的 untyped 照列且在前；别的 untyped 短语仍不列"
         );
-        assert!(dominant(&ranked, "Acme"), "只有它精确命中");
+        assert!(dominant(&ranked, "Acme"), "only it matches exactly");
     }
 
     #[test]
@@ -1481,7 +1486,10 @@ mod tests {
             ],
             "Zhang Wei",
         );
-        assert!(dominant(&ranked, "Zhang Wei"), "事实数三倍以上就明显");
+        assert!(
+            dominant(&ranked, "Zhang Wei"),
+            "clearly so when the fact count is at least three times"
+        );
     }
 
     fn fact(direction: &str, pred: &str, other: &str, other_type: Option<&str>) -> EntityFact {

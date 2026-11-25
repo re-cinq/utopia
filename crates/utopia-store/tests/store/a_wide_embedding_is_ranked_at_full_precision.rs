@@ -159,7 +159,10 @@ async fn a_wide_embedding_is_indexed_and_ranked_at_full_precision() -> anyhow::R
         vector_index::drop(&pool, Target::Chunks, DIMS).await?;
         forget_jobs().await?;
         let queued = vector_index::request(&pool, Target::Chunks, DIMS).await?;
-        assert!(queued.is_some(), "{DIMS} 维也排一条建索引任务");
+        assert!(
+            queued.is_some(),
+            "{DIMS} dimensions also queue an index build task"
+        );
 
         let built = vector_index::build(&pool, Target::Chunks, DIMS).await?;
         assert!(built.created);
@@ -186,9 +189,20 @@ async fn a_wide_embedding_is_indexed_and_ranked_at_full_precision() -> anyhow::R
         .await?;
         let after = index_scans(&indexed).await?;
 
-        assert!(after > before, "检索走了半精度索引");
-        assert_eq!(top, vec![f.nearer, f.farther], "次序按全精度距离");
-        assert_eq!(small, vec![f.only], "大库旁边的小库也回满");
+        assert!(
+            after > before,
+            "retrieval went through the half-precision index"
+        );
+        assert_eq!(
+            top,
+            vec![f.nearer, f.farther],
+            "ordering uses full-precision distance"
+        );
+        assert_eq!(
+            small,
+            vec![f.only],
+            "a small store beside a large one also gets full recall"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;

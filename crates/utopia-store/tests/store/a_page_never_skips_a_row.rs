@@ -81,7 +81,7 @@ async fn assert_total_order(
     expected: usize,
 ) -> anyhow::Result<()> {
     let mut want: Vec<Uuid> = sqlx::query_scalar(all_ids).fetch_all(pool).await?;
-    assert_eq!(want.len(), expected, "{what}: 写下的行数");
+    assert_eq!(want.len(), expected, "{what}: rows written");
     want.sort_by(|a, b| b.cmp(a));
     let mut distinct = seen.to_vec();
     distinct.sort();
@@ -92,7 +92,12 @@ async fn assert_total_order(
         "{what}: {} 行翻到了不止一次",
         seen.len() - distinct.len()
     );
-    assert_eq!(seen.len(), expected, "{what}: 翻完只见到 {} 行", seen.len());
+    assert_eq!(
+        seen.len(),
+        expected,
+        "{what}: paging only saw {} rows",
+        seen.len()
+    );
     assert!(
         seen == want,
         "{what}: 并列的行没有按 id 定下先后，翻页之间会漂"
@@ -145,7 +150,7 @@ async fn paging_through_a_batch_sees_every_row_exactly_once() -> anyhow::Result<
         .execute(&pool)
         .await?;
         let r = reasoning::run(&pool, f.kb).await?;
-        assert_eq!(r.inserted, CYCLES, "一次检查插下这些环");
+        assert_eq!(r.inserted, CYCLES, "one check inserts these cycles");
         let seen = page_through(|offset| {
             let pool = pool.clone();
             async move {

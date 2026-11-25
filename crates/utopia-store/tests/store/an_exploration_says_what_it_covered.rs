@@ -76,7 +76,7 @@ async fn a_run_says_what_it_scanned_and_what_it_dropped() -> anyhow::Result<()> 
                 .is_some_and(|s| s.contains("mounted")),
             "光有计数诊断不动，例子要留住"
         );
-        assert_eq!(r.tables_covered.len(), 2, "覆盖率的分子");
+        assert_eq!(r.tables_covered.len(), 2, "the numerator of the coverage");
         assert!(r.finished_at.is_some());
         assert!(r.error.is_none());
         Ok::<_, anyhow::Error>(())
@@ -104,7 +104,7 @@ async fn a_failed_run_is_not_an_empty_one() -> anyhow::Result<()> {
         runs::fail(&pool, id, "Chat model not configured").await?;
 
         let got = runs::recent(&pool, kb, 10).await?;
-        assert_eq!(got.len(), 1, "跑挂了的那一轮也该留下一行");
+        assert_eq!(got.len(), 1, "a run that failed should still leave a row");
         // The difference between this row and "ran to completion but accepted = 0" lies here. On the page both
         // used to show as "no new proposals", while one has to go and configure the model and the other has to go and annotate the columns
         assert_eq!(got[0].accepted, 0);

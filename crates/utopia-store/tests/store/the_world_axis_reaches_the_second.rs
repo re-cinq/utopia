@@ -117,16 +117,24 @@ async fn a_stored_value_is_truncated_to_its_precision() -> anyhow::Result<()> {
         )
         .await?;
         let (from, fp, _, _) = bounds(&pool, "facts", id).await?;
-        assert_eq!(from, Some(t("2026-06-01T14:32:00Z")), "截到整分");
+        assert_eq!(
+            from,
+            Some(t("2026-06-01T14:32:00Z")),
+            "truncated to the whole minute"
+        );
         assert_eq!(fp.as_deref(), Some("minute"));
 
         // A person closes it at some hour: the closing point is truncated to the whole hour
         let closed =
             utopia_store::temporal::close_superseded(&pool, id, t("2026-06-01T18:45:00Z"), "hour")
                 .await?
-                .expect("开放行关得上");
+                .expect("an open row can be closed");
         let (_, _, to, tp) = bounds(&pool, "facts", closed).await?;
-        assert_eq!(to, Some(t("2026-06-01T18:00:00Z")), "小时精度就是整点");
+        assert_eq!(
+            to,
+            Some(t("2026-06-01T18:00:00Z")),
+            "hour precision means on the hour"
+        );
         assert_eq!(tp.as_deref(), Some("hour"));
 
         // A row whose value and precision disagree is inserted directly, bypassing the write path: the CHECK blocks it. **This one must actually run** —
@@ -160,7 +168,7 @@ async fn a_stored_value_is_truncated_to_its_precision() -> anyhow::Result<()> {
         .bind(f.c)
         .execute(&pool)
         .await;
-        assert!(bad.is_err(), "账本到秒为止");
+        assert!(bad.is_err(), "the ledger goes down to the second");
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -220,7 +228,7 @@ async fn a_derived_bound_carries_the_precision_of_the_premise_that_set_it() -> a
         .bind(f.c)
         .fetch_optional(&pool)
         .await?;
-        let (id,) = row.expect("a ⊂ c 推得出");
+        let (id,) = row.expect("a ⊂ c follows");
         let (from, fp, _, _) = bounds(&pool, "derived_facts", id).await?;
         assert_eq!(
             from,

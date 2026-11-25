@@ -322,10 +322,10 @@ async fn a_merged_peer_keeps_its_degree_before_the_merge() -> anyhow::Result<()>
         let merged = peers
             .iter()
             .find(|n| n.id == a)
-            .expect("合并之前 a 在同名列里");
+            .expect("before the merge, a is in the same-name list");
         let (_, panel) = utopia_store::graph::entity_detail(&pool, kb, a, None, feb).await?;
-        assert_eq!(panel.len(), 1, "面板上二月的 a 有一条事实");
-        assert_eq!(merged.degree, 1, "同名列里的度数与面板一致");
+        assert_eq!(panel.len(), 1, "the panel shows a fact for a in February");
+        assert_eq!(merged.degree, 1, "the degree in the same-name list matches the panel");
         anyhow::Ok(())
     }
     .await;

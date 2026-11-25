@@ -156,7 +156,7 @@ async fn a_fact_closed_from_that_queue_leaves_it() -> anyhow::Result<()> {
             "month",
         )
         .await?
-        .expect("闭合要改写出修正行");
+        .expect("closing must rewrite out a correction row");
 
         // **The correction row carries the same batch of evidence, but it already has an end, so it is no longer "current".**
         // Without this condition it would go straight back into the list — what the user sees is exactly "I clicked close, and the entry is still there"
@@ -176,13 +176,19 @@ async fn a_fact_closed_from_that_queue_leaves_it() -> anyhow::Result<()> {
                 .bind(corrected)
                 .fetch_one(&pool)
                 .await?;
-        assert_eq!(copied, 1, "证据随修正行复制");
+        assert_eq!(
+            copied, 1,
+            "evidence is copied along with the correction row"
+        );
         let end: Option<DateTime<Utc>> =
             sqlx::query_scalar("SELECT valid_to FROM facts WHERE id = $1")
                 .bind(corrected)
                 .fetch_one(&pool)
                 .await?;
-        assert!(end.is_some(), "修正行的终点是写明的");
+        assert!(
+            end.is_some(),
+            "the correction row's end is stated explicitly"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;

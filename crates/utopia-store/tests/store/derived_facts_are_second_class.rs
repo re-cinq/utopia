@@ -156,7 +156,7 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
         let ab = assert_fact(&pool, &f, f.a, f.b, None).await?;
         let bc = assert_fact(&pool, &f, f.b, f.c, None).await?;
         let r = reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(r.rules, 1, "一条 transitive 规则");
+        assert_eq!(r.rules, 1, "a transitive rule");
         assert_eq!(r.edges, 2);
         assert_eq!(r.inserted, 1);
         assert_eq!(live_derived(&pool, f.kb).await?, vec![(f.a, f.c)]);
@@ -173,7 +173,11 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
         .bind(derived)
         .fetch_all(&pool)
         .await?;
-        assert_eq!(premises, vec![ab, bc], "证明要按推导顺序记直接前提");
+        assert_eq!(
+            premises,
+            vec![ab, bc],
+            "the proof must record direct premises in derivation order"
+        );
 
         // ---- 2. Rerun is idempotent, the rule id is unchanged
         let rule_before: Uuid = sqlx::query_scalar("SELECT id FROM rules WHERE kb_id = $1")
@@ -181,19 +185,31 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
             .fetch_one(&pool)
             .await?;
         let again = reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(again.inserted, 0, "同一条派生第二次跑不该再插一份");
+        assert_eq!(
+            again.inserted, 0,
+            "the same derivation must not be inserted again on a second run"
+        );
         assert_eq!(again.invalidated, 0);
         let rule_after: Uuid = sqlx::query_scalar("SELECT id FROM rules WHERE kb_id = $1")
             .bind(f.kb)
             .fetch_one(&pool)
             .await?;
-        assert_eq!(rule_before, rule_after, "重编译要认得出还是那条规则");
+        assert_eq!(
+            rule_before, rule_after,
+            "recompilation must recognise it is still the same rule"
+        );
 
         // ---- 3. Assertion first: when A ⊂ C is also asserted, the derived one should yield
         assert_fact(&pool, &f, f.a, f.c, None).await?;
         let asserted = reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(asserted.derived, 0, "断言过的三元组不该再派生");
-        assert_eq!(asserted.invalidated, 1, "此前派生的那条要作废");
+        assert_eq!(
+            asserted.derived, 0,
+            "an asserted triple must not be derived again"
+        );
+        assert_eq!(
+            asserted.invalidated, 1,
+            "the one derived earlier must be voided"
+        );
         assert!(live_derived(&pool, f.kb).await?.is_empty());
         // Voiding is not deleting — it stays on the record axis
         let ghost: i64 = sqlx::query_scalar(
@@ -203,7 +219,10 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
         .bind(f.kb)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(ghost, 1, "派生失效要留痕，与拒绝一条事实同构");
+        assert_eq!(
+            ghost, 1,
+            "invalidating a derivation must leave a trace, same as rejecting a fact"
+        );
 
         // ---- 4. Premise retracted, derivation follows
         sqlx::query(
@@ -214,13 +233,19 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
         .execute(&pool)
         .await?;
         let back = reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(back.inserted, 1, "断言撤了，派生该回来");
+        assert_eq!(
+            back.inserted, 1,
+            "the assertion was withdrawn, so the derivation should come back"
+        );
         sqlx::query("UPDATE facts SET invalidated_at = now() WHERE id = $1")
             .bind(bc)
             .execute(&pool)
             .await?;
         let gone = reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(gone.invalidated, 1, "前提没了，派生必须跟着失效");
+        assert_eq!(
+            gone.invalidated, 1,
+            "the premise is gone, so the derivation must be invalidated too"
+        );
         assert!(live_derived(&pool, f.kb).await?.is_empty());
 
         // ---- 5. Precision: the intersection makes the end unbounded, so that end's precision must be cleared as well,
@@ -269,7 +294,7 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
             Some("day"),
             "精度跟赢下这一端的前提走，不是最粗的那个"
         );
-        assert_eq!(tp, None, "结束端无界，精度必须是空");
+        assert_eq!(tp, None, "open end, so precision must be empty");
 
         // ---- 6. Axiom retracted: the facts derived from it are voided, and the rule row is **kept**
         sqlx::query("UPDATE relation_types SET is_transitive = FALSE WHERE id = $1")
@@ -277,8 +302,8 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
             .execute(&pool)
             .await?;
         let blind = reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(blind.rules, 0, "没有公理就编不出规则");
-        assert_eq!(blind.invalidated, 1, "据它推出来的事实要作废");
+        assert_eq!(blind.rules, 0, "no rule can be compiled without an axiom");
+        assert_eq!(blind.invalidated, 1, "facts derived from it must be voided");
         assert!(live_derived(&pool, f.kb).await?.is_empty());
         let rules_left: i64 = sqlx::query_scalar("SELECT count(*) FROM rules WHERE kb_id = $1")
             .bind(f.kb)
@@ -295,12 +320,15 @@ async fn what_the_engine_adds_it_can_also_take_back() -> anyhow::Result<()> {
             .await?;
         let revived = reasoning::materialize(&pool, f.kb).await?;
         assert_eq!(revived.rules, 1);
-        assert_eq!(revived.inserted, 1, "公理回来，推导也回来");
+        assert_eq!(revived.inserted, 1, "axiom back, derivation back too");
         let rule_now: Uuid = sqlx::query_scalar("SELECT id FROM rules WHERE kb_id = $1")
             .bind(f.kb)
             .fetch_one(&pool)
             .await?;
-        assert_eq!(rule_now, rule_before, "撤了又加回来，还是同一条规则");
+        assert_eq!(
+            rule_now, rule_before,
+            "withdrawn and re-added, still the same rule"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;

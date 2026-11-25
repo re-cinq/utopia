@@ -108,19 +108,19 @@ pub async fn propose_rules(
             {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(%kb_id, error = %e, "提规则调用失败，这一批留到下次");
+                    tracing::warn!(%kb_id, error = %e, "rule-proposal call failed, this batch is deferred to next time");
                     return Ok::<_, anyhow::Error>((0usize, 1usize));
                 }
             };
         let (choices, malformed) = match parse_rule_response(&reply.text, &items, READINGS) {
             Ok(x) => x,
             Err(e) => {
-                tracing::warn!(%kb_id, error = %e, "提规则回复解析失败，这一批留到下次");
+                tracing::warn!(%kb_id, error = %e, "failed to parse rule-proposal reply, this batch is deferred to next time");
                 return Ok::<_, anyhow::Error>((0usize, 1usize));
             }
         };
         if malformed > 0 {
-            tracing::info!(%kb_id, malformed, "提规则的回复里有坏项");
+            tracing::info!(%kb_id, malformed, "the rule-proposal reply contains bad items");
         }
         for c in choices {
             let Ok(i) = usize::try_from(c.id) else {
@@ -235,7 +235,7 @@ pub async fn read_phrases(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
     let pool = &state.pool;
     let pending = implication_rules::pending_readings(pool, kb_id).await?;
     if pending.is_empty() {
-        tracing::info!(%kb_id, "没有待读的字");
+        tracing::info!(%kb_id, "nothing pending to read");
     } else {
         let kb = utopia_store::kbs::get(pool, kb_id).await?;
         let settings = utopia_store::settings::get(pool, kb.workspace_id)
@@ -255,27 +255,32 @@ pub async fn read_phrases(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
                 })
                 .collect();
             let messages = build_reading_messages(&items, READINGS);
-            let reply =
-                match chat_retrying_rate_limits_at(state, &settings, &client, &messages, Some(0.0))
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!(%kb_id, error = %e, "读数调用失败，这一批留到下次");
-                        failed += 1;
-                        continue;
-                    }
-                };
+            let reply = match chat_retrying_rate_limits_at(
+                state,
+                &settings,
+                &client,
+                &messages,
+                Some(0.0),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(%kb_id, error = %e, "reading call failed, this batch is deferred to next time");
+                    failed += 1;
+                    continue;
+                }
+            };
             let (answers, malformed) = match parse_reading_response(&reply.text, &items) {
                 Ok(x) => x,
                 Err(e) => {
-                    tracing::warn!(%kb_id, error = %e, "读数回复解析失败，这一批留到下次");
+                    tracing::warn!(%kb_id, error = %e, "failed to parse reading reply, this batch is deferred to next time");
                     failed += 1;
                     continue;
                 }
             };
             if malformed > 0 {
-                tracing::info!(%kb_id, malformed, "读数的回复里有坏项");
+                tracing::info!(%kb_id, malformed, "the reading reply contains bad items");
             }
             for a in answers {
                 let Ok(i) = usize::try_from(a.id) else {
@@ -301,7 +306,7 @@ pub async fn read_phrases(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
                 answered += 1;
             }
         }
-        tracing::info!(%kb_id, pending = pending.len(), answered, failed, "读数填缓存完成");
+        tracing::info!(%kb_id, pending = pending.len(), answered, failed, "reading cache fill complete");
         if failed > 0 {
             anyhow::bail!("{failed} reading batches failed; the job retries");
         }

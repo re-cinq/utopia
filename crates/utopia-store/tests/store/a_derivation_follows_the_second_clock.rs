@@ -176,7 +176,7 @@ async fn a_derivation_is_absent_before_it_was_drawn_and_kept_until_it_was_withdr
             Some(t("2026-03-01T00:00:00Z")),
         )
         .await?;
-        assert!(facts.is_empty(), "三月一日：两条前提都还没记下");
+        assert!(facts.is_empty(), "March 1: neither premise is recorded yet");
         assert!(
             derived_of(f.atlas, Some("2026-03-01T00:00:00Z"))
                 .await?
@@ -199,7 +199,11 @@ async fn a_derivation_is_absent_before_it_was_drawn_and_kept_until_it_was_withdr
             Some(t("2026-03-10T12:00:00Z")),
         )
         .await?;
-        assert_eq!(facts.len(), 1, "三月十日中午：Atlas 自己的那条前提已经记下");
+        assert_eq!(
+            facts.len(),
+            1,
+            "March 10 noon: Atlas's own premise is already recorded"
+        );
         assert!(
             derived_of(f.atlas, Some("2026-03-10T12:00:00Z"))
                 .await?

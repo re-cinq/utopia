@@ -64,14 +64,14 @@ async fn a_single_name_candidate_is_attached_without_counting_its_facts() -> any
             &[],
         )
         .await?;
-        assert!(!r.created && r.entity_id == entity, "唯一的同名候选就是它");
+        assert!(!r.created && r.entity_id == entity, "the only same-name candidate is it");
         let counted: Vec<String> = sqlx::query_scalar(
             "SELECT statement FROM pg_prepared_statements WHERE statement LIKE '%count(*)%facts f%'",
         )
         .persistent(false)
         .fetch_all(&pool)
         .await?;
-        assert_eq!(counted, Vec::<String>::new(), "只有一个候选，不该数事实");
+        assert_eq!(counted, Vec::<String>::new(), "only one candidate, should not count facts");
         anyhow::Ok(())
     }
     .await;

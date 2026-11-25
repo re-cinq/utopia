@@ -343,7 +343,7 @@ pub async fn install(
         .await?;
     }
     if !report.skipped.is_empty() {
-        tracing::info!(%kb_id, skipped = ?report.skipped, "场景包有跳过的元素");
+        tracing::info!(%kb_id, skipped = ?report.skipped, "scenario pack has skipped elements");
     }
     Ok(report)
 }

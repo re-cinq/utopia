@@ -194,7 +194,7 @@ pub async fn export(
 
 /// An error from the database mid-stream can only become an io error -- the response headers have already been sent, so the status code cannot be changed.
 fn io(e: AppError) -> std::io::Error {
-    tracing::error!(error = %e, "导出中断");
+    tracing::error!(error = %e, "export interrupted");
     std::io::Error::other(e.to_string())
 }
 

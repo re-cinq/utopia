@@ -281,10 +281,13 @@ async fn the_summary_reads_the_three_ledgers_with_one_yardstick() -> anyhow::Res
         "重复按 created_at"
     );
     assert_eq!(w.lowconf.count, 1);
-    assert!(w.lowconf.oldest_at.is_some(), "低置信按事实的 recorded_at");
+    assert!(
+        w.lowconf.oldest_at.is_some(),
+        "low confidence uses the fact's recorded_at"
+    );
     assert_eq!(w.unconfirmed.count, 0);
     assert_eq!(w.pending.count, 0);
-    assert_eq!(w.pending.oldest_at, None, "空队列没有「最老」");
+    assert_eq!(w.pending.oldest_at, None, "an empty queue has no oldest");
     assert_eq!(w.violations.count, 0);
     assert_eq!(w.defects.count, 0);
     assert_eq!(

@@ -67,7 +67,7 @@ async fn candidates_for(
         Ok(nearest) => nearest,
         Err(e) if utopia_llm::out_of_credit(&e).is_some() => return Err(e),
         Err(e) => {
-            tracing::warn!(%kb_id, error = %e, "类别词对齐检索候选类失败，退回整表");
+            tracing::warn!(%kb_id, error = %e, "category word alignment candidate class search failed, falling back to the full table");
             Vec::new()
         }
     };
@@ -124,7 +124,7 @@ pub async fn align_types_reasking(state: &AppState, kb_id: Uuid, reask: u32) -> 
     // (`candidates_for`); a class without a vector cannot be retrieved, so judging now would leave it out of the candidates. Come back once it finishes —
     // queue one attempt half a minute later, at most one pending. Phrase alignment waits on this job, so the order is vectors → category words → phrases
     if utopia_store::jobs::pending_for_kb(pool, "embed_ontology", kb_id).await? {
-        tracing::info!(%kb_id, "类别词对齐：本体向量还在补，半分钟后再看");
+        tracing::info!(%kb_id, "category word alignment: ontology vectors still being filled, checking again in half a minute");
         let payload = if reask == 0 {
             serde_json::json!({ "kb_id": kb_id })
         } else {
@@ -150,7 +150,7 @@ pub async fn align_types_reasking(state: &AppState, kb_id: Uuid, reask: u32) -> 
             .await?;
     if !locked {
         // The run in progress checks for new items itself when it ends (see the end of align_types_locked); no new run is queued here
-        tracing::info!(%kb_id, "类别词对齐已有一份在跑，这次跳过");
+        tracing::info!(%kb_id, "category word alignment already has a run in progress, skipping");
         return Ok(());
     }
     let result = align_types_locked(state, kb_id, reask, &settings, &client).await;
@@ -174,7 +174,7 @@ async fn align_types_locked(
     // so phrase alignment, queued after this, sees classes on both ends of the signature
     let caught_up = type_bindings::apply_bound(pool, kb_id).await?;
     if caught_up > 0 {
-        tracing::info!(%kb_id, entities = caught_up, "已绑上的类补到了后建的实体上");
+        tracing::info!(%kb_id, entities = caught_up, "classes already bound were applied to the entity created later");
     }
     // Read all inputs from one snapshot before calling the model (#795): class definitions, class versions and parent edges, category words, and existing
     // decisions. If read in several passes, an edit committed between two reads would leave the definition in the prompt and the version in the fingerprint out of step
@@ -221,7 +221,7 @@ async fn align_types_locked(
     let attempted: HashSet<String> = todo.iter().map(|s| s.kind_word.clone()).collect();
     // Written in this round, or already decided by a person and not overwritten by the agent. Asked but not concluded does not count; see the wrap-up
     let mut settled: HashSet<String> = HashSet::new();
-    tracing::info!(%kb_id, kind_words = sigs.len(), to_decide = todo.len(), classes = classes.len(), "类别词对齐开始");
+    tracing::info!(%kb_id, kind_words = sigs.len(), to_decide = todo.len(), classes = classes.len(), "category word alignment started");
 
     // No class to bind to: every word is "none", and proposed as suggestions; once classes appear the candidates change and the fingerprint mismatches, so they come back again
     if classes.is_empty() {
@@ -299,23 +299,28 @@ async fn align_types_locked(
                 continue;
             }
             let messages = build_kind_word_messages(&items);
-            let reply =
-                match chat_retrying_rate_limits_at(state, settings, client, &messages, Some(0.0))
-                    .await
-                {
-                    Ok(r) => r,
-                    // An overdue balance fails the whole round once and raises the alert; it is not recorded as failed and queued again (same as phrase alignment, #1360)
-                    Err(e) if utopia_llm::out_of_credit(&e).is_some() => return Err(e),
-                    Err(e) => {
-                        tracing::warn!(%kb_id, error = %e, "类别词对齐调用失败，这一批留到下次");
-                        failed += 1;
-                        continue;
-                    }
-                };
+            let reply = match chat_retrying_rate_limits_at(
+                state,
+                settings,
+                client,
+                &messages,
+                Some(0.0),
+            )
+            .await
+            {
+                Ok(r) => r,
+                // An overdue balance fails the whole round once and raises the alert; it is not recorded as failed and queued again (same as phrase alignment, #1360)
+                Err(e) if utopia_llm::out_of_credit(&e).is_some() => return Err(e),
+                Err(e) => {
+                    tracing::warn!(%kb_id, error = %e, "category word alignment call failed, this batch is deferred to next time");
+                    failed += 1;
+                    continue;
+                }
+            };
             let (choices, malformed) = match parse_kind_word_response(&reply.text, &items) {
                 Ok(x) => x,
                 Err(e) => {
-                    tracing::warn!(%kb_id, error = %e, "类别词对齐回复解析失败，这一批留到下次");
+                    tracing::warn!(%kb_id, error = %e, "category word alignment reply failed to parse, this batch is deferred to next time");
                     failed += 1;
                     continue;
                 }
@@ -410,15 +415,15 @@ async fn align_types_locked(
                     settled.insert(s.kind_word.clone());
                 }
                 Acceptance::Moved => {
-                    tracing::info!(%kb_id, kind_word = %s.kind_word, "类别词对齐：模型答题期间候选类变了，这份回复不收");
+                    tracing::info!(%kb_id, kind_word = %s.kind_word, "category word alignment: candidate classes changed while the model was answering, this reply is not accepted");
                     moved += 1;
                 }
             }
         }
     }
-    tracing::info!(%kb_id, bound, none, undecided, skipped, failed, unanswered, moved, "类别词对齐完成");
+    tracing::info!(%kb_id, bound, none, undecided, skipped, failed, unanswered, moved, "category word alignment finished");
     if unanswered > 0 {
-        tracing::warn!(%kb_id, unanswered, "类别词对齐有词模型没答到，这些词这轮没有结论");
+        tracing::warn!(%kb_id, unanswered, "category word alignment: some word models gave no answer, these words have no conclusion this round");
     }
     if bound + none + undecided > 0 {
         state.emit_graph(kb_id);
@@ -482,7 +487,7 @@ async fn finish(
         another_round = true;
     } else if unfinished && reask < MAX_REASK {
         let delay = std::time::Duration::from_secs(20 * u64::from(reask + 1));
-        tracing::info!(%kb_id, failed, unanswered, reask = reask + 1, delay_secs = delay.as_secs(), "类别词对齐没判完，稍后再问");
+        tracing::info!(%kb_id, failed, unanswered, reask = reask + 1, delay_secs = delay.as_secs(), "category word alignment not decided yet, will ask again later");
         utopia_store::jobs::enqueue_unless_pending(
             pool,
             "align_types",
@@ -492,7 +497,7 @@ async fn finish(
         .await?;
         another_round = true;
     } else if unfinished {
-        tracing::warn!(%kb_id, failed, unanswered, reask, "类别词对齐问了几轮仍没判完，等下一篇文档或本体改动再问");
+        tracing::warn!(%kb_id, failed, unanswered, reask, "category word alignment asked several rounds without deciding, will ask again after the next document or ontology change");
     }
     // Phrase signatures are only fixed once the classes at both ends are fixed: phrase alignment is queued after category-word alignment **finishes**
     if !another_round {

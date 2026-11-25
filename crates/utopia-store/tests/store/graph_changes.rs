@@ -251,6 +251,6 @@ async fn ledger_events_are_derived_as_specified() -> anyhow::Result<()> {
     .bind(kb)
     .execute(&pool)
     .await?;
-    assert_eq!(gone.rows_affected(), 1, "一次性 org 没删掉");
+    assert_eq!(gone.rows_affected(), 1, "one-off org was not deleted");
     Ok(())
 }

@@ -80,7 +80,7 @@ fn payload_document_id(payload: &serde_json::Value) -> anyhow::Result<Uuid> {
         .get("document_id")
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| anyhow::anyhow!("payload 缺少 document_id"))
+        .ok_or_else(|| anyhow::anyhow!("payload missing document_id"))
 }
 
 /// The most common misunderstanding among database connection failures, stated on the spot (#456): the compose deployment's database password
@@ -124,9 +124,11 @@ async fn main() -> anyhow::Result<()> {
         mig_pool.close().await;
     }
     if separate_migration_role {
-        tracing::info!("数据库迁移完成（迁移身份与运行身份分离）");
+        tracing::info!(
+            "database migrations complete (migration identity separated from runtime identity)"
+        );
     } else {
-        tracing::info!("数据库迁移完成");
+        tracing::info!("database migrations complete");
     }
 
     let pool = utopia_store::db::connect(&cfg.database_url, cfg.db_max_connections)
@@ -146,12 +148,12 @@ async fn main() -> anyhow::Result<()> {
     // Plaintext credentials stored before the upgrade are sealed here
     let sealed = utopia_store::sealing::backfill(&pool).await?;
     if sealed > 0 {
-        tracing::info!(rows = sealed, "凭据补封完成");
+        tracing::info!(rows = sealed, "credential re-sealing complete");
     }
 
     let index_dir = std::path::Path::new(&cfg.data_dir).join("index");
     let search = Arc::new(search_recovery::open(&index_dir)?);
-    tracing::info!("全文索引就绪: {}", index_dir.display());
+    tracing::info!("full-text index ready: {}", index_dir.display());
 
     // **If the index comes up empty, rebuild it automatically; no button is offered.**
     //
@@ -174,7 +176,9 @@ async fn main() -> anyhow::Result<()> {
             let secret =
                 utopia_store::access::ensure_jwt_secret(&pool, &auth::generate_jwt_secret())
                     .await?;
-            tracing::info!("JWT 密钥取自部署设置（未显式配置 UTOPIA_JWT_SECRET）");
+            tracing::info!(
+                "JWT key taken from deployment settings (UTOPIA_JWT_SECRET not set explicitly)"
+            );
             secret
         }
     };
@@ -238,11 +242,11 @@ async fn main() -> anyhow::Result<()> {
                         if let Err(e) =
                             utopia_store::sources::enqueue_sync(&sched_state.pool, s.id).await
                         {
-                            tracing::warn!(source_id = %s.id, error = %e, "同步任务入队失败");
+                            tracing::warn!(source_id = %s.id, error = %e, "failed to enqueue sync task");
                         }
                     }
                 }
-                Err(e) => tracing::warn!(error = %e, "扫描到期来源失败"),
+                Err(e) => tracing::warn!(error = %e, "failed to scan due sources"),
             }
         }
     });
@@ -262,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
         loop {
             tick.tick().await;
             if let Err(e) = utopia_store::reasoning::queue_due_inferences(&infer_state.pool).await {
-                tracing::warn!(error = %e, "扫描到期推理失败");
+                tracing::warn!(error = %e, "failed to scan due reasoning runs");
             }
         }
     });
@@ -286,11 +290,11 @@ async fn main() -> anyhow::Result<()> {
                         )
                         .await
                         {
-                            tracing::warn!(kb_id = %kb_id, error = %e, "治理任务入队失败");
+                            tracing::warn!(kb_id = %kb_id, error = %e, "failed to enqueue governance task");
                         }
                     }
                 }
-                Err(e) => tracing::warn!(error = %e, "扫描治理积压失败"),
+                Err(e) => tracing::warn!(error = %e, "failed to scan governance backlog"),
             }
         }
     });
@@ -312,11 +316,11 @@ async fn main() -> anyhow::Result<()> {
                         )
                         .await
                         {
-                            tracing::warn!(source_id = %source_id, error = %e, "衰减任务入队失败");
+                            tracing::warn!(source_id = %source_id, error = %e, "failed to enqueue decay task");
                         }
                     }
                 }
-                Err(e) => tracing::warn!(error = %e, "扫描超出容量的源失败"),
+                Err(e) => tracing::warn!(error = %e, "failed to scan sources over capacity"),
             }
         }
     });
@@ -332,7 +336,7 @@ async fn main() -> anyhow::Result<()> {
                 let bases = match utopia_store::retention::bases(&prune_state.pool).await {
                     Ok(bases) => bases,
                     Err(e) => {
-                        tracing::warn!(error = %e, "列出要清理的库失败");
+                        tracing::warn!(error = %e, "failed to list databases to clean up");
                         continue;
                     }
                 };
@@ -344,7 +348,7 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .await
                     {
-                        tracing::warn!(kb_id = %kb_id, error = %e, "清理任务入队失败");
+                        tracing::warn!(kb_id = %kb_id, error = %e, "failed to enqueue cleanup task");
                     }
                 }
             }
@@ -353,7 +357,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = api::router(state, &cfg);
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
-    tracing::info!("Utopia 服务启动于 http://{}", cfg.bind_addr);
+    tracing::info!("Utopia server started at http://{}", cfg.bind_addr);
 
     // Browsers may resolve localhost to ::1 (IPv6): when the configured address is IPv4, add an IPv6 loopback listener on the same port,
     // to avoid "cannot find localhost". If binding fails (port in use or no IPv6), only warn.
@@ -361,16 +365,16 @@ async fn main() -> anyhow::Result<()> {
         let v6_addr = format!("[::1]:{}", addr.port());
         match tokio::net::TcpListener::bind(&v6_addr).await {
             Ok(v6_listener) => {
-                tracing::info!("同时监听 http://{v6_addr}");
+                tracing::info!("also listening on http://{v6_addr}");
                 let app_v6 = app.clone();
                 tokio::spawn(async move {
                     let svc = app_v6.into_make_service_with_connect_info::<std::net::SocketAddr>();
                     if let Err(e) = axum::serve(v6_listener, svc).await {
-                        tracing::warn!(error = %e, "IPv6 监听退出");
+                        tracing::warn!(error = %e, "IPv6 listener exited");
                     }
                 });
             }
-            Err(e) => tracing::warn!(error = %e, "IPv6 回环绑定失败（不影响 IPv4）"),
+            Err(e) => tracing::warn!(error = %e, "IPv6 loopback bind failed (IPv4 unaffected)"),
         }
     }
 
@@ -392,20 +396,25 @@ async fn reindex_if_empty(pool: &sqlx::PgPool, search: &SearchIndex, index_dir: 
     let rows = match utopia_store::documents::all_chunks_for_index(pool).await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(error = %e, "读分块失败，索引未重建");
+            tracing::warn!(error = %e, "failed to read chunks, index not rebuilt");
             return;
         }
     };
     let total = rows.len();
     if total > 0 {
-        tracing::info!(chunks = total, "全文索引是空的，从库里重建");
+        tracing::info!(
+            chunks = total,
+            "full-text index is empty, rebuilding from database"
+        );
     }
     // Even an empty database completes an interrupted rebuild: otherwise the
     // marker would make every subsequent startup discard an empty generation.
     match search_recovery::rebuild(index_dir, search, rows) {
-        Ok(()) if total > 0 => tracing::info!(chunks = total, "全文索引重建完成"),
+        Ok(()) if total > 0 => tracing::info!(chunks = total, "full-text index rebuild finished"),
         Ok(()) => {}
-        Err(e) => tracing::warn!(error = %e, "全文索引未重建完，下次启动重试"),
+        Err(e) => {
+            tracing::warn!(error = %e, "full-text index rebuild did not finish, will retry on next startup")
+        }
     }
 }
 ///
@@ -416,7 +425,7 @@ async fn reindex_if_empty(pool: &sqlx::PgPool, search: &SearchIndex, index_dir: 
 async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow::Result<()> {
     match job.kind.as_str() {
         "noop" => {
-            tracing::info!(job_id = job.id, "noop 任务执行成功");
+            tracing::info!(job_id = job.id, "noop task ran successfully");
             Ok(())
         }
         "process_document" => {
@@ -433,7 +442,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             mappings::explore_mappings(st, kb_id).await
         }
         // Scheduled re-derivation (0002 R1). **Record the time first, then derive**: even if derivation errors, this library should not
@@ -444,7 +453,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             utopia_store::reasoning::mark_inference_ran(&st.pool, kb_id).await?;
             let report = utopia_store::reasoning::materialize(&st.pool, kb_id).await?;
             // **Compare at the due time**: `materialize` already compares what this round computed against what the library holds,
@@ -477,7 +486,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             let fact_ids: Vec<Uuid> =
                 serde_json::from_value(job.payload.get("fact_ids").cloned().unwrap_or_default())?;
             utopia_store::documents::reattest_facts(&st.pool, kb_id, &fact_ids).await?;
@@ -497,7 +506,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             ontology_index::refresh(st, kb_id).await.map(|_| ())
         }
         // Vector index (0035 / #512): queued when the first vector of some dimension is written; built CONCURRENTLY outside the transaction.
@@ -508,12 +517,13 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("table")
                 .and_then(|v| v.as_str())
                 .and_then(utopia_store::vector_index::Target::parse)
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 table"))?;
-            let dims =
-                job.payload
-                    .get("dims")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| anyhow::anyhow!("payload 缺少 dims"))? as usize;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing table"))?;
+            let dims = job
+                .payload
+                .get("dims")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| anyhow::anyhow!("payload is missing dims"))?
+                as usize;
             let built = utopia_store::vector_index::build_as_owner(
                 &st.pool,
                 st.owner_database_url.as_deref(),
@@ -546,7 +556,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             match utopia_store::materialize::try_materialize(&st.pool, kb_id).await? {
                 Some(typed) => {
                     if typed.added > 0 || typed.merged > 0 || typed.retired > 0 {
@@ -592,7 +602,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             implication::read_phrases(st, kb_id).await
         }
         // Correction agent (0044 decision 7): for documents whose materialisation produced new rows, re-review the typed graph per document
@@ -602,7 +612,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             errata::review(st, kb_id).await
         }
         "align_types" => {
@@ -611,7 +621,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             // The attempt count is carried by the job queued by itself; documents and class creation queue without this field
             let reask = job
                 .payload
@@ -628,7 +638,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             // The attempt count is carried by the job queued by itself; the document, ontology and category-word alignment queues do not have this field
             let reask = job
                 .payload
@@ -648,7 +658,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             extraction_open::embed_names_job(st, kb_id).await
         }
         "resolve_types" => {
@@ -657,7 +667,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             type_resolution::resolve_types_job(st, kb_id).await
         }
         "adjudicate_entities" => {
@@ -666,7 +676,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             adjudication::adjudicate_entities(st, kb_id).await
         }
         "decay_sweep" => {
@@ -675,7 +685,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("source_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 source_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing source_id"))?;
             decay_sweep::sweep_source(st, source_id).await
         }
         utopia_store::retention::JOB_KIND => {
@@ -684,12 +694,12 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             let days = job
                 .payload
                 .get("days")
                 .and_then(|v| v.as_i64())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 days"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing days"))?;
             let vectors_cleared =
                 utopia_store::retention::prune_superseded(&st.pool, kb_id, days).await?;
             tracing::info!(
@@ -706,7 +716,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             governance::govern(st, kb_id).await
         }
         "propose_ontology" => {
@@ -715,7 +725,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             // For measurement: when the payload's glossary = full, the full glossary is sent with each batch (bench/agent.mjs)
             let full = job.payload.get("glossary").and_then(|v| v.as_str()) == Some("full");
             ontology_agent::propose_with(st, kb_id, full).await
@@ -726,7 +736,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("kb_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 kb_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing kb_id"))?;
             ontology_agent::propose_questions(st, kb_id)
                 .await
                 .map(|_| ())
@@ -737,7 +747,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("source_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 source_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing source_id"))?;
             ingest_sources::sync_source(st, source_id).await.map(|_| ())
         }
         "hydrate_rss_entry" => {
@@ -746,16 +756,16 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .get("source_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 source_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing source_id"))?;
             let entry_id: Uuid = job
                 .payload
                 .get("rss_entry_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse().ok())
-                .ok_or_else(|| anyhow::anyhow!("payload 缺少 rss_entry_id"))?;
+                .ok_or_else(|| anyhow::anyhow!("payload is missing rss_entry_id"))?;
             rss_full_content::hydrate_entry(st, job.id, source_id, entry_id).await
         }
-        other => anyhow::bail!("未知任务类型: {other}"),
+        other => anyhow::bail!("unknown task type: {other}"),
     }
 }
 

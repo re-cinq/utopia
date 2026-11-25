@@ -69,7 +69,11 @@ async fn a_hashed_asset_is_served_and_may_be_kept_for_a_year() {
 async fn a_missing_asset_is_a_404_that_nobody_keeps() {
     let (status, ctype, cache) = get("/assets/app-00000000.js").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_ne!(ctype.as_deref(), Some("text/html"), "404 不许是一张网页");
+    assert_ne!(
+        ctype.as_deref(),
+        Some("text/html"),
+        "a 404 must not be an HTML page"
+    );
     assert_eq!(cache.as_deref(), Some("no-cache"));
 }
 

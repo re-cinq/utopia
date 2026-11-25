@@ -50,7 +50,7 @@ pub async fn observe_job_failure(
     )
     .await
     {
-        tracing::warn!(error = %e, %kind, "上报告警失败");
+        tracing::warn!(error = %e, %kind, "failed to report alert");
         return;
     }
     state.emit_alert();
@@ -82,7 +82,7 @@ pub async fn observe_document_truncated(
     )
     .await
     {
-        tracing::warn!(error = %e, "上报告警失败");
+        tracing::warn!(error = %e, "failed to report alert");
         return;
     }
     state.emit_alert();
@@ -129,7 +129,7 @@ pub async fn observe_document_needs_reader(
     )
     .await
     {
-        tracing::warn!(error = %e, "上报告警失败");
+        tracing::warn!(error = %e, "failed to report alert");
         return;
     }
     state.emit_alert();
@@ -181,11 +181,11 @@ pub fn spawn_retention_sweep(state: AppState) {
             tick.tick().await;
             match alerts::purge_older_than(&state.pool, RETAIN_DAYS).await {
                 Ok(n) if n > 0 => {
-                    tracing::info!(count = n, days = RETAIN_DAYS, "清理过期告警");
+                    tracing::info!(count = n, days = RETAIN_DAYS, "clearing expired alerts");
                     state.emit_alert();
                 }
                 Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "清理过期告警失败"),
+                Err(e) => tracing::warn!(error = %e, "failed to clear expired alerts"),
             }
         }
     });
@@ -226,7 +226,7 @@ pub async fn observe_schema_sync_failure(
     )
     .await
     {
-        tracing::warn!(error = %e, "上报 data_source.schema_sync_failed 失败");
+        tracing::warn!(error = %e, "failed to report data_source.schema_sync_failed");
         return;
     }
     state.emit_alert();
@@ -263,8 +263,8 @@ mod tests {
             retry_after: None,
             detail: "slow down".into(),
         })
-        .context("限流退避 5 次仍未通过")
-        .context("extract_document 失败");
+        .context("rate-limit backoff still failing after 5 attempts")
+        .context("extract_document failed");
         assert_eq!(alert_for(&err), Some((kind::LLM_RATE_LIMITED, "warning")));
     }
 
@@ -288,14 +288,14 @@ mod tests {
             status: 402,
             detail: "insufficient balance".into(),
         })
-        .context("bootstrap_ontology 失败");
+        .context("bootstrap_ontology failed");
         assert_eq!(alert_for(&err), Some((kind::LLM_OUT_OF_CREDIT, "error")));
     }
 
     /// Counter-case: an ordinary failure should not raise an alert, or every parse error would pop one up and people would learn to ignore it.
     #[test]
     fn an_ordinary_failure_raises_nothing() {
-        let err = anyhow::anyhow!("结果解析失败").context("抽取失败");
+        let err = anyhow::anyhow!("结果解析失败").context("extraction failed");
         assert_eq!(alert_for(&err), None);
     }
 
@@ -315,7 +315,7 @@ mod tests {
             status: 402,
             detail: "insufficient balance".into(),
         })
-        .context("抽取失败");
+        .context("extraction failed");
         assert!(super::hopeless(&err));
     }
 
@@ -333,7 +333,7 @@ mod tests {
     /// Counter-case: ordinary failures are still retried. A network blip should not decide life or death on one try.
     #[test]
     fn an_ordinary_failure_still_gets_its_retries() {
-        assert!(!super::hopeless(&anyhow::anyhow!("结果解析失败")));
+        assert!(!super::hopeless(&anyhow::anyhow!("failed to parse result")));
     }
 
     #[test]

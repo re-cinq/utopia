@@ -132,7 +132,11 @@ async fn a_merge_that_would_leave_the_graph_is_held() -> anyhow::Result<()> {
 
     // Nothing at all: not blocked
     let none = impact_of(&pool, f.kb, f.a, f.b).await?;
-    assert_eq!(hold(&none), None, "两边空空的一对，闸门不该拦：{none:?}");
+    assert_eq!(
+        hold(&none),
+        None,
+        "a pair with both sides empty should not be blocked by the gate: {none:?}"
+    );
 
     // Contradiction: a's CEO is Alice, b's CEO is Bob. Merged, one entity would have two CEOs
     fact(&pool, f.kb, f.a, f.ceo_of, f.c1).await?;
@@ -151,7 +155,10 @@ async fn a_merge_that_would_leave_the_graph_is_held() -> anyhow::Result<()> {
         .await?;
     fact(&pool, f.kb, f.b, f.ceo_of, f.c1).await?;
     let i = impact_of(&pool, f.kb, f.a, f.b).await?;
-    assert!(i.contradictions.is_empty(), "作废的与同值的都不算：{i:?}");
+    assert!(
+        i.contradictions.is_empty(),
+        "voided ones and same-value ones do not count: {i:?}"
+    );
     assert_eq!(hold(&i), None);
 
     // Derivation: a still-holding derivation that was derived from a
@@ -211,7 +218,10 @@ async fn a_merge_that_would_leave_the_graph_is_held() -> anyhow::Result<()> {
         .await?;
     }
     let i = impact_of(&pool, f.kb, f.a, f.b).await?;
-    assert_eq!(i.answered, 1, "只数认了 a 或 b 的那些回答：{i:?}");
+    assert_eq!(
+        i.answered, 1,
+        "only count the answers that confirmed a or b: {i:?}"
+    );
     assert_eq!(hold(&i), Some(Hold::Answered(1)));
     assert_eq!(hold(&i).unwrap().to_string(), "answered 1");
 
@@ -227,7 +237,7 @@ async fn a_merge_that_would_leave_the_graph_is_held() -> anyhow::Result<()> {
         .bind(f.org)
         .execute(&pool)
         .await?;
-    assert_eq!(gone.rows_affected(), 1, "一次性 org 没删掉");
+    assert_eq!(gone.rows_affected(), 1, "one-off org was not deleted");
     Ok(())
 }
 
@@ -304,7 +314,11 @@ async fn a_value_that_took_over_from_another_is_not_a_contradiction() -> anyhow:
             .execute(&pool)
             .await?;
     }
-    assert_eq!(hold(&succession), None, "先后接替不是矛盾：{succession:?}");
+    assert_eq!(
+        hold(&succession),
+        None,
+        "successive takeovers are not a contradiction: {succession:?}"
+    );
     assert_eq!(hold(&clash), Some(Hold::Contradiction("CEO of".into())));
     Ok(())
 }

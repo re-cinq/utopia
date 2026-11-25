@@ -125,7 +125,7 @@ async fn a_relation_the_text_says_is_over_is_not_stored_as_ongoing() -> anyhow::
         )
         .await?;
         let (to_is_null, prec) = shape(&pool, ended).await?;
-        assert!(to_is_null, "没有日期可写，valid_to 仍然是 NULL");
+        assert!(to_is_null, "no date to write, valid_to stays NULL");
         assert_eq!(
             prec.as_deref(),
             Some(ENDED_UNKNOWN),
@@ -145,7 +145,10 @@ async fn a_relation_the_text_says_is_over_is_not_stored_as_ongoing() -> anyhow::
             0.9,
         )
         .await?;
-        assert!(created, "它说了事情，不该被当成弱化陈述并掉");
+        assert!(
+            created,
+            "it states something, so it must not be dropped as a weakened statement"
+        );
         assert_eq!(
             shape(&pool, second).await?.1.as_deref(),
             Some(ENDED_UNKNOWN)
@@ -207,15 +210,25 @@ async fn an_already_ended_fact_is_not_treated_as_an_open_claim() -> anyhow::Resu
             0.9,
         )
         .await?;
-        assert_eq!(report.corrected.len(), 0, "旧行已经结束，不该再被闭合一次");
-        assert_eq!(report.conflicts, 0, "它也不构成矛盾——两段本来就不重叠");
+        assert_eq!(
+            report.corrected.len(),
+            0,
+            "the old row has already ended and must not be closed again"
+        );
+        assert_eq!(
+            report.conflicts, 0,
+            "it is not a contradiction either: the two spans never overlapped"
+        );
         // Old row left untouched
         let still: Option<chrono::DateTime<chrono::Utc>> =
             sqlx::query_scalar("SELECT valid_to FROM facts WHERE id = $1")
                 .bind(old)
                 .fetch_one(&pool)
                 .await?;
-        assert!(still.is_none(), "引擎不该凭空给它安一个结束日期");
+        assert!(
+            still.is_none(),
+            "the engine must not invent an end date for it"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;

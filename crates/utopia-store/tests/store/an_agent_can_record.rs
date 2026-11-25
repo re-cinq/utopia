@@ -126,7 +126,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         async move {
             match utopia_store::pending::propose(pool, p).await? {
                 Outcome::Proposed(id) => Ok::<Uuid, anyhow::Error>(id),
-                other => anyhow::bail!("提议没有入队：{other:?}"),
+                other => anyhow::bail!("proposal was not queued: {other:?}"),
             }
         }
     };
@@ -155,7 +155,7 @@ async fn a_pending_fact_names_the_agent_that_proposed_it() -> anyhow::Result<()>
         queue
             .iter()
             .find(|v| v.id == id)
-            .expect("待确认项不在队列里")
+            .expect("the item awaiting confirmation is not in the queue")
     };
 
     // 1. The entry recorded by a token: both a person and an agent can answer for it. The person is the identity; the agent is "which client" --
@@ -185,6 +185,6 @@ async fn a_pending_fact_names_the_agent_that_proposed_it() -> anyhow::Result<()>
         .bind(f.org)
         .execute(&pool)
         .await?;
-    assert_eq!(gone.rows_affected(), 1, "一次性 org 没删掉");
+    assert_eq!(gone.rows_affected(), 1, "one-off org was not deleted");
     Ok(())
 }

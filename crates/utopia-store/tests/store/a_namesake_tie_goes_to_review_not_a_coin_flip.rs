@@ -143,15 +143,24 @@ async fn a_namesake_tie_creates_an_entity_and_two_reviews() -> anyhow::Result<()
             r.created,
             "同名并列不该静默归并到先遇到的那个——该新建实体（#270）"
         );
-        assert_ne!(r.entity_id, f.zhang_a, "attach 到了 A：候选顺序掷出的硬币");
-        assert_ne!(r.entity_id, f.zhang_b, "attach 到了 B：候选顺序掷出的硬币");
+        assert_ne!(
+            r.entity_id, f.zhang_a,
+            "attached to A: a coin flipped by candidate order"
+        );
+        assert_ne!(
+            r.entity_id, f.zhang_b,
+            "attached to B: a coin flipped by candidate order"
+        );
 
         // Enter one review pair for each of the two tied candidates
         let mut reviewed: Vec<Uuid> = r.reviews.iter().map(|rv| rv.other_id).collect();
         reviewed.sort();
         let mut want = vec![f.zhang_a, f.zhang_b];
         want.sort();
-        assert_eq!(reviewed, want, "两个同名候选都该进审核，一个都不能少");
+        assert_eq!(
+            reviewed, want,
+            "both same-name candidates should go to review, none may be dropped"
+        );
 
         // A same-name tie can only be told apart by a person, and the batch adjudicator must never auto-merge two nearly identical profiles
         assert!(
@@ -181,14 +190,21 @@ async fn a_namesake_tie_creates_an_entity_and_two_reviews() -> anyhow::Result<()
         .bind(r.entity_id)
         .fetch_all(&pool)
         .await?;
-        assert_eq!(pending.len(), 2, "库里该有两条待裁的审核对");
+        assert_eq!(
+            pending.len(),
+            2,
+            "the database should have two review pairs awaiting a decision"
+        );
         assert!(
             pending.iter().all(|(_, stage)| stage == "human"),
             "落库的审核对都该是 human 阶段"
         );
         let mut others: Vec<Uuid> = pending.iter().map(|(id, _)| *id).collect();
         others.sort();
-        assert_eq!(others, want, "两条审核对分别指向 A 和 B");
+        assert_eq!(
+            others, want,
+            "the two review pairs point to A and B respectively"
+        );
 
         Ok::<_, anyhow::Error>(())
     }

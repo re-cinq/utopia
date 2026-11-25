@@ -113,7 +113,10 @@ mod tests {
         let h = headers(&[("user-agent", long.as_str())]);
         let got = user_agent(&h).unwrap();
         assert_eq!(got.len(), 256);
-        assert!(long.starts_with(&got), "截断后仍是原串的前缀");
+        assert!(
+            long.starts_with(&got),
+            "after truncation it is still a prefix of the original string"
+        );
     }
 
     /// HeaderValue::to_str accepts only visible ASCII, so a non-ASCII UA cannot be read back:

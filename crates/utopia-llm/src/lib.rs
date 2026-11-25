@@ -578,7 +578,7 @@ impl LlmClient {
                 // Only fails when the TLS backend cannot start. In that case falling back to the default client is pointless,
                 // but the whole process should not crash here either
                 .unwrap_or_else(|e| {
-                    tracing::error!(error = %e, "HTTP 客户端建不起来，退回无超时的默认客户端");
+                    tracing::error!(error = %e, "failed to build the HTTP client, falling back to the default client without a timeout");
                     reqwest::Client::new()
                 }),
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -765,7 +765,7 @@ impl LlmClient {
             {
                 if let Some(lower) = stated_completion_ceiling(&err_detail(&parsed, &raw), ceiling)
                 {
-                    tracing::info!(model = %self.model, sent = ceiling, stated = lower, "端点说了自己的补全上限，按它重试并记住");
+                    tracing::info!(model = %self.model, sent = ceiling, stated = lower, "endpoint stated its own completion ceiling, retrying with it and remembering it");
                     self.completion_ceiling.fetch_min(lower, Ordering::Relaxed);
                     ceiling = lower;
                     lowered = true;
@@ -974,7 +974,7 @@ impl LlmClient {
                 && !learned
                 && says_tools_refuse_effort(&err_detail(&parsed, &raw))
             {
-                tracing::info!(model = %self.model, "端点不收带工具的推理强度，带工具的请求改发 none 并记住");
+                tracing::info!(model = %self.model, "endpoint does not accept reasoning effort with tools, sending none for tool requests and remembering it");
                 self.tools_without_effort.store(true, Ordering::Relaxed);
                 retried = true;
                 continue;
@@ -1238,7 +1238,7 @@ impl LlmClient {
         for item in items {
             let v = item["embedding"]
                 .as_array()
-                .ok_or_else(|| anyhow::anyhow!("Embedding 响应缺少向量"))?
+                .ok_or_else(|| anyhow::anyhow!("embedding response is missing the vectors"))?
                 .iter()
                 .filter_map(|x| x.as_f64().map(|f| f as f32))
                 .collect();
@@ -2053,9 +2053,13 @@ mod tests {
     }
 
     fn sent_max_tokens(request: &str) -> serde_json::Value {
-        let body: serde_json::Value =
-            serde_json::from_str(request.split_once("\r\n\r\n").expect("请求该有 body").1)
-                .expect("请求体是 JSON");
+        let body: serde_json::Value = serde_json::from_str(
+            request
+                .split_once("\r\n\r\n")
+                .expect("request should have a body")
+                .1,
+        )
+        .expect("request body is JSON");
         body["max_tokens"].clone()
     }
 
@@ -2583,7 +2587,10 @@ mod tests {
             .await
             .unwrap();
         server.await.unwrap();
-        assert_eq!(answer.text, "{\"e\":[]}", "只收 content 的增量，拼成整段");
+        assert_eq!(
+            answer.text, "{\"e\":[]}",
+            "only accumulate content deltas and join them into one whole"
+        );
 
         // Stream opened but no frame was sent: that is not an empty answer, it is no answer
         // The final frame has no trailing blank line: the tail must not be dropped
@@ -2602,7 +2609,10 @@ data: {\"choices\":[{\"delta\":{\"content\":\"tail\"},\"finish_reason\":\"stop\"
             .await
             .unwrap();
         server.await.unwrap();
-        assert_eq!(answer.text, "headtail", "最后一帧没有空行收尾，也要算进去");
+        assert_eq!(
+            answer.text, "headtail",
+            "a last frame without a closing blank line must also be counted"
+        );
         assert_eq!(
             answer.finish_reason.as_deref(),
             Some("stop"),
@@ -3007,9 +3017,12 @@ data: {\"choices\":[{\"delta\":{\"content\":\"tail\"},\"finish_reason\":\"stop\"
 
         // First, the request really carried a cap, and it was ours
         let sent = request.await.unwrap();
-        let body: serde_json::Value =
-            serde_json::from_str(sent.split_once("\r\n\r\n").expect("请求该有 body").1)
-                .expect("请求体是 JSON");
+        let body: serde_json::Value = serde_json::from_str(
+            sent.split_once("\r\n\r\n")
+                .expect("request should have a body")
+                .1,
+        )
+        .expect("request body is JSON");
         assert_eq!(
             body["max_tokens"],
             json!(MAX_COMPLETION_TOKENS),
@@ -3041,7 +3054,7 @@ data: [DONE]
             .await
             .unwrap();
         server.await.unwrap();
-        assert!(!reply.hit_token_ceiling(), "stop 不是截断");
+        assert!(!reply.hit_token_ceiling(), "stop is not truncation");
     }
 
     /// Separates what will clear up by itself from what won't: the gateway ones are [`Unavailable`], a wrong key stays
@@ -3063,8 +3076,9 @@ data: [DONE]
                 .await
                 .expect_err("非成功状态该是错误");
             server.await.unwrap();
-            let hit = crate::unavailable(&err)
-                .unwrap_or_else(|| panic!("{status} 该是会自己好的那一类：{err:#}"));
+            let hit = crate::unavailable(&err).unwrap_or_else(|| {
+                panic!("{status} should be a kind that recovers on its own: {err:#}")
+            });
             assert_eq!(hit.status, status[..3].parse::<u16>().unwrap());
             assert!(
                 format!("{err:#}").contains("upstream hiccup"),
@@ -3347,8 +3361,8 @@ data: [DONE]
         .await;
 
         // The outer timeout firing means the client did not cut it off itself, which is exactly the bug to fix
-        let inner = out.expect("客户端没有超时，请求一直挂着");
-        assert!(inner.is_err(), "沉默的服务端不该被当成成功");
+        let inner = out.expect("client has no timeout, so the request hangs forever");
+        assert!(inner.is_err(), "a silent server must not count as success");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "read_timeout 没生效：等了 {:?}",
@@ -3365,8 +3379,8 @@ data: [DONE]
     async fn unreachable_survives_context_layers() {
         let raw = a_real_transport_error().await;
         let err = anyhow::Error::new(Unreachable(raw))
-            .context("embedding 失败")
-            .context("process_document 失败");
+            .context("embedding failed")
+            .context("process_document failed");
         assert!(is_unreachable(&err));
         // Also pins down the fact that "the text changes": the outermost layer no longer contains any of the endpoint's wording
         assert!(!err.to_string().contains("endpoint"));
@@ -3375,7 +3389,7 @@ data: [DONE]
     /// The opposite: an ordinary error should not be recognized as an endpoint problem, or alerts would fire for every failure.
     #[tokio::test]
     async fn an_ordinary_failure_is_not_the_endpoint() {
-        let e = anyhow::anyhow!("Embedding 响应缺少向量").context("抽取失败");
+        let e = anyhow::anyhow!("Embedding 响应缺少向量").context("extraction failed");
         assert!(!is_unreachable(&e));
     }
 
@@ -3391,9 +3405,9 @@ data: [DONE]
             retry_after: None,
             detail: "TPM limit reached".into(),
         })
-        .context("抽取失败")
-        .context("process_document 失败");
-        let hit = rate_limited(&err).expect("限流没被认出来");
+        .context("extraction failed")
+        .context("process_document failed");
+        let hit = rate_limited(&err).expect("rate limit was not recognized");
         assert_eq!(hit.status, 429);
         assert!(!err.to_string().contains("rate limiting"));
     }
@@ -3443,8 +3457,14 @@ data: [DONE]
             &body,
             "",
         );
-        assert!(out_of_credit(&e).is_some(), "该判成欠费");
-        assert!(rate_limited(&e).is_none(), "不该判成限流");
+        assert!(
+            out_of_credit(&e).is_some(),
+            "should be classed as out of credit"
+        );
+        assert!(
+            rate_limited(&e).is_none(),
+            "should not be classed as a rate limit"
+        );
     }
 
     /// 402 is the standard answer. SiliconFlow uses exactly that.
@@ -3511,7 +3531,7 @@ data: [DONE]
         ] {
             let out = embeddings_from(data.clone())
                 .await
-                .unwrap_or_else(|e| panic!("{data} 该按位置配对，却报错：{e}"));
+                .unwrap_or_else(|e| panic!("{data} should pair by position but failed: {e}"));
             assert_eq!(out, vec![vec![1.0], vec![2.0]], "{data}");
         }
     }

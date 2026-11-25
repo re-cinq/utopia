@@ -974,7 +974,10 @@ mod tests {
         let with = src.with_extension("with");
         let _ = std::fs::remove_dir_all(&with);
         copy_dir_recursive(&src, &with, true).unwrap();
-        assert!(with.join(SECRET_KEY_FILE).exists(), "说了要带却没带");
+        assert!(
+            with.join(SECRET_KEY_FILE).exists(),
+            "promised to bring it but did not"
+        );
 
         for d in [src, without, with] {
             let _ = std::fs::remove_dir_all(d);

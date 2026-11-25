@@ -442,7 +442,7 @@ async fn unanchored_values_do_not_keep_a_placed_one_from_closing_them() -> anyho
     observe(&pool, &f, seen(&f, "Z", "2010-01-01")).await?;
     let open = open_rows(&pool, &f, f.lease).await?;
     cleanup(&pool, &f).await?;
-    assert_eq!(open, 1, "只有 Z 还开着");
+    assert_eq!(open, 1, "only Z is still open");
     Ok(())
 }
 
@@ -469,8 +469,14 @@ async fn an_unanchored_successor_closes_nothing() -> anyhow::Result<()> {
     observe(&pool, &f, seen(&f, "third", "2022-01-01")).await?;
     let after = open_rows(&pool, &f, f.lease).await?;
     cleanup(&pool, &f).await?;
-    assert_eq!(open, 2, "锚不到的那一行关不了它前面的");
-    assert_eq!(after, 1, "锚得住的一来，前面两行都关上");
+    assert_eq!(
+        open, 2,
+        "the row that cannot be anchored cannot close the ones before it"
+    );
+    assert_eq!(
+        after, 1,
+        "once an anchored row arrives, both earlier rows get closed"
+    );
     Ok(())
 }
 
@@ -586,7 +592,7 @@ async fn a_revert_takes_back_a_moved_value_closed_after_the_merge() -> anyhow::R
     assert!(target.iter().all(|r| r.0 != "D"), "{target:?}");
     assert_eq!(back.len(), 1);
     assert_eq!((back[0].0.as_str(), back[0].2.as_deref()), ("D", None));
-    assert_eq!(target[0].2.as_deref(), Some("2020-06-01"), "A 止于 N");
+    assert_eq!(target[0].2.as_deref(), Some("2020-06-01"), "A ends at N");
     Ok(())
 }
 

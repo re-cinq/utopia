@@ -82,7 +82,11 @@ async fn a_new_entity_carries_its_name_and_an_alias_brings_a_later_mention_home(
         let probe = mention(&pool, &f, "海洋探测器1号").await?;
         assert!(probe.created);
         let n = names::for_entity(&pool, f.kb, probe.entity_id, None).await?;
-        assert_eq!(values(&n), vec!["海洋探测器1号"], "本名是一条名字事实");
+        assert_eq!(
+            values(&n),
+            vec!["海洋探测器1号"],
+            "the legal name is a name fact"
+        );
         assert!(n[0].canonical);
 
         // A short name with no bridge: a separate entity is created (this is exactly what 0041 is meant to fix; this slice fixes it by recording the name)
@@ -91,7 +95,10 @@ async fn a_new_entity_carries_its_name_and_an_alias_brings_a_later_mention_home(
 
         names::record(&pool, f.kb, probe.entity_id, "海探1", None, None).await?;
         let later = mention(&pool, &f, "海探1").await?;
-        assert!(!later.created, "记下的别名让后来的提及找得到它");
+        assert!(
+            !later.created,
+            "the recorded alias lets later mentions find it"
+        );
         assert_eq!(later.entity_id, probe.entity_id);
         assert_eq!(
             resolution::existing_by_name(&pool, f.kb, "海探1").await?,
@@ -124,8 +131,11 @@ async fn a_name_is_neither_a_listed_fact_nor_a_degree() -> anyhow::Result<()> {
         let probe = mention(&pool, &f, "海洋探测器1号").await?;
         names::record(&pool, f.kb, probe.entity_id, "海探1", None, None).await?;
         let (node, facts) = graph::entity_detail(&pool, f.kb, probe.entity_id, None, None).await?;
-        assert!(facts.is_empty(), "名字不进事实列表：{facts:?}");
-        assert_eq!(node.degree, 0, "名字不算度数");
+        assert!(
+            facts.is_empty(),
+            "names do not enter the fact list: {facts:?}"
+        );
+        assert_eq!(node.degree, 0, "names do not count toward degree");
         anyhow::Ok(())
     }
     .await;
@@ -210,7 +220,7 @@ async fn a_name_another_entity_already_has_queues_the_pair_without_merging() -> 
                 .bind(short)
                 .fetch_one(&pool)
                 .await?;
-        assert_eq!(merged, None, "只排队，不合并");
+        assert_eq!(merged, None, "queue only, do not merge");
         // Reporting the same name again does not queue it twice
         assert_eq!(
             names::pair_shared_name(&pool, f.kb, full, "海探1").await?,
@@ -324,7 +334,10 @@ async fn the_name_attribute_is_not_an_ordinary_attribute() -> anyhow::Result<()>
             None,
         )
         .await;
-        assert!(edited.is_err(), "内建的名字属性不能改成 functional");
+        assert!(
+            edited.is_err(),
+            "built-in name property cannot be changed to functional"
+        );
         let functional: bool =
             sqlx::query_scalar("SELECT functional FROM relation_types WHERE id = $1")
                 .bind(known_as)
@@ -338,7 +351,10 @@ async fn the_name_attribute_is_not_an_ordinary_attribute() -> anyhow::Result<()>
             Some(utopia_store::ontology::TypeKind::Relation),
         )
         .await?;
-        assert!(stale.iter().all(|t| t.id != known_as), "名字属性不嵌");
+        assert!(
+            stale.iter().all(|t| t.id != known_as),
+            "name property is not embedded"
+        );
         anyhow::Ok(())
     }
     .await;
@@ -411,8 +427,8 @@ async fn a_bare_name_is_not_a_quote_and_a_deleted_document_keeps_the_name() -> a
             .map(|(_, q)| q)
             .collect();
         assert!(quotes.iter().all(|q| q != "海洋探测器1号"), "{quotes:?}");
-        assert_eq!(quotes.len(), 1, "一块一段：{quotes:?}");
-        assert_eq!(quotes[0], "于2026年下水", "同一块里真正的句子优先");
+        assert_eq!(quotes.len(), 1, "one chunk, one passage: {quotes:?}");
+        assert_eq!(quotes[0], "于2026年下水", "within the same chunk, the real sentence takes priority");
 
         utopia_store::documents::delete(&pool, f.kb, doc, None).await?;
         let invalidated = |id: Uuid| {
@@ -426,8 +442,8 @@ async fn a_bare_name_is_not_a_quote_and_a_deleted_document_keeps_the_name() -> a
                 .await
             }
         };
-        assert!(!invalidated(canonical).await?, "本名不随文档走");
-        assert!(invalidated(alias).await?, "只凭这篇读到的别名作废");
+        assert!(!invalidated(canonical).await?, "the legal name does not follow the document");
+        assert!(invalidated(alias).await?, "aliases voided based only on what this document reads");
         assert!(invalidated(fact).await?);
         anyhow::Ok(())
     }

@@ -911,8 +911,11 @@ mod tests {
     #[test]
     fn the_real_jira_shapes_still_parse() {
         let raw = include_str!("../tests/fixtures/jira_issues.json");
-        let page: SearchPage = serde_json::from_str(raw).expect("真实响应该解得出来");
-        assert!(!page.issues.is_empty(), "夹具是空的，这条测试什么都没验");
+        let page: SearchPage = serde_json::from_str(raw).expect("a real response should parse");
+        assert!(
+            !page.issues.is_empty(),
+            "the fixture is empty, so this test verifies nothing"
+        );
 
         for issue in &page.issues {
             let doc = render(issue);
@@ -929,11 +932,14 @@ mod tests {
                     .as_ref()
                     .is_some_and(|c| c.histories.iter().any(|h| !h.items.is_empty()))
             })
-            .expect("夹具里该有带 changelog 的工单");
+            .expect("the fixture should include a ticket with a changelog");
         let doc = render(with_log);
-        assert!(doc.contains("## History"), "历史一节缺失：{doc}");
-        assert!(doc.contains(" changed "), "变更行没写成字段级：{doc}");
-        assert!(doc.contains(" → "), "缺少 from → to：{doc}");
+        assert!(doc.contains("## History"), "history section missing: {doc}");
+        assert!(
+            doc.contains(" changed "),
+            "change rows not written at field level: {doc}"
+        );
+        assert!(doc.contains(" → "), "missing from → to: {doc}");
     }
 
     /// Times in the body are written to the second with `Z`, without milliseconds; the extractor reads them back at second precision (#691)
@@ -977,6 +983,9 @@ mod tests {
         }))
         .unwrap();
         let out = render(&issue);
-        assert!(!out.contains("### a"), "空评论不该留下小节：{out}");
+        assert!(
+            !out.contains("### a"),
+            "an empty comment must not leave a section: {out}"
+        );
     }
 }

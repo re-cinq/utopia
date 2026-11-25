@@ -290,13 +290,13 @@ async fn a_cycle_is_one_moment_and_fixing_the_time_clears_it() -> anyhow::Result
             },
         )
         .await?
-        .expect("这条还活着，应当改得动");
+        .expect("this one is still alive and should be editable");
         let after = reasoning::run(pool, f.kb).await?;
         assert!(
             open_cycles(pool, f).await?.is_empty(),
             "改对了时间，环就不在了"
         );
-        assert_eq!(after.cleared, 1, "上一轮那一行是陈的");
+        assert_eq!(after.cleared, 1, "the row from the previous round is stale");
         Ok::<_, anyhow::Error>(())
     })
 }
@@ -426,7 +426,10 @@ async fn an_eternal_predicate_has_no_time_to_tell_apart() -> anyhow::Result<()> 
         };
         set("state").execute(pool).await?;
         let r = reasoning::run(pool, f.kb).await?;
-        assert!(open_cycles(pool, f).await?.is_empty(), "成了状态，就看日期");
+        assert!(
+            open_cycles(pool, f).await?.is_empty(),
+            "became a state, so it depends on the date"
+        );
         assert_eq!(r.cleared, 1);
 
         set("eternal").execute(pool).await?;
@@ -478,11 +481,15 @@ async fn decisions_on_a_cycle_still_hold() -> anyhow::Result<()> {
 
         reasoning::decide(pool, f.kb, id().await?, "axiom_relaxed", f.user).await?;
         let r = reasoning::run(pool, f.kb).await?;
-        assert_eq!(r.reopened, 1, "公理没真放宽，环还同时成立，那一行回到 open");
+        assert_eq!(r.reopened, 1, "axiom was not really relaxed, cycle still holds at the same time, that row goes back to open");
 
         reasoning::decide(pool, f.kb, id().await?, "accepted", f.user).await?;
         let r = reasoning::run(pool, f.kb).await?;
-        assert_eq!((r.inserted, r.reopened), (0, 0), "认可过的重跑沉默");
+        assert_eq!(
+            (r.inserted, r.reopened),
+            (0, 0),
+            "a rerun over an approved item stays silent"
+        );
         assert!(open_cycles(pool, f).await?.is_empty());
 
         // Another cycle: remove one of its edges
@@ -498,7 +505,10 @@ async fn decisions_on_a_cycle_still_hold() -> anyhow::Result<()> {
         .await?;
         reasoning::retract_from_violation(pool, f.kb, open, Some(pq), f.user).await?;
         let r = reasoning::run(pool, f.kb).await?;
-        assert_eq!(r.reopened, 0, "撤掉之后环不再算出来，承诺兑现了");
+        assert_eq!(
+            r.reopened, 0,
+            "after retraction the cycle is no longer computed, promise kept"
+        );
         assert!(open_cycles(pool, f).await?.is_empty());
         let resolved: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM axiom_violations
@@ -507,7 +517,7 @@ async fn decisions_on_a_cycle_still_hold() -> anyhow::Result<()> {
         .bind(f.kb)
         .fetch_one(pool)
         .await?;
-        assert_eq!(resolved, 2, "两次裁决都留着");
+        assert_eq!(resolved, 2, "both decisions are kept");
         let _ = xy;
         Ok::<_, anyhow::Error>(())
     })

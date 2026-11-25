@@ -109,7 +109,7 @@ async fn a_source_reaches_only_where_it_was_granted() -> anyhow::Result<()> {
         // ---- 2. Granting one workspace leaves another unaffected
         datasources::grant(&pool, f.source, f.ours, f.actor).await?;
         let ours = datasources::granted_to_workspace(&pool, f.ours).await?;
-        assert_eq!(ours.len(), 1, "授权过的工作区看得见它");
+        assert_eq!(ours.len(), 1, "the authorized workspace can see it");
         assert!(
             !ours[0].summary.contains("p@"),
             "列表里只能有 host:port/db 摘要，凭据不出服务端"
@@ -146,7 +146,10 @@ async fn a_source_reaches_only_where_it_was_granted() -> anyhow::Result<()> {
         datasources::mount(&pool, f.our_kb, f.source).await?;
         datasources::mount(&pool, f.their_kb, f.source).await?;
         let unmounted = datasources::revoke(&pool, f.source, f.theirs).await?;
-        assert_eq!(unmounted, 1, "撤授权要把那个工作区里已挂上的一起卸掉");
+        assert_eq!(
+            unmounted, 1,
+            "revoking authorization must also unmount what is already attached in that workspace"
+        );
         assert!(
             datasources::mounted(&pool, f.their_kb).await?.is_empty(),
             "**留着挂载 = 撤销不生效**：问数读的是 kb_data_sources"

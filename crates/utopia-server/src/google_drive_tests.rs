@@ -234,7 +234,7 @@ async fn a_walk_descends_skips_what_cannot_be_read_and_counts_each_file_once() -
         .await?;
     let ids: Vec<&str> = listing.files.iter().map(|f| f.id.as_str()).collect();
     assert_eq!(ids, ["doc1", "pdf1"]);
-    assert_eq!(listing.skipped, 2, "表单与超大文件");
+    assert_eq!(listing.skipped, 2, "forms and oversized files");
     assert!(!listing.truncated);
     assert!(listing.unreachable.is_empty());
 
@@ -249,7 +249,7 @@ async fn a_walk_descends_skips_what_cannot_be_read_and_counts_each_file_once() -
         doc.modified.map(|d| d.to_rfc3339()),
         Some("2026-10-01T09:30:00+00:00".into())
     );
-    assert_eq!(listing.files[1].marker(), "abc", "二进制文件用 md5");
+    assert_eq!(listing.files[1].marker(), "abc", "binary files use md5");
     Ok(())
 }
 
@@ -759,7 +759,10 @@ async fn it_reads_from_a_real_drive() -> anyhow::Result<()> {
         "那个文件夹里一个能读的文件都没有"
     );
     let first = &listing.files[0];
-    assert!(first.modified.is_some(), "modifiedTime 是 doc_time 的来源");
+    assert!(
+        first.modified.is_some(),
+        "modifiedTime is the source of doc_time"
+    );
     let c = d.content(first).await?;
     assert!(!c.bytes.is_empty());
     Ok(())

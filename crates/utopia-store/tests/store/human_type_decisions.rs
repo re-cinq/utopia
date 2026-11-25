@@ -119,7 +119,10 @@ async fn type_resolution_leaves_human_decisions_alone() -> anyhow::Result<()> {
             picked.contains(&by_engine),
             "抽取定的类型该被重判——organization 有子类 startup，这正是消解的用武之地"
         );
-        assert!(!picked.contains(&by_human), "人拍过板的不该被拿去重判");
+        assert!(
+            !picked.contains(&by_human),
+            "what a person has signed off must not be re-judged"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -243,8 +246,16 @@ async fn who_approved_a_retype_decides_whether_it_is_protected() -> anyhow::Resu
             .await?;
         utopia_store::resolution::retype_entities(&pool, f.kb, &[(b, f.sub_type)], None).await?;
 
-        assert_eq!(source_of(&pool, a).await?, "human", "人点的批准是背书");
-        assert_eq!(source_of(&pool, b).await?, "inferred", "引擎自动裁决的不是");
+        assert_eq!(
+            source_of(&pool, a).await?,
+            "human",
+            "a person's approval click is an endorsement"
+        );
+        assert_eq!(
+            source_of(&pool, b).await?,
+            "inferred",
+            "what the engine decided automatically is not"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;

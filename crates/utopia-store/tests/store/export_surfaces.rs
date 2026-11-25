@@ -144,7 +144,10 @@ async fn a_reassigned_document_breaks_the_edges_that_point_at_it() -> anyhow::Re
     // A's export is refused as a whole: evidence.document still points at a document that no longer belongs to this library
     let err = export::provenance_integrity(&mut tx, f.a).await;
     let msg = format!("{err:?}");
-    assert!(err.is_err(), "文档过户后 A 的出处链必须拒导");
+    assert!(
+        err.is_err(),
+        "after the document is transferred, A's provenance chain must be refused on export"
+    );
     assert!(
         msg.contains("evidence.document"),
         "该报 evidence.document: {msg}"
@@ -275,7 +278,11 @@ async fn a_mid_stream_commit_stays_outside_the_snapshot() -> anyhow::Result<()> 
         !derived.iter().any(|d| d.id == derived_late),
         "中途提交的派生不许进这份导出——也就不会有悬空的 wasGeneratedBy"
     );
-    assert_eq!(derived.len(), 1, "快照内的那条还在");
+    assert_eq!(
+        derived.len(),
+        1,
+        "the one inside the snapshot is still there"
+    );
     tx.rollback().await?;
     drop(conn);
 

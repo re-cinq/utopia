@@ -166,7 +166,7 @@ async fn delayed_observation_cannot_cross_purge_and_diagnostics_hide_job_errors(
         sources[0]
             .rss_full_content
             .as_ref()
-            .expect("RSS 全文来源有这一块")
+            .expect("the RSS full-text source has this block")
             .terminal,
         1
     );
@@ -398,7 +398,10 @@ async fn source_list_exposes_scoped_rss_summary() -> anyhow::Result<()> {
         .iter()
         .find(|source| source.id == source_id)
         .ok_or_else(|| anyhow::anyhow!("RSS source is missing"))?;
-    let block = rss.rss_full_content.as_ref().expect("RSS 全文来源有这一块");
+    let block = rss
+        .rss_full_content
+        .as_ref()
+        .expect("the RSS full-text source has this block");
     assert_eq!(block.state, "pending");
     assert_eq!(
         (
@@ -480,7 +483,10 @@ async fn source_list_exposes_scoped_rss_summary() -> anyhow::Result<()> {
         .iter()
         .find(|source| source.id == source_id)
         .ok_or_else(|| anyhow::anyhow!("RSS source is missing after discovery"))?;
-    let block = rss.rss_full_content.as_ref().expect("RSS 全文来源有这一块");
+    let block = rss
+        .rss_full_content
+        .as_ref()
+        .expect("the RSS full-text source has this block");
     assert_eq!(block.state, "active");
     assert_eq!(block.pending, 1);
     assert_eq!(block.queued, 2, "queued and hydrating share one bucket");
@@ -507,7 +513,10 @@ async fn source_list_exposes_scoped_rss_summary() -> anyhow::Result<()> {
         .iter()
         .find(|source| source.id == source_id)
         .ok_or_else(|| anyhow::anyhow!("RSS source is missing after generation change"))?;
-    let block = rss.rss_full_content.as_ref().expect("RSS 全文来源有这一块");
+    let block = rss
+        .rss_full_content
+        .as_ref()
+        .expect("the RSS full-text source has this block");
     assert_eq!(block.state, "active");
     assert_eq!(block.pending, 1, "old-generation observations are excluded");
     assert_eq!(block.terminal, 0);
@@ -527,7 +536,10 @@ async fn source_list_exposes_scoped_rss_summary() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("RSS source is missing after disabling"))?;
     // An RSS source with full text turned off **is still in this block**: it is still RSS, only this level is off,
     // and those observations are still in the database. What does not apply is "not RSS at all", not "full text not turned on"
-    let block = rss.rss_full_content.as_ref().expect("还是 RSS，块还在");
+    let block = rss
+        .rss_full_content
+        .as_ref()
+        .expect("still RSS, the block is still there");
     assert_eq!(block.state, "disabled");
     assert_eq!(block.terminal, 1, "disabled current rows are superseded");
 

@@ -243,24 +243,30 @@ async fn a_conclusion_is_a_premise_for_the_next_rule() -> anyhow::Result<()> {
 
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
         assert_eq!(report.attribute_rules, 2);
-        assert_eq!(report.rule_hits, 2, "两条结论：含气井，以及在产井");
+        assert_eq!(
+            report.rule_hits, 2,
+            "two conclusions: gas-bearing well, and producing well"
+        );
         assert!(
             report.rule_rounds >= 2,
             "链上一环一轮，一轮跑不出第二条：{}",
             report.rule_rounds
         );
-        assert!(!report.rule_rounds_capped, "两环没到上限");
+        assert!(
+            !report.rule_rounds_capped,
+            "two cycles did not reach the cap"
+        );
 
         let rows = derived(&pool, &f).await?;
         assert_eq!(rows.len(), 2);
         let gas = rows
             .iter()
             .find(|d| d.class.as_deref() == Some("gas_well"))
-            .expect("含气井那一行");
+            .expect("the gas-bearing well row");
         let prod = rows
             .iter()
             .find(|d| d.class.as_deref() == Some("producer"))
-            .expect("在产井那一行");
+            .expect("the producing well row");
 
         // Gas-bearing well: both premises are assertions
         let leaf: Vec<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
@@ -270,7 +276,11 @@ async fn a_conclusion_is_a_premise_for_the_next_rule() -> anyhow::Result<()> {
         .bind(gas.id)
         .fetch_all(&pool)
         .await?;
-        assert_eq!(leaf, vec![(Some(thc_fact), None)], "含气井只凭那条全烃读数");
+        assert_eq!(
+            leaf,
+            vec![(Some(thc_fact), None)],
+            "gas-bearing well rests only on the total hydrocarbon reading"
+        );
 
         // Producing well: one assertion + one derivation. **This one is the chain**
         let chained: Vec<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
@@ -280,7 +290,11 @@ async fn a_conclusion_is_a_premise_for_the_next_rule() -> anyhow::Result<()> {
         .bind(prod.id)
         .fetch_all(&pool)
         .await?;
-        assert_eq!(chained.len(), 2, "完井那条读数，加上「它是含气井」那条结论");
+        assert_eq!(
+            chained.len(),
+            2,
+            "the completion reading, plus the conclusion that it is a gas-bearing well"
+        );
         assert!(
             chained.contains(&(Some(done), None)),
             "断言前提落在 premise_fact_id 上"
@@ -293,20 +307,30 @@ async fn a_conclusion_is_a_premise_for_the_next_rule() -> anyhow::Result<()> {
         // Proof that one level is walked down the chain: producing well → gas-bearing well → the whole-hydrocarbon statement
         let proof = utopia_store::reasoning::proof(&pool, f.kb, prod.id)
             .await?
-            .expect("在产井有证明");
+            .expect("the producing well has a proof");
         let step = proof
             .steps
             .iter()
             .find(|s| s.derived)
-            .expect("证明里有一步是推出来的");
-        assert_eq!(step.premises.len(), 1, "那一步自己也有前提，再往下一层");
-        assert!(!step.premises[0].derived, "再下一层是断言，链到此为止");
+            .expect("one step in the proof is derived");
+        assert_eq!(
+            step.premises.len(),
+            1,
+            "that step has premises of its own, one level further down"
+        );
+        assert!(
+            !step.premises[0].derived,
+            "the next level down is an assertion, chain ends here"
+        );
 
         // A rerun should add no rows, and should not judge it stale either — the row on the chain identifies the row id left by the previous round.
         // If it identified the wrong one, you would see "void one, insert one" here
         let again = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(again.inserted, 0, "同一条链重跑不再插");
-        assert_eq!(again.invalidated, 0, "也不该把自己判成陈旧");
+        assert_eq!(
+            again.inserted, 0,
+            "rerunning the same chain does not insert again"
+        );
+        assert_eq!(again.invalidated, 0, "nor should it judge itself stale");
         assert_eq!(derived(&pool, &f).await?.len(), 2);
         Ok::<_, anyhow::Error>(())
     }
@@ -452,11 +476,18 @@ async fn a_chain_retires_with_the_reading_it_stood_on() -> anyhow::Result<()> {
             .execute(&pool)
             .await?;
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(report.invalidated, 2, "含气井与站在它上面的在产井一起退场");
+        assert_eq!(
+            report.invalidated, 2,
+            "gas-bearing well and the producing well built on it retire together"
+        );
         assert_eq!(report.inserted, 0);
 
         let rows = derived(&pool, &f).await?;
-        assert_eq!(rows.len(), 2, "作废不是删除：记录轴上留着「曾据此推出」");
+        assert_eq!(
+            rows.len(),
+            2,
+            "voiding is not deletion: the record axis keeps 'once derived from this'"
+        );
         assert!(
             rows.iter().all(|d| d.invalidated_at.is_some()),
             "两行都作废"
@@ -516,14 +547,21 @@ async fn a_rule_that_feeds_itself_settles() -> anyhow::Result<()> {
         .await?;
 
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(report.rule_hits, 1, "两条规则推出的是同一条结论，只算一条");
+        assert_eq!(
+            report.rule_hits, 1,
+            "two rules derive the same conclusion, counted as one"
+        );
         assert!(
             report.rule_rounds < utopia_reason::MAX_DEPTH,
             "收敛靠的是「这一轮没有新键」，不是撞上上限：{}",
             report.rule_rounds
         );
         assert!(!report.rule_rounds_capped);
-        assert_eq!(derived(&pool, &f).await?.len(), 1, "库里就一行");
+        assert_eq!(
+            derived(&pool, &f).await?.len(),
+            1,
+            "just one row in the database"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -589,9 +627,12 @@ async fn a_conclusion_that_stands_on_a_new_reading_gets_a_new_proof() -> anyhow:
         .await?;
 
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(report.inserted, 0, "结论没变，不该多一行");
-        assert_eq!(report.invalidated, 0, "也不该把它判成陈旧");
-        assert_eq!(report.reproved, 1, "证明换了一条");
+        assert_eq!(
+            report.inserted, 0,
+            "conclusion unchanged, should not add a row"
+        );
+        assert_eq!(report.invalidated, 0, "nor should it judge itself stale");
+        assert_eq!(report.reproved, 1, "the proof switched to a different one");
 
         let now: Vec<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
             "SELECT premise_fact_id, premise_derived_id
@@ -600,7 +641,11 @@ async fn a_conclusion_that_stands_on_a_new_reading_gets_a_new_proof() -> anyhow:
         .bind(row)
         .fetch_all(&pool)
         .await?;
-        assert_eq!(now, vec![(Some(second), None)], "挂的是现在成立的那条读数");
+        assert_eq!(
+            now,
+            vec![(Some(second), None)],
+            "attached to the reading that holds now"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;

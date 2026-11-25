@@ -66,11 +66,17 @@ async fn one_concept_one_source_one_mapping() -> anyhow::Result<()> {
         };
         let (a, wrote_a) = p("orders").await?;
         let (b, wrote_b) = p("orders_v2").await?;
-        assert_eq!(a, b, "同一个 (概念, 源) 该是同一行，不是两行");
-        assert!(wrote_a && wrote_b, "第一次插入、第二次刷新，都算写入");
+        assert_eq!(
+            a, b,
+            "the same (concept, source) should be one row, not two"
+        );
+        assert!(
+            wrote_a && wrote_b,
+            "first insert and second refresh both count as writes"
+        );
 
         let got = utopia_store::mappings::proposed(&pool, kb, 100, 0).await?;
-        assert_eq!(got.len(), 1, "只该有一条");
+        assert_eq!(got.len(), 1, "there should be only one");
         assert_eq!(
             got[0].table_name.as_deref(),
             Some("orders_v2"),
@@ -160,7 +166,7 @@ async fn a_rejected_mapping_does_not_come_back() -> anyhow::Result<()> {
             false,
         )
         .await?;
-        assert!(!written, "撞上决定的提议不算写入，探索账把它记成 decided");
+        assert!(!written, "a proposal that collides with a decision is not a write, the exploration ledger records it as decided");
         assert!(
             utopia_store::mappings::proposed(&pool, kb, 100, 0)
                 .await?

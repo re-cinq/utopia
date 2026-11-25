@@ -107,14 +107,14 @@ async fn retry_reads_the_uncovered_window(
         let asked = asked.lock().unwrap().clone();
         let last = asked.last().copied().flatten();
         if prior_success {
-            let last = last.expect("没有带下界：增量拉取整个没了");
+            let last = last.expect("no lower bound, the incremental pull loses everything");
             assert!(
                 (last - started).num_seconds().abs() <= 1,
                 "下界应当是源自己的游标（上一轮成功那轮的开始）{started}，实得 {last}"
             );
-            assert!(last < changed, "下界晚于那次改动，漏掉的窗口又被跳过了");
+            assert!(last < changed, "lower bound is later than that change, so the missed window gets skipped");
         } else {
-            assert!(last.is_none(), "没有成功过的源不该带下界，实得 {last:?}");
+            assert!(last.is_none(), "a source that never succeeded should have no lower bound, got {last:?}");
         }
         Ok::<_, anyhow::Error>(())
     }.await;
@@ -250,7 +250,10 @@ async fn a_truncated_custom_batch_resumes_on_the_next_run() -> anyhow::Result<()
         .bind(source)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(imported, 200, "第一轮装得下 200 条，第 201 条得等下一轮");
+        assert_eq!(
+            imported, 200,
+            "first round fits 200 items, item 201 has to wait for the next round"
+        );
 
         // Round two: the same batch comes back as they were; the first 200 are Unchanged and take no budget, and entry 201 is reachable this time
         let stats = sync_source(&state, source).await?;
@@ -264,7 +267,10 @@ async fn a_truncated_custom_batch_resumes_on_the_next_run() -> anyhow::Result<()
         .bind(source)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(imported, 201, "第二轮之后 201 条都在库里了");
+        assert_eq!(
+            imported, 201,
+            "after the second round all 201 items are in the store"
+        );
         let last = utopia_store::sources::get(&pool, source).await?;
         assert_eq!(
             last.last_sync_status, "ok",
@@ -372,7 +378,10 @@ async fn a_capped_custom_batch_is_read_whole_over_three_rounds() -> anyhow::Resu
         .bind(source)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(imported, 200, "第一轮装得下 200 条，剩下的留给下一轮");
+        assert_eq!(
+            imported, 200,
+            "first round fits 200 items, the rest is left for the next round"
+        );
         let first = utopia_store::sources::get(&pool, source).await?;
         assert_eq!(
             first.last_sync_status, "failed",
@@ -392,7 +401,10 @@ async fn a_capped_custom_batch_is_read_whole_over_three_rounds() -> anyhow::Resu
         .bind(source)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(alerts, 0, "触顶的那一轮不该发同步失败告警");
+        assert_eq!(
+            alerts, 0,
+            "the round that hits the cap should not raise a sync failure alert"
+        );
 
         // Round two: the first 200 come back as they were (Unchanged, taking no budget), then 200 more are fetched, and it hits the ceiling again
         let stats = sync_source(&state, source).await?;
@@ -406,7 +418,10 @@ async fn a_capped_custom_batch_is_read_whole_over_three_rounds() -> anyhow::Resu
         .bind(source)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(imported, 400, "第二轮之后 400 条都在库里了");
+        assert_eq!(
+            imported, 400,
+            "after the second round all 400 items are in the store"
+        );
         let second = utopia_store::sources::get(&pool, source).await?;
         assert_eq!(
             second.last_sync_status, "failed",
@@ -431,7 +446,10 @@ async fn a_capped_custom_batch_is_read_whole_over_three_rounds() -> anyhow::Resu
         .bind(source)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(imported, 450, "第三轮之后 450 条都在库里了");
+        assert_eq!(
+            imported, 450,
+            "after the third round all 450 items are in the store"
+        );
         let third = utopia_store::sources::get(&pool, source).await?;
         assert_eq!(
             third.last_sync_status, "ok",
@@ -573,9 +591,9 @@ async fn an_item_changed_during_a_round_is_still_read_by_the_next_one() -> anyho
     let result = async {
         // Round one: only item-0; once read, it completes
         let first = sync_source(&state, source).await?;
-        assert_eq!(first.created, 1, "第一轮只有 item-0");
+        assert_eq!(first.created, 1, "first round only has item-0");
         let checkpoint = utopia_store::sources::sync_checkpoint(&pool, source).await?;
-        assert!(checkpoint.is_some(), "这一轮走完了，游标该落下来");
+        assert!(checkpoint.is_some(), "this round is complete, the cursor should advance");
 
         // Round two: the endpoint now has two changed entries, and the lower bound must still be before their changes
         let second = sync_source(&state, source).await?;
@@ -589,7 +607,7 @@ async fn an_item_changed_during_a_round_is_still_read_by_the_next_one() -> anyho
             imported, 2,
             "运行期间改的那一条、添的那一条，下一轮都得进来（游标要停在那一轮**开始**的时刻，不是结束的时刻）"
         );
-        assert_eq!(second.updated, 1, "item-0 是改过的，item-1 是新的");
+        assert_eq!(second.updated, 1, "item-0 was modified, item-1 is new");
         Ok::<_, anyhow::Error>(())
     }
     .await;

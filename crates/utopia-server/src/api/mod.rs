@@ -95,7 +95,7 @@ fn with_static_files(mut app: Router, web_dist: &str) -> Router {
                 HeaderValue::from_static("no-cache"),
             ));
         app = app.nest("/assets", assets).fallback_service(spa);
-        tracing::info!("已托管前端产物: {}", web_dist);
+        tracing::info!("serving frontend build artifacts: {}", web_dist);
     }
     app
 }

@@ -2841,7 +2841,7 @@ pub async fn queue_due_inferences(pool: &PgPool) -> AppResult<()> {
         )
         .await
         {
-            tracing::warn!(kb_id = %kb_id, error = %e, "推理任务入队失败");
+            tracing::warn!(kb_id = %kb_id, error = %e, "failed to enqueue reasoning task");
         }
     }
     Ok(())

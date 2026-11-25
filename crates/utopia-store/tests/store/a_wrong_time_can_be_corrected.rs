@@ -195,7 +195,7 @@ async fn correcting_a_date_leaves_the_old_reading_in_the_ledger() -> anyhow::Res
             Validity::starting(Some(t("2023-06-01T00:00:00Z")), Some("month")),
         )
         .await?
-        .expect("这条还活着，应当改得动");
+        .expect("this one is still live and should be correctable");
 
         let old = row(&pool, wrong).await?;
         assert!(
@@ -209,8 +209,15 @@ async fn correcting_a_date_leaves_the_old_reading_in_the_ledger() -> anyhow::Res
         );
 
         let new = row(&pool, corrected).await?;
-        assert_eq!(new.supersedes, Some(wrong), "修正行要链回被它取代的那条");
-        assert!(new.invalidated_at.is_none(), "修正行是现行的");
+        assert_eq!(
+            new.supersedes,
+            Some(wrong),
+            "the correction row must link back to the one it replaces"
+        );
+        assert!(
+            new.invalidated_at.is_none(),
+            "the correction row is the current one"
+        );
         assert_eq!(new.valid_from, Some(t("2023-06-01T00:00:00Z")));
         assert_eq!(
             new.valid_from_precision.as_deref(),
@@ -261,7 +268,7 @@ async fn an_end_that_was_never_there_can_be_taken_back() -> anyhow::Result<()> {
             },
         )
         .await?
-        .expect("改得动");
+        .expect("can still be corrected");
         assert_eq!(
             row(&pool, closed).await?.valid_to,
             Some(t("2024-01-01T00:00:00Z"))
@@ -274,14 +281,18 @@ async fn an_end_that_was_never_there_can_be_taken_back() -> anyhow::Result<()> {
             Validity::starting(Some(t("2023-01-01T00:00:00Z")), Some("day")),
         )
         .await?
-        .expect("改得动");
+        .expect("can still be corrected");
         let r = row(&pool, reopened).await?;
-        assert!(r.valid_to.is_none(), "结束端收回了");
+        assert!(r.valid_to.is_none(), "the end side was pulled back");
         assert!(
             r.valid_to_precision.is_none(),
             "精度也要一起收回：留着 'year' 而日期为空，CHECK 会拦，而三值逻辑下这种组合曾经静默放行"
         );
-        assert_eq!(r.supersedes, Some(closed), "两次修正串成链，不是各挂各的");
+        assert_eq!(
+            r.supersedes,
+            Some(closed),
+            "two corrections form a chain, not separate attachments"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -320,7 +331,7 @@ async fn moving_a_start_earlier_makes_it_the_predecessor() -> anyhow::Result<()>
             Validity::starting(Some(t("2023-01-01T00:00:00Z")), Some("month")),
         )
         .await?
-        .expect("改得动");
+        .expect("can still be corrected");
         let report = utopia_store::temporal::reconcile_moved_facts(&pool, f.kb, &[fixed]).await?;
 
         assert!(
@@ -400,7 +411,7 @@ async fn a_row_that_is_already_gone_cannot_be_corrected() -> anyhow::Result<()> 
             .bind(fact)
             .fetch_one(&pool)
             .await?;
-        assert_eq!(n, 1, "一条死行只该有一个后继");
+        assert_eq!(n, 1, "a dead row should have only one successor");
         Ok::<_, anyhow::Error>(())
     }
     .await;

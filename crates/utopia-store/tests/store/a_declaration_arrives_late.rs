@@ -216,7 +216,7 @@ async fn a_succession_closes_once_someone_declares_it() -> anyhow::Result<()> {
         // —— Candidates ——
         let cands = temporal::uniqueness_candidates(&pool, f.kb).await?;
         let on_leads: Vec<_> = cands.iter().filter(|c| c.predicate_id == f.leads).collect();
-        assert_eq!(on_leads.len(), 1, "每人各管一个项目：主语侧不该报");
+        assert_eq!(on_leads.len(), 1, "each person owns one project: subject side should not be reported");
         let leads = on_leads[0];
         assert_eq!(leads.side, "object");
         assert!(!leads.declared);
@@ -232,10 +232,10 @@ async fn a_succession_closes_once_someone_declares_it() -> anyhow::Result<()> {
         let salary = cands
             .iter()
             .find(|c| c.predicate_id == f.salary)
-            .expect("两份开放的薪资是主语侧的候选");
+            .expect("two open salaries are candidates on the subject side");
         assert_eq!(salary.side, "subject");
         assert_eq!((salary.holders, salary.open_facts, salary.would_close), (1, 2, 1));
-        assert_eq!(salary.examples[0].values[0].name, "28000 CNY", "字面值带单位");
+        assert_eq!(salary.examples[0].values[0].name, "28000 CNY", "literal value carries a unit");
 
         // —— No declaration, no change ——
         assert!(
@@ -294,7 +294,7 @@ async fn a_succession_closes_once_someone_declares_it() -> anyhow::Result<()> {
         .bind(f.salary)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(closed, Some(day(2024, 2, 20)), "旧薪资止于新薪资的起点");
+        assert_eq!(closed, Some(day(2024, 2, 20)), "old salary ends where the new salary starts");
         Ok::<_, anyhow::Error>(())
     }
     .await;

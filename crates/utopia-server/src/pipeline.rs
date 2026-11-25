@@ -269,7 +269,7 @@ async fn run(state: &AppState, input: &ProcessingInput) -> anyhow::Result<()> {
     }
     state.emit_document(doc.kb_id, document_id);
 
-    tracing::info!(%document_id, chunks = chunk_count, "文档处理完成");
+    tracing::info!(%document_id, chunks = chunk_count, "document processing finished");
     Ok(())
 }
 
@@ -350,10 +350,10 @@ async fn embed_each(
                 done += 1;
             }
             Ok(vectors) => {
-                tracing::warn!(%document_id, %chunk_id, got = vectors.len(), "记忆的向量数量对不上，这一句先不嵌");
+                tracing::warn!(%document_id, %chunk_id, got = vectors.len(), "memory vector count mismatch, this sentence is not embedded for now");
             }
             Err(e) => {
-                tracing::warn!(%document_id, %chunk_id, error = %e, "这一句记忆没嵌成，别的照常");
+                tracing::warn!(%document_id, %chunk_id, error = %e, "this memory sentence was not embedded, the rest proceed as usual");
             }
         }
     }

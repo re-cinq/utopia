@@ -476,7 +476,7 @@ pub async fn resolve_types_job(state: &AppState, kb_id: Uuid) -> anyhow::Result<
             }),
         )
         .await;
-        tracing::info!(%kb_id, rounds, retyped, for_review, left_alone, "类型消解自动跑完成");
+        tracing::info!(%kb_id, rounds, retyped, for_review, left_alone, "automatic type resolution run finished");
     }
     Ok(())
 }

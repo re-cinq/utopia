@@ -204,7 +204,7 @@ async fn the_neighbours_come_back_in_order_and_the_gates_hold() -> anyhow::Resul
             serial.push(resolution::nearest_typed_entities(&pool, f.kb, *s, 10).await?);
         }
         for (i, list) in serial.iter().enumerate() {
-            assert_eq!(list.len(), 10, "主语 {i} 该有十个邻居");
+            assert_eq!(list.len(), 10, "subject {i} should have ten neighbours");
             let me = format!("subject {i}");
             assert!(
                 list.iter().all(|(n, ..)| *n != me),
@@ -227,9 +227,16 @@ async fn the_neighbours_come_back_in_order_and_the_gates_hold() -> anyhow::Resul
             .collect();
         let has_typed0 = serial[0].iter().any(|(n, ..)| n == "typed 0");
         if has_typed0 {
-            assert_eq!(flagged, vec!["typed 0"], "同一篇文档的要标出来，且只标它");
+            assert_eq!(
+                flagged,
+                vec!["typed 0"],
+                "same-document items must be marked, and only those"
+            );
         } else {
-            assert!(flagged.is_empty(), "不在邻居里就没什么可标");
+            assert!(
+                flagged.is_empty(),
+                "not among the neighbours means nothing to mark"
+            );
         }
         // Subjects whose own vector is 3-dimensional: there are no typed neighbours of 3 dimensions to compare against... except that one 3-dimensional one
         let odd = resolution::nearest_typed_entities(&pool, f.kb, f.three_dims_subject, 10).await?;
@@ -315,7 +322,11 @@ async fn the_neighbours_come_back_in_order_and_the_gates_hold() -> anyhow::Resul
             memo.get(&pool, f.kb, None).await?.is_empty(),
             "没有粗类：没有后代这个轴"
         );
-        assert_eq!(memo.len(), 3, "没有粗类的不进表");
+        assert_eq!(
+            memo.len(),
+            3,
+            "entries without a coarse class do not go in the table"
+        );
         // The ontology changed within the batch: memory still returns the copy that was asked for, while a direct ask gives the new one — that is what "remembering" means
         let intern = Uuid::now_v7();
         sqlx::query(

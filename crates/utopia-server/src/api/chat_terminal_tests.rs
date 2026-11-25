@@ -83,7 +83,10 @@ fn assert_one_earned_terminal(what: &str, ends: Ends, sse: &str) {
     );
 
     match ends {
-        Ends::Done => assert_eq!(done, 1, "{what}：答案成立时该是 done\n{sse}"),
+        Ends::Done => assert_eq!(
+            done, 1,
+            "{what}: when the answer holds, the terminal event should be done\n{sse}"
+        ),
         Ends::Error => {
             assert_eq!(
                 done, 0,
@@ -204,7 +207,10 @@ async fn a_turn_ends_in_exactly_one_earned_terminal() -> anyhow::Result<()> {
         ran += 1;
     }
 
-    assert!(ran > 0, "整张表被跳空了，等于没测");
+    assert!(
+        ran > 0,
+        "the whole table was skipped, so nothing was tested"
+    );
     Ok(())
 }
 
@@ -216,7 +222,11 @@ async fn a_turn_ends_in_exactly_one_earned_terminal() -> anyhow::Result<()> {
 fn a_terminal_is_a_frame_not_a_substring() {
     let sse = "event: delta\ndata: {\"text\": \"SSE 里用 event: done 表示结束\"}\n\n\
                event: done\ndata: {}\n\n";
-    assert_eq!(terminals(sse).0, 1, "正文里提到的 done 不算终结");
+    assert_eq!(
+        terminals(sse).0,
+        1,
+        "a done mentioned in the body does not count as terminal"
+    );
 
     let sse = "event: error\ndata: Model returned an empty answer\n\n";
     let (done, error, reasons) = terminals(sse);

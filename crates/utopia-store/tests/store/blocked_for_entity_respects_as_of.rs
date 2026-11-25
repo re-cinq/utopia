@@ -200,7 +200,7 @@ async fn blocked_for_entity_respects_as_of() -> anyhow::Result<()> {
 
     // February: neither has been detected yet → neither appears
     let feb = blocks(Some(t("2026-02-01T00:00:00Z"))).await?;
-    assert!(feb.is_empty(), "2 月：检测之前都不到");
+    assert!(feb.is_empty(), "February: nothing reached before detection");
 
     // 25 March: resolved is still open before decided_at; still_open is there → both
     let late_mar = blocks(Some(t("2026-03-25T00:00:00Z"))).await?;

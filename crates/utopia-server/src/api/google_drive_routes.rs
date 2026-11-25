@@ -141,8 +141,12 @@ async fn revoke_unless_still_used(
         .await;
     match revoked {
         Ok(resp) if resp.status().is_success() => {}
-        Ok(resp) => tracing::warn!(status = %resp.status(), "Google 拒绝作废刷新令牌，库里已删除"),
-        Err(e) => tracing::warn!(error = %e, "Google 刷新令牌作废失败，库里已删除"),
+        Ok(resp) => {
+            tracing::warn!(status = %resp.status(), "Google refused to revoke the refresh token, deleted from the database anyway")
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Google refresh token revocation failed, deleted from the database anyway")
+        }
     }
     Ok(())
 }
@@ -240,7 +244,7 @@ pub async fn callback(
             "You can close this window and choose the folders to sync.",
         ),
         Err((code, reason)) => {
-            tracing::warn!(code, reason = %reason, "Google Drive 连接被拒");
+            tracing::warn!(code, reason = %reason, "Google Drive connection refused");
             page(
                 "Google Drive was not connected",
                 match code {

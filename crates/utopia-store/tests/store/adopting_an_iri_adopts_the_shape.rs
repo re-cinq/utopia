@@ -58,7 +58,7 @@ async fn adopting_an_iri_turns_the_class_square() -> anyhow::Result<()> {
             .bind(grown)
             .fetch_one(&pool)
             .await?;
-        assert_eq!(shape, "circle", "还没被认领时该是圆的");
+        assert_eq!(shape, "circle", "should be round while not yet claimed");
 
         // Import a vocabulary, adopting schema.org's Person onto this key
         let adopted = utopia_store::ontology::adopt_iri_onto_key(
@@ -68,7 +68,7 @@ async fn adopting_an_iri_turns_the_class_square() -> anyhow::Result<()> {
             "https://schema.org/Person",
         )
         .await?;
-        assert_eq!(adopted, Some(grown), "该认到那个已有的类上");
+        assert_eq!(adopted, Some(grown), "should attach to that existing class");
 
         let (iri, shape, color): (Option<String>, String, String) =
             sqlx::query_as("SELECT iri, shape, color FROM entity_types WHERE id = $1")
@@ -82,7 +82,10 @@ async fn adopting_an_iri_turns_the_class_square() -> anyhow::Result<()> {
         );
         // **The color must not change**: color is identity (the same key is always the same color),
         // claiming changes the provenance, not the identity
-        assert_eq!(color, "#7fd0ff", "认领不该动用户看惯的颜色");
+        assert_eq!(
+            color, "#7fd0ff",
+            "claiming must not change the colour users are used to"
+        );
 
         // Idempotent: claiming again must change nothing (the iri is already non-empty, so the UPDATE matches nothing)
         let again = utopia_store::ontology::adopt_iri_onto_key(
@@ -92,7 +95,10 @@ async fn adopting_an_iri_turns_the_class_square() -> anyhow::Result<()> {
             "https://example.org/OtherPerson",
         )
         .await?;
-        assert_eq!(again, None, "已被认领的类不该被另一个词汇表抢走");
+        assert_eq!(
+            again, None,
+            "a class already claimed must not be taken over by another vocabulary"
+        );
         let iri2: Option<String> = sqlx::query_scalar("SELECT iri FROM entity_types WHERE id = $1")
             .bind(grown)
             .fetch_one(&pool)

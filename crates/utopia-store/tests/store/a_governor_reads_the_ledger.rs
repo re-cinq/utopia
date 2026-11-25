@@ -227,11 +227,15 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
 
     // Precedents from the four families
     let p = governance::precedents_for(pool, s.kb, &by_id(s.zw12)).await?;
-    assert_eq!(p.same_pair.len(), 2, "人分开过两次；机器合过的那条不算");
+    assert_eq!(
+        p.same_pair.len(),
+        2,
+        "people split them twice, the one the machine merged does not count"
+    );
     assert!(p.same_pair.iter().all(|x| !x.merged()));
     assert!(p.same_name.is_empty());
     assert!(p.reverts.is_empty());
-    let t = p.type_pair.clone().expect("两边都有类型");
+    let t = p.type_pair.clone().expect("both sides have a type");
     assert_eq!((t.merged, t.kept, t.reverted), (1, 3, 0));
     assert_eq!(
         governance::gate(
@@ -256,7 +260,11 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
     );
 
     let p = governance::precedents_for(pool, s.kb, &by_id(s.apple)).await?;
-    assert_eq!(p.same_pair.len(), 1, "左右对调也算这一对");
+    assert_eq!(
+        p.same_pair.len(),
+        1,
+        "swapping left and right still counts as this pair"
+    );
     assert!(p.same_pair[0].merged());
     assert_eq!(
         p.same_name.len(),
@@ -359,7 +367,7 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
     assert_eq!(governance::count_proposed(pool, s.kb).await?, 2);
     assert_eq!(utopia_store::review::counts(pool, s.kb).await?.agent, 2);
     let listed = governance::list(pool, s.kb, 10, 0).await?;
-    assert_eq!(listed.len(), 2, "最新的在前");
+    assert_eq!(listed.len(), 2, "newest first");
     assert_eq!(listed[0].id, d_zw23);
     assert_eq!(listed[1].left.as_deref(), Some("Apple"));
     assert_eq!(listed[1].right.as_deref(), Some("Apple Inc."));
@@ -448,7 +456,7 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
         "机器合的那条不算"
     );
     let alike = governance::namesakes(pool, s.kb, "zhang wei", 10).await?;
-    assert_eq!(alike.len(), 3, "三个张伟");
+    assert_eq!(alike.len(), 3, "three Zhang Weis");
     assert!(alike
         .iter()
         .all(|x| x.type_label.as_deref() == Some("Person") && !x.merged));
@@ -534,8 +542,11 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
         0,
         "只数那一刻之后的"
     );
-    assert!(governance::trip(pool, s.kb).await?, "开着：关了");
-    assert!(!governance::trip(pool, s.kb).await?, "已经关了：不再算跳闸");
+    assert!(governance::trip(pool, s.kb).await?, "still open: closed");
+    assert!(
+        !governance::trip(pool, s.kb).await?,
+        "already closed: no longer counts as a trip"
+    );
     sqlx::query("UPDATE knowledge_bases SET governance = TRUE WHERE id = $1")
         .bind(s.kb)
         .execute(pool)
