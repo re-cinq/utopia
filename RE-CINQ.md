@@ -21,6 +21,25 @@ git push origin upstream/dev:dev upstream/main:main
 git switch re-dev && git merge origin/dev
 ```
 
+## English comments
+
+This fork's comments are in English. Upstream writes them in Chinese, so every sync from upstream
+brings some new Chinese. After merging `dev` into `re-dev`, translate only the new lines:
+
+```sh
+python3 scripts/cjk/find.py --since <re-dev before the merge>   # new Chinese comment lines
+# translate them, one line in and one line out (rules in scripts/cjk/README.md)
+git diff --name-only | xargs python3 scripts/cjk/guard.py       # must print nothing
+```
+
+Open the result as its own PR into `re-dev`. If a merge conflicts on a line we translated, take
+upstream's text and translate it again. A few comments keep Chinese on purpose, where the characters
+are the point: test data names, Chinese date formats, look-alike characters.
+
+Only comments are translated. Strings, test data, `web/src/i18n/zh.ts`, the `*.zh-CN.md` files and
+`scripts/bench` stay as upstream has them. Nothing translated is ever sent upstream: upstream PRs
+branch from upstream `dev`.
+
 ## Building a feature
 
 1. Branch from `re-dev` and open a PR against `re-dev` in this repo.
