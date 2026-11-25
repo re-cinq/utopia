@@ -82,7 +82,7 @@ struct ManifestDataDir {
 /// not a side effect of a code change.
 // It is the **count** of migration files, not the highest number (the guard `schema_version_policy_compares_against_current`
 // compares by count): the two differ when numbers have gaps — 0071 is held by an open PR, 0072 landed first, so the count is 71
-const CURRENT_SCHEMA_VERSION: u32 = 128;
+const CURRENT_SCHEMA_VERSION: u32 = 129;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
