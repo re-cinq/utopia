@@ -78,9 +78,9 @@ fn gbk_pdf(text: &str) -> Vec<u8> {
     bytes
 }
 
-/// 回退用的 `pdftotext` 是不是 Poppler。同名的程序有两个实现——Git for Windows 带的是
-/// Xpdf 4.00，它对这份文件退出码 0、输出为空——只有 Poppler 连着 `poppler-data` 的 CJK
-/// CMap 表读得了 `GBK-EUC-H`。
+/// Whether the `pdftotext` used as fallback is Poppler. Two programs share that name: the one Git for Windows ships is
+/// Xpdf 4.00, which exits 0 and prints nothing for this file; only Poppler with `poppler-data` installed reads the CJK
+/// CMap table for `GBK-EUC-H`.
 fn fallback_is_poppler() -> bool {
     let Ok(out) = std::process::Command::new("pdftotext").arg("-v").output() else {
         return false;
@@ -96,7 +96,7 @@ fn fallback_is_poppler() -> bool {
 #[test]
 fn gbk_euc_h_pdf_extracts_chinese_text() {
     if !fallback_is_poppler() {
-        // CI 装了 Poppler 并设了这个变量：那里不许跳过，否则绿色是假的
+        // CI installs Poppler and sets this variable: skipping is not allowed there, or the green result is fake
         assert!(
             std::env::var("UTOPIA_TEST_REQUIRE_PDFTOTEXT").is_err(),
             "this run requires Poppler: install poppler-utils and poppler-data"

@@ -1,7 +1,7 @@
-//! ODS 的时刻格读成它显示的钟点，和 xlsx 里同一格写法一样。
+//! An ODS time-of-day cell is read as the clock time it displays, the same as the same cell written in xlsx.
 //!
-//! LibreOffice 把时刻存成 ISO 时长：`office:value-type="time"
-//! office:time-value="PT09H30M00S"`，格子里显示的是 `09:30:00`。
+//! LibreOffice stores a time as an ISO duration: `office:value-type="time"`
+//! `office:time-value="PT09H30M00S"`, and the cell displays `09:30:00`.
 
 use std::io::{Cursor, Write};
 

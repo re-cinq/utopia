@@ -1,8 +1,8 @@
-//! PDF 文字层里长得一样的码位（部首、连字）读成它们显示的那个字。
+//! Code points in the PDF text layer that look alike (radicals, ligatures) are read as the character they display.
 //!
-//! 照 macOS 生成的 PDF 的样子拼一份：Type0 字体、Identity-H，ToUnicode 把字形指到部首和
-//! 连字的码位——Quartz 与 Chrome 用苹方生成的 PDF 就是这样指的。不带字体文件，取字只看
-//! ToUnicode。
+//! Built the way a macOS-generated PDF looks: Type0 font, Identity-H, and ToUnicode maps the glyphs to radical and
+//! ligature code points, which is what Quartz and Chrome do when they render with PingFang. No font file is included, so text is taken only from
+//! ToUnicode.
 
 use lopdf::content::{Content, Operation};
 use lopdf::{dictionary, Document, Object, Stream, StringFormat};
@@ -107,7 +107,7 @@ fn pdf_showing(shown: &str) -> Vec<u8> {
 
 #[test]
 fn a_mac_pdf_is_read_with_the_characters_it_shows() {
-    // ⽂ ⾃ ⽇ ⾏ ⼀ ⽤ 是康熙部首，⻄ 是部首补充区的，ﬁ ﬂ 是连字
+    // ⽂ ⾃ ⽇ ⾏ ⼀ ⽤ are Kangxi radicals, ⻄ is from the CJK Radicals Supplement, ﬁ ﬂ are ligatures
     let shown = "时间线按⽂件⾃带的⽇期排⾏，⼀律⽤⻄历。ﬁscal ﬂow";
     let parsed = utopia_ingest::parse("report.pdf", &pdf_showing(shown)).unwrap();
     assert!(

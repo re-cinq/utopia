@@ -1,30 +1,30 @@
-//! 表格从 DOM 直接渲染成带真表头的 Markdown 表（0039/0040 那一层的活）。
+//! Tables are rendered straight from the DOM as Markdown tables with real headers (work of the 0039/0040 layer).
 //!
-//! 为什么不交给 htmd：SEC/XBRL 报表的表一个 `<th>` 都没有。标题行（公司名、报表名、
-//! 单位）是 colspan 跨全宽的普通行，列头（"July 26," / "2026"）拆在两行里，每个数字前后
-//! 各有一格 "$" 或 ")"，列与列之间是空的占位格。此前的补丁把第一行提成表头，于是被切开
-//! 的每一块表头都是「| NVIDIA CORPORATION | | |」，真列头一块都没带；模型面对
-//! 「Accounts receivable, net | 63,059 | 38,466」只能写出「短语 = 数字」或者不写。财报
-//! 长文在 #743 下 56 条错说法里 38 条、64 条读不通里 43 条出自这里。
+//! Why not hand this to htmd: the tables in SEC/XBRL reports have no `<th>` at all. Title rows (company name, report name,
+//! units) are ordinary rows spanning the full width; the column headers ("July 26," / "2026") are split across two rows, and each number has a
+//! "$" or ")" cell before or after it, with empty placeholder cells between columns. The earlier patch promoted the first row to the header, so every piece of the split table
+//! got the header "| NVIDIA CORPORATION | | |", and none carried the real column headers. Faced with
+//! "Accounts receivable, net | 63,059 | 38,466", the model could only write "phrase = number", or nothing. In the #743 long financial report runs,
+//! 38 of the 56 wrong statements and 43 of the 64 unreadable ones came from here.
 //!
-//! 这里只看结构，不认任何词：跨列格、空列、只含符号的格、只有一格的行、行标签的左内
-//! 边距、格子里有没有数字和字母。做四件事：标题行提成表前的说明句；多行列头按列拼成
-//! 一行；只有标签没有值的行当成小节，折进后面每行的标签里（「Current assets ›
-//! Accounts receivable, net」）；"$"、")" 这类符号格并回相邻的数字格。渲染出的表交给
-//! `blocks` / `chunker`，它们本来就让说明句和表头跟着每一块走。
+//! This only looks at structure and recognizes no words: spanning cells, empty columns, cells with only symbols, rows with a single cell, the left inner
+//! margin of row labels, and whether a cell has digits or letters. It does four things: promotes the title row to an explanatory sentence before the table; joins multi-line column headers per column into
+//! one row; a row with only a label and no values is treated as a section and folded into the label of every row below it ("Current assets ›
+//! Accounts receivable, net"); symbol cells such as "$" and ")" are merged back into the adjacent number cell. The rendered table is handed to
+//! `blocks` / `chunker`, which already keep the explanatory sentence and the header with every chunk.
 //!
-//! 只处理最外层且不含内层表的表；套着的表留给 htmd 原路。
+//! Only the outermost table is handled, and only if it contains no inner table; nested tables are left to htmd as before.
 //!
-//! docx 和电子表格的表不经过 DOM：解析器把格子收成网格交给 [`render_grid`]，之后的
-//! 分类与渲染和 HTML 表一模一样。电子表格的第一排（至少两格有字的那排）按惯例是
-//! 列头，哪怕列头是年份这种数字。csv/tsv 则保留记录与字段边界，交给 [`render_records`]。
+//! Tables from docx and spreadsheets do not go through the DOM: the parser collects the cells into a grid and hands it to [`render_grid`]; after that the
+//! classification and rendering are exactly the same as for HTML tables. By convention, the first row of a spreadsheet (the row with at least two cells that have text)
+//! is the column header, even if the column headers are numbers such as years. csv/tsv keep record and field boundaries and are handed to [`render_records`].
 
 use dom_query::{Document, Selection};
 
 const PLACEHOLDER: &str = "UTOPIATABLE";
 const PATH_SEP: &str = " › ";
 
-/// 一格：文字、跨了几列、左内边距（pt，取整）、在网格里的起始列。
+/// One cell: its text, how many columns it spans, the left inner padding (pt, rounded), and its starting column in the grid.
 #[derive(Clone, Debug, Default)]
 struct Cell {
     text: String,
@@ -36,12 +36,12 @@ struct Cell {
 #[derive(Clone, Debug)]
 struct Row {
     cells: Vec<Cell>,
-    /// 网格总宽（含跨列）
+    /// Total grid width (including spans)
     width: usize,
 }
 
 impl Row {
-    /// 覆盖第 k 列的那个非空格
+    /// The non-empty cell covering column k
     fn covering(&self, k: usize) -> Option<&Cell> {
         self.cells
             .iter()
@@ -58,13 +58,13 @@ enum Kind {
     Data,
 }
 
-/// 把最外层且不含内层表的表换成占位段落；返回改过的 HTML 和每个占位对应的 Markdown。
+/// Replaces the outermost table that has no inner table with a placeholder paragraph; returns the changed HTML and the Markdown each placeholder corresponds to.
 pub fn lift_tables(html: &str) -> (String, Vec<String>) {
     let doc = Document::from(html);
     let mut rendered: Vec<String> = Vec::new();
     let mut targets: Vec<Selection<'_>> = Vec::new();
-    // 上一张表的列头：分页符把一张报表劈成两个 <table> 时，后半张没有表头，
-    // 列数又一样，就是同一张表的续表，接着用前一张的列头
+    // The column header of the previous table: when a page break splits a report into two <table>s, the second half has no header,
+    // but the same column count, so it is a continuation of the same table and reuses the previous table's column header
     let mut last_headers: Vec<String> = Vec::new();
     for tbl in doc.select("table").iter() {
         let nested_in = tbl.nodes().first().is_some_and(|n| {
@@ -90,7 +90,7 @@ pub fn lift_tables(html: &str) -> (String, Vec<String>) {
     (doc.html().to_string(), rendered)
 }
 
-/// 把 htmd 转出的 Markdown 里的占位行换回渲染好的表。
+/// Swaps the placeholder rows in the Markdown converted by htmd back for the rendered tables.
 pub fn restore_tables(markdown: &str, tables: &[String]) -> String {
     if tables.is_empty() {
         return markdown.to_string();
@@ -121,7 +121,7 @@ fn hidden(style: &str) -> bool {
     s.to_ascii_lowercase().contains("display:none")
 }
 
-/// 左内边距：`padding-left: 12pt`、`text-indent: 6pt`，或 `padding: a b c d` 的第四个值。
+/// Left inner padding: `padding-left: 12pt`, `text-indent: 6pt`, or the fourth value of `padding: a b c d`.
 fn padding_left(style: &str) -> u32 {
     let lower = style.to_ascii_lowercase();
     let number_at = |s: &str| -> Option<f32> {
@@ -175,8 +175,8 @@ fn is_numeric(text: &str) -> bool {
     text.chars().any(|c| c.is_ascii_digit()) && !text.chars().any(char::is_alphabetic)
 }
 
-/// 该并回邻格的符号格：货币符号和左括号贴到后一格前面，右括号和百分号贴到前一格后面。
-/// 破折号那类「空值」占位符不算——它自己就是这一格的内容，并过去会把整行的值挪位
+/// Symbol cells that merge into the neighbouring cell: currency symbols and opening parentheses attach to the front of the next cell, and closing parentheses and percent signs attach to the back of the previous one.
+/// Dash-like "empty value" placeholders do not count; they are the content of their own cell, and merging them would shift the values of the whole row.
 fn merge_direction(text: &str) -> Option<bool> {
     let mut chars = text.chars();
     let first = chars.next()?;
@@ -196,10 +196,10 @@ fn is_currency(c: char) -> bool {
     matches!(c, '$' | '€' | '£' | '¥' | '₩' | '₹' | '¢' | '￥')
 }
 
-/// 读出网格：按 `tr` 逐行，跨行的格顺着往下带。
+/// Reads out the grid: row by row through `tr`, with cells that span rows carried down.
 fn grid(tbl: &Selection<'_>) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
-    // (列, 格, 还剩几行)
+    // (column, cell, rows remaining)
     let mut carry: Vec<(usize, Cell, usize)> = Vec::new();
     for tr in tbl.select("tr").iter() {
         let mut cells: Vec<Cell> = Vec::new();
@@ -216,9 +216,9 @@ fn grid(tbl: &Selection<'_>) -> Vec<Row> {
             let span = attr_usize(&cell, "colspan");
             let rowspan = attr_usize(&cell, "rowspan");
             let c = Cell {
-                // `text()` 只把文字节点首尾相接，10<br>20 读成 1020；`formatted_text()` 在
-                // <br>、<p>、<div>、<li> 这类地方断行，行内的 <b>、<span> 照旧相接，
-                // `clean` 再把断行并成一个空格
+                // `text()` joins only the text nodes end to end, so 10<br>20 reads as 1020; `formatted_text()` breaks lines at
+                // <br>, <p>, <div>, <li> and similar places, while inline <b> and <span> are still joined end to end;
+                // `clean` then collapses the breaks into one space
                 text: clean(&cell.formatted_text()),
                 span,
                 pad: padding_left(&style),
@@ -250,7 +250,7 @@ fn place_carried(col: &mut usize, cells: &mut Vec<Cell>, carry: &mut Vec<(usize,
     }
 }
 
-/// 一行是什么：只看非空格的个数、位置、跨度，和格子里有没有数字。
+/// What a row is: looks only at the count, position and span of non-empty cells, and whether the cells contain digits.
 fn kind(row: &Row, headers_seen: bool, data_seen: bool, table_width: usize) -> Kind {
     let nonempty: Vec<&Cell> = row.cells.iter().filter(|c| !c.text.is_empty()).collect();
     let Some(first) = nonempty.first() else {
@@ -262,7 +262,7 @@ fn kind(row: &Row, headers_seen: bool, data_seen: bool, table_width: usize) -> K
             return if data_seen { Kind::Data } else { Kind::Header };
         }
         if !headers_seen && !data_seen {
-            // 表头和数据都还没来：靠左或跨宽的一格文字是标题，不靠左的是一根列头
+            // Neither header nor data has come yet: left-aligned or full-width cell text is a title, and text that is not left-aligned is a column header
             return if wide || first.col == 0 {
                 Kind::Caption
             } else {
@@ -273,8 +273,8 @@ fn kind(row: &Row, headers_seen: bool, data_seen: bool, table_width: usize) -> K
     }
     let label = !is_numeric(&first.text);
     let values_after = nonempty[1..].iter().any(|c| is_numeric(&c.text));
-    // 有标签跟着数字的是数据行；最左一格就有内容的整排数字也是（年份列的表）。
-    // 最左几格空着、全是数字的一排（"2026 | 2026"）是列头的第二行
+    // A row with a label followed by numbers is a data row; a row whose leftmost cell already has content and that is all numbers also counts (tables with a year column).
+    // A row whose leftmost cells are empty and that is all numbers ("2026 | 2026") is the second line of a column header
     if values_after && (label || first.col == 0 || data_seen) {
         return Kind::Data;
     }
@@ -282,13 +282,13 @@ fn kind(row: &Row, headers_seen: bool, data_seen: bool, table_width: usize) -> K
         return Kind::Header;
     }
     if label {
-        // 数据行之后又一排没有数字的格：当成一条小节
+        // After a data row, another row with no numbers in its cells: treated as a section
         return Kind::Section;
     }
     Kind::Data
 }
 
-/// 把只含符号的格并回邻格："$" 和 "(" 贴到后一个非空格前面，")" 和 "%" 贴到前一个后面。
+/// Merges symbol-only cells back into a neighbour: "$" and "(" attach to the front of the next non-empty cell, and ")" and "%" attach to the back of the previous one.
 fn merge_symbols(row: &mut Row) {
     let n = row.cells.len();
     for i in 0..n {
@@ -315,7 +315,7 @@ fn escape(text: &str) -> String {
     text.replace('|', "\\|")
 }
 
-/// csv/tsv 的空字段只是缺失值，不能把该记录当成小节，或把独立字段并成财报的标签列。
+/// Empty fields in csv/tsv are only missing values: they must not make the record count as a section, or merge separate fields into a financial report's label column.
 pub(crate) fn render_records(rows: &[Vec<String>]) -> Option<String> {
     let rows: Vec<Vec<String>> = rows
         .iter()
@@ -345,21 +345,21 @@ pub(crate) fn render_records(rows: &[Vec<String>]) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-/// 缩进深度：先看标签格前面有几根空列（Workiva 报表用空格子缩进），再看左内边距
-/// （另一些用 padding-left）。两者合成一个数，列在前、内边距在后
+/// Indent depth: first count the empty columns before the label cell (Workiva reports indent with empty cells), then the left padding
+/// (other reports use padding-left). The two are combined into one number, columns first and padding after.
 fn depth_of(cell: &Cell) -> u32 {
     cell.col as u32 * 1000 + cell.pad
 }
 
-/// 一张表 → 说明句（可选）+ 带真表头的 Markdown 表，连同它用的列头（给续表接着用）。
-/// 表里什么都没有时返回 None。
+/// A table → an explanatory sentence (optional) + the Markdown table with a real header, along with the column header it uses (for continuation tables to reuse).
+/// Returns None when the table contains nothing at all.
 fn render_table(tbl: &Selection<'_>, inherited: &[String]) -> Option<(String, Vec<String>)> {
     let (md, headers) = render_rows(grid(tbl), inherited, None)?;
-    // <caption> 不在任何 tr 里，读网格时看不见；整张表又换成了占位段落，htmd 本来会写出的
-    // 这句话也跟着没了。照 htmd 和 Word 题注的样子写回表前，单独一段，不像标题行那样硬加冒号：
-    // 短的由分块器当说明句带进表的每一块，长的（表名后面还跟着几句说明的）和别的长段落一样只写
-    // 一次。硬加了冒号，长的也得每块重复，300 token 的预算剩不下几行。
-    // 用 formatted_text：text() 把 <br> 两边的字首尾相接
+    // A <caption> is not inside any tr, so it is invisible when reading the grid; and since the whole table is swapped for a placeholder paragraph, the sentence htmd would have written
+    // is lost too. It is written back before the table the way htmd and Word captions are, as its own paragraph, without a forced colon like the title row has:
+    // a short one is carried by the chunker into every chunk of the table as an explanatory sentence, while a long one (a table name followed by several explanatory sentences) is written once, like any other long paragraph.
+    // A forced colon would have to repeat in every chunk if the caption is long, and the 300-token budget would leave little room for rows.
+    // Uses formatted_text: text() joins the text on either side of a <br> end to end
     let captions: String = tbl
         .select("caption")
         .iter()
@@ -370,10 +370,10 @@ fn render_table(tbl: &Selection<'_>, inherited: &[String]) -> Option<(String, Ve
     Some((captions + &md, headers))
 }
 
-/// 以 Markdown 块标记开头的说明句（「# of wells」「1. Demographics」「- Totals」「> 5 years」
-/// 「~~~ Notes」）会读成标题、列表、引用或代码块：分块器只认段落作说明句，表的续块就没有它；
-/// 读成标题还会顶替后面每一块的面包屑，读成代码块则没有收尾，把表和后文一直吞到文末。照 htmd
-/// 转义正文的办法，在标记前加反斜杠；只是像标记的（「#1 well」「~5 km」）照原样写
+/// Explanatory sentences that start with a Markdown block marker ("# of wells", "1. Demographics", "- Totals", "> 5 years",
+/// "~~~ Notes") would be read as a heading, list, quote or code block: the chunker only accepts a paragraph as an explanatory sentence, so the table's continuation chunks would not have it;
+/// read as a heading it would also replace the breadcrumb of every chunk after it, and read as a code block it would never close, swallowing the table and all the text after it to the end. Following how htmd
+/// escapes body text, a backslash is put in front of the marker; ones that only look like markers ("#1 well", "~5 km") are written as-is
 fn as_paragraph(line: &str) -> String {
     let b = line.as_bytes();
     let spaced = |i: usize| b.get(i).is_none_or(|&c| c == b' ');
@@ -394,8 +394,8 @@ fn as_paragraph(line: &str) -> String {
     format!("{}\\{}", &line[..at], &line[at..])
 }
 
-/// 别的解析器用的入口：一行是若干 (文字, 跨几列, 左内边距 pt)。`first_is_header` 为真时，
-/// 第一排至少两格有字的行按列头算（电子表格的惯例），其余行照常分类。
+/// The entry point for other parsers: a row is a list of (text, columns spanned, left padding in pt). When `first_is_header` is true,
+/// the first row with at least two cells that have text counts as the column header (spreadsheet convention); other rows are classified as usual.
 pub(crate) fn render_grid(
     rows: &[Vec<(String, usize, u32)>],
     first_is_header: bool,
@@ -411,9 +411,9 @@ pub(crate) fn render_grid(
     render_rows(rows, &[], forced).map(|(md, _)| md)
 }
 
-/// docx 和 pptx 用的入口：[`render_grid`] 不认作表的网格也不能丢字。没有列头也没有数据行的
-/// 网格（单列的文字、每排只有一格有字、一格跨整排的告示）按行写出来：一排一段，有字的格用
-/// ` | ` 连起来。HTML 的表有 htmd 接着，电子表格和 csv 各有退路，所以这一步不放在渲染器里。
+/// The entry point for docx and pptx: a grid that [`render_grid`] does not recognize as a table must still not lose text. A grid with no column header and no data rows
+/// (single-column text, one cell with text per row, a notice with one cell spanning the row) is written out line by line: one paragraph per row, with the cells that have text joined by
+/// ` | `. HTML tables are followed up by htmd, and spreadsheets and csv each have a fallback, so this step is not put in the renderer.
 pub(crate) fn grid_or_lines(
     rows: &[Vec<(String, usize, u32)>],
     first_is_header: bool,
@@ -434,8 +434,8 @@ pub(crate) fn grid_or_lines(
     })
 }
 
-/// 电子表格的 merged cells 可以给出不止一行的表头。调用方已经把行投影成网格，
-/// 这里只负责把明确的表头区间按表头处理。
+/// Merged cells in a spreadsheet can give a header spanning more than one row. The caller has already projected the rows into a grid;
+/// this only handles the explicit header range as a header.
 pub(crate) fn render_grid_with_headers(
     rows: &[Vec<(String, usize, u32)>],
     headers: Option<std::ops::Range<usize>>,
@@ -484,21 +484,21 @@ fn render_rows(
     }
     let mut captions: Vec<String> = Vec::new();
     let mut headers: Vec<Row> = Vec::new();
-    // (小节深度, 小节名, 已经见过比它深的行)。
-    // 一个小节被同深度的数据行结束，只在它已经有过更深的子行之后：资产负债表里
-    // 「Current assets:」的子行缩进了，同深度的「Property and equipment」是下一项；
-    // 现金流量表里「Cash flows from operating activities:」的子行没缩进，同深度的
-    // 「Net income」就是它的第一行
+    // (section depth, section name, whether a row deeper than it has already been seen)
+    // A section is ended by a data row at the same depth only after it already has deeper child rows. In a balance sheet
+    // the child rows of "Current assets:" are indented, so the same-depth "Property and equipment" is the next item;
+    // in a cash flow statement the child rows of "Cash flows from operating activities:" are not indented, so the same-depth
+    // "Net income" is its first row
     let mut sections: Vec<(u32, String, bool)> = Vec::new();
-    // (标签路径, 该行)
+    // (label path, the row)
     let mut data: Vec<(String, Row)> = Vec::new();
     let (mut headers_seen, mut data_seen) = (false, false);
     for (i, row) in rows.iter_mut().enumerate() {
         let filled = row.cells.iter().filter(|c| !c.text.is_empty()).count();
         let k = match forced_header.as_ref() {
             Some(header) if header.contains(&i) => Kind::Header,
-            // 列头之后的行是记录，哪怕一格数字都没有；只填了一个数字的行（序号列）也是记录，
-            // 只填了一个词的行才按小节算
+            // A row after the header is a record even if no cell has a number; a row with only one number filled in (a sequence column) is also a record,
+            // and only a row with a single word filled in counts as a section
             Some(header)
                 if i >= header.end
                     && (filled >= 2
@@ -559,7 +559,7 @@ fn render_rows(
             }
         }
     }
-    // 全是列头没有一行数据的表不存在：一格数字都没有的表，第一排是列头，其余是数据行
+    // A table with only column headers and no data rows does not exist: a table with no numeric cells at all has its first row as the header and the rest as data rows
     if data.is_empty() && headers.len() >= 2 {
         let rest = headers.split_off(1);
         data.extend(rest.into_iter().map(|r| (String::new(), r)));
@@ -568,8 +568,8 @@ fn render_rows(
         return None;
     }
 
-    // 标签列 = 第一根出现过数字的列左边的所有列；一个数字都没有的表，标签列只有最左那格。
-    // 值列 = 标签列右边、数据行里出现过内容的列（表头有字但整列没数据的列不算）
+    // Label column = all columns to the left of the first column that ever contained a number; in a table with no numbers at all, the label column is just the leftmost cell.
+    // Value columns = columns to the right of the label column that have content in some data row (a header column with text but no data at all does not count)
     let label_end: usize = (0..width)
         .find(|&k| {
             data.iter()
@@ -601,7 +601,7 @@ fn render_rows(
     };
     let value_cols: Vec<usize> = (label_end..width).filter(|&k| has_content(k)).collect();
     let value_cols: Vec<Vec<usize>> = collapse_spans(value_cols, &headers, &data);
-    // 一根值列是一组网格列：取这一行落在这组里的第一个非空格
+    // A value column is a group of grid columns: take the first non-empty cell in this row that falls in the group
     let at = |r: &Row, group: &[usize]| -> String {
         group
             .iter()
@@ -609,7 +609,7 @@ fn render_rows(
             .map(|c| c.text.clone())
             .unwrap_or_default()
     };
-    // 一行的标签：标签列里的格子按出现顺序拼起来
+    // The row's label: the cells in the label column are joined in order of appearance
     let own_label = |r: &Row| -> String {
         let mut parts: Vec<&str> = Vec::new();
         for c in r
@@ -637,7 +637,7 @@ fn render_rows(
     if headers.is_empty() && !data.is_empty() && inherited.len() == header_texts.len() {
         header_texts = inherited.to_vec();
     }
-    // 标签列的表头：只算整格都落在标签列里的表头格，跨进值列的是值列的头
+    // Header of the label column: only header cells that fall entirely within the label column count; a header that spans into the value columns belongs to the value column
     let label_header: String = {
         let mut parts: Vec<String> = Vec::new();
         for h in &headers {
@@ -663,7 +663,7 @@ fn render_rows(
         lines.push(caption);
         lines.push(String::new());
     }
-    // 最左一列本身就是数字（年份列的表）：没有标签列，行就是它的值
+    // When the leftmost column is itself numbers (a table with a year column): there is no label column, and the row is its value
     let has_label_col = label_end > 0;
     let ncols = usize::from(has_label_col) + value_cols.len().max(1);
     let header_cells: Vec<String> = has_label_col
@@ -695,8 +695,8 @@ fn render_rows(
     Some((lines.join("\n"), header_texts))
 }
 
-/// 跨列的格会让同一个值落在好几根网格列上，"$" 又常常单独占一格：相邻两列在每一行
-/// 上要么由同一格覆盖、要么至少一边是空的，就是同一根值列，并成一组。
+/// Spanning cells make the same value land on several grid columns, and "$" often takes a cell of its own: two adjacent columns that, in every row,
+/// are either covered by the same cell or have at least one side empty are the same value column, and are grouped together.
 fn collapse_spans(cols: Vec<usize>, headers: &[Row], data: &[(String, Row)]) -> Vec<Vec<usize>> {
     let mut out: Vec<Vec<usize>> = Vec::new();
     for k in cols {
@@ -728,7 +728,7 @@ mod tests {
     #[test]
     fn a_grid_that_is_not_a_table_keeps_its_words_as_lines() {
         let cell = |text: &str, span: usize| (text.to_string(), span, 0);
-        // 单列的文字，中间夹一排空行
+        // Single-column text with a run of blank lines in between
         let one_column = vec![
             vec![cell("Action", 1)],
             vec![cell("", 1)],
@@ -742,7 +742,7 @@ mod tests {
                 Some("Action\n\nApprove contract\n\nRenew license")
             );
         }
-        // 两列，只有左边一列有字；一格跨整排的告示
+        // Two columns, only the left one has text; a notice with one cell spanning the row
         let left_only = vec![
             vec![cell("Action", 1), cell("", 1)],
             vec![cell("Approve  contract", 1), cell("", 1)],
@@ -755,7 +755,7 @@ mod tests {
             grid_or_lines(&[vec![cell("Notice for the board", 2)]], false).as_deref(),
             Some("Notice for the board")
         );
-        // 一个字都没有的网格什么都不写；真正的表照旧是表
+        // A grid with no text at all writes nothing; a real table is still a table
         assert_eq!(grid_or_lines(&[vec![cell("", 1)]], false), None);
         let table = vec![
             vec![cell("Item", 1), cell("2025", 1)],
@@ -767,7 +767,7 @@ mod tests {
             .starts_with("| Item | 2025 |"));
     }
 
-    /// 单列的 HTML 表多半是排版用的：留给 htmd，格子里的标题、列表和链接才留得住
+    /// A single-column HTML table is usually for layout: it is left to htmd, so the headings, lists and links in its cells are kept
     #[test]
     fn a_single_column_html_table_is_left_to_the_page_converter() {
         let html = "<table><tr><td><h2>To our shareholders</h2><p>Revenue grew.</p></td></tr><tr><td><p>We opened three offices.</p></td></tr></table>";
@@ -833,8 +833,8 @@ mod tests {
         );
     }
 
-    /// <caption> 是表写明的名字：单独一段写在标题行前面，和 Word 的题注一样不加冒号；
-    /// 模板常留的空 <caption> 什么都不写
+    /// A <caption> is the name the table states: it is written as its own paragraph before the title row, like a Word caption, with no colon;
+    /// an empty <caption> left by a template writes nothing
     #[test]
     fn an_html_table_keeps_its_caption() {
         let table = |caption: &str| {
@@ -878,7 +878,7 @@ mod tests {
                 "{md}"
             );
         }
-        // 只是像标记的照原样写，块里的原文不多出反斜杠
+        // Only those that merely look like markers are written as-is, so the original text in the block gains no backslashes
         for caption in ["#1 well", "~5 km"] {
             let md = table(caption);
             assert!(md.starts_with(&format!("{caption}\n\n")), "{md}");
@@ -918,9 +918,9 @@ mod tests {
         assert!(md.contains("| Other | 112 | — | 31 | — |"), "{md}");
     }
 
-    /// 格子里的 <br>、<p>、<div>、<li> 隔开两边的字，和 Word（#813）、幻灯片（#1042）的格子
-    /// 一样：两个读数 10 和 20 不能读成 1020，列头「Depth」「(m)」不能粘成「Depth(m)」。
-    /// 行内的 <b> 照旧不隔开
+    /// <br>, <p>, <div>, <li> in a cell separate the text on either side, the same as Word (#813) and slide (#1042) cells:
+    /// the two readings 10 and 20 must not read as 1020, and the column headers "Depth" and "(m)" must not stick together as "Depth(m)".
+    /// Inline <b> still does not separate
     #[test]
     fn a_line_break_inside_a_cell_keeps_the_words_on_either_side_apart() {
         let html = "<table><tr><th>Well</th><th>Depth<br>(m)</th><th>Readings</th></tr>\

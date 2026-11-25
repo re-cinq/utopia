@@ -1,9 +1,9 @@
-//! 电子表格里的日期格读成它显示的日期，不是 Excel 的序数。
+//! A date-formatted cell in a spreadsheet is read as the date it displays, not as Excel's serial number.
 //!
-//! 照 Excel 写出来的样子拼一份 xlsx：日期存成从 1899-12-30 起的天数（`<v>45306</v>`），
-//! 小数部分是一天里的时刻；它是日期，只因为 styles.xml 里挂的数字格式是日期格式——内置的
-//! 14（短日期）、22（日期加时刻）、20（时刻）、46（累计时长），和中文 Excel 自定义的
-//! `yyyy"年"m"月"d"日"`。
+//! Built the way Excel writes an xlsx: the date is stored as a day count from 1899-12-30 (`<v>45306</v>`),
+//! and the fractional part is the time of day. It is a date only because the number format attached in styles.xml is a date format: the built-in
+//! 14 (short date), 22 (date and time), 20 (time), 46 (elapsed time), and the custom format that Chinese Excel adds:
+//! `yyyy"年"m"月"d"日"`.
 
 use std::io::{Cursor, Write};
 
@@ -74,7 +74,7 @@ fn a_date_cell_reads_as_the_date_it_shows() {
                 number("B3", 2, "45307"),
                 number("C3", 6, "800"),
             ],
-            // 没挂日期格式的数就是数，哪怕它碰巧落在日期的范围里
+            // A number without a date format stays a number, even if it happens to fall inside the date range
             vec![
                 words("A4", "Plain number"),
                 number("B4", 0, "45306"),
@@ -124,7 +124,7 @@ fn a_time_of_day_and_an_elapsed_time_read_as_clock_time() {
 
 #[test]
 fn a_workbook_counting_from_1904_reads_the_same_date() {
-    // Excel for Mac 从前默认 1904 纪年：同一天存成少 1462 的数
+    // Excel for Mac used the 1904 date system by default: the same day is stored as a number 1462 smaller
     let text = read(
         &[
             header(1),
