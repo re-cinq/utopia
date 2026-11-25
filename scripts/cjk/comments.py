@@ -6,6 +6,9 @@ from dataclasses import dataclass
 CJK = re.compile(r"[一-鿿　-〿＀-￯]")
 RUST_SUFFIXES = (".rs",)
 TS_SUFFIXES = (".ts", ".tsx", ".mjs", ".js")
+ANCHOR = re.compile(r"#\d+|\d{2,}(?:\.\d+)?|[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z0-9_]+)+|[A-Za-z]+_[A-Za-z0-9_]+|[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+")
+MIN_COPY_LENGTH = 40
+REWRITTEN_NUMBER_WORDS = re.compile(r"[万亿千百年月日]")
 RAW_STRING_OPENER = re.compile(r'(?<![A-Za-z0-9_])b?r(#*)"')
 
 
@@ -43,6 +46,31 @@ def comment_text(segments: list[Segment]) -> str:
 
 def code_text(segments: list[Segment]) -> str:
     return "".join(segment.text for segment in segments if not segment.is_comment)
+
+
+def anchors(comment: str) -> list[str]:
+    """Names (snake_case, paths, CamelCase) and issue numbers a translation must carry over."""
+    return sorted(set(ANCHOR.findall(re.sub(r"(?<=\d),(?=\d{3})", "", comment))))
+
+
+def missing_anchors(before: str, after: str) -> list[str]:
+    lost = set(anchors(before)) - set(anchors(after))
+    if REWRITTEN_NUMBER_WORDS.search(before):
+        lost = {anchor for anchor in lost if not anchor[0].isdigit()}
+    return sorted(lost)
+
+
+def copied_translations(before_comments: list[str], after_comments: list[str]) -> list[int]:
+    """Lines whose translation is a long text that also sits on a line with a different original."""
+    originals_by_text: dict[str, set[str]] = {}
+    for old, new in zip(before_comments, after_comments):
+        if old != new and len(new.strip()) >= MIN_COPY_LENGTH:
+            originals_by_text.setdefault(new.strip(), set()).add(old.strip())
+    return [
+        number
+        for number, (old, new) in enumerate(zip(before_comments, after_comments), start=1)
+        if old != new and len(originals_by_text.get(new.strip(), ())) > 1
+    ]
 
 
 def is_rust_path(path: str) -> bool:
