@@ -1,4 +1,4 @@
-//! utopia-core: 领域模型、错误类型与配置。
+//! utopia-core: domain models, error types and configuration.
 
 pub mod config;
 pub mod error;
@@ -9,19 +9,19 @@ pub mod text;
 pub use error::{is_deferred, is_terminal, AppError, AppResult, Deferred, Terminal};
 pub use text::without_nul;
 
-/// 审核对的 `reason` 里，召回通道留下的记号。名字向量召回（0041 第 2 刀通道 2）提的是两个
-/// **不同的字符串**，和同名家族（`shared_name|`、`ambiguous_name|`、`namesake_tie|`）是两种
-/// 证据强度：裁决器读它、治理闸门看它、召回写它，都从这里认，不各自拼前缀
+/// The marker the recall channel leaves in the `reason` of a review pair. The name-vector recall channel (0041 second cut, channel 2) proposes two
+/// **different strings**, and this is a different kind of evidence strength from the same-name families (`shared_name|`, `ambiguous_name|`, `namesake_tie|`).
+/// The adjudicator reads it, the governance gate checks it, and recall writes it. All of them recognize it from here and none builds its own prefix.
 pub mod review_reasons {
-    /// `name_vector|<余弦>`：名字向量召回提的对
+    /// `name_vector|<cosine>`: the pair proposed by name-vector recall
     pub const NAME_VECTOR: &str = "name_vector|";
 
-    /// 这一对是名字向量召回提出来的（两个相近但不同的字符串）
+    /// This pair was proposed by name-vector recall (two similar but different strings)
     pub fn similarity_proposed(reason: Option<&str>) -> bool {
         reason.is_some_and(|r| r.starts_with(NAME_VECTOR))
     }
 
-    /// 名字向量召回记下的余弦文本；不是这种对时为 None
+    /// Cosine text recorded by name-vector recall; None when the pair is not of this kind
     pub fn name_vector_cosine(reason: Option<&str>) -> Option<&str> {
         reason?.strip_prefix(NAME_VECTOR)
     }
