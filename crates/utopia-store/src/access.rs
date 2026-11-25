@@ -261,7 +261,7 @@ pub async fn ensure_jwt_secret(pool: &PgPool, generated: &str) -> AppResult<Stri
     .await?;
     secret.ok_or_else(|| {
         AppError::Other(anyhow::anyhow!(
-            "deployment_settings 没有单例行，JWT 密钥无处落库"
+            "deployment_settings has no singleton row, so there is nowhere to store the JWT key"
         ))
     })
 }

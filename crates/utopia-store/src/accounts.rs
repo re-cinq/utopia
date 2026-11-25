@@ -289,7 +289,9 @@ pub async fn update_password(pool: &PgPool, id: Uuid, password_hash: &str) -> Ap
 /// **The last admin cannot be deactivated**: otherwise the organization would forever have no one who can manage members. Same reason.
 pub async fn deactivate_user(pool: &PgPool, target: Uuid, actor: Uuid) -> AppResult<()> {
     if target == actor {
-        return Err(AppError::Validation("不能停用自己的账号".into()));
+        return Err(AppError::Validation(
+            "you cannot deactivate your own account".into(),
+        ));
     }
     let mut tx = pool.begin().await?;
     lock_account_organization(&mut tx, target).await?;
@@ -319,7 +321,7 @@ pub async fn deactivate_user(pool: &PgPool, target: Uuid, actor: Uuid) -> AppRes
         if others == 0 {
             tx.rollback().await?;
             return Err(AppError::Validation(
-                "这是组织里最后一个管理员，停用之后没人能管成员".into(),
+                "this is the organization's last admin; after deactivating them nobody could manage members".into(),
             ));
         }
     }
@@ -359,7 +361,9 @@ pub async fn set_system_admin(
     value: bool,
 ) -> AppResult<()> {
     if target == actor && !value {
-        return Err(AppError::Validation("不能收回自己的系统管理员".into()));
+        return Err(AppError::Validation(
+            "you cannot revoke your own system administrator role".into(),
+        ));
     }
     let mut tx = pool.begin().await?;
     let org_id = lock_account_organization(&mut tx, target).await?;
@@ -380,7 +384,7 @@ pub async fn set_system_admin(
         .await?;
         if others == 0 {
             return Err(AppError::Validation(
-                "这是组织里最后一个管理员，收回权限之后没人能管成员".into(),
+                "this is the organization's last admin; after revoking the role nobody could manage members".into(),
             ));
         }
     }

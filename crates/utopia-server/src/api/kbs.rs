@@ -436,8 +436,9 @@ pub(super) async fn install_packs(
     }
     let mut packs = Vec::with_capacity(pack_ids.len());
     for id in pack_ids {
-        let pack = crate::ontology_packs::get(id)
-            .ok_or_else(|| AppError::invalid("unknown_pack", format!("未知的本体包：{id}")))?;
+        let pack = crate::ontology_packs::get(id).ok_or_else(|| {
+            AppError::invalid("unknown_pack", format!("unknown ontology pack: {id}"))
+        })?;
         packs.push((pack, crate::ontology_packs::bytes(pack)?));
     }
     for (pack, bytes) in &packs {

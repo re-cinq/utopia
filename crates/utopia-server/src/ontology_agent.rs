@@ -1179,7 +1179,7 @@ async fn adopt_on(
         _ => {
             return Err(AppError::invalid(
                 "bad_section",
-                "section 只能是 map_to、entity_types、relation_types 或 attribute_types",
+                "section can only be map_to, entity_types, relation_types or attribute_types",
             ))
         }
     };
