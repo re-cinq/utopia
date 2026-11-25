@@ -1,8 +1,8 @@
-//! 幻灯片上的换行把两边的字隔开。
+//! Line breaks on a slide keep the text on either side apart.
 //!
-//! 在 PowerPoint 里按 Shift+Enter 换的行不是新段落，是段落里的一个 `<a:br>`，前后各是一个
-//! run；PowerPoint 写的是 `<a:br><a:rPr …/></a:br>`，别的程序也写 `<a:br/>`。标题
-//! 「Q1」换行「2024」、指标「Revenue」换行「$1.2B」都是这个形状。
+//! A line break typed with Shift+Enter in PowerPoint is not a new paragraph. It is an `<a:br>` inside the paragraph, with one
+//! run before it and one after. PowerPoint writes `<a:br><a:rPr …/></a:br>`, and other programs write `<a:br/>`. A title
+//! "Q1" break "2024", or a metric "Revenue" break "$1.2B", are all this shape.
 
 use std::io::{Cursor, Write};
 

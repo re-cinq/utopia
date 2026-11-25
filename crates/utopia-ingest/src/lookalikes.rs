@@ -1,36 +1,36 @@
-//! PDF 文字层里长得一样、码位不同的字：部首与连字换回它们显示的那个字。
+//! Characters in the PDF text layer that look alike but have different code points: radicals and ligatures are mapped back to the character they display.
 //!
-//! PDF 画的是字形，文字层靠字体的 ToUnicode 表把字形指回码位。同一个字形在字体里常常
-//! 既是一个部首又是一个统一汉字——苹方里「⼀」（U+2F00，康熙部首）和「一」（U+4E00）是
-//! 同一个字形——ToUnicode 指到部首码位，读出来的字看着一样，码位却是部首：搜「日期」
-//! 找不到「⽇期」，「王⼤⼒」和「王大力」是两个名字。macOS 生成的 PDF（Quartz、Chrome，
-//! 用苹方）里，有部首孪生码位的汉字大都这样读出来。拉丁连字同理：「ﬁscal」的 ﬁ 是一个
-//! 字形、一个码位（U+FB01）。
+//! A PDF draws glyphs, and the text layer maps each glyph back to a code point through the font's ToUnicode table. In the font, one glyph often
+//! is both a radical and a unified Han character: in PingFang, "⼀" (U+2F00, Kangxi radical) and "一" (U+4E00) are
+//! the same glyph. ToUnicode points at the radical code point, so the text looks identical but the code point is the radical: searching for "日期"
+//! does not find "⽇期", and "王⼤⼒" and "王大力" are two different names. PDFs generated on macOS (Quartz, Chrome,
+//! using PingFang) mostly come out this way for characters that have a radical twin code point. Latin ligatures work the same: the ﬁ in "ﬁscal" is one
+//! glyph and one code point (U+FB01).
 //!
-//! 部首换成 Unicode 说它等同的那个统一汉字：UCD 的 `EquivalentUnifiedIdeograph.txt`，
-//! 原样收在旁边。康熙部首 NFKC 也换得了，部首补充区（⻄、⻓）NFKC 不管，所以用这张表。
-//! 表里的笔画不换：文档里写笔画，是当笔画用的。连字拆成字母。别的字一概不动——这不是
-//! NFKC，全角标点、全角数字照旧。
+//! Radicals are replaced with the unified Han character that Unicode says they are equivalent to: UCD's `EquivalentUnifiedIdeograph.txt`,
+//! vendored alongside. NFKC also replaces Kangxi radicals, but not the Radicals Supplement (⻄, ⻓), so this table is used instead.
+//! Stroke forms in the table are not replaced: a document that writes a stroke is using it as a stroke. Ligatures are split into letters. Nothing else is touched; this is not
+//! NFKC: full-width punctuation and full-width digits stay as they are.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// Unicode 18.0.0 的 EquivalentUnifiedIdeograph.txt，原样收录
+/// Unicode 18.0.0's EquivalentUnifiedIdeograph.txt, vendored as-is
 const EQUIVALENTS: &str = include_str!("EquivalentUnifiedIdeograph.txt");
 
-/// 两个部首区：部首补充（U+2E80–2EFF）与康熙部首（U+2F00–2FDF）
+/// Two radical blocks: CJK Radicals Supplement (U+2E80–2EFF) and Kangxi Radicals (U+2F00–2FDF)
 fn is_radical(c: char) -> bool {
     matches!(c, '\u{2E80}'..='\u{2EFF}' | '\u{2F00}'..='\u{2FDF}')
 }
 
-/// 部首 → 它等同的统一汉字。表里没有的部首（⺀）不在这里
+/// Radical → the unified Han character it is equivalent to. Radicals not in the table (⺀) are not here
 fn radicals() -> &'static HashMap<char, char> {
     static MAP: OnceLock<HashMap<char, char>> = OnceLock::new();
     MAP.get_or_init(|| {
         let hex = |s: &str| u32::from_str_radix(s.trim(), 16).ok();
         let mut map = HashMap::new();
-        // 一行一条：`2F08       ; 4EBA  #  KANGXI RADICAL MAN`，左边也可以是区间 `2E8C..2E8D`
+        // One entry per line: `2F08       ; 4EBA  #  KANGXI RADICAL MAN`, and the left side can also be a range `2E8C..2E8D`
         for line in EQUIVALENTS.lines() {
             let data = line.split('#').next().unwrap_or_default();
             let Some((from, to)) = data.split_once(';') else {
@@ -53,7 +53,7 @@ fn radicals() -> &'static HashMap<char, char> {
     })
 }
 
-/// 拉丁连字 → 字母（U+FB00–FB06，与 NFKC 拆得一样）
+/// Latin ligatures → letters (U+FB00–FB06, split the same way as NFKC)
 fn ligature(c: char) -> Option<&'static str> {
     Some(match c {
         '\u{FB00}' => "ff",
@@ -66,7 +66,7 @@ fn ligature(c: char) -> Option<&'static str> {
     })
 }
 
-/// 部首、连字换回它们显示的那个字；一个都没有时原样借用
+/// Radicals and ligatures are mapped back to the character they display; when there are none, the input is borrowed unchanged
 pub(crate) fn plain(text: &str) -> Cow<'_, str> {
     if !text.chars().any(|c| is_radical(c) || ligature(c).is_some()) {
         return Cow::Borrowed(text);
@@ -98,7 +98,7 @@ mod tests {
                 c as u32
             );
         }
-        // 补充区也在表里，除了 Unicode 说没有等同字的 ⺀
+        // The supplement block is in the table too, except ⺀, which Unicode says has no equivalent character
         assert_eq!(radicals().len(), 214 + 114);
         assert_eq!(radicals().get(&'\u{2E80}'), None);
     }
@@ -110,13 +110,13 @@ mod tests {
             plain(read),
             "项目负责人为王大力，现金流量净额同比增长。一行西母龟亻 fiscal flow ffl"
         );
-        // 没有等同字的部首照旧
+        // Radicals without an equivalent character are kept as-is
         assert_eq!(plain("⺀"), "⺀");
     }
 
     #[test]
     fn other_text_is_borrowed_as_it_is() {
-        // 全角标点、全角数字、全角字母不动：这不是 NFKC
+        // Full-width punctuation, digits and letters are not touched: this is not NFKC
         let text = "营业收入１２５，４３０元（同比增长１３．７７％）；ＡＢＣ “引号” café";
         assert!(matches!(plain(text), Cow::Borrowed(t) if t == text));
     }

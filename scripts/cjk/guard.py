@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from comments import CJK, code_projection, comment_text, is_rust_path, split_lines
+from comments import CJK, blanked_comments, code_projection, copied_translations, missing_anchors, comment_text, is_rust_path, split_lines
 
 
 def read_at_revision(revision: str, path: str) -> list[str]:
@@ -36,7 +36,28 @@ def violations_in(path: str, base_revision: str) -> list[str]:
         for number, segments in enumerate(split_lines(after, is_rust), start=1)
         if CJK.search(comment_text(segments))
     ]
-    return changed_code + left_in_comments
+    before_comments = [comment_text(segments) for segments in split_lines(before, is_rust)]
+    after_comments = [comment_text(segments) for segments in split_lines(after, is_rust)]
+    moved_anchors = [
+        f"{path}:{number}: names or issue numbers lost: {lost}"
+        for number in range(1, len(after) + 1)
+        if before_comments[number - 1] != after_comments[number - 1]
+        and (lost := missing_anchors(before_comments[number - 1], neighbourhood(after_comments, number)))
+    ]
+    copies = [
+        f"{path}:{number}: same translation sits on a line with a different original"
+        for number in copied_translations(before_comments, after_comments)
+    ]
+    blanks = [
+        f"{path}:{number}: comment was emptied"
+        for number in blanked_comments(before_comments, after_comments)
+    ]
+    return changed_code + left_in_comments + moved_anchors + copies + blanks
+
+
+def neighbourhood(comments: list[str], number: int) -> str:
+    """The line and its two neighbours: a translation may reflow a name onto the next line."""
+    return "\n".join(comments[max(number - 2, 0) : number + 1])
 
 
 def main() -> int:

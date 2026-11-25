@@ -1,21 +1,21 @@
-//! 一段文字从哪来（0040）：原文写的、从扫描页上认出来的、从录音里转出来的、还是模型看图说的。
+//! Where a piece of text comes from (0040): written in the source, recognized from a scanned page, transcribed from a recording, or described by a model looking at an image.
 //!
-//! 分块之后的一切只吃文字，分不出一句话是写在文件里的，还是模型转述的。这四种不是同等的证据：
-//! 前三种是「原话，照读」，人能对着页面或录音核对；第四种是模型对一张图的转述，没有原话可对。
-//! 所以来源跟着分块走，不跟着证据行走——证据引用的就是分块，抽取读的也是分块。
+//! Everything after chunking only consumes text and cannot tell whether a sentence was written in the file or paraphrased by a model. These four are not equal evidence:
+//! the first three are "verbatim, read as-is", which a person can check against the page or recording; the fourth is a model's paraphrase of an image, with no original wording to check against.
+//! So the origin follows the chunk, not the evidence line: evidence cites the chunk, and extraction reads the chunk too.
 
 use std::ops::Range;
 
-/// 文字的来源。数据库里存 [`Origin::as_str`] 那个词
+/// Origin of the text. The database stores the word from [`Origin::as_str`]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
-    /// 文件里写着的
+    /// Written in the file
     Stated,
-    /// 从扫描页、截图上认出来的字（可能认错一个数字）
+    /// Characters recognized from a scanned page or screenshot (a digit may be misread)
     Ocr,
-    /// 录音转写（名字最容易听错，而名字正是抽取要抽的）
+    /// Recording transcript (names are the easiest to mishear, and names are exactly what extraction is meant to pull out)
     Transcribed,
-    /// 模型对一张图的描述：没有人写过、说过这句话
+    /// A model's description of an image: no person wrote or said this sentence
     Described,
 }
 
@@ -40,11 +40,11 @@ impl Origin {
     }
 }
 
-/// 一段文字的出处：来源、读出它的引擎或模型、以及指回原文件字节的锚点。
+/// Provenance of a piece of text: its origin, the engine or model that read it, and the anchor pointing back to the bytes of the source file.
 ///
-/// 锚点的形状由来源决定（数据库上有 CHECK）：原文没有锚点（`char_start` / `char_end`
-/// 已经给出位置）；扫描页是 `{"page": n}`，引擎给了框就带 `"bbox"`；录音是
-/// `{"start_ms", "end_ms", "speaker"}`；图片描述指到页和图
+/// The anchor's shape is set by the origin (the database enforces it with a CHECK): source text has no anchor (`char_start` / `char_end`
+/// already give the position); a scanned page is `{"page": n}`, with `"bbox"` added if the engine gave a box; a recording is
+/// `{"start_ms", "end_ms", "speaker"}`; an image description points to the page and image
 #[derive(Debug, Clone, PartialEq)]
 pub struct Provenance {
     pub origin: Origin,
@@ -62,11 +62,11 @@ impl Provenance {
     }
 }
 
-/// 正文里的一段，连同它的出处。读扫描件、录音的引擎一页、一段地交回文字，拼成一份正文
-/// 交给分块；分块按段切开，**一块只装一种出处**（0040 决定 2）
+/// A segment of body text, along with its provenance. Engines that read scanned pages and recordings return text one page or one segment at a time; these are joined into one body
+/// passed to chunking; chunking splits by segment, and **a chunk holds only one provenance** (0040 decision 2)
 #[derive(Debug, Clone)]
 pub struct Segment {
-    /// 在拼好的正文里的字节区间
+    /// Byte range within the joined body
     pub range: Range<usize>,
     pub provenance: Provenance,
 }

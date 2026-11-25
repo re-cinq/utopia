@@ -1,135 +1,135 @@
-//! OWL / RDFS 文件的解析与**投影**。
+//! Parsing and **projection** of OWL / RDFS files.
 //!
-//! 分工按 0001 定的三层：本模块只做第二层（投影），第一层（原文保真进 blob）
-//! 由调用方负责。**这里读不懂的东西不是错误，是"暂未投影"**——原文留着，
-//! 将来补上消费者时重跑即可。
+//! Division of labour, per the three layers set in 0001: this module does only the second layer (projection); the first layer (the source kept verbatim in a blob)
+//! is the caller's job. **Anything this reader cannot understand is not an error; it is "not yet projected"**: the source stays put,
+//! and once a consumer is added later, the file is simply re-run.
 //!
-//! 只解析，不推理：Oxigraph 那两个小解析器给出三元组，我们按名单挑走能用的。
-//! 不引 horned-owl——推理机是 0002 的事，而且它读的是原文不是投影。
+//! Parse only, no inference: the two small Oxigraph parsers yield triples, and we pick the usable ones from a list.
+//! No horned-owl: reasoning is 0002's job, and it reads the source, not the projection.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-/// 投影出来的一个类。
+/// One class from the projection.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OwlClass {
     pub iri: String,
-    /// 从 IRI 派生的短标签（模型读写的令牌）；调用方负责去重加后缀
+    /// Short label derived from the IRI (the token the model reads and writes); the caller is responsible for de-duplicating and adding suffixes
     pub key: String,
     pub label: String,
-    /// `rdfs:comment` —— 承重字段，逐字进抽取提示词
+    /// `rdfs:comment`: a load-bearing field, passed verbatim into the extraction prompt
     pub description: String,
-    /// `rdfs:subClassOf` 的全部父类 IRI（多继承在这里是常态）
+    /// All parent class IRIs from `rdfs:subClassOf` (multiple inheritance is the norm here)
     pub parents: Vec<String>,
-    /// `owl:disjointWith` 的对端 IRI。**两个方向都收**——公理是对称的,
-    /// 而词表通常只写一遍
+    /// IRIs of the other side of `owl:disjointWith`. **Both directions are collected**, because the axiom is symmetric,
+    /// while vocabularies usually write it only once
     pub disjoint_with: Vec<String>,
     /// How the type asks to be shown (RC-008): the `utopia:panel` / `utopia:chain_first`
     /// literals, keyed by the bare word. Empty when the file says nothing.
     pub display_hints: BTreeMap<String, String>,
 }
 
-/// 投影出来的一个属性（对象属性 → 关系，数据属性 → 属性）。
+/// One projected property (object property → relation, data property → attribute).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OwlProperty {
     pub iri: String,
     pub key: String,
     pub label: String,
     pub description: String,
-    /// true = 走属性通道（字面值），false = 走关系通道。
-    /// 来源有二：显式的 `owl:DatatypeProperty`，或者 range 全是数据类型
+    /// true = goes through the attribute channel (literal values), false = goes through the relation channel.
+    /// Two sources: an explicit `owl:DatatypeProperty`, or a range that is all datatypes
     pub is_datatype: bool,
     pub functional: bool,
     pub inverse_functional: bool,
-    /// OWL 属性公理。一致性检查(0002 R0)的判定依据:没有它们,
-    /// `A part_of B` 与 `B part_of A` 同时存在到底是矛盾还是正常,无从判起
+    /// OWL property axioms. The consistency check (0002 R0) decides on these: without them,
+    /// there is no basis for judging whether `A part_of B` together with `B part_of A` is a contradiction or normal,
     pub transitive: bool,
     pub symmetric: bool,
     pub asymmetric: bool,
     pub irreflexive: bool,
-    /// `owl:inverseOf` 的对端 IRI。**只按写的方向收**——归一化（补上反向）
-    /// 在读取公理时做（`reasoning::axioms`），那里绕不过去；
-    /// 在这里补会让「本体自己写了什么」和「我们推出来的」分不开
+    /// IRIs of the other side of `owl:inverseOf`. **Collected only in the direction written**; normalization (adding the inverse)
+    /// happens when axioms are read (`reasoning::axioms`), which cannot be avoided there;
+    /// adding it here would make "what the ontology itself wrote" indistinguishable from "what we inferred"
     pub inverse_of: Option<String>,
-    /// `rdfs:subPropertyOf` 的父属性 IRI。多写几条只留第一条——
-    /// OWL 允许多父，而 R1 的规则一次只升一级，多父要另一套形状
+    /// Parent property IRIs from `rdfs:subPropertyOf`. Only the first one is kept when there are several:
+    /// OWL allows multiple parents, but R1's rule moves up only one level at a time, and multiple parents need a different shape
     pub sub_property_of: Option<String>,
-    /// `schema:supersededBy` 的对端 IRI：这条属性已经被另一条取代。schema.org 里
-    /// `employees` 让位给 `employee`、`founders` 让位给 `founder`，两条都还在词表里。
-    /// 不读这一位，两条都建成关系，抽取时精确 key 各自命中，一个关系永久分成两个（#560）
+    /// Other side of `schema:supersededBy`: this property has been superseded by another. In schema.org,
+    /// `employees` gives way to `employee`, and `founders` to `founder`; both are still in the vocabulary.
+    /// If this bit is not read, both become relations, and at extraction each exact key matches its own, so one relation is permanently split in two (#560)
     pub superseded_by: Option<String>,
     pub domains: Vec<String>,
     pub ranges: Vec<String>,
-    /// **多条 range 是并集还是交集**。`rdfs:range` 写多条是交集
-    ///（"必须同时是两者"），`schema:rangeIncludes` 写多条是并集
-    ///（"哪个都行"）。倒进同一个 Vec 而不记这一位，
-    /// `author rangeIncludes Organization, Person` 就会被读成
-    /// "必须既是组织又是人"，然后降级成 text——一条边就这么没了
+    /// **Whether multiple ranges are a union or an intersection.** Several `rdfs:range` entries are an intersection
+    /// ("must be both"), while several `schema:rangeIncludes` entries are a union
+    /// ("either will do"). Pushing both into the same Vec without recording this bit means
+    /// `author rangeIncludes Organization, Person` gets read as
+    /// "must be both an organization and a person", then degrades to text: an edge is lost that way
     pub ranges_union: bool,
-    /// `utopia:temporal` 的值：`state` / `event` / `eternal`（0031）。导出端早就写这一条，
-    /// 导入端从前不读——一份本体自己说「这条关系是一个时刻」，导进来还是 `state`。
-    /// 没写或写了别的值都是 `None`，落库时按 `state`；数据属性读了也不用
+    /// Value of `utopia:temporal`: `state` / `event` / `eternal` (0031). The export side has always written this one;
+    /// the import side did not read it before, so a source that says "this relation is a moment in time" was imported as `state`.
+    /// Missing or any other value is `None`, stored as `state` when persisted; data properties do not need it when read
     pub temporal: Option<String>,
     /// How the property asks to be shown (RC-008): `utopia:role`, `utopia:tones`,
     /// `utopia:chain_next` literals, keyed by the bare word. Empty when the file says nothing.
     pub display_hints: BTreeMap<String, String>,
 }
 
-/// 一次解析的结果。`unprojected` 是**报告**不是错误——见模块文档。
+/// The result of one parse. `unprojected` is a **report**, not an error; see the module docs.
 #[derive(Debug, Default)]
 pub struct OwlProjection {
     pub classes: Vec<OwlClass>,
     pub properties: Vec<OwlProperty>,
-    /// 出现过但我们今天不消费的谓词 → 次数。给预览页"暂未投影"那一栏
+    /// Predicates that appear but are not consumed today → count. Feeds the "not yet projected" column of the preview page
     pub unprojected: BTreeMap<String, usize>,
-    /// 三元组总数，让人对"这个文件有多大"有个数
+    /// Total triple count, so a person has a sense of "how big this file is"
     pub triples: usize,
-    /// **这份文件自己声明为数据类型的那些 IRI** → 我们的四种之一。
-    /// schema.org 把 Text/Number/Date… 声明成 `a rdfs:Class, schema:DataType`，
-    /// 只看 `rdfs:Class` 会把它们当成实体类建出来（`text`、`boolean` 成了实体类型）
+    /// **IRIs that this file itself declares to be datatypes** → one of our four kinds.
+    /// schema.org declares Text/Number/Date... as `a rdfs:Class, schema:DataType`;
+    /// looking only at `rdfs:Class` would build them as entity classes (`text`, `boolean` become entity types)
     pub vocab_datatypes: VocabDatatypes,
 }
 
-/// 词汇表自己声明的数据类型 IRI → 我们的四种（`text`/`number`/`date`/`bool`）。
+/// Datatype IRIs the vocabulary declares itself → our four kinds (`text`/`number`/`date`/`bool`).
 pub type VocabDatatypes = BTreeMap<String, &'static str>;
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS: &str = "http://www.w3.org/2000/01/rdf-schema#";
 const OWL: &str = "http://www.w3.org/2002/07/owl#";
-/// 我们自己的注解命名空间，与导出端（`utopia-server::rdf`）同一个
+/// Our own annotation namespace, the same one the export side (`utopia-server::rdf`) uses
 const UTOPIA_NS: &str = "urn:utopia:ns:";
 /// The `utopia:*` literals that say how a type is shown (RC-008). Any other `utopia:*`
 /// word stays reported as unprojected, so a typo in a file is visible in the preview.
 pub const HINT_KEYS: [&str; 5] = ["panel", "chain_first", "role", "tones", "chain_next"];
 
-/// schema.org 自己那套 domain/range。**不是标准词汇**，所以写死在这里，
-/// 但值得认：schema.org 及派生词汇表一个 `rdfs:domain` 都没有，
-/// 不认这两个谓词就等于把它整个类型系统当成没看见——1600 多个属性
-/// 会全变成无约束的关系。
-/// 两种 scheme 都收：同一份词汇表的新旧版本分别用 https 与 http 发布。
+/// schema.org's own domain/range scheme. **Not a standard vocabulary**, so it is hard-coded here,
+/// but it must be recognized: schema.org and its derived vocabularies have no `rdfs:domain` at all,
+/// and not recognizing these two predicates means ignoring the whole type system: 1600+ properties
+/// would all become unconstrained relations.
+/// Both schemes are accepted: old and new versions of the same vocabulary are published under https and http respectively.
 const SCHEMA_NS: [&str; 2] = ["https://schema.org/", "http://schema.org/"];
 
-/// 谓词/类是不是 schema.org 那个名字下的某一个。
+/// Whether a predicate or class is one of the names under the schema.org namespace.
 fn is_schema(iri: &str, local: &str) -> bool {
     SCHEMA_NS.iter().any(|ns| {
         iri.len() == ns.len() + local.len() && iri.starts_with(ns) && iri.ends_with(local)
     })
 }
 
-/// SHACL。把约束写在形状上的本体（UCO 是一个，#923）同样几乎没有 `rdfs:domain`：
-/// 属性形状 `sh:property [ sh:path p; sh:class C ]` 挂在节点形状上，节点形状作用于
-/// 哪个类，p 就用在哪个类上。与 schema.org 的 `domainIncludes` 同一个道理——不认它，
-/// 数据属性全都没有 domain，导入时整批跳过
+/// SHACL. Ontologies that put constraints on shapes (UCO is one, #923) likewise have almost no `rdfs:domain`:
+/// a property shape `sh:property [ sh:path p; sh:class C ]` hangs off a node shape, and the node shape applies to
+/// some class, and p is used on that class. The same reasoning as schema.org's `domainIncludes`: without recognizing it,
+/// no data property has a domain, and the whole batch is skipped on import
 const SH: &str = "http://www.w3.org/ns/shacl#";
 
-/// 属性形状上的那三条（路径、类、数据类型）：主语是空节点的三元组只为它们留下
+/// The three entries on a property shape (path, class, datatype): triples whose subject is a blank node exist only to keep these
 fn is_shape_detail(predicate: &str) -> bool {
     predicate
         .strip_prefix(SH)
         .is_some_and(|local| matches!(local, "path" | "class" | "datatype"))
 }
 
-/// 支持的输入格式。v1 只做这两个——Protégé 导出的绝大多数是它们，
-/// OWL/XML 与 Manchester 语法刻意砍掉（见 0001 P2 的 "v1 砍掉"）。
+/// Supported input formats. v1 does only these two, since most of what Protégé exports is them;
+/// OWL/XML and Manchester syntax are deliberately cut (see "v1 cut" in 0001 P2).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RdfFormat {
     Turtle,
@@ -137,14 +137,14 @@ pub enum RdfFormat {
 }
 
 impl RdfFormat {
-    /// 扩展名是强信号，内容只在**明确矛盾**时推翻它。
+    /// The extension is a strong signal; content overrules it only on a **clear contradiction**.
     ///
-    /// 曾经反过来（`.rdf` 探不到 XML 标志就退回 Turtle），结果 FOAF 的官方文件
-    /// 一开头是几十行 `<!--` 注释、`<rdf:` 在嗅探窗口之外，于是被当成 Turtle
-    /// 送进解析器，第一行就报 "Invalid IRI code point"。
+    /// It used to work the other way round (a `.rdf` that did not sniff as XML fell back to Turtle), and the FOAF official file
+    /// starts with dozens of lines of `<!--` comments, with `<rdf:` outside the sniffing window, so it was fed to the
+    /// Turtle parser and failed on the first line with "Invalid IRI code point".
     pub fn detect(filename: &str, bytes: &[u8]) -> Self {
         let lower = filename.to_ascii_lowercase();
-        // Turtle 的指纹很硬：只有它以 @prefix / @base / PREFIX 开头
+        // Turtle's fingerprint is strong: only Turtle starts with @prefix / @base / PREFIX
         let looks_turtle = {
             let head = &bytes[..bytes.len().min(4096)];
             let s = String::from_utf8_lossy(head);
@@ -162,7 +162,7 @@ impl RdfFormat {
             return Self::Turtle;
         }
         if lower.ends_with(".rdf") || lower.ends_with(".owl") || lower.ends_with(".xml") {
-            // .owl 两种编码都常见，所以内容说了算——但只有"确实像 Turtle"才推翻
+            // .owl is common in both encodings, so content decides, but only "clearly looks like Turtle" overrules it
             return if looks_turtle {
                 Self::Turtle
             } else {
@@ -177,16 +177,16 @@ impl RdfFormat {
     }
 }
 
-/// 三元组的中间形态：只留我们看得懂的部分。
+/// Intermediate form of a triple: only the parts we can understand are kept.
 struct Triple {
     subject: String,
     predicate: String,
-    /// 宾语是 IRI 时为 Some
+    /// Some(...) when the object is an IRI
     object_iri: Option<String>,
-    /// 宾语是字面量时为 Some(值, 语言标记)
+    /// Some((value, language tag)) when the object is a literal
     object_lit: Option<(String, Option<String>)>,
-    /// 宾语是空节点时为 Some(`_:id`)。只有 SHACL 那一遍读它：`sh:property` 指向的属性
-    /// 形状多是空节点。其余代码只看 `object_iri`，照旧看不见空节点
+    /// Some(`_:id`) when the object is a blank node. Only the SHACL pass reads this: the property shapes that `sh:property` points to
+    /// are mostly blank nodes. The rest of the code looks only at `object_iri` and, as before, cannot see blank nodes
     object_node: Option<String>,
 }
 
@@ -196,12 +196,12 @@ fn read_triples(bytes: &[u8], format: RdfFormat) -> anyhow::Result<Vec<Triple>> 
     let mut push = |t: oxrdf::Triple| {
         let subject = match &t.subject {
             oxrdf::NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
-            // 属性形状多是空节点：它的路径、类、数据类型留给 SHACL 那一遍
+            // Property shapes are mostly blank nodes: their path, class and datatype are left for the SHACL pass
             oxrdf::NamedOrBlankNode::BlankNode(b) if is_shape_detail(t.predicate.as_str()) => {
                 format!("_:{}", b.as_str())
             }
-            // 空节点是匿名类表达式（owl:Restriction 之类）——投影不碰它们，
-            // 原文里留着等推理机
+            // Blank nodes are anonymous class expressions (owl:Restriction and the like); projection does not touch them,
+            // and they stay in the source for the reasoner
             oxrdf::NamedOrBlankNode::BlankNode(_) => return,
         };
         let (object_iri, object_lit) = match &t.object {
@@ -227,11 +227,11 @@ fn read_triples(bytes: &[u8], format: RdfFormat) -> anyhow::Result<Vec<Triple>> 
             object_node,
         });
     };
-    // **相对 IRI 需要 base 才能解析。** 从字节读没有文档 URL，而 Turtle 规范说
-    // base 默认取文档自身的地址。给一个占位符：本体文件里的相对 IRI 几乎都是
-    // 文档级元数据（PROV-O 的 `<#> a owl:Ontology`），我们不消费 owl:Ontology 节点，
-    // 解析得过去就行。不给的话整个文件在第一个 `<#>` 上报
-    // "No scheme found in an absolute IRI" 而全军覆没
+    // **Relative IRIs need a base to resolve.** Reading from bytes gives no document URL, while the Turtle spec says
+    // the base defaults to the document's own address. Give a placeholder: relative IRIs in ontology files are almost all
+    // document-level metadata (PROV-O's `<#> a owl:Ontology`), and we do not consume owl:Ontology nodes,
+    // so it is enough that they parse. Without it, the whole file fails at the first `<#>` with
+    // "No scheme found in an absolute IRI", and everything is lost
     const BASE: &str = "urn:utopia:import";
     match format {
         RdfFormat::Turtle => {
@@ -254,11 +254,11 @@ fn read_triples(bytes: &[u8], format: RdfFormat) -> anyhow::Result<Vec<Triple>> 
     Ok(out)
 }
 
-/// 解析并投影。语言标记优先 `@en`/`@zh`，其次无标记，最后随便一个。
+/// Parse and project. Language tags prefer `@en`/`@zh`, then no tag, and finally any one.
 pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection> {
     let triples = read_triples(bytes, format)?;
     let mut proj = OwlProjection {
-        // 为属性形状留下的空节点三元组不算：这个数一直只数主语是 IRI 的那些
+        // Blank-node triples left for property shapes are not counted: this number has always counted only subjects that are IRIs
         triples: triples
             .iter()
             .filter(|t| !t.subject.starts_with("_:"))
@@ -266,7 +266,7 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
         ..Default::default()
     };
 
-    // 先分类：谁是类、谁是对象属性、谁是数据属性、谁带函数性标记
+    // Classify first: which are classes, which are object properties, which are data properties, which carry the functional marker
     let mut classes: BTreeSet<String> = BTreeSet::new();
     let mut obj_props: BTreeSet<String> = BTreeSet::new();
     let mut data_props: BTreeSet<String> = BTreeSet::new();
@@ -274,7 +274,7 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
     let mut inverse_functional: BTreeSet<String> = BTreeSet::new();
     let mut transitive: BTreeSet<String> = BTreeSet::new();
     let mut symmetric: BTreeSet<String> = BTreeSet::new();
-    // 属性之间的两条关系（不是类型声明，所以单独收）
+    // The two relations between properties (not type declarations, so collected separately)
     let mut inverse_of: BTreeMap<String, String> = BTreeMap::new();
     let mut sub_property_of: BTreeMap<String, String> = BTreeMap::new();
     let mut superseded_by: BTreeMap<String, String> = BTreeMap::new();
@@ -282,7 +282,7 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
     let mut irreflexive: BTreeSet<String> = BTreeSet::new();
     let mut plain_props: BTreeSet<String> = BTreeSet::new();
     let mut datatype_roots: BTreeSet<String> = BTreeSet::new();
-    // 声明为 `sh:NodeShape` 的节点：同时是类的，按 SHACL 的隐式类目标作用于自己
+    // Nodes declared `sh:NodeShape`: those that are also classes apply to themselves via SHACL's implicit class target
     let mut node_shapes: BTreeSet<String> = BTreeSet::new();
     for t in &triples {
         if t.predicate != RDF_TYPE {
@@ -301,9 +301,9 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
             x if x == format!("{OWL}DatatypeProperty") => {
                 data_props.insert(t.subject.clone());
             }
-            // rdf:Property **没说**是对象还是数据。跟显式 owl:ObjectProperty
-            // 分开存：那个是"说了"，不该被 range 改判；这个是"没说"，
-            // 下面按 range 定通道，range 也没有才兜底当关系
+            // rdf:Property does **not** say whether it is an object or a data property. Stored separately from explicit owl:ObjectProperty:
+            // that one "says so" and must not be reclassified by range; this one "does not say", so
+            // the channel is decided by range below, and falls back to relation if there is no range either
             "http://www.w3.org/1999/02/22-rdf-syntax-ns#Property" => {
                 plain_props.insert(t.subject.clone());
             }
@@ -313,13 +313,13 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
             x if x == format!("{OWL}InverseFunctionalProperty") => {
                 inverse_functional.insert(t.subject.clone());
             }
-            // 属性公理:R0 的一致性检查靠它们才谈得上判定。
+            // Property axioms: the R0 consistency check only becomes decidable with them.
             //
-            // **五个随包词表只覆盖了其中一半**(TransitiveProperty 14 条、
-            // SymmetricProperty 1 条,而 Asymmetric 与 Irreflexive 一条没有),
-            // 但那五个只是冷启动的底座。这条线的终点是把**企业自己的本体**
-            // 导进来(0001 开篇:FIBO、行业标准、Protégé 自建),那些里
-            // 反对称与非自反是常见声明。按 OWL 收全,而不是按手上这几个包收。
+            // **The five bundled vocabularies cover only half of them** (TransitiveProperty: 14 entries,
+            // SymmetricProperty: 1 entry, and Asymmetric and Irreflexive: none),
+            // but those five are only a cold-start base. The end point of this line is importing **the enterprise's own ontologies**
+            // (0001 opening: FIBO, industry standards, self-built Protégé ontologies), where
+            // asymmetric and irreflexive declarations are common. Collect per OWL in full, not per the packs at hand.
             x if x == format!("{OWL}TransitiveProperty") => {
                 transitive.insert(t.subject.clone());
             }
@@ -332,11 +332,11 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
             x if x == format!("{OWL}IrreflexiveProperty") => {
                 irreflexive.insert(t.subject.clone());
             }
-            // 词汇表自报的数据类型。这里只收显式声明的那几个根，
-            // 子类（Integer ⊂ Number、URL ⊂ Text）等父类图收完再往下传。
-            // **标记类自己也收**：schema:DataType 的声明是 `a rdfs:Class`，
-            // 不收就会剩下一个叫 data_type 的实体类型；顺带让
-            // `rdfs:subClassOf schema:DataType` 这种写法也落进闭包
+            // Datatypes the vocabulary declares about itself. Only the explicitly declared roots are collected here;
+            // subclasses (Integer ⊂ Number, URL ⊂ Text) are propagated down after the parent graph is collected.
+            // **The marker classes are collected too**: schema:DataType's declaration is `a rdfs:Class`,
+            // and if not collected, an entity type named data_type is left behind; this also lets
+            // the `rdfs:subClassOf schema:DataType` form fall into the closure
             x if is_schema(x, "DataType") => {
                 datatype_roots.insert(t.subject.clone());
                 datatype_roots.insert(x.to_string());
@@ -348,16 +348,16 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
         }
     }
 
-    // 再收集标签、注释、父类、domain/range
+    // Then collect labels, comments, parents, domain/range
     let mut labels: BTreeMap<String, Vec<(String, Option<String>)>> = BTreeMap::new();
     let mut comments: BTreeMap<String, Vec<(String, Option<String>)>> = BTreeMap::new();
     let mut parents: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut disjoint: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut domains: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut ranges: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    // rangeIncludes 用过的属性，它的 range 按并集读
+    // Properties used with rangeIncludes: their range is read as a union
     let mut union_ranged: BTreeSet<String> = BTreeSet::new();
-    // `utopia:temporal` 说的时间语义；只认三个值
+    // The temporal semantics that `utopia:temporal` states; only three values are recognized
     let mut temporal: BTreeMap<String, String> = BTreeMap::new();
     let utopia_temporal = format!("{UTOPIA_NS}temporal");
     // subject → the display hints it declares (RC-008); the first value of a key wins
@@ -375,7 +375,7 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
             || p == format!("{OWL}disjointWith")
             || p == format!("{OWL}inverseOf")
             || is_schema(p, "supersededBy")
-            // 形状那一遍读的五条（`shape_signatures`）
+            // The five things read by the shape pass (`shape_signatures`)
             || p.strip_prefix(SH).is_some_and(|local| {
                 matches!(
                     local,
@@ -385,7 +385,7 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
     };
     for t in &triples {
         let p = t.predicate.as_str();
-        // 导出端写的就是这三个字面值（0031）。别的值不猜：落到下面按谓词报告，落库按 `state`
+        // The export side writes exactly these three literal values (0031). Other values are not guessed: they fall through to the predicate report below, and persist as `state`
         let declared_temporal = t
             .object_lit
             .as_ref()
@@ -407,9 +407,9 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
                     .push(l.clone());
             }
         } else if p == format!("{OWL}disjointWith") {
-            // **两个方向都记。** `owl:disjointWith` 是对称的,而词表通常只写一遍
-            // (W3C Org 的 Role/Membership/Site/ChangeEvent 四者两两互斥,只写了六行)。
-            // 只按写的方向存,查"A 与 B 互斥吗"就得看调用方碰巧从哪一头问
+            // **Both directions are recorded.** `owl:disjointWith` is symmetric, and vocabularies usually write it only once
+            // (W3C Org's Role/Membership/Site/ChangeEvent are pairwise disjoint, but only six lines are written).
+            // Storing only the written direction means that asking "are A and B disjoint?" depends on which end the caller happens to ask from
             if let Some(o) = &t.object_iri {
                 disjoint
                     .entry(t.subject.clone())
@@ -421,22 +421,22 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
                     .push(t.subject.clone());
             }
         } else if p == format!("{OWL}inverseOf") {
-            // **只按写的方向收。** OWL 里 `p owl:inverseOf q` 蕴含反向，
-            // 而词表通常只写一遍。补反向是在读取公理时做的
-            //（`reasoning::axioms`，那一处绕不过去）——在这里补会让
-            // 「本体自己写了什么」和「我们推出来的」分不开，而 R0 有一条
-            // `inverse_not_mutual` 检查恰恰要区分这两者
+            // **Collected only in the written direction.** In OWL, `p owl:inverseOf q` implies the reverse,
+            // but vocabularies usually write it only once. Filling in the reverse is done when axioms are read
+            // (`reasoning::axioms`, which cannot be bypassed there): doing it here would make
+            // "what the ontology itself wrote" indistinguishable from "what we inferred", and R0 has an
+            // `inverse_not_mutual` check whose whole purpose is to tell these apart
             if let Some(o) = &t.object_iri {
                 inverse_of.entry(t.subject.clone()).or_insert(o.clone());
             }
         } else if is_schema(p, "supersededBy") {
-            // 取代关系只在 schema.org 词表里出现；多写几条只留第一条
+            // The supersession relation appears only in the schema.org vocabulary; several are written, and only the first is kept
             if let Some(o) = &t.object_iri {
                 superseded_by.entry(t.subject.clone()).or_insert(o.clone());
             }
         } else if p == format!("{RDFS}subPropertyOf") {
-            // 从前这条只出现在 `known()` 白名单里——认得出、不报警、**然后扔掉**。
-            // 导一份带 subPropertyOf 的本体进来，那部分信息当场消失且没有提示
+            // Before, this one appeared only in the `known()` allowlist: recognized, not warned about, and **then discarded**.
+            // Importing an ontology with subPropertyOf meant that part of the information vanished on the spot, with no warning
             if let Some(o) = &t.object_iri {
                 sub_property_of
                     .entry(t.subject.clone())
@@ -461,8 +461,8 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
                 ranges.entry(t.subject.clone()).or_default().push(o.clone());
             }
         } else if is_schema(p, "domainIncludes") {
-            // domainIncludes 是并集（"可以用在这些类型上"），而我们的 domain
-            // 列表本来就是并集语义（签名 `person|organization`），直接进
+            // domainIncludes is a union ("can be used on these types"), and our domain
+            // list is already union-semantic (signature `person|organization`), so it goes straight in
             if let Some(o) = &t.object_iri {
                 domains
                     .entry(t.subject.clone())
@@ -483,20 +483,20 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
                 .entry(word.to_string())
                 .or_insert(v.to_string());
         } else if !known(p) {
-            // 报告而不是丢弃：预览页要能说清"这个文件里还有什么我们没消费"
+            // Reported rather than dropped: the preview page must be able to say "what else in this file we do not consume"
             *proj.unprojected.entry(p.to_string()).or_insert(0) += 1;
         }
     }
 
-    // SHACL 形状补上属性自己没写的 domain / range（#923）。**只填空白**：显式的
-    // `rdfs:domain` / `rdfs:range`（和 schema.org 那两个）说了的，形状不改
+    // Fills in the domain / range that the shape gives the property itself, which the property did not write (#923). **Fills blanks only**: an explicit
+    // `rdfs:domain` / `rdfs:range` (and the two from schema.org) that are stated are not changed by the shape
     let (shape_domains, shape_ranges) = shape_signatures(&triples, &classes, &node_shapes);
     for (p, ds) in shape_domains {
         domains.entry(p).or_insert_with(|| ds.into_iter().collect());
     }
     for (p, rs) in shape_ranges {
         if let std::collections::btree_map::Entry::Vacant(e) = ranges.entry(p) {
-            // 几个类上各自约束成不同的类型，是「哪个都行」，与 rangeIncludes 同理
+            // Constrained to different types on several classes: that is "either will do", the same as rangeIncludes
             if rs.len() > 1 {
                 union_ranged.insert(e.key().clone());
             }
@@ -504,10 +504,10 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
         }
     }
 
-    // 数据类型闭包：根是显式 `a schema:DataType` 的那几个，子类沿 subClassOf
-    // 往下传（Integer ⊂ Number、URL ⊂ Text）。
-    // **哪些 IRI 是数据类型由文件自己说**，写死的只有"这个数据类型算我们四种里的
-    // 哪一种"——那一半是命名约定，RDF 里推不出来
+    // Datatype closure: the roots are those explicitly `a schema:DataType`; subclasses propagate down
+    // along subClassOf (Integer ⊂ Number, URL ⊂ Text).
+    // **Which IRIs are datatypes is stated by the file itself**; what is hard-coded is only "which of our four kinds this datatype counts as":
+    // that half is a naming convention, and cannot be inferred from RDF
     let mut datatype_classes = datatype_roots.clone();
     loop {
         let grown: Vec<String> = parents
@@ -538,18 +538,18 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
     )
     .unwrap_or_default();
     for iri in &classes {
-        // **数据类型不是实体类型。** schema:Text 声明的是
-        // `a rdfs:Class, schema:DataType`，只看前半截就会建出叫
-        // `text`、`number`、`boolean` 的实体类型来
+        // **A datatype is not an entity type.** schema:Text is declared as
+        // `a rdfs:Class, schema:DataType`; looking only at the first half would build
+        // entity types named `text`, `number`, `boolean`.
         if datatype_classes.contains(iri) {
             continue;
         }
-        // **光秃秃的外来声明不是这份词表的类。** schema.org 的 dump 里写着
-        // `snomed:105590001 a rdfs:Class .`——它只是某个 owl:equivalentClass 的对象：
-        // 没有标签、没有父类、没有任何属性指向它，命名空间也不是 schema.org 的。
-        // 建出来就是八个数字排在类列表最前面（#286）。这份词表对它一个字都没说，
-        // 所以不建，记进"未投影"让预览页说得出它去了哪儿。本命名空间的裸声明
-        // 照建：小词表常常只写 `a owl:Class`，那是它自己的类
+        // **A bare foreign declaration is not a class of this vocabulary.** The schema.org dump has
+        // `snomed:105590001 a rdfs:Class .`: it is only the object of some owl:equivalentClass,
+        // with no label, no parent, and no property pointing to it, and its namespace is not schema.org's.
+        // Building it would put eight digits at the very front of the class list (#286). The vocabulary says nothing about it at all,
+        // so it is not built; it is recorded as "not projected" so the preview page can say where it went. A bare declaration in this namespace
+        // is built: small vocabularies often write only `a owl:Class`, and that is their own class
         let bare = !labels.contains_key(iri)
             && !comments.contains_key(iri)
             && parents.get(iri).is_none_or(|p| p.is_empty())
@@ -562,8 +562,8 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
                 .or_insert(0) += 1;
             continue;
         }
-        // 先取真正的 label：编号式 IRI 的 key 要从它派生（#324）。
-        // 词汇表没给 label 时退回局部名，那也正是 key 的来源，行为不变
+        // First take the real label: the key of a numbered IRI must be derived from it (#324).
+        // When the vocabulary gives no label, fall back to the local name, which is also the source of the key; behavior is unchanged
         let declared_label = pick_lang(labels.get(iri));
         proj.classes.push(OwlClass {
             key: key_from_iri_or_label(iri, declared_label.as_deref()),
@@ -571,7 +571,7 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
             description: pick_lang(comments.get(iri)).unwrap_or_default(),
             parents: parents.get(iri).cloned().unwrap_or_default(),
             disjoint_with: {
-                // 去重:两个方向都收之后,词表若两边都写过就会重复
+                // De-duplicate: after collecting both directions, if the vocabulary wrote it on both sides, it would be duplicated
                 let mut d = disjoint.get(iri).cloned().unwrap_or_default();
                 d.sort();
                 d.dedup();
@@ -581,9 +581,9 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
             iri: iri.clone(),
         });
     }
-    // **并集去重，不是两个集合首尾相接**：词汇表常把同一个属性既声明为
-    // rdf:Property 又声明为 owl:DatatypeProperty（FOAF 的 name、age、nick… 都这样），
-    // 两个集合各收一次，chain 就会把它吐两遍。分类看 data_props 就够了。
+    // **Union, de-duplicated, not chained end to end**: vocabularies often declare the same property both as
+    // rdf:Property and as owl:DatatypeProperty (FOAF's name, age, nick... all do this),
+    // collecting each set once would make the chain emit it twice. Classifying by data_props is enough.
     let all_props: BTreeSet<&String> = obj_props
         .iter()
         .chain(data_props.iter())
@@ -591,11 +591,11 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
         .collect();
     for iri in all_props {
         let rs = ranges.get(iri).cloned().unwrap_or_default();
-        // 走属性通道还是关系通道。显式声明说了算；没说的看 range：
-        // **全是数据类型才算属性**。并集里只要有一个类就走关系——
-        // `address` 的 range 是 `PostalAddress|Text`，判成属性就把那条边
-        // 永久丢了，而关系总能给一个新实体起名字。富的那一侧可回退，
-        // 穷的那一侧回不去
+        // Whether it goes through the attribute channel or the relation channel. The explicit declaration decides; if there is none, look at the range:
+        // **it counts as an attribute only if every range is a datatype**. If any member of the union is a class, it goes through the relation channel:
+        // `address` has range `PostalAddress|Text`, and treating it as an attribute would lose that edge
+        // permanently, whereas a relation can always be given a new entity name. The rich side can fall back;
+        // the poor side cannot go back
         let is_datatype = if data_props.contains(iri) {
             true
         } else if obj_props.contains(iri) {
@@ -630,21 +630,21 @@ pub fn project(bytes: &[u8], format: RdfFormat) -> anyhow::Result<OwlProjection>
     Ok(proj)
 }
 
-/// 属性 IRI → 形状给它的 domain 或 range（去重、有序，重导入结果一样）
+/// Property IRI → the domain or range the shape gives it (de-duplicated and ordered, so a re-import gives the same result)
 type ShapeSignatures = BTreeMap<String, BTreeSet<String>>;
 
-/// SHACL 形状说的 domain 与 range（#923）。
+/// The domain and range that a SHACL shape states (#923).
 ///
-/// `节点形状 sh:property 属性形状`：属性形状的 `sh:path` 是哪个属性，节点形状作用的
-/// 类就是它的 domain，属性形状上的 `sh:class` / `sh:datatype` 就是它的 range。同一个
-/// 属性约束在几个类上，domain 是这几个类的并集——与 `domainIncludes` 同一个读法。
+/// `node shape sh:property property shape`: the property shape's `sh:path` says which property it is, and the class the node shape applies to
+/// is its domain; `sh:class` / `sh:datatype` on the property shape is its range. When one
+/// property constraint sits on several classes, the domain is the union of those classes, the same reading as `domainIncludes`.
 ///
-/// 节点形状作用于哪些类：`sh:targetClass`，加上 SHACL 的隐式类目标——一个节点既是
-/// 类又是 `sh:NodeShape`，就作用于它自己（UCO 两样都写）。不读的几种，各有理由：
-/// - `sh:targetSubjectsOf` / `sh:targetObjectsOf` 说的是「用了某个属性的节点」，不是
-///   一个类；
-/// - 路径只认一个 IRI：逆向、序列路径是空节点，说的不是这个属性自己的 domain；
-/// - `sh:or` 里的备选类型、`sh:node` 指向的形状，是另一层结构，原文里留着
+/// The classes a node shape applies to: `sh:targetClass`, plus SHACL's implicit class target: a node that is both
+/// a class and an `sh:NodeShape` applies to itself (UCO writes both). The forms not read each have a reason:
+/// - `sh:targetSubjectsOf` / `sh:targetObjectsOf` state "nodes that use some property", not
+///   a class;
+/// - a path is taken only as a single IRI: inverse and sequence paths are blank nodes, and they do not state this property's own domain;
+/// - the alternative types inside `sh:or`, and the shapes `sh:node` points to, are another layer of structure and stay in the source
 fn shape_signatures(
     triples: &[Triple],
     classes: &BTreeSet<String>,
@@ -657,7 +657,7 @@ fn shape_signatures(
             .or_default()
             .insert(shape.as_str());
     }
-    // 节点形状 → 它的属性形状；属性形状 → 路径；属性形状 → 类或数据类型
+    // Node shape → its property shapes; property shape → path; property shape → class or datatype
     let mut members: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut paths: BTreeMap<&str, &str> = BTreeMap::new();
     let mut values: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
@@ -715,17 +715,17 @@ fn shape_signatures(
     (domains, ranges)
 }
 
-/// 把**这份文件自己的**词汇表排到前面。
+/// Puts **this file's own** vocabulary first.
 ///
-/// 撞 key 时调用方是先到先得（`owl_import::plan` 里那个 `claimed`），而"先"
-/// 此前来自 IRI 的字典序——于是 `http://` 排在 `https://` 前面，被引用的
-/// 小词汇表系统性地压过主词汇表。schema.org 那份文件里合了 50 个命名空间，
-/// 主词汇表声明了其中 94% 的词，却输掉了 141 场撞车里的 114 场：
-/// `location` 输给 OMG Commons、`country` 输给 unece.org、
-/// `organization` 输给 purl.org。丢的正是最该用的那批词。
+/// On a key collision the caller decides first-come-first-served (the `claimed` in `owl_import::plan`), and "first" came
+/// from the lexicographic order of IRIs: so `http://` sorted before `https://`, and the referenced
+/// small vocabularies systematically beat the main one. The schema.org file merges 50 namespaces; the main vocabulary declares 94% of its terms,
+/// but lost 114 of the 141 collisions:
+/// `location` lost to OMG Commons, `country` to unece.org,
+/// `organization` to purl.org. The terms lost were exactly the ones most in use.
 ///
-/// 判据是**声明得最多的那个命名空间就是文件的主人**——不认 schema.org
-/// 这个名字，任何词汇表都适用。同数时取字典序小的，保证可重复。
+/// The criterion is that **the namespace that declares the most terms is the file's owner**. The name schema.org is not required:
+/// any vocabulary qualifies. On a tie, the lexicographically smaller one is taken, so the result is repeatable.
 fn order_by_home_namespace(proj: &mut OwlProjection) {
     let Some(home) = home_namespace(
         proj.classes
@@ -735,16 +735,16 @@ fn order_by_home_namespace(proj: &mut OwlProjection) {
     ) else {
         return;
     };
-    // 稳定排序：只把主词汇表提到前面，其余保持原有的字典序
+    // Stable sort: only moves the main vocabulary to the front; everything else keeps its existing lexicographic order
     proj.classes.sort_by_key(|c| namespace_of(&c.iri) != home);
     proj.properties
         .sort_by_key(|p| namespace_of(&p.iri) != home);
 }
 
-/// 一批 IRI 里声明得最多的命名空间，即"这份文件的主人"。
+/// The namespace declared the most among a batch of IRIs, i.e. "the owner of this file".
 ///
-/// max_by_key 取的是最后一个最大值，而 BTreeMap 按 key 升序——
-/// 于是同数时拿到字典序最大的那个。要的是最小的，所以自己比
+/// max_by_key takes the last maximum, and BTreeMap sorts keys ascending,
+/// so on a tie it would get the lexicographically largest. What is wanted is the smallest, so compare by hand
 fn home_namespace<'a>(iris: impl Iterator<Item = &'a str>) -> Option<String> {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for iri in iris {
@@ -759,7 +759,7 @@ fn home_namespace<'a>(iris: impl Iterator<Item = &'a str>) -> Option<String> {
         .map(|(ns, _)| ns.to_string())
 }
 
-/// IRI 去掉局部名剩下的那段（含结尾的 `#` 或 `/`）。
+/// The part of an IRI left after removing the local name (including the trailing `#` or `/`).
 fn namespace_of(iri: &str) -> &str {
     match iri.rfind(['#', '/']) {
         Some(i) => &iri[..=i],
@@ -767,12 +767,12 @@ fn namespace_of(iri: &str) -> &str {
     }
 }
 
-/// 数据类型 IRI → 我们的四种。自身叫得上名就用自身，否则沿 `rdfs:subClassOf`
-/// 上溯（Integer → Number、URL → Text）。
+/// Datatype IRI → one of our four kinds. If the datatype itself can be named, use itself; otherwise follow `rdfs:subClassOf` upward
+/// (Integer → Number, URL → Text).
 ///
-/// 叫不上名的返回 `None`——比如 `schema:Time`，它只有时刻没有日期，
-/// 跟 `xsd:time` 同样待遇：由 [`map_range`] 走 [`RangeMapping::Degraded`]，
-/// 按 text 建**并报告**。
+/// If it cannot be named, return `None`. For example `schema:Time` has a time of day but no date,
+/// and is treated the same as `xsd:time`: [`map_range`] takes [`RangeMapping::Degraded`],
+/// built as text and **reported**.
 fn name_datatype(
     iri: &str,
     parents: &BTreeMap<String, Vec<String>>,
@@ -787,8 +787,8 @@ fn name_datatype(
         if let Some(dt) = well_known_datatype(cur) {
             return Some(dt);
         }
-        // 只沿数据类型往上走：数据类型的父类可能是普通的 rdfs:Class
-        //（schema:DataType ⊂ rdfs:Class），越过去就走进整个类层次了
+        // Only walk up through datatypes: a datatype's parent may be an ordinary rdfs:Class
+        //   (schema:DataType ⊂ rdfs:Class), and crossing that would walk into the whole class hierarchy
         for p in parents.get(cur).into_iter().flatten() {
             if datatypes.contains(p) {
                 stack.push(p);
@@ -798,14 +798,14 @@ fn name_datatype(
     None
 }
 
-/// 写死的那一半：数据类型的**名字**对应我们哪一种。
+/// The half that is hard-coded: the **names** of datatypes, and which of our kinds each maps to.
 ///
-/// 这从 RDF 里推不出来——文件说得出"Integer 是个数据类型"，
-/// 说不出"它是数字不是日期"。表里只放根，子类靠 subClassOf 上溯够到。
+/// This cannot be inferred from RDF: the file can say "Integer is a datatype", but cannot say "it is a number, not a date".
+/// The table holds only the roots; subclasses are reached by walking up subClassOf.
 ///
-/// 这里按局部名匹配是安全的，跟 [`datatype_of`] 那条"必须按完整 IRI 匹配"
-/// 不冲突：能走到这儿的 IRI，是**这份文件自己**声明成数据类型的，
-/// 一个文件说 "Date 是数据类型" 就不会同时拿 Date 当实体类。
+/// Matching by local name is safe here; it does not conflict with [`datatype_of`]'s rule that matching must use the full IRI,
+/// because an IRI that reaches this point is one **this file itself** declared to be a datatype,
+/// so a file that says "Date is a datatype" cannot also use Date as an entity class.
 fn well_known_datatype(iri: &str) -> Option<&'static str> {
     [
         ("Text", "text"),
@@ -819,7 +819,7 @@ fn well_known_datatype(iri: &str) -> Option<&'static str> {
     .map(|(_, dt)| dt)
 }
 
-/// 多语言标签里挑一个：优先 en / zh，其次无语言标记，最后第一个。
+/// Picks one from multilingual labels: en / zh are preferred, then no language tag, and finally the first one.
 fn pick_lang(vals: Option<&Vec<(String, Option<String>)>>) -> Option<String> {
     let vals = vals?;
     for want in ["en", "zh"] {
@@ -836,21 +836,21 @@ fn pick_lang(vals: Option<&Vec<(String, Option<String>)>>) -> Option<String> {
         .map(|(v, _)| v.clone())
 }
 
-/// IRI 的局部名：最后一个 `#` 或 `/` 之后的部分。
+/// The local name of an IRI: the part after the last `#` or `/`.
 pub fn local_name(iri: &str) -> &str {
     iri.rsplit(['#', '/']).next().unwrap_or(iri)
 }
 
-/// 局部名是不是**纯编号**——`BFO_0000144`、`CHEBI_15377`、`GO_0008150` 这种。
+/// Whether the local name is **purely numeric**: forms like `BFO_0000144`, `CHEBI_15377`, `GO_0008150`.
 ///
-/// OBO 系的词汇表（OBO Foundry 两百余个，覆盖生命科学、制造、医疗）把标识放在
-/// IRI 里、把意思放在 `rdfs:label` 里。照 IRI 派生出来的 `bfo_0000144` 不含任何
-/// 信息，而 key 正是抽取时递给模型的那份类清单——模型认不出它，这个类就永远
-/// 不会有实体落进去，且导入是「成功」的，坏了也看不出来（#324）。
+/// OBO-family vocabularies (over two hundred in the OBO Foundry, covering life sciences, manufacturing, medicine) put the identifier
+/// in the IRI and the meaning in `rdfs:label`. A key derived from the IRI, `bfo_0000144`, carries no
+/// information, and the key is exactly the class list handed to the model: the model cannot recognize it, so the class never
+/// gets any entity, and the import "succeeds" and nothing shows it is broken (#324).
 ///
-/// 判据卡得窄：**字母前缀 + 一个分隔符 + 至少三位数字**。schema.org 里那些带
-/// 数字却有意义的名字都不满足——`gtin12`、`sha256`、`percentile10` 没有分隔符，
-/// `emissionsCO2` 数字不在末尾，`3DModel` 压根不是这个形状。
+/// The criterion is narrow: **a run of letters + one separator + at least three digits**. Names in schema.org that have digits
+/// and yet are meaningful all fail it: `gtin12`, `sha256`, `percentile10` have no separator,
+/// `emissionsCO2` has its digits not at the end, and `3DModel` is not this shape at all.
 fn is_opaque_local_name(local: &str) -> bool {
     let Some(pos) = local.rfind(['_', '-']) else {
         return false;
@@ -862,11 +862,11 @@ fn is_opaque_local_name(local: &str) -> bool {
         && digits.chars().all(|c| c.is_ascii_digit())
 }
 
-/// 派生 key：局部名是纯编号且词汇表给了 label 时用 label，否则用局部名。
-/// 局部名派生不出 key 的（`ex:公司` 一个 ASCII 字母都没有）也改用 label。
+/// Derived key: if the local name is purely numeric and the vocabulary gives a label, use the label; otherwise use the local name.
+/// If the local name cannot yield a key (for example `ex:公司`, which has no ASCII letters at all), use the label as well.
 ///
-/// **IRI 始终是身份**，这里只换那个给模型读的标签，所以重导入、对齐、
-/// `e_by_iri` 的认领都不受影响。
+/// **The IRI is always the identity.** Only the label shown to the model is replaced here, so re-import, alignment,
+/// and the claims on `e_by_iri` are unaffected.
 pub fn key_from_iri_or_label(iri: &str, label: Option<&str>) -> String {
     let from_iri = key_from_iri(iri);
     match label {
@@ -880,14 +880,14 @@ pub fn key_from_iri_or_label(iri: &str, label: Option<&str>) -> String {
     }
 }
 
-/// 从 IRI 派生 key。**IRI 是身份，key 是给模型读的标签**（见 0001 P2）：
-/// 只允许 `[a-z0-9_]`、最长 40，所以 IRI 本身进不去。
-/// 驼峰拆成下划线：`hasEmployee` → `has_employee`。
+/// Derives the key from the IRI. **The IRI is the identity; the key is a label for the model to read** (see 0001 P2):
+/// only `[a-z0-9_]` is allowed, at most 40 characters, so the IRI itself cannot go in.
+/// Camel case splits into underscores: `hasEmployee` → `has_employee`.
 pub fn key_from_iri(iri: &str) -> String {
     to_key(local_name(iri))
 }
 
-/// 一段文本 → key 的字符规则：驼峰断词，非字母数字并成一个下划线，截断 40。
+/// Character rules for turning text into a key: camel case splits words, non-alphanumeric runs become one underscore, truncated at 40.
 fn to_key(local: &str) -> String {
     let mut out = String::with_capacity(local.len() + 4);
     let mut prev_lower = false;
@@ -915,46 +915,46 @@ fn to_key(local: &str) -> String {
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 const RDF_NS: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
-/// `rdfs:range` 映射到我们的四种 datatype 的结果。**三路，不是两路**。
+/// The result of mapping `rdfs:range` onto our four datatype kinds. **Three ways, not two.**
 #[derive(Debug, Clone, PartialEq)]
 pub enum RangeMapping {
-    /// 能映射到 `text` / `number` / `date` / `bool`
+    /// Can be mapped to `text` / `number` / `date` / `bool`.
     Datatype(&'static str),
-    /// 压根没写 range：词汇表没做任何声明，只知道是字面量。
-    /// `text` 是诚实的超集（它接受任何字符串，从不拦），所以建、并在预览里列出
+    /// No range at all: the vocabulary made no declaration, and only knows it is a literal.
+    /// `text` is an honest superset (it accepts any string and never rejects), so it is built, and listed in the preview.
     Absent,
-    /// 写了 range，值是**短的可读字面量**，但我们的四种类型表达不了它
-    ///（`time` 没有年、`duration` 是时长不是时点）。按 `text` 建**并报告**：
-    /// 只丢了排序语义，值还在；跳过则是这条知识彻底不会被捕获，那更糟
+    /// A range is given and the value is a **short, readable literal**, but our four kinds cannot express it
+    /// (`time` has no year, `duration` is a length of time, not a point in time). It is built as `text` and **reported**:
+    /// only the sort semantics are lost, the values remain; skipping it would mean this knowledge is never captured at all, which is worse.
     Degraded(String),
-    /// 写了 range，而**抽取器永远不可能从散文里读出这个值**：二进制块、
-    /// XML 片段、XML 内部标识。跳过它保护不了任何数据（本来就不会有值），
-    /// 省掉的是提示词——每个属性都是抽取提示词里的一行，每个文本块付一遍
+    /// A range is given, and **the extractor can never read this value from prose**: binary blocks,
+    /// XML fragments, XML-internal identifiers. Skipping it protects no data (there would never be a value anyway);
+    /// what it saves is the prompt: each property is one line of the extraction prompt, paid for in every text block.
     Unusable(String),
 }
 
-/// 数据属性的 `rdfs:range` → datatype。
+/// `rdfs:range` of a data property → datatype.
 ///
-/// 按**完整 IRI** 匹配而不是局部名：自定义词汇表完全可能有个叫 `date` 的类，
-/// 按尾巴匹配会把它当成 `xsd:date`。
+/// Matches by the **full IRI**, not the local name: a custom vocabulary may well have a class called `date`,
+/// and matching by suffix would take it for `xsd:date`.
 ///
-/// 多条 range 一律 [`RangeMapping::Degraded`]——RDFS 里那是**交集**语义
-///（"必须同时是两者"），几乎总是建模笔误，但规范如此，不猜。
+/// Multiple ranges always map to [`RangeMapping::Degraded`]: in RDFS that means an **intersection**
+/// ("must be both"), which is almost always a modelling slip, but the spec says so, so it is not guessed.
 pub fn map_range(ranges: &[String]) -> RangeMapping {
     resolve_range(ranges, false, &VocabDatatypes::new())
 }
 
-/// 按属性**自己的** range 语义来解。
+/// Resolves by the property's **own** range semantics.
 ///
-/// `rdfs:range` 写多条是交集，`schema:rangeIncludes` 写多条是并集，两者都落在
-/// 同一个 `ranges` 里——不看 [`OwlProperty::ranges_union`] 这一位就会把
-/// `author rangeIncludes Organization, Person` 读成"必须既是组织又是人"。
+/// Several `rdfs:range` entries are an intersection, while several `schema:rangeIncludes` entries are a union; both land in
+/// the same `ranges`, and without checking the [`OwlProperty::ranges_union`] bit,
+/// `author rangeIncludes Organization, Person` would be read as "must be both an organization and a person".
 pub fn map_range_of(p: &OwlProperty, vocab: &VocabDatatypes) -> RangeMapping {
     resolve_range(&p.ranges, p.ranges_union, vocab)
 }
 
 fn resolve_range(ranges: &[String], union: bool, vocab: &VocabDatatypes) -> RangeMapping {
-    // 词汇表自报的数据类型先查（schema:Text → text），查不到再走 xsd/owl 那套标准的
+    // The vocabulary's own declared datatype is checked first (schema:Text → text); if that fails, fall through to the standard xsd/owl set
     let named = |iri: &String| vocab.get(iri).copied().or_else(|| datatype_of(iri));
     match ranges {
         [] => RangeMapping::Absent,
@@ -964,8 +964,8 @@ fn resolve_range(ranges: &[String], union: bool, vocab: &VocabDatatypes) -> Rang
             None => RangeMapping::Degraded(one.clone()),
         },
         many if union => {
-            // 并集：全指向同一种就是那一种（Text ∪ URL 都是 text）。
-            // 不一致则降级成 text 并报告——text 是任意并集的诚实上界
+            // Union: if all point to the same kind, that kind is used (Text ∪ URL are both text).
+            // If they disagree, degrade to text and report: text is the honest upper bound of any union
             let dts: Vec<Option<&'static str>> = many.iter().map(named).collect();
             match dts[0] {
                 Some(dt) if dts.iter().all(|d| *d == Some(dt)) => RangeMapping::Datatype(dt),
@@ -973,23 +973,23 @@ fn resolve_range(ranges: &[String], union: bool, vocab: &VocabDatatypes) -> Rang
                 _ => RangeMapping::Degraded(many.join(" ∪ ")),
             }
         }
-        // rdfs:range 写多条是交集语义，不猜类型——但值仍是字面量，所以按 text 建
+        // Multiple rdfs:range entries have intersection semantics; the type is not guessed, but the value is still a literal, so it is built as text
         many => RangeMapping::Degraded(many.join(" ∩ ")),
     }
 }
 
-/// 抽取器不可能从散文里读出来的那些：二进制块与 XML 内部管道。
+/// Those the extractor could never read from prose: binary blocks and XML internal pipes.
 ///
-/// 判据不是"这个值该不该存"——属性值本来就存在图谱里（走 `facts.object_value`，
-/// 证据、时态、审阅全套）。判据是**会不会有值**：「门店每天 9:00 开门」里有
-/// `09:00`，而一张 base64 平面图不会出现在散文里；就算文档里真有一段 base64，
-/// 把它当成事实抽出来也是错的。
+/// The criterion is not "should this value be stored" (values exist in the graph anyway, via `facts.object_value`,
+/// with evidence, temporality, and review in full). The criterion is **whether a value can ever appear**: "the store opens at 9:00 every day" contains
+/// `09:00`, while a base64 floor plan never appears in prose; and even if a base64 blob did appear in a document,
+/// extracting it as a fact would be wrong.
 ///
-/// `hexBinary` 不在此列：名字里有 binary，写出来却是一串十六进制数字，散文里带的是
-/// 哈希、内存地址、标志位这类值（「该文件的 SHA-256 为 9f86d0…」），抽成事实是对的。
-/// UCO 有 12 个属性是它（#1001 的评审）。
+/// `hexBinary` is not on this list: its name says binary, but what is written is a string of hex digits, and prose carries values
+/// like hashes, memory addresses and flag bits ("the file's SHA-256 is 9f86d0..."), so extracting them as facts is correct.
+/// Twelve UCO properties are of this kind (review of #1001).
 ///
-/// **其余一律降级成 text**——一个抽得出来的值，宁可类型糙一点也别让它没处可去。
+/// **Everything else degrades to text**: a value that can be extracted is better kept with a rough type than left with nowhere to go.
 fn unusable(iri: &str) -> bool {
     if let Some(local) = iri.strip_prefix(XSD) {
         return matches!(
@@ -1013,26 +1013,26 @@ fn unusable(iri: &str) -> bool {
 fn datatype_of(iri: &str) -> Option<&'static str> {
     if let Some(local) = iri.strip_prefix(XSD) {
         return match local {
-            // 有界与无符号变体全部收进 number：区别在取值范围，不在语义
+            // Bounded and unsigned variants are all collected into number: the difference is the value range, not the meaning
             "decimal" | "integer" | "int" | "long" | "short" | "byte" | "nonNegativeInteger"
             | "positiveInteger" | "nonPositiveInteger" | "negativeInteger" | "unsignedLong"
             | "unsignedInt" | "unsignedShort" | "unsignedByte" | "double" | "float" => {
                 Some("number")
             }
-            // 我们的日期格式本就是 YYYY[-MM[-DD]]，逐级可省，所以 gYear / gYearMonth 装得下
+            // Our date format is always YYYY[-MM[-DD]], with each level optional, so gYear / gYearMonth fit
             "date" | "dateTime" | "dateTimeStamp" | "gYear" | "gYearMonth" => Some("date"),
             "boolean" => Some("bool"),
-            // hexBinary 的写法就是十六进制数字：哈希、地址、标志位，照原样存成文本不丢东西
+            // hexBinary is written as hex digits: hashes, addresses, flag bits; storing it as text as-is loses nothing
             "string" | "normalizedString" | "token" | "language" | "Name" | "NCName"
             | "NMTOKEN" | "anyURI" | "hexBinary" => Some("text"),
-            // time / gMonth / gDay / gMonthDay 缺年，duration 系列是时长不是时点 ——
-            // 落到 None，再由 unusable() 分流：它们是可读字面量，降级成 text；
-            // base64 块与 XML 内部标识才是真的不收
+            // time / gMonth / gDay / gMonthDay lack a year, and the duration family is a length of time, not a point in time:
+            // they fall to None, and unusable() then routes them: they are readable literals, degraded to text;
+            // base64 blocks and XML-internal identifiers are the ones truly not collected
             _ => None,
         };
     }
     if let Some(local) = iri.strip_prefix(RDF_NS) {
-        // XMLLiteral 是 XML 片段，不收
+        // XMLLiteral is an XML fragment, not collected
         return matches!(local, "PlainLiteral" | "langString").then_some("text");
     }
     if let Some(local) = iri.strip_prefix(RDFS) {
@@ -1074,14 +1074,14 @@ mod tests {
                 "{local}"
             );
         }
-        // owl:real / owl:rational 也在 OWL 2 的 datatype map 里
+        // owl:real / owl:rational are also in OWL 2's datatype map
         assert_eq!(
             map_range(&[format!("{OWL}rational")]),
             RangeMapping::Datatype("number")
         );
     }
 
-    /// 我们的日期格式是 YYYY[-MM[-DD]]，逐级可省，所以只缺低位的 g 类型装得下
+    /// Our date format is YYYY[-MM[-DD]], with each level optional, so only g-types missing the low-order parts fit
     #[test]
     fn partial_dates_fit_only_when_the_year_is_there() {
         for local in ["date", "dateTime", "dateTimeStamp", "gYear", "gYearMonth"] {
@@ -1091,7 +1091,7 @@ mod tests {
                 "{local}"
             );
         }
-        // 缺年的进不了 date —— 但它们是可读字面量，降级成 text 而不是丢掉
+        // Those missing a year cannot go into date, but they are readable literals, so they degrade to text instead of being dropped
         for local in ["gMonth", "gDay", "gMonthDay", "time"] {
             assert!(
                 matches!(
@@ -1103,23 +1103,23 @@ mod tests {
         }
     }
 
-    /// 分界不是"能不能精确映射"，而是**"这个取值该不该进图谱"**。
-    /// 存得下的一律留下来——类型糙一点，好过这条知识彻底不被捕获。
+    /// The dividing line is not "can it be mapped exactly", but **"should this value be in the graph"**.
+    /// Anything that can be stored is kept: a rough type beats a piece of knowledge never being captured at all.
     #[test]
     fn a_value_we_can_store_is_kept_even_when_we_cannot_type_it() {
-        // 没写 range：没有声明可丢，text 是诚实的超集
+        // No range given: there is no declaration to lose, and text is the honest superset
         assert_eq!(map_range(&[]), RangeMapping::Absent);
-        // 写了但表达不了：时长是可读字面量，降级成 text 并报告
+        // Given but cannot be expressed: a duration is a readable literal, degraded to text and reported
         assert!(matches!(
             map_range(&[format!("{XSD}duration")]),
             RangeMapping::Degraded(_)
         ));
-        // 十六进制写出来的值：哈希、地址、标志位。它是一个值，照原样存成文本
+        // Values written in hex: hashes, addresses, flag bits. It is a value, stored as text as-is
         assert_eq!(
             map_range(&[format!("{XSD}hexBinary")]),
             RangeMapping::Datatype("text")
         );
-        // 取值本就不该进图谱：base64 块、XML 片段与 XML 内部标识，这才是真的跳过
+        // The value should never have been in the graph: base64 blocks, XML fragments and XML-internal identifiers; these are the real skips
         for unusable in [
             format!("{XSD}base64Binary"),
             format!("{RDF_NS}XMLLiteral"),
@@ -1135,19 +1135,19 @@ mod tests {
         }
     }
 
-    /// 多条 range 在 RDFS 里是**交集**（"必须同时是两者"），不是并集。
-    /// 几乎总是建模笔误，但规范如此 —— 不猜。
+    /// Multiple ranges in RDFS are an **intersection** ("must be both"), not a union.
+    /// It is almost always a modelling slip, but the spec says so: not guessed.
     #[test]
     fn several_ranges_are_an_intersection_we_refuse_to_guess() {
         let m = map_range(&[format!("{XSD}string"), format!("{XSD}integer")]);
         match m {
-            // 交集不猜类型，但值仍是字面量，所以按 text 落下来
+            // The intersection does not guess a type, but the value is still a literal, so it lands as text
             RangeMapping::Degraded(s) => assert!(s.contains('∩')),
             other => panic!("多条 range 不该被精确映射: {other:?}"),
         }
     }
 
-    /// 按完整 IRI 匹配：自定义词汇表里叫 date 的**类**不是 xsd:date
+    /// Matches by full IRI: a **class** named date in a custom vocabulary is not xsd:date
     #[test]
     fn a_class_that_happens_to_be_called_date_is_not_a_date() {
         assert!(matches!(
@@ -1180,7 +1180,7 @@ mod tests {
     fn projects_classes_properties_and_reports_the_rest() {
         let p = project(TTL.as_bytes(), RdfFormat::Turtle).unwrap();
         let emp = p.classes.iter().find(|c| c.key == "employee").unwrap();
-        // 多语言标签取 en 优先
+        // For multilingual labels, en is preferred
         assert_eq!(emp.label, "Employee");
         assert_eq!(emp.description, "A person on the payroll.");
         assert_eq!(emp.parents, vec!["http://acme.example/hr#Person"]);
@@ -1196,18 +1196,18 @@ mod tests {
         let sal = p.properties.iter().find(|x| x.key == "salary").unwrap();
         assert!(sal.is_datatype);
 
-        // 消费不了的公理进报告，不是丢弃也不是报错。
+        // Axioms that cannot be consumed go into the report: neither dropped nor an error.
         //
-        // `disjointWith` 曾经在这份名单上,现在被消费了(它是一致性检查的判定
-        // 依据)——所以这里改用一个仍然消费不了的公理来守这条性质本身
+        // `disjointWith` used to be on this list; it is now consumed (it is the basis of the consistency check's
+        // decision), so this guard uses an axiom that still cannot be consumed, to protect this property itself
         assert!(p
             .unprojected
             .contains_key("http://www.w3.org/2002/07/owl#equivalentClass"));
     }
 
-    /// schema.org 把 `snomed:105590001 a rdfs:Class .` 这种 equivalentClass 的对象
-    /// 也声明成了类：没标签、没父类、没属性、不在自家命名空间。不建，但记账；
-    /// 自家命名空间里同样光秃秃的类照建
+    /// schema.org also declares as classes the objects of equivalentClass like `snomed:105590001 a rdfs:Class .`:
+    /// no label, no parent, no property, and not in its own namespace. They are not built, but are accounted for;
+    /// bare classes in its own namespace are still built
     #[test]
     fn a_bare_class_from_another_namespace_is_reported_not_projected() {
         let ttl = r#"
@@ -1240,17 +1240,17 @@ mod tests {
 
     #[test]
     fn detects_rdfxml_that_opens_with_comments() {
-        // FOAF 的官方文件就长这样：几十行 <!-- --> 之后才见 <rdf:RDF>。
-        // 早先版本嗅不到 XML 标志就退回 Turtle，结果第一行就解析失败
+        // The FOAF official file looks like this: dozens of lines of <!-- --> before <rdf:RDF> appears.
+        // An earlier version, failing to sniff the XML marker, fell back to Turtle, and failed to parse on the first line
         let head = b"<!-- This is the FOAF vocabulary, expressed using RDFS and OWL. -->\n\
                      <!-- padding padding padding padding padding padding padding -->\n";
         assert_eq!(RdfFormat::detect("index.rdf", head), RdfFormat::RdfXml);
-        // 反过来：.owl 里放 Turtle 也常见，内容说了算
+        // The other way round: Turtle inside a .owl is also common, so content decides
         assert_eq!(
             RdfFormat::detect("x.owl", b"@prefix owl: <http://x#> .\n"),
             RdfFormat::Turtle
         );
-        // 注释开头的 Turtle 同样认得出（# 行先跳过）
+        // Turtle that starts with a comment is recognized too (# lines are skipped first)
         assert_eq!(
             RdfFormat::detect("x", b"# a note\n\n@base <http://x> .\n"),
             RdfFormat::Turtle
@@ -1264,8 +1264,8 @@ mod tests {
         assert_eq!(key_from_iri("http://x#HTTP_Server"), "http_server");
     }
 
-    /// 编号式 IRI 的 key 改从 label 来（#324）。这些词汇表把标识放在 IRI、
-    /// 把意思放在 label 里，照 IRI 派生出的 key 递给模型等于没给。
+    /// The key of numbered IRIs comes from the label instead (#324). These vocabularies put the identifier in the IRI
+    /// and the meaning in the label; handing the model a key derived from the IRI is no help at all.
     #[test]
     fn an_opaque_iri_takes_its_key_from_the_label() {
         let k = |iri, label| key_from_iri_or_label(iri, Some(label));
@@ -1287,42 +1287,42 @@ mod tests {
             ),
             "biological_process"
         );
-        // 没有 label 就没得选，退回 IRI——总比没有强，身份仍在 IRI 上
+        // With no label there is no choice: fall back to the IRI. Better than nothing, and identity stays in the IRI
         assert_eq!(
             key_from_iri_or_label("http://purl.obolibrary.org/obo/BFO_0000144", None),
             "bfo_0000144"
         );
-        // 空 label 同样不算数
+        // An empty label does not count either
         assert_eq!(
             k("http://purl.obolibrary.org/obo/BFO_0000144", "   "),
             "bfo_0000144"
         );
     }
 
-    /// 判据必须窄。schema.org 里带数字的名字都有意义，一个都不能被改写——
-    /// 有 label 的类占绝大多数，判据一宽就是整个词汇表的 key 全被换掉。
+    /// The criterion must be narrow. Names with digits in schema.org are all meaningful, and none may be rewritten:
+    /// most classes have a label, so a wide criterion would rewrite the keys of the whole vocabulary.
     #[test]
     fn a_meaningful_name_keeps_its_key_even_with_digits() {
         let k = |iri, label| key_from_iri_or_label(iri, Some(label));
-        // 数字紧跟字母，没有分隔符
+        // Digits right after letters, with no separator
         assert_eq!(k("https://schema.org/gtin12", "GTIN-12"), "gtin12");
         assert_eq!(k("https://schema.org/sha256", "sha256"), "sha256");
         assert_eq!(
             k("https://schema.org/percentile10", "percentile 10"),
             "percentile10"
         );
-        // 数字不在末尾
+        // Digits not at the end
         assert_eq!(
             k("https://schema.org/emissionsCO2", "emissions CO2"),
             "emissions_co2"
         );
-        // 分隔符后面不是数字
+        // The character after the separator is not a digit
         assert_eq!(k("http://x#HTTP_Server", "HTTP server"), "http_server");
-        // 数字不足三位：可能是有意义的编号（v2、Q1），不当编号处理
+        // Fewer than three digits: may be a meaningful identifier (v2, Q1), so it is not treated as a number
         assert_eq!(k("http://x#part_12", "part twelve"), "part_12");
     }
 
-    /// 中文写的 IRI 派生不出 key：有英文 label 就用它，不然每个类都是空 key，导入整个被拒
+    /// An IRI written in Chinese cannot yield a key: if there is an English label, use it; otherwise every class gets an empty key and the whole import is rejected
     #[test]
     fn a_chinese_iri_takes_its_key_from_the_label() {
         let ttl = r#"
@@ -1341,12 +1341,12 @@ ex:注册资本 a owl:DatatypeProperty ; rdfs:label "registered capital"@en ;
         keys.sort();
         assert_eq!(keys, ["company", "person"]);
         assert_eq!(p.properties[0].key, "registered_capital");
-        // 没有 label 的仍退回局部名
+        // Those with no label still fall back to the local name
         assert_eq!(key_from_iri_or_label("http://x#Company", None), "company");
     }
 
-    /// schema.org 那一套的最小复刻：数据类型自报家门，属性用
-    /// domainIncludes / rangeIncludes，全部只声明成 rdf:Property。
+    /// A minimal reproduction of the schema.org scheme: datatypes declare themselves, and properties use
+    /// domainIncludes / rangeIncludes, all declared only as rdf:Property.
     const SCHEMA_ISH: &str = r#"
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -1395,8 +1395,8 @@ schema:knows a rdf:Property ;
     fn schema_org_datatypes_are_not_entity_types() {
         let p = schema_ish();
         let keys: Vec<&str> = p.classes.iter().map(|c| c.key.as_str()).collect();
-        // Text / Number / Date / Time 声明的是 `a rdfs:Class, schema:DataType`，
-        // 只看前半截就会建出叫 text、number 的实体类型来
+        // Text / Number / Date / Time are declared as `a rdfs:Class, schema:DataType`,
+        // so looking only at the first half would build entity types named text and number
         for gone in [
             "text",
             "number",
@@ -1414,7 +1414,7 @@ schema:knows a rdf:Property ;
     #[test]
     fn domain_includes_feeds_the_signature() {
         let p = schema_ish();
-        // 不认 schema:domainIncludes 的话这里是空的，签名就成了 (* → *)
+        // Without recognizing schema:domainIncludes this is empty, and the signature becomes (* → *)
         assert_eq!(
             prop(&p, "founding_date").domains,
             vec!["https://schema.org/Organization".to_string()]
@@ -1424,10 +1424,10 @@ schema:knows a rdf:Property ;
     #[test]
     fn a_union_range_of_classes_stays_a_relation() {
         let p = schema_ish();
-        // rangeIncludes Organization, Person —— 并集，两个都是类
+        // rangeIncludes Organization, Person: a union, both are classes
         assert!(!prop(&p, "author").is_datatype);
-        // rangeIncludes PostalAddress, Text —— schema.org 的常见写法，
-        // Text 是"懒得建实体就写个字符串"。判成属性就把这条边永久丢了
+        // rangeIncludes PostalAddress, Text: the common schema.org form,
+        // where Text means "a string, because I'm too lazy to build an entity". Treating it as an attribute would permanently lose that edge
         assert!(!prop(&p, "address").is_datatype);
     }
 
@@ -1440,7 +1440,7 @@ schema:knows a rdf:Property ;
             map_range_of(fd, &p.vocab_datatypes),
             RangeMapping::Datatype("date")
         );
-        // Text ∪ URL：URL ⊂ Text，两个都解到 text，所以不用降级也不用报告
+        // Text ∪ URL: URL ⊂ Text, both resolve to text, so there is no need to degrade or report
         let hp = prop(&p, "homepage");
         assert!(hp.is_datatype);
         assert_eq!(
@@ -1452,11 +1452,11 @@ schema:knows a rdf:Property ;
     #[test]
     fn a_union_is_not_an_intersection() {
         let p = schema_ish();
-        // 这是整件事最容易错的一步：两个 range 倒进同一个 Vec 之后，
-        // 不看 ranges_union 就会当成 rdfs:range 的交集语义
+        // This is the easiest step to get wrong: after two ranges are poured into the same Vec,
+        // without checking ranges_union they would be taken with rdfs:range's intersection semantics
         assert!(prop(&p, "author").ranges_union);
         assert_eq!(prop(&p, "author").ranges.len(), 2);
-        // 而 rdfs:range 写两条仍然是交集
+        // Whereas two rdfs:range entries are still an intersection
         assert!(matches!(
             map_range(&[format!("{XSD}string"), format!("{XSD}integer")]),
             RangeMapping::Degraded(ref s) if s.contains('∩')
@@ -1466,8 +1466,8 @@ schema:knows a rdf:Property ;
     #[test]
     fn an_unnamed_datatype_degrades_and_is_reported() {
         let p = schema_ish();
-        // schema:Time 只有时刻没有日期，跟 xsd:time 一个待遇：是数据类型
-        //（所以走属性通道、不当实体类型），但叫不上名 → 按 text 建**并报告**
+        // schema:Time has a time of day but no date, the same treatment as xsd:time: it is a datatype
+        //(so it goes through the attribute channel, not as an entity type), but it cannot be named, so it is built as text and **reported**
         let o = prop(&p, "opens");
         assert!(o.is_datatype);
         assert!(matches!(
@@ -1479,7 +1479,7 @@ schema:knows a rdf:Property ;
     #[test]
     fn a_bare_rdf_property_without_range_is_still_a_relation() {
         let p = schema_ish();
-        // 没有 range 就没有判据，兜底仍是关系——宾语是 IRI 的远多于字面值
+        // No range means no basis for judgment, and the fallback is still relation: far more values are IRIs than literals
         let k = prop(&p, "knows");
         assert!(!k.is_datatype);
         assert!(k.ranges.is_empty());
@@ -1488,8 +1488,8 @@ schema:knows a rdf:Property ;
     #[test]
     fn schema_predicates_are_consumed_not_reported_as_unprojected() {
         let p = schema_ish();
-        // 认了就不该再出现在"暂未投影"里，否则预览页会说
-        // "还有 2312 条 domainIncludes 没消费"，而其实消费了
+        // Once recognized, it should not show up under "not yet projected", or the preview page would say
+        // "2312 domainIncludes entries are still unconsumed", when in fact they were consumed
         for consumed in ["domainIncludes", "rangeIncludes"] {
             assert!(
                 !p.unprojected.keys().any(|k| k.ends_with(consumed)),
@@ -1499,8 +1499,8 @@ schema:knows a rdf:Property ;
         }
     }
 
-    /// 一份文件里合了两个词汇表，主词汇表的 IRI 用 https、被引用的用 http——
-    /// 字典序下 http 在前，主词汇表就输了。这是 schema.org 那份文件的形状。
+    /// One file merges two vocabularies, with the main vocabulary's IRIs under https and the referenced ones under http:
+    /// in lexicographic order http comes first, so the main vocabulary loses. This is the shape of the schema.org file.
     const TWO_VOCABS: &str = r#"
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -1521,9 +1521,9 @@ cited:worksAt a rdf:Property ; rdfs:label "worksAt (cited)" .
     #[test]
     fn the_files_own_vocabulary_wins_a_key_collision() {
         let p = project(TWO_VOCABS.as_bytes(), RdfFormat::Turtle).unwrap();
-        // 撞车由调用方先到先得地裁决，所以顺序就是裁决。
-        // 主词汇表声明得最多，它必须排在前面——否则 `http://` < `https://`
-        // 这条字典序会让被引用的词汇表赢走 location、country、organization
+        // A collision is decided first-come-first-served by the caller, so the order is the decision.
+        // The main vocabulary declares the most, so it must come first, otherwise `http://` < `https://`
+        // in this lexicographic order would let the referenced vocabularies take location, country, organization
         let first_location = p.classes.iter().find(|c| c.key == "location").unwrap();
         assert!(
             first_location.iri.starts_with("https://home.example/"),
@@ -1539,10 +1539,10 @@ cited:worksAt a rdf:Property ; rdfs:label "worksAt (cited)" .
 mod axioms {
     use super::*;
 
-    /// OWL 的属性公理与类互斥都要投影出来——它们是一致性检查（0002 R0）的**判定
-    /// 依据**。没有它们，`A part_of B` 与 `B part_of A` 同时成立到底是矛盾还是
-    /// 正常，无从判起：`alias_of` 双向是对的，`produces` 双向几乎肯定是错的，
-    /// 而区分这两者的东西只能来自本体。
+    /// OWL property axioms and class disjointness must both be projected; they are the **decision basis** for the consistency check (0002 R0).
+    /// Without them, there is no way to tell whether `A part_of B` and `B part_of A` holding together is a contradiction or
+    /// normal: `alias_of` in both directions is right, while `produces` in both directions is almost certainly wrong,
+    /// and only the ontology can tell the two apart.
     const AX: &str = r#"
         @prefix owl: <http://www.w3.org/2002/07/owl#> .
         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -1578,16 +1578,16 @@ mod axioms {
         );
         assert!(by("reports_to").irreflexive, "非自反：自己汇报给自己是矛盾");
 
-        // 没声明的一律为假——**默认不是"未知"而是"没这条公理"**。
-        // OWL 是开放世界，但一致性检查只能按写下来的判：没写就是没有依据，
-        // 而没有依据时不报矛盾，比猜一个公理出来安全
+        // Anything not declared is false: **the default is not "unknown" but "no such axiom"**.
+        // OWL is open-world, but the consistency check can only judge by what is written: if nothing is written, there is no basis,
+        // and reporting no contradiction without a basis is safer than guessing an axiom into existence
         let plain = by("plain");
         assert!(!plain.transitive && !plain.symmetric);
         assert!(!plain.asymmetric && !plain.irreflexive);
     }
 
-    /// **两个方向都要有。** 词表通常只写一遍（W3C Org 把四个类两两互斥写成六行），
-    /// 只按书写方向存，查"A 与 B 互斥吗"就取决于调用方碰巧从哪一头问。
+    /// **Both directions must be present.** Vocabularies usually write it once (W3C Org writes the pairwise disjointness of four classes as six lines),
+    /// so storing only the written direction makes "are A and B disjoint?" depend on which end the caller happens to ask from.
     #[test]
     fn disjointness_is_recorded_from_both_ends() {
         let p = proj();
@@ -1605,11 +1605,11 @@ mod axioms {
     }
 }
 
-/// 拿**真包**验一遍,而不只是夹具。
+/// Verify against the **real packs**, not just the fixtures.
 ///
-/// 先例在 `pack_alignment::against_real_packs`:那一版靠真包抓出了四个凭记忆
-/// 写错的 IRI。夹具只能证明"我写的 Turtle 我自己解析得了",真包能证明
-/// "官方文件里那些写法我们接得住"——两者不是一回事。
+/// Precedent is in `pack_alignment::against_real_packs`: that version caught four IRIs written wrongly from memory
+/// using the real packs. A fixture can only prove "the Turtle I wrote parses under my own parser"; the real packs prove
+/// "the forms the official files use are handled". The two are not the same thing.
 #[cfg(test)]
 mod against_real_packs {
     use super::*;
@@ -1625,12 +1625,12 @@ mod against_real_packs {
         out
     }
 
-    /// W3C Org 把 Organization / Role / Membership / Site / ChangeEvent 五者两两
-    /// 互斥,官方文件里每对只写一次。**五个类每个都该看到四个对端**——只按书写
-    /// 方向存的话,先被写到的那几个会缺对端,而缺哪个取决于文件里的行序。
+    /// W3C Org makes Organization / Role / Membership / Site / ChangeEvent pairwise disjoint;
+    /// the official file writes each pair only once. **Each of the five classes must see all four counterparts**: if only the written
+    /// direction is stored, the ones written first would be missing counterparts, and which ones depends on line order in the file.
     ///
-    /// (写这条断言时我按 grep 目测数成了"四者",真包当场纠正:`Organization`
-    /// 也在互斥集里。夹具证明不了这种事。)
+    /// (When writing this assertion I counted "four" by eye from grep; the real pack corrected it on the spot: `Organization`
+    /// is also in the disjoint set. A fixture cannot prove that kind of thing.)
     #[test]
     fn w3c_org_declares_four_mutually_disjoint_classes() {
         let p = project(&load("w3c-org.ttl.gz"), RdfFormat::Turtle).unwrap();
@@ -1649,13 +1649,13 @@ mod against_real_packs {
         }
     }
 
-    /// IOF Core 引用 BFO,而 BFO 的 IRI 是编号(`.../obo/BFO_0000144`)。
-    /// 照 IRI 派生的 `bfo_0000144` 递给模型等于没递——那个类会永远空着,
-    /// 而导入是「成功」的(#324)。这里钉的是**真包里那一个**:
-    /// 它的 `rdfs:label` 写着 "process profile"。
+    /// IOF Core references BFO, and BFO's IRIs are numbered (`.../obo/BFO_0000144`).
+    /// Handing the model `bfo_0000144`, derived from the IRI, is no help: the class would stay empty forever,
+    /// while the import "succeeds" (#324). What is pinned here is **the one in the real pack**:
+    /// its `rdfs:label` says "process profile".
     ///
-    /// 同时钉住反面:schema.org 那些带数字却有意义的 key 一个都不能被改写。
-    /// 判据一宽,受影响的就不是一个类而是整个词汇表——它的类几乎都有 label。
+    /// It also pins the opposite: none of schema.org's digit-bearing but meaningful keys may be rewritten.
+    /// With a wide criterion, the affected thing is not one class but the whole vocabulary: most of its classes have a label.
     #[test]
     fn an_opaque_iri_in_a_real_pack_reads_from_its_label() {
         let p = project(&load("iof-core.rdf.gz"), RdfFormat::RdfXml).unwrap();
@@ -1684,8 +1684,8 @@ mod against_real_packs {
         }
     }
 
-    /// IOF Core 声明了一批传递属性(before/after/occursDuring…)。
-    /// 这是 R0 环检测唯一有真实依据的地方
+    /// IOF Core declares a batch of transitive properties (before/after/occursDuring...).
+    /// This is the only place R0 cycle detection has a real basis
     #[test]
     fn iof_core_declares_transitive_properties() {
         let p = project(&load("iof-core.rdf.gz"), RdfFormat::RdfXml).unwrap();
@@ -1693,9 +1693,9 @@ mod against_real_packs {
         assert!(n >= 8, "IOF 该有一批传递属性,实得 {n}");
     }
 
-    /// FOAF 的 Person ⊥ Organization / Document —— **最常撞的那一对**。
-    /// `classify_type_drift` 里那张手写表(person vs organization 判 Disjoint)
-    /// 想表达的就是它,注释里也写着"公理落库后这张表应改从本体读"
+    /// FOAF's Person ⊥ Organization / Document: **the pair that collides most often**.
+    /// The hand-written table in `classify_type_drift` (person vs organization judged Disjoint)
+    /// is meant to express it, and the comment there also says that once axioms are persisted, this table should be read from the ontology.
     #[test]
     fn foaf_says_a_person_is_not_an_organization() {
         let p = project(&load("foaf.rdf.gz"), RdfFormat::RdfXml).unwrap();
@@ -1719,7 +1719,7 @@ mod against_real_packs {
 mod property_axiom_tests {
     use super::*;
 
-    /// `schema:supersededBy` 要被读出来：让位的属性带着它让给了谁
+    /// `schema:supersededBy` must be read out: a property that gives way carries whom it gave way to
     #[test]
     fn a_superseded_property_names_its_successor() {
         let ttl = r#"
@@ -1752,11 +1752,11 @@ schema:employees a rdf:Property ; rdfs:label "employees" ;
         );
     }
 
-    /// `owl:inverseOf` 与 `rdfs:subPropertyOf` 要被读出来。
+    /// `owl:inverseOf` and `rdfs:subPropertyOf` must be read out.
     ///
-    /// 从前 `subPropertyOf` 只出现在 `known()` 白名单里——认得出、不报警、
-    /// **然后扔掉**；`inverseOf` 连白名单都没进，被算进「暂未投影」。
-    /// 两种都是导一份本体进来，那部分信息当场消失。
+    /// Before, `subPropertyOf` appeared only in the `known()` allowlist: recognized, not warned about,
+    /// **then discarded**; `inverseOf` was not even in the allowlist and was counted as "not yet projected".
+    /// In both cases, importing an ontology made that information vanish on the spot.
     #[test]
     fn the_two_property_relations_survive_projection() {
         let ttl = include_str!("../tests/inverse_and_sub.ttl");
@@ -1776,8 +1776,8 @@ schema:employees a rdf:Property ; rdfs:label "employees" ;
             by("ceo_of").sub_property_of.as_deref(),
             Some("http://example.org/worksAt")
         );
-        // 反方向没写，就该是空的：本体写了什么与我们推了什么要分得开，
-        // R0 的 inverse_not_mutual 检查靠这个区分
+        // If the reverse direction is not written it should be empty: what the ontology wrote and what we inferred must stay distinct,
+        // and R0's inverse_not_mutual check relies on this distinction
         assert!(
             by("works_at").inverse_of.is_none(),
             "没写的方向不该在导入时被补上"
@@ -1788,9 +1788,9 @@ schema:employees a rdf:Property ; rdfs:label "employees" ;
         );
     }
 
-    /// `utopia:temporal` 要被读出来（0031）。导出端一直写它，导入端从前不读：
-    /// 一份本体自己说「这条关系是一个时刻」，导进来还是 `state`，#1242 的那条
-    /// 「非 state 的关系不经模型就能绑」对它永远不成立。
+    /// `utopia:temporal` must be read out (0031). The export side has always written it; the import side did not read it before:
+    /// an ontology that says "this relation is a moment in time" was imported as `state`, and the #1242 rule
+    /// "a non-state relation can be bound without the model" never held for it.
     #[test]
     fn a_property_annotated_with_utopia_temporal_keeps_the_value_it_declared() {
         let ttl = r#"
@@ -1819,7 +1819,7 @@ ex:met a owl:ObjectProperty ; rdfs:label "met" ; utopia:temporal "sometimes" .
             None,
             "没写就是没写，落库再按 state"
         );
-        // 三个值以外的不猜：留空并按谓词报告出来，只有 `met` 那一条，预览页能说清它没进来
+        // Values outside the three are not guessed: left empty and reported by predicate; with only the `met` entry, the preview page can say why it did not come in
         assert_eq!(by("met").temporal, None);
         assert_eq!(p.unprojected.get("urn:utopia:ns:temporal"), Some(&1));
     }
@@ -1924,14 +1924,14 @@ ex:twice a owl:ObjectProperty ; rdfs:label "twice" ; utopia:role "children" ; ut
 mod shape_tests {
     use super::*;
 
-    /// SHACL 形状给的 domain / range（#923），每种写法一处：
-    /// - `Account`：UCO 的写法，类自己就是形状，显式 `sh:targetClass` 指向自己，属性形状
-    ///   是空节点，一个带 `sh:class`、一个带 `sh:datatype`；
-    /// - `Identity`：只是类加 `sh:NodeShape`，没写 `sh:targetClass`（隐式类目标）；
-    /// - `DeviceShape`：有名字的节点形状，引用有名字的属性形状；
-    /// - `Tool`：`owner` 在第二个类上又约束一次，值是另一个类；`version` 自己声明了
-    ///   domain 与 range；逆向路径、`sh:or` 不读；`undeclared` 文件里没声明成属性；
-    /// - `Usage`：`sh:targetSubjectsOf` 不是一个类。
+    /// SHACL shape domain / range (#923), one place per form:
+    /// - `Account`: UCO's form, where the class is itself the shape, with an explicit `sh:targetClass` pointing at itself, and the property shapes
+    ///   are blank nodes, one with `sh:class`, one with `sh:datatype`;
+    /// - `Identity`: just a class plus `sh:NodeShape`, without `sh:targetClass` (implicit class target);
+    /// - `DeviceShape`: a named node shape, referencing named property shapes;
+    /// - `Tool`: `owner` is constrained again on a second class, with a different class as its value; `version` declares its own
+    ///   domain and range; inverse paths and `sh:or` are not read; `undeclared` is not declared as a property in the file;
+    /// - `Usage`: `sh:targetSubjectsOf` is not a class.
     const SHAPES: &str = r#"
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
@@ -1989,22 +1989,22 @@ ex:version a owl:DatatypeProperty ; rdfs:domain ex:Device ; rdfs:range xsd:integ
     #[test]
     fn a_shape_gives_a_property_its_domain_and_range() {
         let p = project(SHAPES.as_bytes(), RdfFormat::Turtle).unwrap();
-        // 类自己就是形状、显式 targetClass：一个对象属性、一个数据属性
+        // The class is itself the shape, with an explicit targetClass: one object property, one data property
         let t = by_iri(&p, "accountType");
         assert_eq!(
             (t.domains.clone(), t.ranges.clone()),
             (ex(&["Account"]), vec![format!("{XSD}string")])
         );
         assert!(!t.ranges_union);
-        // 隐式类目标：类加 sh:NodeShape，没写 targetClass
+        // Implicit class target: class plus sh:NodeShape, no targetClass written
         assert_eq!(by_iri(&p, "givenName").domains, ex(&["Identity"]));
-        // 有名字的节点形状引用有名字的属性形状
+        // A named node shape references named property shapes
         let s = by_iri(&p, "serial");
         assert_eq!(
             (s.domains.clone(), s.ranges.clone()),
             (ex(&["Device"]), vec![format!("{XSD}string")])
         );
-        // 约束在两个类上：domain 两个都要，range 是「哪个都行」
+        // Constrained on two classes: both are domains, and range is "either will do"
         let o = by_iri(&p, "owner");
         assert_eq!(o.domains, ex(&["Account", "Tool"]));
         assert_eq!(o.ranges, ex(&["Identity", "Organization"]));
@@ -2029,14 +2029,14 @@ ex:version a owl:DatatypeProperty ; rdfs:domain ex:Device ; rdfs:range xsd:integ
     #[test]
     fn a_shape_reads_no_other_target_path_or_alternative() {
         let p = project(SHAPES.as_bytes(), RdfFormat::Turtle).unwrap();
-        // 逆向路径说的不是 uses 自己的 domain；targetSubjectsOf 不是一个类
+        // An inverse path does not state uses' own domain; targetSubjectsOf is not a class
         let u = by_iri(&p, "uses");
         assert!(u.domains.is_empty() && u.ranges.is_empty(), "{u:?}");
-        // sh:or 里的备选类型不读，路径本身照读
+        // The alternative types inside sh:or are not read; the path itself is read
         let v = by_iri(&p, "vendor");
         assert_eq!(v.domains, ex(&["Tool"]));
         assert!(v.ranges.is_empty(), "{v:?}");
-        // 形状点到的属性要文件里声明过，才建出来
+        // A property the shape points at is built only if the file declares it
         assert!(!p.properties.iter().any(|x| x.iri.ends_with("undeclared")));
     }
 
@@ -2052,13 +2052,13 @@ ex:version a owl:DatatypeProperty ; rdfs:domain ex:Device ; rdfs:range xsd:integ
                 p.unprojected
             );
         }
-        // 不读的照旧报告
+        // Those not read are reported as before
         assert!(
             p.unprojected.contains_key(&format!("{SH}targetSubjectsOf")),
             "{:?}",
             p.unprojected
         );
-        // 三元组数照旧只数主语是 IRI 的：为属性形状留下的空节点三元组不算
+        // The triple count still counts only subjects that are IRIs, as before: blank-node triples left for property shapes do not count
         let iri_subjects = oxttl::TurtleParser::new()
             .for_reader(SHAPES.as_bytes())
             .map(Result::unwrap)

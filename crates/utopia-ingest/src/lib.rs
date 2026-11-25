@@ -1,5 +1,5 @@
-//! utopia-ingest: 解析矩阵 + 分块。
-//! 原则：文本层 Rust 原生解决（快、零依赖）；扫描件/复杂版式后续走 docling sidecar。
+//! utopia-ingest: parse matrix and chunking.
+//! Principle: the text layer is handled natively in Rust (fast, zero dependencies); scanned files and complex layouts go later through the docling sidecar.
 
 #[cfg(test)]
 mod html_tests {
@@ -132,18 +132,18 @@ mod reader_tests {
     #[test]
     fn an_image_or_a_recording_waits_for_its_reader() {
         assert_eq!(needs("scan.png", PNG), Some(Reader::Ocr));
-        // 扩展名撒谎：文件头说了算
+        // The extension lies: the file header decides
         assert_eq!(needs("notes.txt", PNG), Some(Reader::Ocr));
         assert_eq!(needs("meeting.mp3", MP3), Some(Reader::Transcribe));
         assert_eq!(needs("meeting.wav", WAV), Some(Reader::Transcribe));
-        // 认不出文件头时看扩展名
+        // When the header is not recognized, look at the extension
         assert_eq!(needs("photo.heic", &[0, 1, 2, 3]), Some(Reader::Ocr));
         assert_eq!(needs("call.amr", &[0, 1, 2, 3]), Some(Reader::Transcribe));
     }
 
     #[test]
     fn a_binary_is_not_decoded_as_text() {
-        // 老式 .doc 这类：开头夹着 NUL，从前会解成乱码进库
+        // Old-style .doc and the like: NUL bytes near the start; these used to be decoded into garbage and stored
         assert!(unreadable(
             "old.doc",
             &[0xD0, 0xCF, 0x11, 0xE0, 0, 0, 0, 0, b'x']
@@ -153,10 +153,10 @@ mod reader_tests {
             &[0, 0, 0, 0x18, b'f', b't', b'y', b'p', b'm', b'p', b'4', b'2']
         ));
         assert!(unreadable("empty.txt", b"   \n\n  "));
-        // 真正的文本照读，UTF-16 带字节序标记的不算二进制
+        // Real text is read as-is; UTF-16 with a byte order mark does not count as binary
         assert!(parse("a.txt", "你好，世界".as_bytes()).is_ok());
         assert!(!looks_binary(&[0xFF, 0xFE, b'h', 0, b'i', 0]));
-        // PDF 文本层抄来的正文夹着 NUL 但是合法 UTF-8：照读（#611）
+        // Body text copied from a PDF text layer can contain NUL but is still valid UTF-8: read it (#611)
         assert!(parse("layer.md", "Revenue grew\0 twelve percent.".as_bytes()).is_ok());
     }
 }
@@ -179,14 +179,14 @@ pub use parsers::plain_text as decode_text;
 pub use provenance::{Origin, Provenance, Segment};
 pub use reading::Reading;
 
-/// 解析产物：纯文本 + 可选结构信息和可观测的解析警告。
+/// Parse output: plain text plus optional structure info and observable parse warnings.
 #[derive(Debug)]
 pub struct ParsedDoc {
     pub text: String,
     pub warnings: Vec<ParseWarning>,
 }
 
-/// 解析器到了安全上限，正文有意只保留一部分；`detail` 说明省略的范围。
+/// The parser hit its safety limit, so the body intentionally keeps only part of it; `detail` explains the omitted range.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseWarning {
     pub kind: &'static str,
@@ -198,12 +198,12 @@ impl ParseWarning {
     pub const CSV_RECORDS_TRUNCATED: &'static str = "csv.records_truncated";
 }
 
-/// 读出字要靠哪一种模型（0040）
+/// Which kind of model is needed to read the characters (0040)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reader {
-    /// 扫描件、图片：版面识别（MinerU 这类服务）
+    /// Scanned documents and images: layout recognition (services such as MinerU)
     Ocr,
-    /// 录音：带说话人的转写
+    /// Recordings: transcription with speaker labels
     Transcribe,
 }
 
@@ -215,7 +215,7 @@ impl Reader {
         }
     }
 
-    /// 报错里说缺的是什么
+    /// What the error says is missing
     fn wanted(self) -> &'static str {
         match self {
             Reader::Ocr => "a document-reading (OCR) service",
@@ -224,31 +224,31 @@ impl Reader {
     }
 }
 
-/// 这份文件没有可以直接读的文字，要靠 [`Reader`] 那一种模型读。
+/// This file has no text that can be read directly; it needs the model behind [`Reader`] to read it.
 ///
-/// **不是解析失败**：文件没坏，只是这一步轮不到文本解析器。从前图片和录音会掉进
-/// 「按文本解码」那一支，解出一堆乱码、照样分块、嵌入、抽取；扫描件则报一句笼统的
-/// 「没抽出文字」，重试三次。现在它们停在这里，交给配了模型的读取器，没配就降级并告警
+/// **Not a parse failure**: the file is not broken, this step just has no text parser. Images and recordings used to fall into
+/// the "decode as text" branch, which produced a pile of garbage that was still chunked, embedded and extracted; scanned PDFs got a generic
+/// "no text extracted" error and were retried three times. Now they stop here and go to a configured reader model; without one, they degrade and raise a warning
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("This {what} has no text layer; reading it needs {}", reader.wanted())]
 pub struct NeedsReader {
     pub reader: Reader,
-    /// 给人看的是什么文件：scanned PDF / image / recording
+    /// What kind of file the person sees: scanned PDF / image / recording
     pub what: &'static str,
 }
 
-/// 录音转写回来了，却分不出谁说的（0040 决定 5）。
+/// The recording was transcribed, but the speakers could not be told apart (0040 decision 5).
 ///
-/// 跟没配转写模型一样对待：不读，文档停下、告警说明原因。分不出说话人的会议记录，「张三说
-/// 他三季度交付」和「李四说张三三季度交付」是同一行字，承诺会记到错的人头上——比什么都
-/// 不抽更糟。换一个会标说话人的模型，存设置时它会重新排队
+/// Treated the same as having no transcription model configured: not read, the document stops and a warning says why. A meeting transcript
+/// that cannot tell speakers apart reads "A says B delivered in Q3" and "B says A delivered in Q3" as the same line of text, so the commitment lands on the wrong person,
+/// which is worse than extracting nothing. Once a model that labels speakers is configured, saving the setting queues it again.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error(
     "The transcription model did not say who spoke; a recording is read only with speaker labels"
 )]
 pub struct NoSpeakers;
 
-/// 这份文件读不了，换什么模型也读不了（视频、可执行文件、老式二进制格式）。重试没用
+/// This file cannot be read, and no model can read it (video, executables, old binary formats). Retrying does not help
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{0}")]
 pub struct Unreadable(pub String);
@@ -261,9 +261,9 @@ const AUDIO_EXTS: &[&str] = &[
 ];
 const VIDEO_EXTS: &[&str] = &["mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv"];
 
-/// 按文件头（认得出来的话）或扩展名判断这是不是要模型读的媒体文件。
+/// Decides from the file header (when recognizable) or the extension whether this is a media file that a model has to read.
 ///
-/// 文件头优先：扩展名可能撒谎。认不出文件头的才看扩展名
+/// The header takes priority: the extension may lie. Only files whose header is not recognized fall back to the extension
 fn media_kind(bytes: &[u8], ext: &str) -> Option<Result<NeedsReader, Unreadable>> {
     use infer::MatcherType;
     let by_header = infer::get(bytes).map(|t| t.matcher_type());
@@ -291,11 +291,11 @@ fn media_kind(bytes: &[u8], ext: &str) -> Option<Result<NeedsReader, Unreadable>
     None
 }
 
-/// 按文本解码之前看一眼是不是二进制：开头夹着 NUL、**而且**不是合法的 UTF-8。
+/// Before decoding as text, check whether the content is binary: it contains NUL near the start **and** is not valid UTF-8.
 ///
-/// 两条都要：PDF 文本层抄出来的正文会夹 NUL，但它是合法的 UTF-8（#611，照读、剥掉 NUL）；
-/// GBK 这类中文编码不是合法的 UTF-8，但不夹 NUL。老式 .doc、压缩包两条都占。
-/// 带 UTF-16 字节序标记的不算
+/// Both conditions are needed: body text copied from a PDF text layer can contain NUL but is valid UTF-8 (#611: read it, strip the NUL);
+/// Chinese encodings such as GBK are not valid UTF-8 but contain no NUL. Old .doc files and archives hit both conditions.
+/// Content with a UTF-16 byte order mark does not count as binary
 fn looks_binary(bytes: &[u8]) -> bool {
     if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
         return false;
@@ -304,16 +304,16 @@ fn looks_binary(bytes: &[u8]) -> bool {
     if !head.contains(&0) {
         return false;
     }
-    // 截断可能切在一个多字节字符中间：只看完整的那一段是否合法
+    // Truncation may cut in the middle of a multi-byte character: only check validity of the complete part
     match std::str::from_utf8(head) {
         Ok(_) => false,
         Err(e) => e.error_len().is_some(),
     }
 }
 
-/// 支持的格式（P1）：pdf / docx / xlsx·xls·ods / pptx / md / txt / html / csv / json / yaml / xml / log。
+/// Supported formats (P1): pdf / docx / xlsx·xls·ods / pptx / md / txt / html / csv / json / yaml / xml / log.
 ///
-/// 要模型读的（扫描件、图片、录音）返回挂着 [`NeedsReader`] 的错误；读不了的挂 [`Unreadable`]
+/// Those that need a model (scanned documents, images, recordings) return an error with [`NeedsReader`] attached; the ones that cannot be read at all get [`Unreadable`]
 pub fn parse(filename: &str, bytes: &[u8]) -> anyhow::Result<ParsedDoc> {
     let ext = filename
         .rsplit('.')
@@ -327,13 +327,13 @@ pub fn parse(filename: &str, bytes: &[u8]) -> anyhow::Result<ParsedDoc> {
         None => {}
     }
 
-    // 魔数探测优先于扩展名（扩展名可能撒谎）
+    // Magic-number detection takes priority over the extension (the extension may lie)
     let kind = infer::get(bytes).map(|t| t.extension()).unwrap_or("");
 
     let (text, warnings) = match (kind, ext.as_str()) {
         ("pdf", _) | (_, "pdf") => {
             let text = parsers::pdf(bytes)?;
-            // 文本层是空的：扫描件，字在图里
+            // The text layer is empty: a scanned document, the text is in the image
             if text.trim().is_empty() {
                 return Err(NeedsReader {
                     reader: Reader::Ocr,
@@ -348,9 +348,9 @@ pub fn parse(filename: &str, bytes: &[u8]) -> anyhow::Result<ParsedDoc> {
         ("pptx", _) | (_, "pptx") => (parsers::pptx(bytes)?, Vec::new()),
         (_, "html") | (_, "htm") => (parsers::html(bytes)?, Vec::new()),
         (_, "csv") | (_, "tsv") => parsers::csv_text(bytes, ext == "tsv")?,
-        // md/json/yaml/xml/log/txt 及一切未识别格式：按文本解码（编码探测覆盖 GBK 等）。
-        // 解码之前先看是不是二进制：老式 .doc、压缩包、可执行文件解出来是乱码，
-        // 从前照样分块、嵌入、抽取
+        // md/json/yaml/xml/log/txt and every unrecognized format: decode as text (encoding detection covers GBK and so on).
+        // Check for binary content before decoding: old-style .doc, archives and executables decode to garbage,
+        // which used to be chunked, embedded and extracted as-is
         _ if looks_binary(bytes) => {
             return Err(
                 Unreadable("This file is not in a format that can be read as text".into()).into(),
@@ -366,7 +366,7 @@ pub fn parse(filename: &str, bytes: &[u8]) -> anyhow::Result<ParsedDoc> {
     Ok(ParsedDoc { text, warnings })
 }
 
-/// 压缩连续空白行，统一换行符。
+/// Collapse consecutive blank lines and normalize line endings.
 fn normalize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut blank_run = 0;

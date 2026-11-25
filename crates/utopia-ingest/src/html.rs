@@ -8,7 +8,7 @@ mod table_tests {
         let html = "<table><tr><td>Revenue</td><td>Q2 FY27</td><td>Q1 FY27</td></tr>\
                     <tr><td>total</td><td>$96,221</td><td>$81,615</td></tr></table>";
         let md = markdown_from_html(html).expect("converts");
-        // 行列关系还在：同一行的三格在同一行文本里
+        // Row and column relations survive: the three cells of one row stay on one row of text
         let row = md
             .lines()
             .find(|l| l.contains("96,221"))
@@ -47,7 +47,7 @@ mod table_tests {
         assert!(md.contains("b"), "有内容的列不能砍: {md}");
     }
 
-    /// 页面标题「Pricing」又出现在表名「Pricing tiers」里：那是表的名字，不是正文里的标题
+    /// The page title "Pricing" also appears in the table name "Pricing tiers": that is the table's name, not a heading in the body text
     #[test]
     fn a_caption_that_repeats_the_page_title_keeps_the_title_heading() {
         let page = "<html><head><title>Pricing</title></head><body><article>\
@@ -71,7 +71,7 @@ mod table_tests {
 
     #[test]
     fn a_nested_table_does_not_promote_the_outer_row() {
-        // 内层先被处理；外层因此看得见 <th>，跳过——不猜哪一行属于谁
+        // The inner table is processed first; the outer one therefore sees <th> and skips, rather than guessing which row belongs to whom
         let html = "<table><tr><td><table><tr><td>inner</td></tr></table></td></tr></table>";
         let out = promote_first_row_headers(html);
         assert_eq!(out.to_ascii_lowercase().matches("<th").count(), 1, "{out}");
@@ -185,8 +185,8 @@ pub fn page_to_markdown(html: &str, base_url: Option<&str>) -> Result<String, Ht
             }
             let (markdown, prose) = markdown_and_prose(&article.content)?;
             let title = article.title.trim();
-            // 只在 htmd 写的正文里找标题，不看换回来的表：表前的说明句（<caption>、标题行）
-            // 常常重复页面标题，算进去就不补 `# 标题`，每一块的面包屑里也就没有它
+            // Look for headings only in the body text htmd wrote, not in the reattached tables: the explanatory sentence before a table (<caption>, header row)
+            // often repeats the page title; counting it would skip adding `# Title`, and no chunk's breadcrumb would carry it
             if title.is_empty() || prose.contains(title) {
                 Ok(markdown)
             } else {
@@ -322,25 +322,25 @@ pub fn looks_like_challenge_shell(markdown: &str) -> bool {
         && !has_substantive_prose(markdown)
 }
 
-/// 没有 `<th>` 的表格，把第一行的 `<td>` 提成 `<th>`。
+/// A table with no `<th>`: promote the `<td>` cells of the first row to `<th>`.
 ///
-/// **理由是一整类文档在解析这一步就把行列关系丢了。** htmd 的表格处理器要求
-/// 表里有显式表头（`<th>` 或 `<thead>`），否则整张退回逐格摊平——一格一行。
-/// 而 SEC 的 XBRL 报表一个都没有：实测 NVIDIA 那份财报 11 张表、那份投票结果
-/// 8-K 21 张表，`<th>` 计数都是 0。摊平之后模型看到的是一列孤立标签跟一列
-/// 孤立数字，只能按顺序猜哪个数配哪一列，于是抽出 `NVIDIA net_worth Net income`
-/// 这种边，十位董事的四类票数也全部退化成分不出类别的裸数字。
+/// **The reason: a whole class of documents loses the row and column relations at the parsing step.** htmd's table handler requires
+/// an explicit header (`<th>` or `<thead>`), otherwise the whole table falls back to flattening, one cell per line.
+/// SEC XBRL reports have none of them: measured, the NVIDIA earnings report has 11 tables and the vote-result 8-K has 21,
+/// all with `<th>` counts of 0. After flattening, the model sees a column of isolated labels next to a column of
+/// isolated numbers, and can only guess by order which number goes with which column, so it extracts edges like `NVIDIA net_worth Net income`,
+/// and the four vote categories for ten directors all degrade into bare numbers that cannot be told apart.
 ///
-/// 第一行提成表头是这类表格的实际语义（"Q2 FY27 | Q1 FY27 | Q2 FY26"），
-/// 而且**判据很窄**：整张表一个 `<th>`/`<thead>` 都没有时才动。已经有表头的
-/// 表格一个字不改。
+/// Promoting the first row to the header is what these tables actually mean ("Q2 FY27 | Q1 FY27 | Q2 FY26"),
+/// and the rule is **deliberately narrow**: it only applies when the whole table has no `<th>`/`<thead>` at all. A table that already has a header
+/// is left exactly as it is.
 ///
-/// 嵌套表格按**从内到外**处理（`</table>` 出现的顺序天然如此）：内层改过之后
-/// 外层就带着 `<th>` 了，于是外层跳过——宁可少改一张，不去猜哪一行属于谁。
+/// Nested tables are processed **inside out** (the order `</table>` appears gives exactly that): after the inner one is changed,
+/// the outer one already carries `<th>`, so the outer one is skipped. Better to change one table less than to guess which row belongs to whom.
 fn promote_first_row_headers(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let mut out = html.to_string();
-    // (开标签结束位置, 表格结束位置)，按闭合顺序 = 从内到外
+    // (end position of the opening tag, end position of the table), in closing order = inside out
     let mut opens: Vec<usize> = Vec::new();
     let mut spans: Vec<(usize, usize)> = Vec::new();
     let mut i = 0usize;
@@ -365,7 +365,7 @@ fn promote_first_row_headers(html: &str) -> String {
             (None, None) => break,
         }
     }
-    // 位置会随改写移动，所以从后往前改
+    // Positions shift as rewriting happens, so rewrite from the back to the front
     spans.sort_by_key(|(o, _)| std::cmp::Reverse(*o));
     for (open, close) in spans {
         let seg = &out[open..close.min(out.len())];
@@ -389,7 +389,7 @@ fn promote_first_row_headers(html: &str) -> String {
     out
 }
 
-/// 只换标签名，属性原样留着。
+/// Only the tag name is swapped; attributes are kept as they are.
 fn replace_td_with_th(row: &str) -> String {
     let mut out = String::with_capacity(row.len());
     let lower = row.to_ascii_lowercase();
@@ -410,15 +410,15 @@ fn replace_td_with_th(row: &str) -> String {
     out
 }
 
-/// 表格里整列都空的，砍掉；对齐用的空格也不留。
+/// Columns that are empty throughout the table are dropped; alignment spaces are not kept either.
 ///
-/// **不砍的代价是三倍。** 排版用的空单元格（XBRL 的缩进列、货币符号列）在
-/// HTML 里不占地方，转成 markdown 管道表之后每一行都要为它们写一个 `|` 和
-/// 一片对齐空格。实测那份财报：24 块 2.6 万字符 → 78 块 9.2 万字符，多出来的
-/// 全是 `|  |  |  |`。分块数进了抽取的成本，一列空格不值这个钱。
+/// **Not dropping them costs triple.** Empty cells used for layout (XBRL indent columns, currency-symbol columns) take up no room in
+/// HTML, but once converted to a Markdown pipe table every row must write a `|` and a run of alignment spaces for each of them.
+/// Measured on that earnings report: 24 chunks totaling 26k characters became 78 chunks totaling 92k characters; the extra is all `|  |  |  |`.
+/// Chunk count feeds the cost of extraction, and a column of spaces is not worth that cost.
 ///
-/// 判据是「这一列在**每一行**都空」，所以有内容的列一个不动；分隔行不参与判断
-/// （它本来就只有横线），但跟着一起砍列。
+/// The test is "this column is empty in **every** row", so columns with content are never touched; the separator row does not take part in the decision
+/// (it is only dashes anyway), but its column is dropped along with the rest.
 fn prune_empty_table_columns(markdown: &str) -> String {
     let is_row = |l: &str| {
         let t = l.trim();
@@ -458,7 +458,7 @@ fn prune_empty_table_columns(markdown: &str) -> String {
                     .any(|r| !is_sep(r) && r.get(c).is_some_and(|x| !x.is_empty()))
             })
             .collect();
-        // 一列都不剩就原样留着，不去猜
+        // If no column is left, keep the table as it is, rather than guessing
         if !keep.iter().any(|k| *k) {
             out.extend(lines[start..i].iter().map(|l| l.to_string()));
             continue;
@@ -478,10 +478,10 @@ fn prune_empty_table_columns(markdown: &str) -> String {
                 .collect();
             format!("| {} |", kept.join(" | "))
         };
-        // **表头整行是空的就让位。** 提上来的第一行有时只是排版用的占位行
-        // （SEC 那份投票结果 8-K 的每张表都这样），留着它，模型看到的是
-        // 一张列名全空的表——没有信息，还占着「表头」这个位置。下一行顶上，
-        // 表的第一行才是它真正的抬头（"a. Tench Coxe"）。
+        // **If the header row is entirely empty, step aside.** The first row that gets promoted is sometimes only a layout placeholder row
+        // (every table in the SEC vote-result 8-K looks like this). Keeping it means the model sees
+        // a table whose column names are all empty: no information, while still occupying the "header" slot. The next row takes its place, and
+        // the table's first row is then its real heading ("a. Tench Coxe").
         let head_blank = rows.first().is_some_and(|r| {
             (0..width)
                 .filter(|c| keep[*c])
@@ -509,10 +509,10 @@ fn markdown_from_html(html: &str) -> Result<String, HtmlError> {
     markdown_and_prose(html).map(|(markdown, _)| markdown)
 }
 
-/// 转出的 Markdown，和表换回去之前 htmd 写出的那份（表还是占位段落）
+/// The Markdown produced by conversion, and the version htmd wrote before the table was swapped back (the table was still a placeholder paragraph)
 fn markdown_and_prose(html: &str) -> Result<(String, String), HtmlError> {
-    // 最外层的表先从 DOM 渲染成带真表头的 Markdown（见 `table`），htmd 只看到占位段落；
-    // 套着的表还走老路，所以第一行提表头的补丁留着给它们
+    // The outermost table is first rendered from the DOM as Markdown with a real header (see `table`); htmd only sees a placeholder paragraph;
+    // nested tables still take the old route, so the first-row header promotion patch stays for them
     let (html, tables) = crate::table::lift_tables(html);
     let html = &promote_first_row_headers(&html);
     let markdown = htmd::HtmlToMarkdown::builder()

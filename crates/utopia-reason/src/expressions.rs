@@ -77,8 +77,8 @@ impl DatePart {
         let Scalar::Text(text) = value else {
             return None;
         };
-        // 年精度存的是 "2024"，月精度是 "2024-03"（规则 3）。截到比字更细的一档
-        // 是在补一个原文没有的日或月，所以没有。
+        // Year precision is stored as "2024", month precision as "2024-03" (rule 3). Truncating to a finer tier
+        // fills in a day or month the source never had, so there is none.
         let (date, finest) = if text.len() == 10 {
             (
                 NaiveDate::parse_from_str(&text, "%Y-%m-%d").ok()?,
@@ -90,7 +90,7 @@ impl DatePart {
                 Self::Month,
             )
         } else if text.len() == 4 {
-            // 四位数字才是年：`parse` 也收 "+202"、"-123"，它们不是存下来的年精度
+            // Only four digits make a year: `parse` also accepts "+202" and "-123", which are not stored year precision
             if !text.bytes().all(|b| b.is_ascii_digit()) {
                 return None;
             }
@@ -464,7 +464,7 @@ mod tests {
         }
         let expr = Expr::from_json(&json!({"date_trunc":"month","expr":{"attr":id(1)}})).unwrap();
         let day = Expr::from_json(&json!({"date_trunc":"day","expr":{"attr":id(1)}})).unwrap();
-        // 月精度没有日，年精度没有月：截得更细就没有值
+        // Month precision has no day, year precision has no month: truncating finer yields no value
         assert_eq!(
             day.evaluate(&|_| Some(Scalar::Text("2024-03".into()))),
             None

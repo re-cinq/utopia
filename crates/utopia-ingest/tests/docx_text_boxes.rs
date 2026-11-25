@@ -1,8 +1,8 @@
-//! Word 文档里的文本框只读一遍。
+//! A text box in a Word document is read once.
 //!
-//! Word 2010 起把一个文本框写两遍，包在 `mc:AlternateContent` 里：`mc:Choice` 是新的画法
-//! （wps 形状，字在 `wps:txbx/w:txbxContent`），`mc:Fallback` 是给旧版 Word 的 VML 画法
-//! （字在 `v:textbox/w:txbxContent`）。两份是同一段字，读的人只看见一个框。
+//! Since Word 2010 a text box is written twice, wrapped in `mc:AlternateContent`: `mc:Choice` is the new drawing
+//! (wps shape, text in `wps:txbx/w:txbxContent`), and `mc:Fallback` is the VML drawing for older Word
+//! (text in `v:textbox/w:txbxContent`). Both copies hold the same text, and the reader sees only one box.
 
 use std::io::{Cursor, Write};
 
