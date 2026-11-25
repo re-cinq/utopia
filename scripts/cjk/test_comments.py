@@ -34,6 +34,17 @@ class SplitLines(unittest.TestCase):
     def test_cjk_in_string_stays_in_code_projection(self):
         self.assertEqual(code_projection(['let s = "名字";'], True), ['let s = "名字";'])
 
+    def test_raw_string_hides_double_slash_and_keeps_cjk_as_code(self):
+        line = 'const X: &str = r#"<a href="http://x">项目</a>"#; // 注释'
+        self.assertEqual(comments_of([line]), ["// 注释"])
+
+    def test_raw_string_spanning_lines_is_code_on_every_line(self):
+        lines = ['let x = r#"first // 一', 'second "quoted" // 二"#; // 三']
+        self.assertEqual(comments_of(lines), ["", "// 三"])
+
+    def test_identifier_ending_in_r_before_a_string_is_not_a_raw_string(self):
+        self.assertEqual(comments_of(['let bar = "a//b"; // 注释']), ["// 注释"])
+
 
 if __name__ == "__main__":
     unittest.main()
