@@ -1,20 +1,20 @@
-//! 分块：把文档块打包成抽取一次能看见的单元。
+//! Chunking: packs document blocks into units that extraction can see in a single pass.
 //!
-//! **块的职责是「抽取一次能看见的全部」。**模型只看这一块，切开的东西补不回来，
-//! 所以块边界是抽取契约的一部分，不是文本处理的细节。从这条出发定的规矩：
+//! **A chunk's job is to hold everything extraction can see at once.** The model sees only this chunk, and anything cut apart cannot be patched back together,
+//! so chunk boundaries are part of the extraction contract, not a text-processing detail. Rules derived from this:
 //!
-//! - 一行不拆；表头与表体不拆；说明句（表上面那句「结果如下：」）与它的表不拆；
-//!   标题与它下面的第一段不拆。
-//! - 一张表放得下就整张放。放不下才按行切，**每个续块重复面包屑、说明句和表头**
-//!   ——这一条才是修「续块只剩一行五个美元数」的那一刀，换再聪明的切分器都不解决它。
-//! - 预算按 token 算，不按字符。从前是 1200 字符，注释说「约 1000+ token」，那是中文；
-//!   英文只有 300 上下，一张宽表放不下。现在两种语言拿到的是同一个预算。
-//! - 水平线**不是**切点。从前的切分器偏爱在水平线上切，而这类文档里水平线是分页符：
-//!   投票结果里一张表正是被它劈成了两半。
-//! - 不重叠。块是语义单元，上下文靠面包屑和补头给，不靠把上一块的尾巴抄一遍。
+//! - A line is not split; a table header and its body are not split; an explanatory sentence (the "results are as follows:" line above a table) and its table are not split;
+//!   a heading and the first paragraph under it are not split.
+//! - A table that fits is kept whole. It is split by row only when it does not fit, and **every continuation chunk repeats the breadcrumb, the explanatory sentence and the header**
+//!   — this is the rule that fixes "a continuation chunk with only one row of five dollar figures"; no cleverer splitter solves that on its own.
+//! - The budget is counted in tokens, not characters. It used to be 1200 characters, with a comment saying "about 1000+ tokens", which was meant for Chinese;
+//!   English got only around 300, and a wide table did not fit. Now both languages get the same budget.
+//! - A horizontal rule is **not** a split point. The old splitter liked to split at horizontal rules, but in these documents a rule is a page break:
+//!   in a vote result, one table was split in half by exactly that.
+//! - No overlap. Chunks are semantic units; context comes from breadcrumbs and reattached headers, not from copying the tail of the previous chunk.
 //!
-//! 每块的正文都是原文的切片，一个字不改；前缀（面包屑、说明句、表头）也是原文的
-//! 切片，只是从别处抄来的。`char_start` / `char_end` 指正文那一段，不含前缀。
+//! Each chunk's body is a slice of the source with no character changed; the prefixes (breadcrumb, explanatory sentence, header) are also slices of the source,
+//! just copied from elsewhere. `char_start` / `char_end` refer to the body segment, excluding the prefixes.
 
 use crate::blocks::{blocks, Block, Kind};
 use crate::provenance::{Provenance, Segment};
@@ -29,29 +29,29 @@ pub struct ChunkPiece {
     pub text: String,
     pub char_start: i32,
     pub char_end: i32,
-    /// 这块所在的章节路径，`›` 分隔；没有标题的文档为 None
+    /// The section path this chunk sits in, separated by `›`; None for a document with no headings
     pub heading: Option<String>,
-    /// 这块文字从哪来（0040）。一块只有一种出处
+    /// Where the text of this chunk comes from (0040). A chunk has only one origin
     pub provenance: Provenance,
 }
 
-/// 一块的预算（cl100k token）。
+/// A chunk's budget (cl100k tokens).
 ///
-/// **300，不是 1000。**1000 是旧字符预算的注释里写的本意，第一轮就量掉了：收购
-/// 8-K 从九块变成两块，模型对着 4700 字符只写了七条事实——地址、电话、「published
-/// in the SEC」——收购本身一条都没有。模型一次调用写出的事实数不随输入变长而变多，
-/// 块一大它就挑最容易的几条写。300 是旧切法在英文上的实际大小，也是 43/45 那两轮
-/// 量出来的条件；中文在这个数下拿到的上下文比从前少，还没量（0039 开放问题）。
+/// **300, not 1000.** 1000 was the intent in the old character-budget comment; the first round measured it away: the acquisition
+/// 8-K went from nine chunks to two, and the model wrote only seven facts from 4700 characters (the address, the phone number, "published
+/// in the SEC"), and not one fact about the acquisition itself. The number of facts one call writes does not grow as the input grows;
+/// with a bigger chunk it picks the easiest few to write. 300 is the real size the old splitting had in English, and it is the condition the 43/45 rounds
+/// measured; Chinese gets less context than before at this number, which has not been measured yet (0039 open question).
 pub const BUDGET_TOKENS: usize = 300;
 
-/// 说明句最长多少字节还算说明句：表上面那一段要短、或者以冒号结尾，
-/// 才当成表的一部分带着走；一整段分析不是说明句。全角冒号也算：200 字节只有六十几个汉字，
-/// 长一点的「……如下：」全靠结尾的冒号认；从前只认半角，表落在另一块里就看不见这句话
+/// The longest a paragraph can be and still count as an explanatory sentence: the paragraph above a table must be short, or end with a colon,
+/// to be carried along as part of the table. A whole analysis paragraph is not an explanatory sentence. Full-width colons count too: 200 bytes is only sixty-odd Chinese characters,
+/// so a longer sentence ending in "as follows:" is recognized only by its colon; before, only the half-width colon counted, and when the table fell in another chunk, the sentence was invisible.
 const CAPTION_MAX_BYTES: usize = 200;
-/// 表前最多几段短说明一起当说明句
+/// At most how many short paragraphs before a table are taken together as its explanatory sentence
 const CAPTION_RUN_MAX: usize = 5;
 
-/// 不到这么多 token 的一段（页码、脚注标记）不单独成块，并进上一块
+/// A paragraph shorter than this many tokens (a page number, a footnote marker) does not form a chunk alone; it joins the previous chunk
 const TINY_TOKENS: usize = 8;
 
 pub fn chunk_text(text: &str) -> Vec<ChunkPiece> {
@@ -67,7 +67,7 @@ fn tokens(s: &str) -> usize {
     bpe().encode_ordinary(s).len()
 }
 
-/// 打包的单元：标题贴着下一块走；表带着自己的说明句。
+/// A packing unit: a heading goes with the next chunk; a table carries its own explanatory sentence.
 enum Unit {
     Heading {
         level: u8,
@@ -93,21 +93,21 @@ fn units(text: &str, blocks: Vec<Block>) -> Vec<Unit> {
             }),
             Kind::Rule => {}
             Kind::Paragraph => {
-                // 紧跟着表的短段落是说明句，跟表走。**两条通用的补充**（召回台子，
-                // 2026-09-13 充值后那一轮量出来的）：
+                // A short paragraph right after a table is its explanatory sentence and goes with the table. **Two general additions** (recall desk,
+                // measured in the round after the 2026-09-13 top-up):
                 //
-                // - 说明句和表之间隔着水平线也算紧跟。这类文档里水平线是分页符，
-                //   第五项议案的「结果如下：」和它的表正好被一页隔开，说明句留在了
-                //   上一块，表去了下一块。
-                // - 一句说明引出的是**紧跟其后的一串表**，不只第一张。「选举十位董事
-                //   提名人，结果如下：」后面是十张表，从前只有第一张带着它；黄仁勋
-                //   那张在另一块里，四个票数都对，却没有一句话说这是在投什么，
-                //   「当选董事」那条边就没了。一串到别的东西（段落、标题）出现为止。
+                // - A horizontal rule between an explanatory sentence and its table still counts as right after. In these documents a rule is a page break,
+                //   so in item five of the resolutions, the "results are as follows:" line and its table were split by a page: the sentence stayed in
+                //   the previous chunk while the table went to the next one.
+                // - An explanatory sentence introduces the **run of tables right after it**, not just the first one. "Nominees for ten directors,
+                //   results are as follows:" is followed by ten tables, and before, only the first carried it. Jensen Huang's
+                //   table was in another chunk, and its four vote counts are all right, but no sentence says what is being voted on,
+                //   so the "elected director" edge was lost. A run lasts until something else (a paragraph, a heading) appears.
                 //
-                // - 表前**连续几段**短说明一起算：财报的「NVIDIA CORPORATION」「CONDENSED
-                //   CONSOLIDATED STATEMENTS OF INCOME」「(In millions)」「(Unaudited)」是四个
-                //   段落，只带最后一段的话，模型看到的表不知道是哪张报表、什么单位。
-                //   一串最多五段，中间不隔别的东西
+                // - **Several consecutive short paragraphs** before a table count together: in a financial report, "NVIDIA CORPORATION", "CONDENSED
+                //   CONSOLIDATED STATEMENTS OF INCOME", "(In millions)" and "(Unaudited)" are four paragraphs; carrying only the last one leaves the model
+                //   seeing a table that does not know which report it is or what unit it is in.
+                //   A run is at most five paragraphs, with nothing else in between
                 let caption_like = |blk: &Block| {
                     matches!(blk.kind, Kind::Paragraph)
                         && (blk.range.len() <= CAPTION_MAX_BYTES
@@ -148,7 +148,7 @@ fn units(text: &str, blocks: Vec<Block>) -> Vec<Unit> {
                     }
                 }
                 if attached == 0 {
-                    // 不是说明句：这一段照常；后面那几段下一轮各自再看
+                    // Not an explanatory sentence: this paragraph goes through as usual; the paragraphs after it are each looked at again in the next round
                     out.push(Unit::Text(b.range.clone()));
                 } else {
                     i = j - 1;
@@ -166,7 +166,7 @@ fn units(text: &str, blocks: Vec<Block>) -> Vec<Unit> {
     out
 }
 
-/// 正文里的一项：一段文本，或一张（可能只剩几行的）表
+/// One item in the body: a text paragraph, or a table (possibly only a few rows left)
 enum Piece {
     Text(Range<usize>),
     Table {
@@ -219,22 +219,22 @@ struct Packer<'a> {
     text: &'a str,
     budget: usize,
     out: Vec<ChunkPiece>,
-    /// 现在在哪一章：(层级, 标题行)
+    /// Which chapter we are in now: (level, heading line)
     path: Vec<(u8, Range<usize>)>,
-    /// 出现了、还没贴到正文上的标题
+    /// Headings that have appeared but are not yet attached to body text
     pending: Vec<Range<usize>>,
-    /// 这串 `pending` 标题出现之前的 `path`：它们还没贴上正文时，正在攒的那块仍属于这一章
+    /// The `path` before these `pending` headings appeared: while they are not yet attached to body text, the chunk being collected still belongs to this chapter
     before_pending: Vec<(u8, Range<usize>)>,
-    /// 正在攒的块：前缀（章节标题）与正文
+    /// The chunk being collected: prefix (section headings) and body
     prefix: Vec<Range<usize>>,
     body: Vec<Piece>,
-    /// 正文按出处分成的段；正在攒的块属于 `current` 那一段
+    /// The body, split into segments by origin; the chunk being collected belongs to the segment `current` points to
     segments: &'a [Segment],
     current: usize,
 }
 
 impl<'a> Packer<'a> {
-    /// 位置 `at` 落在哪一段（段按位置排好序）
+    /// Which segment position `at` falls in (segments are sorted by position)
     fn segment_of(&self, at: usize) -> usize {
         self.segments
             .iter()
@@ -242,8 +242,8 @@ impl<'a> Packer<'a> {
             .unwrap_or(0)
     }
 
-    /// 下一项要进 `seg` 那一段：跟正在攒的块不是同一段，先把那块收掉。
-    /// 标题不跟着收——它属于接下来的正文，面包屑也照样往下传
+    /// The next item goes into the `seg` segment: if it is not the same segment as the chunk being collected, close that chunk first.
+    /// Headings do not close with it: they belong to the following body text, and the breadcrumb keeps passing down as well
     fn enter_segment(&mut self, seg: usize) {
         if seg != self.current {
             self.flush();
@@ -256,8 +256,8 @@ impl<'a> Packer<'a> {
             .iter()
             .map(|r| self.text[r.clone()].to_string())
             .collect();
-        // 同一块里一串表共用一句说明：说明只在第一张前面出现一次。
-        // 十位董事的十张表挤在一块里，不该把「结果如下」念十遍
+        // Within one chunk, a run of tables shares one sentence: the explanation appears only once, before the first table.
+        // Ten tables for ten directors packed into one chunk should not repeat "results are as follows" ten times
         let mut last_caption: Option<Range<usize>> = None;
         for p in body {
             match p {
@@ -286,7 +286,7 @@ impl<'a> Packer<'a> {
         parts.join("\n\n")
     }
 
-    /// 新块的前缀：现在这一章的标题路径，去掉马上要作为正文出现的那几条
+    /// Prefix of a new chunk: the heading path of the current chapter, minus the headings that are about to appear as body text
     fn prefix_now(&self) -> Vec<Range<usize>> {
         self.path
             .iter()
@@ -299,11 +299,11 @@ impl<'a> Packer<'a> {
         tokens(&self.render(prefix, body)) <= self.budget
     }
 
-    /// 试着把一项放进当前块；放不下就先收当前块，再试一次空块。
+    /// Try to put an item into the current chunk; if it does not fit, close the current chunk first and try again in an empty one.
     ///
-    /// **极小的一项不单独成块。**新闻稿末尾有一行页码「4」，按预算它放不进已经
-    /// 满了的上一块，于是自己成了一块——一个字符的块，抽取照样为它调一次模型。
-    /// 几个 token 的东西并进上一块，超预算那几个 token 无所谓。
+    /// **A very small item does not form a chunk alone.** At the end of a press release there is a page-number line "4"; by budget it does not fit
+    /// into the previous chunk, which is already full, so it became a chunk of its own: a one-character chunk that extraction still spends a model call on.
+    /// Items of a few tokens are merged into the previous chunk; going a few tokens over budget for them does not matter.
     fn place(&mut self, piece: Piece) -> Option<Piece> {
         if self.pending.is_empty() {
             if let Piece::Text(r) = &piece {
@@ -312,8 +312,8 @@ impl<'a> Packer<'a> {
                         self.body.push(piece);
                         return None;
                     }
-                    // 上一块已经发出去了（长段落走退路切分会立刻 flush）：接到它尾上。
-                    // 只接同一种出处的——一行转写不能混进原文那一块里借它的可信度
+                    // The previous chunk has already been emitted (the fallback for long paragraphs flushes right away): attach to its tail.
+                    // Only attach to one of the same origin: a line of transcript must not be mixed into a source-text chunk and borrow its credibility
                     let here = &self.segments[self.current].provenance;
                     if let Some(last) = self.out.last_mut().filter(|l| &l.provenance == here) {
                         last.text.push_str(
@@ -340,7 +340,7 @@ impl<'a> Packer<'a> {
             self.pending.clear();
             return None;
         }
-        // 放不下：把刚加的拆回来
+        // Does not fit: take back the piece just added
         let n = candidate.len() - (self.pending.len() + 1);
         let mut rest = candidate.split_off(n);
         self.body = candidate;
@@ -361,9 +361,9 @@ impl<'a> Packer<'a> {
         let text = self.render(&prefix, &body);
         let start = body.iter().map(|p| p.span().start).min().unwrap_or(0);
         let end = body.iter().map(|p| p.span().end).max().unwrap_or(0);
-        // 收块时还有没贴上正文的标题，是下一章的第一项放不下（或换了出处）才收的：那几条
-        // 标题跟着下一块走，`path` 已经换成了下一章（同层的上一章也已弹掉），这一块按换章
-        // 之前的路径起名。从前一律取 `path`，在章节交界处收的块都顶着下一章的名字
+        // When a chunk is closed, any headings not yet attached to body text belong to the next item that did not fit (or changed origin): those headings
+        // go along with the next chunk; `path` has already switched to the next chapter (the previous chapter at the same level has also been popped), so this chunk is named by the path from before the chapter change.
+        // Previously `path` was always used, so chunks closed at a chapter boundary carried the next chapter's name.
         let path = if self.pending.is_empty() {
             &self.path
         } else {
@@ -407,7 +407,7 @@ impl<'a> Packer<'a> {
         let Some(Piece::Text(range)) = self.place(Piece::Text(range)) else {
             return;
         };
-        // 一段就超预算：退回按句切，每一小段自成一块，前缀照给
+        // A single paragraph is over budget: fall back to splitting by sentence, each small piece becomes a chunk of its own, with the prefix still applied
         self.prefix = self.prefix_now();
         let prefix_cost = tokens(&self.render(&self.prefix.clone(), &[]));
         let headings: Vec<Piece> = self.pending.drain(..).map(Piece::Text).collect();
@@ -423,8 +423,8 @@ impl<'a> Packer<'a> {
         for (offset, piece) in splitter.chunk_indices(block) {
             let sub = range.start + offset..range.start + offset + piece.len();
             if first {
-                // 第一小段带着标题当正文，前缀用上面那份：标题还在 `pending` 里时算的，不含它们。
-                // 从前每一小段都重算前缀，那时 `pending` 已经倒空，第一块把标题念两遍，有时还超了预算
+                // The first small piece carries the heading as body text, so it uses the prefix computed above: computed while the heading was still in `pending`, not including them.
+                // Previously every small piece recomputed its prefix, by which time `pending` was empty, so the first chunk repeated the heading twice, and sometimes went over budget.
                 self.body = headings
                     .iter()
                     .map(|h| match h {
@@ -434,7 +434,7 @@ impl<'a> Packer<'a> {
                     .collect();
                 first = false;
             } else {
-                // 续块：标题已经贴上正文，前缀给整条路径
+                // Continuation chunk: the heading is already attached to body text, so the prefix is the full path
                 self.prefix = self.prefix_now();
             }
             self.body.push(Piece::Text(sub));
@@ -456,8 +456,8 @@ impl<'a> Packer<'a> {
         let Some(_) = self.place(whole) else {
             return;
         };
-        // 整张放不下：按行切，每一块都带说明句和表头。一行不拆；
-        // 说明句 + 表头 + 一行还超预算的，照样出一块——没有更好的切法
+        // Does not fit whole: split by row, and every chunk carries the explanatory sentence and the header. A row is never split;
+        // a chunk made of the explanatory sentence, the header and one row that is still over budget is emitted anyway: there is no better way to cut it
         let mut rows = rows.into_iter().peekable();
         while rows.peek().is_some() {
             let mut taken: Vec<Range<usize>> = vec![rows.next().expect("peek 过")];
@@ -498,11 +498,11 @@ pub fn chunk_with_budget(text: &str, budget: usize) -> Vec<ChunkPiece> {
     chunk_segments(text, &whole, budget)
 }
 
-/// 按出处分段的正文分块：块不跨段（0040 决定 2），面包屑跨段照传。
+/// Body chunking by origin-separated segments: a chunk does not cross segments (0040 decision 2), but the breadcrumb is carried across segments.
 ///
-/// 读扫描件的引擎一页一段、转写一句一段地交回文字；它们拼成一份正文、按同一套规矩切，
-/// 只是切点多了「出处变了」这一条。`segments` 按位置排好序、覆盖整份正文；
-/// 空的时候当作整份都是原文
+/// The engines that read scanned pages and transcribe recordings return text one page or one segment at a time; they are joined into one body and cut by the same rules,
+/// with only one extra cut point: "the origin changed". `segments` is sorted by position and covers the whole body;
+/// when empty, the whole thing is treated as source text
 pub fn chunk_segments(text: &str, segments: &[Segment], budget: usize) -> Vec<ChunkPiece> {
     let whole = [Segment {
         range: 0..text.len(),
@@ -530,7 +530,7 @@ pub fn chunk_segments(text: &str, segments: &[Segment], budget: usize) -> Vec<Ch
             Unit::Heading { range, .. } | Unit::Text(range) => range.start,
             Unit::Table { caption, head, .. } => caption.as_ref().map_or(head.start, |c| c.start),
         };
-        // 标题不切段：它贴着下一项走，由下一项决定进哪一段
+        // A heading is not a segment cut: it goes with the next item, which decides which segment it enters
         if !matches!(unit, Unit::Heading { .. }) {
             p.enter_segment(p.segment_of(start));
         }
@@ -544,8 +544,8 @@ pub fn chunk_segments(text: &str, segments: &[Segment], budget: usize) -> Vec<Ch
             } => p.table_unit(caption, head, rows),
         }
     }
-    // 文档以标题收尾：攒着的正文先收成一块，标题再自己成一块，总好过丢掉。从前这里直接
-    // 拿标题换掉了正文——还没收的那一块（短文档就是全文）连同它的字一起没了
+    // The document ends with a heading: the body collected so far is closed as a chunk first, then the heading becomes a chunk of its own, which is better than dropping it. Previously this replaced
+    // the body with the heading, so the chunk not yet closed (the whole text of a short document) was lost along with its characters
     if !p.pending.is_empty() {
         p.flush();
         p.prefix = p.prefix_now();
@@ -559,8 +559,8 @@ pub fn chunk_segments(text: &str, segments: &[Segment], budget: usize) -> Vec<Ch
 mod tests {
     use super::*;
 
-    /// 一块只装一种出处（0040 决定 2）：原文与扫描页挨着，也分成两块；
-    /// 面包屑跨段照传；页末那几个 token 的尾巴不接到别的出处那一块上
+    /// One chunk holds only one origin (0040 decision 2): source text next to a scanned page is also split into two chunks;
+    /// the breadcrumb is carried across segments; the tail of a few tokens at the end of a page does not attach to a chunk of another origin
     #[test]
     fn a_chunk_holds_one_provenance_and_the_breadcrumb_crosses_it() {
         use crate::provenance::{Origin, Provenance, Segment};
@@ -606,13 +606,13 @@ The tenant pays rent monthly.
         assert!(chunks[1].text.contains("1,000"));
         assert!(!chunks[0].text.contains("1,000"));
         assert_eq!(chunks[1].heading.as_deref(), Some("Lease"));
-        // 不分段的老路：整份都是原文
+        // The old path with no segments: the whole document is source text
         assert!(chunk_with_budget(&text, BUDGET_TOKENS)
             .iter()
             .all(|c| c.provenance == Provenance::stated()));
     }
 
-    /// 换出处时收掉的那一块按它自己那一章起名：下一章的标题已经读到了，可它属于后面的正文
+    /// A chunk closed when the origin changes is named by its own chapter: the next chapter's heading has already been read, but it belongs to the body that follows
     #[test]
     fn a_chunk_closed_by_a_change_of_provenance_is_named_by_its_own_section() {
         use crate::provenance::{Origin, Provenance, Segment};
@@ -649,7 +649,7 @@ The tenant pays rent monthly.
         s
     }
 
-    /// 财报里那 13 块的形状：表比预算大，续块必须还看得见表头和说明句。
+    /// The shape of the 13 chunks in the earnings report: a table bigger than the budget; continuation chunks must still see the header and the explanatory sentence.
     #[test]
     fn a_wide_table_is_split_by_rows_and_every_piece_carries_its_header_and_caption() {
         let text = format!("# Item 5.07\n\n{}", table(40));
@@ -681,7 +681,7 @@ The tenant pays rent monthly.
             );
             assert_eq!(p.heading.as_deref(), Some("Item 5.07"));
         }
-        // 每一行只出现一次，一行不拆
+        // Each row appears only once; a row is not split
         let all: String = pieces
             .iter()
             .map(|p| p.text.as_str())
@@ -706,7 +706,7 @@ The tenant pays rent monthly.
         assert!(t.ends_with("Closing."));
     }
 
-    /// 说明句已经在上一块的尾巴上、表放不进去了：说明句得跟着表走，不能留在上一块。
+    /// The explanatory sentence is already at the tail of the previous chunk and the table does not fit in: the sentence has to go with the table, not stay in the previous chunk.
     #[test]
     fn a_caption_never_parts_from_its_table() {
         let filler = "Words about nothing in particular. ".repeat(12);
@@ -757,7 +757,7 @@ The tenant pays rent monthly.
         );
     }
 
-    /// 一块的面包屑是它装着的那一章，不是它装不下、挪到下一块去的那一章
+    /// A chunk's breadcrumb is the chapter it holds, not the chapter it was pushed out to the next chunk for not fitting
     #[test]
     fn a_chunk_is_named_by_the_section_it_holds() {
         let text = "# Report\n\n## Part A\n\nFirst.\n\n## Part B\n\nSecond.\n\n### B.1\n\nThird.";
@@ -774,7 +774,7 @@ The tenant pays rent monthly.
         assert_eq!(named, expected);
     }
 
-    /// 以标题收尾的文档：攒着的正文先收成一块，标题再自己成一块
+    /// A document that ends in a heading: the body collected so far is closed as a chunk, and the heading becomes a chunk of its own
     #[test]
     fn a_document_that_ends_with_a_heading_keeps_its_last_text() {
         let text = "# Report\n\nFirst paragraph of the report.\n\nSecond paragraph of the report.\n\n## Appendix\n";
@@ -805,8 +805,8 @@ The tenant pays rent monthly.
         }
     }
 
-    /// 小节下的第一段一段就超预算、退回按句切：切开的第一块是「上一级（前缀）· 这一节的标题 ·
-    /// 第一小段」，每条标题一遍；续块照旧以整条路径开头
+    /// The first paragraph under a section is over budget on its own, so it falls back to splitting by sentence: the first chunk cut is "the parent level (prefix) · this section's heading ·
+    /// first small piece", repeating each heading; continuation chunks still start with the full path as before
     #[test]
     fn the_first_chunk_of_a_split_paragraph_carries_its_headings_once() {
         let text = format!(
@@ -843,7 +843,7 @@ The tenant pays rent monthly.
         assert!(!pieces[0].text.contains("* * *"), "水平线不进块");
     }
 
-    /// 新闻稿末尾的页码「4」：不单独成块，并进上一块，哪怕上一块已经满了。
+    /// The page number "4" at the end of a press release: it does not form a chunk alone; it joins the previous chunk even if that chunk is already full.
     #[test]
     fn a_page_number_never_becomes_a_chunk_of_its_own() {
         let body = "A sentence that fills the budget nicely. ".repeat(6);
@@ -866,7 +866,7 @@ The tenant pays rent monthly.
         ));
     }
 
-    /// 第五项议案的形状：说明句 · 分页符 · 表。分页符不隔开说明句和它的表。
+    /// The shape of item five of the resolutions: explanatory sentence · page break · table. The page break does not separate the sentence from its table.
     #[test]
     fn a_page_break_between_a_caption_and_its_table_does_not_part_them() {
         let filler = "Words about nothing in particular. ".repeat(10);
@@ -897,8 +897,8 @@ The tenant pays rent monthly.
         }
     }
 
-    /// 财报的形状：公司名、报表名、单位、「未经审计」四段短说明，然后是表。
-    /// 四段都是说明句，切开的每一块都带着全部四段。
+    /// The shape of a financial report: company name, report name, units, and "Unaudited": four short explanatory paragraphs, followed by a table.
+    /// All four paragraphs are explanatory sentences, and every chunk the table is cut into carries all four.
     #[test]
     fn a_run_of_short_paragraphs_before_a_table_is_its_caption() {
         let text = format!(
@@ -936,8 +936,8 @@ The tenant pays rent monthly.
         }
     }
 
-    /// 中文年报的形状：「……主要会计数据如下：」一句长过 `CAPTION_MAX_BYTES`，只能靠结尾的
-    /// 全角冒号认出是说明句。表切开的每一块都以这句话和表头开头，它不自己成一块
+    /// The shape of a Chinese annual report: a sentence "...main accounting data is as follows" that is longer than `CAPTION_MAX_BYTES` can only be recognized as an explanatory sentence by its trailing colon (full-width).
+    /// Each chunk the table is cut into starts with this sentence and the header; the sentence does not form a chunk of its own.
     #[test]
     fn a_caption_ending_in_a_full_width_colon_stays_with_its_table_at_any_length() {
         let lead = "根据公司第三届董事会第十二次会议审议通过的二〇二五年半年度报告，本报告期内公司按照企业会计准则编制合并财务报表，经营情况总体平稳，现金流量充足，主要会计数据如下：";
@@ -957,8 +957,8 @@ The tenant pays rent monthly.
         }
     }
 
-    /// 十位董事的形状：一句说明、一串表。每张表不论落在哪一块都看得见那句说明；
-    /// 同一块里的几张表，说明只念一遍。
+    /// The shape of ten directors: one sentence, then a run of tables. Every table, wherever it lands, can see that sentence;
+    /// for several tables in the same chunk, the explanation is read only once.
     #[test]
     fn one_caption_introduces_the_whole_run_of_tables_after_it() {
         let mut text = String::from("Stockholders elected each of the director nominees. The results of the voting were as follows:\n\n");
@@ -999,7 +999,7 @@ The tenant pays rent monthly.
                 p.text
             );
         }
-        // 一串到别的东西出现为止：后面那张无关的表不带这句说明
+        // The run lasts until something else appears: the unrelated table after it does not carry this sentence
         let unrelated = pieces
             .iter()
             .find(|p| p.text.contains("| Unrelated |"))

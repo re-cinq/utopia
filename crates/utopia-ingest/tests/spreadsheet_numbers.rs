@@ -1,8 +1,8 @@
-//! 电子表格里的数按 Excel 认的精度读：15 位有效数字。
+//! Numbers in a spreadsheet are read at the precision Excel uses: 15 significant digits.
 //!
-//! 公式的缓存值是按双精度的 17 位写进文件的：`=0.1+0.2` 存成 `<v>0.30000000000000004</v>`，
-//! Excel 里看到的却是 0.3。这里照 Excel 写出来的样子拼一份 xlsx，值都是缓存值的写法，
-//! 数字格式是常规（没有 `s`）。
+//! A formula's cached value is written to the file with 17 digits at double precision: `=0.1+0.2` is stored as `<v>0.30000000000000004</v>`,
+//! but Excel shows 0.3. The xlsx here is built the way Excel writes it, with every value in its cached form,
+//! and the number format is General (no `s`).
 
 use std::io::{Cursor, Write};
 

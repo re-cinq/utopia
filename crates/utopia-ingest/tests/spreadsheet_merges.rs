@@ -1,4 +1,4 @@
-//! 电子表格里的合并区域投影到它覆盖的所有格，和 HTML 的 colspan/rowspan 一样。
+//! A merged range in a spreadsheet is projected onto every cell it covers, the same as HTML colspan/rowspan.
 
 use std::io::{Cursor, Write};
 

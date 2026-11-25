@@ -1,4 +1,4 @@
-//! 各格式解析器。全部输出纯文本（结构用 markdown 风格标题保留）。
+//! Parsers for each format. All output plain text (structure is kept with markdown-style headings).
 
 use anyhow::Context;
 use quick_xml::events::Event;
@@ -14,7 +14,7 @@ const SPREADSHEET_ROW_LIMIT: usize = 2_000;
 const XLSX_SEGMENT_LIMIT: usize = 1_000_000;
 const CSV_RECORD_LIMIT: usize = 10_000;
 
-/// 文本解码：chardetng 探测编码（覆盖 GBK/GB18030/BIG5 等中文常见编码）。
+/// Text decoding: chardetng detects the encoding (covers common Chinese encodings such as GBK/GB18030/BIG5).
 pub fn plain_text(bytes: &[u8]) -> String {
     use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
     let mut detector = EncodingDetector::new(Iso2022JpDetection::Deny);
@@ -24,13 +24,13 @@ pub fn plain_text(bytes: &[u8]) -> String {
     text.into_owned()
 }
 
-/// 这份 PDF 的内容流里有没有画出字形：任何一个画字的算子（`Tj`、`TJ`、`'`、`"`）
-/// 带着非空的串就算。
+/// Whether this PDF's content stream draws any glyphs: any text-painting operator (`Tj`, `TJ`, `'`, `"`)
+/// with a non-empty string counts.
 ///
-/// **这是「扫描件」与「我们读不了」之间唯一靠得住的分界。** 两种情况下 `pdftotext` 都是
-/// 空输出、退出码 0：一张扫描的图本来就没有字可取，而一份用 `GBK-EUC-H` 这类预定义 CMap
-/// 的文件是取字的人不认那张表（#739）。读不出结构就算作没有——宁可让一份文件多走一趟 OCR，
-/// 也不要把它挡在库外
+/// **This is the only reliable boundary between "scanned document" and "we cannot read it".** In both cases `pdftotext` gives
+/// empty output with exit code 0: a scanned image has no text to extract, while a file that uses a predefined CMap such as `GBK-EUC-H`,
+/// which the text extractor has no table for (#739). Failing to read any structure counts as no text: it is better to send a file through one more OCR pass
+/// than to keep it out of the library.
 fn draws_text(bytes: &[u8]) -> bool {
     let Ok(doc) = lopdf::Document::load_mem(bytes) else {
         return false;
@@ -56,8 +56,8 @@ fn draws_text(bytes: &[u8]) -> bool {
     })
 }
 
-/// PDF 的文字层。字体的 ToUnicode 常把字形指到长得一样的部首、连字码位，`pdf_extract`
-/// 读出来的照收：换回它们显示的那个字（[`crate::lookalikes`]）
+/// The PDF text layer. A font's ToUnicode often maps glyphs to look-alike radical and ligature code points; whatever `pdf_extract`
+/// reads out is accepted and mapped back to the character it displays ([`crate::lookalikes`])
 pub fn pdf(bytes: &[u8]) -> anyhow::Result<String> {
     let text = text_layer(bytes)?;
     Ok(match crate::lookalikes::plain(&text) {
@@ -66,14 +66,14 @@ pub fn pdf(bytes: &[u8]) -> anyhow::Result<String> {
     })
 }
 
-/// 取文字层。取不出来时交给外面的 `pdftotext`——它是另一个进程，所以那边再崩也带不走
-/// 一个工作线程。
+/// Takes the text layer. If that fails, hand off to the external `pdftotext`: it runs as a separate process, so even if it crashes, it cannot take
+/// a worker thread down with it.
 ///
-/// 回退也空手而归时，[`draws_text`] 决定该说哪句话：这份文件没画过字，那是扫描件，交给
-/// OCR 那条路（`NeedsReader`）；画了字却一个都没取到，那是我们读不了它，带着第一个解析器
-/// 的原话往外抛。报错的那句话值得较真：说成「没有文字层」会把人支去配一个 OCR 服务，而
-/// 这份文件的文字层好端端地在那儿（#739：同名的 `pdftotext` 有两个实现，Xpdf 那个和缺了
-/// CJK CMap 数据的 Poppler 都会静静地返回空）
+/// When the fallback also comes back empty-handed, [`draws_text`] decides what to say: a file that never drew any text is a scanned document and goes to
+/// the OCR path (`NeedsReader`); a file that drew text but yielded none is one we cannot read, so the first parser's own message is raised
+/// as-is. That message needs to be accurate: saying "no text layer" would send the person off to configure an OCR service, while
+/// the file's text layer is right there (#739: two programs share the name `pdftotext`: Xpdf's, and Poppler's built without
+/// CJK CMap data, both silently return nothing)
 fn text_layer(bytes: &[u8]) -> anyhow::Result<String> {
     let extracted = std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(bytes));
     let original_error = match extracted {
@@ -141,17 +141,17 @@ fn pdf_with_poppler(bytes: &[u8]) -> anyhow::Result<String> {
     String::from_utf8(output.stdout).context("pdftotext returned invalid UTF-8")
 }
 
-/// docx：解压 word/document.xml。正文 w:t 取字；不在表格里的 w:p 是一段，段末留空行；
-/// 段内的 w:br/w:cr 仍是单换行。表格（w:tbl）收成网格交给 `table::grid_or_lines`，和 HTML 表
-/// 走同一套渲染（不成表的网格按行写出字来）：w:gridSpan 跨列，上下合并（w:vMerge）的续格留空，格内段落的左缩进 w:ind
-/// 当内边距（小节行靠它折进标签）。套在格子里的表按格子文字处理。标题（有大纲级别的段落，
-/// 见 [`docx_heading_styles`]）写成 Markdown 标题。
+/// docx: unzips word/document.xml. Body text is taken from w:t; a w:p outside tables is one paragraph, followed by a blank line;
+/// w:br/w:cr inside a paragraph are still single line breaks. Tables (w:tbl) are collected into a grid and handed to `table::grid_or_lines`, going through the same rendering as HTML tables
+/// (a grid that is not a table is written out line by line): w:gridSpan spans columns, the continuation cells of vertical merges (w:vMerge) are left empty, and a paragraph's left indent in a cell (w:ind)
+/// counts as padding (section lines are folded into their labels by it). A table nested in a cell is treated as that cell's text. A heading (a paragraph with an outline level,
+/// see [`docx_heading_styles`]) is written as a Markdown heading.
 pub fn docx(bytes: &[u8]) -> anyhow::Result<String> {
     let mut archive =
         zip::ZipArchive::new(Cursor::new(bytes)).context("Malformed docx structure")?;
     let xml =
         read_zip_entry(&mut archive, "word/document.xml").context("Malformed docx structure")?;
-    // 样式表缺了或读不了，正文照读，只是认不出靠样式定的标题
+    // If the style sheet is missing or unreadable, the body is still read; only headings defined by style go unrecognized
     let headings = read_zip_entry(&mut archive, "word/styles.xml")
         .ok()
         .and_then(|styles| docx_heading_styles(&styles).ok())
@@ -159,13 +159,13 @@ pub fn docx(bytes: &[u8]) -> anyhow::Result<String> {
     docx_xml_to_text(&xml, &headings)
 }
 
-/// 哪些段落样式是标题、第几级（样式 id → 1–9）。
+/// Which paragraph styles are headings, and at which level (style id → 1–9).
 ///
-/// Word 的标题就是有大纲级别的段落：导航窗格和目录都按它列，样式定义里写 `w:outlineLvl`
-/// （从 0 数，9 是正文）。样式 id 靠不住——英文 Word 写 `Heading1`，中文 Word 写 `1`、`2`，
-/// 正文样式是 `a`——内置样式的名字倒是一律写英文的 `heading 1`。所以按这个次序认：样式
-/// 自己的 `w:outlineLvl`，其次名字是 `heading N`，再次顺着 `w:basedOn` 往上找（自定义的
-/// 标题样式多半基于内置标题）。`Title`、`toc 1` 没有大纲级别，不算标题
+/// In Word, headings are paragraphs with an outline level: the navigation pane and the table of contents list them by it, and the style definition sets `w:outlineLvl`
+/// (counted from 0; 9 is body text). The style id is unreliable: English Word writes `Heading1`, Chinese Word writes `1` and `2`,
+/// and the body style is `a`. Built-in style names, however, are always written in English as `heading 1`. So detection goes in this order: the style's
+/// own `w:outlineLvl`, then a name of `heading N`, then up through `w:basedOn` (custom heading styles are usually based on a built-in heading).
+/// `Title` and `toc 1` have no outline level, so they do not count as headings
 pub(crate) fn docx_heading_styles(
     xml: &str,
 ) -> anyhow::Result<std::collections::HashMap<String, u8>> {
@@ -216,7 +216,7 @@ pub(crate) fn docx_heading_styles(
     }
     let level_of = |id: &str| -> Option<u8> {
         let mut id = id;
-        // basedOn 最多往上走十步：Word 自己不会链这么长，写坏了成环的也就此打住
+        // basedOn is followed up to ten steps at most: Word itself never chains this long, and a cyclic one that was written wrong stops here too
         for _ in 0..10 {
             let style = styles.get(id)?;
             if let Some(outline) = style.outline {
@@ -235,12 +235,12 @@ pub(crate) fn docx_heading_styles(
         .collect())
 }
 
-/// 大纲级别 0–8 是第 1–9 级标题，9 是正文
+/// Outline levels 0–8 are heading levels 1–9; 9 is body text
 fn outline_level(outline: u8) -> Option<u8> {
     (outline <= 8).then_some(outline + 1)
 }
 
-/// 内置标题样式的名字 `heading 1` … `heading 9`，大小写不论
+/// Built-in heading style names `heading 1` … `heading 9`, case-insensitive
 fn heading_number(name: &str) -> Option<u8> {
     let name = name.trim().to_ascii_lowercase();
     let n: u8 = name.strip_prefix("heading")?.trim().parse().ok()?;
@@ -256,16 +256,16 @@ pub(crate) fn docx_xml_to_text(
     let mut reader = Reader::from_str(xml);
     let mut out = String::new();
     let mut in_text = false;
-    // 套了几层 w:tbl；只有最外层收成网格
+    // Several layers of w:tbl deep; only the outermost is collected into a grid
     let mut depth = 0usize;
     let mut rows: Vec<GridRow> = Vec::new();
     let mut row: GridRow = Vec::new();
     let mut cell: Option<(String, usize, u32)> = None;
-    // 正文里的一段（不在表格里、不是文本框里套着的段）是不是标题。`paragraphs` 数套了几层
-    // w:p，`para_start` 是这一段在 out 里开始的位置。级别先看段落自己写的 w:outlineLvl，
-    // 再看它的样式；两样都只认第一次出现的，w:pPrChange 里记的是修订之前的样式，不算。
-    // 另一个栈记每段开始的位置，用来在段末把空段丢掉、非空段之间只留一个空行。文本框会
-    // 在宿主段里再套 w:p，栈让内层段落也能各自收尾，而标题判定仍只看最外层。
+    // Whether a paragraph in the body (not in a table, not a paragraph inside a text box) is a heading. `paragraphs` counts how many layers of
+    // w:p are nested, and `para_start` is where this paragraph starts in out. The level first looks at the paragraph's own w:outlineLvl,
+    // then at its style; each is only honored at first occurrence, and a style recorded in w:pPrChange (from before a revision) does not count.
+    // A second stack records where each paragraph starts, so that at the paragraph's end an empty paragraph is dropped and only one blank line is kept between non-empty ones. A text box
+    // can nest w:p inside its host paragraph again; the stack lets the inner paragraphs each close on their own, while the heading check still looks only at the outermost one.
     let mut paragraphs = 0usize;
     let mut para_start = 0usize;
     let mut paragraph_starts: Vec<usize> = Vec::new();
@@ -278,8 +278,8 @@ pub(crate) fn docx_xml_to_text(
             .find(|a| a.key.as_ref() == name)
             .map(|a| a.value.to_string())
     };
-    // 每个 mc:AlternateContent 是否已经读过一种画法；读过之后，其余画法整棵跳过，
-    // `skipping` 是跳过的那棵子树还有几层没收口
+    // Whether each mc:AlternateContent has already read one drawing form; once read, the other forms are skipped as a whole subtree,
+    // `skipping` is how many levels of the skipped subtree are still unclosed
     let mut alternates: Vec<bool> = Vec::new();
     let mut skipping = 0usize;
     loop {
@@ -295,10 +295,10 @@ pub(crate) fn docx_xml_to_text(
             continue;
         }
         match event {
-            // Word 2010 起一个文本框写两遍：`mc:Choice` 里是 wps 形状，`mc:Fallback` 里是给
-            // 旧版 Word 的 VML，框里的字各有一份。两份都读，同一段字就进来两遍，抽取也各算
-            // 一遍。照标记兼容（markup compatibility）的规矩只取一种画法：第一个 Choice，
-            // 其后的 Choice 和 Fallback 不读
+            // Since Word 2010, a text box is written twice: `mc:Choice` holds the wps shape, and `mc:Fallback` holds the one for
+            // older Word's VML, with the text in each. Reading both brings the same text in twice, and extraction counts it twice.
+            // Following the markup compatibility rules, only one form is taken: the first Choice,
+            // and the later Choice and Fallback are not read
             Ok(Event::Start(e)) if e.name().as_ref() == "mc:AlternateContent" => {
                 alternates.push(false);
             }
@@ -372,7 +372,7 @@ pub(crate) fn docx_xml_to_text(
                         }
                     }
                 }
-                // 格子里第一段的左缩进（twips，1/20 pt）
+                // Left indent of the first paragraph in a cell (twips, 1/20 pt)
                 "w:ind" => {
                     if let Some(c) = cell.as_mut().filter(|c| c.0.is_empty()) {
                         if let Some(v) = attr(&e, "w:left")
@@ -387,9 +387,9 @@ pub(crate) fn docx_xml_to_text(
                     Some(c) => c.0.push(' '),
                     None => out.push(' '),
                 },
-                // Word 的不断行连字符（Ctrl+Shift+-）不是 w:t 里的字，是一个元素：页面上照样画出
-                // 连字符，只是不在这里折行。丢了它，2024‑01‑15 读成 20240115，010‑62345678 读成
-                // 01062345678。写成普通连字符，日期和号码才认得出来
+                // Word's non-breaking hyphen (Ctrl+Shift+-) is not a w:t character; it is an element: it is still drawn on the page as a
+                // hyphen, just not used to break a line here. Dropping it would read 2024‑01‑15 as 20240115, and 010‑62345678 as
+                // 01062345678. Written as a regular hyphen, dates and phone numbers are recognized.
                 "w:noBreakHyphen" => match cell.as_mut() {
                     Some(c) => c.0.push('-'),
                     None => out.push('-'),
@@ -403,9 +403,9 @@ pub(crate) fn docx_xml_to_text(
                         Some(c) => c.0.push(' '),
                         None => {
                             let start = paragraph_starts.pop().unwrap_or(out.len());
-                            // 标题写成一行 Markdown 标题：分块器靠它给每块开头补上所在的各级标题，
-                            // 时间解释靠块里的标题行分节（0064 决定 1 按 cut 2 修订的那段）。没有
-                            // 它，一份 Word 里各节的日期都算成第一节的
+                            // A heading is written as a one-line Markdown heading: the chunker uses it to prefix each chunk with the headings of every level it sits under,
+                            // and date interpretation splits sections by the heading lines in a chunk (0064 decision 1, the section revised in cut 2). Without
+                            // it, every section's date in a Word file would be computed as the first section's
                             let level = own_level.unwrap_or(style_level.flatten());
                             if let Some(level) = level.filter(|_| paragraph_starts.is_empty()) {
                                 let title = out[para_start..]
@@ -419,8 +419,8 @@ pub(crate) fn docx_xml_to_text(
                                     out.push_str(&title);
                                 }
                             }
-                            // 一个 Word 段落是一个 Markdown 段。收尾时先去掉段内末尾的空白，
-                            // 空段不留痕；非空段只补一个空行，w:br 产生的段内单换行不受影响。
+                            // One Word paragraph is one Markdown paragraph. On close, trailing whitespace inside the paragraph is removed first;
+                            // an empty paragraph leaves no trace; a non-empty one adds only one blank line, and single line breaks inside it from w:br are unaffected.
                             let end = start + out[start..].trim_end().len();
                             if end == start {
                                 out.truncate(start);
@@ -469,8 +469,8 @@ pub(crate) fn docx_xml_to_text(
                     None => out.push_str(&s),
                 }
             }
-            // 字符引用是独立事件，丢掉它会把 R&amp;D 这样的正文变成 RD。
-            // 未识别的引用保留原样，不能因此让整篇导入失败。
+            // Character references are separate events; dropping them would turn body text like R&amp;D into RD.
+            // An unrecognized reference is kept as-is, and must not make the whole document fail to import.
             Ok(Event::GeneralRef(e)) if in_text => {
                 let reference = format!("&{};", e.into_inner());
                 let s = quick_xml::escape::unescape(&reference)
@@ -491,9 +491,9 @@ pub(crate) fn docx_xml_to_text(
 /// PPTX: extract a:t text in the presentation's logical slide order. Tables under a:tbl
 /// become Markdown grids through the same renderer as DOCX and spreadsheet tables.
 ///
-/// 第一页是这份演示的开头，写在任何标题之前；第二页起每页一节（`## Slide N`）。封面上的
-/// 日期说的是整份演示，而一个日期管到哪看它所在的标题（0064）：封面也是一节的话，它的
-/// 日期只管封面，后面每一页的陈述都没有见证。Word 的标题块本来就在第一个标题之前，这里一样
+/// The first slide is the opening of this deck and is written before any heading; from the second slide on, each slide is a section (`## Slide N`). The date on the cover
+/// states for the whole deck, while a date's scope follows the heading it sits under (0064). If the cover were a section too, its date would cover only the cover, and none of the later slides would have a source.
+/// Word's heading block also sits before the first heading, and the cover does the same here.
 pub fn pptx(bytes: &[u8]) -> anyhow::Result<String> {
     let mut archive =
         zip::ZipArchive::new(Cursor::new(bytes.to_vec())).context("Failed to unzip pptx")?;
@@ -770,7 +770,7 @@ fn pptx_order(
     Ok(Some(slides))
 }
 
-/// xlsx / xls / ods: calamine 全格式读取，每 sheet 输出制表符表格（限前 2000 行）。
+/// xlsx / xls / ods: calamine reads every format, and each sheet is output as a tab-separated table (first 2000 rows only).
 pub fn spreadsheet(bytes: &[u8]) -> anyhow::Result<(String, Vec<crate::ParseWarning>)> {
     use calamine::Reader as _;
     let mut workbook = calamine::open_workbook_auto_from_rs(Cursor::new(bytes.to_vec()))
@@ -981,8 +981,8 @@ struct GridMerge {
     text: String,
 }
 
-/// 把 calamine 的矩形 range 和 merge 信息铺成 [`GridRow`]。横向 merge 变成一格的
-/// span，纵向 merge 把锚点的值带到覆盖的每一行；anchor 之外的值不再单独成格。
+/// Lays the calamine rectangular range and merge info out as [`GridRow`]. A horizontal merge becomes a cell with one
+/// span, and a vertical merge carries the anchor's value into every row it covers; values outside the anchor are no longer separate cells.
 fn spreadsheet_grid(
     range: &calamine::Range<calamine::Data>,
     merges: &[calamine::Dimensions],
@@ -1103,9 +1103,9 @@ fn spreadsheet_cell_text(cell: Option<&calamine::Data>) -> String {
     }
 }
 
-/// ODS 的时刻格存的是 ISO 时长（`office:time-value="PT09H30M00S"`），不分一天里的钟点和
-/// 累计时长。照 xlsx 那两种格子的写法：不到一天的写钟点（`09:30`），满一天的写累计的
-/// 时分秒（`36:15:00`）。LibreOffice 常把秒写成 `59.999999998S`，按最近的整秒算
+/// ODS time cells store an ISO duration (`office:time-value="PT09H30M00S"`), and it does not tell a clock time within a day from
+/// a cumulative duration. Following the two xlsx cell forms: under a day it is written as a clock time (`09:30`), and at a day or more it is written as cumulative
+/// h:mm:ss (`36:15:00`). LibreOffice often writes seconds as `59.999999998S`, which is rounded to the nearest whole second
 fn ods_time(iso: &str) -> Option<String> {
     let iso = iso.trim();
     let (sign, body) = match iso.strip_prefix('-') {
@@ -1138,7 +1138,7 @@ fn ods_time(iso: &str) -> Option<String> {
     })
 }
 
-/// 表头从第一排至少两格有字的行开始；这一块里纵向 merge 伸到的行也是表头。
+/// The header starts at the first row where at least two cells have text; a vertical merge in this block that reaches a row also makes that row a header.
 fn spreadsheet_headers(regions: &[GridMerge], rows: &[GridRow]) -> Option<std::ops::Range<usize>> {
     let start = rows
         .iter()
@@ -1155,16 +1155,16 @@ fn spreadsheet_headers(regions: &[GridMerge], rows: &[GridRow]) -> Option<std::o
     Some(start..end.min(rows.len()))
 }
 
-/// 日期格按它显示的样子写。
+/// Date cells are written as the date they display.
 ///
-/// calamine 按格子挂的数字格式认出了日期，交来的却还是 Excel 存的那个数：从 1899-12-30
-/// 起的天数（1904 纪年的工作簿从 1904-01-01 起），小数部分是一天里的时刻。`Data` 的
-/// Display 原样写这个数，2024-01-15 就成了 45306——文档里没有这个日期了，时间抽取看不见
-/// 它，模型只当它是个量；同一天在 1904 纪年的工作簿里还是另一个数（43844）。
+/// calamine recognized the date from the number format attached to the cell, but handed over the number Excel stores: a day count from 1899-12-30
+/// (for workbooks in the 1904 date system, from 1904-01-01), and the fractional part is the time of day. The
+/// Display writes this number as-is, so 2024-01-15 became 45306: the document no longer has the date, and time extraction cannot see
+/// it; the model takes it for a plain quantity. The same day in a 1904-system workbook is another number (43844).
 ///
-/// 写成 ISO：整天只写日期，带时刻的加上时刻，整数部分是 0 的只写时刻（`h:mm` 一类格式），
-/// 累计时长（`[h]:mm:ss`）写累计的时分秒。显示用的格式 calamine 不交出来，所以只显示年月
-/// 的格子也写到日。出了 Excel 日历的数照原样写
+/// Written as ISO: a whole day writes only the date; one with a time adds the time; an integer part of 0 writes only the time (formats like `h:mm`),
+/// and a cumulative duration (`[h]:mm:ss`) writes cumulative h:mm:ss. The display format is not handed over by calamine, so a cell that shows only year and month
+/// is also written out to the day. A number outside Excel's calendar is written as-is
 fn excel_date(d: &calamine::ExcelDateTime) -> String {
     let value = d.as_f64();
     if d.is_duration() {
@@ -1177,7 +1177,7 @@ fn excel_date(d: &calamine::ExcelDateTime) -> String {
             seconds % 60
         );
     }
-    // Excel 的日历止于 9999-12-31（序数 2958465）；负数它自己也只显示 ####
+    // Excel's calendar ends at 9999-12-31 (serial number 2958465); a negative number also shows as #### by itself
     if !(0.0..2_958_466.0).contains(&value) {
         return value.to_string();
     }
@@ -1198,12 +1198,12 @@ fn excel_date(d: &calamine::ExcelDateTime) -> String {
     }
 }
 
-/// 数字格按 Excel 认的精度写：15 位有效数字。
+/// Number cells are written at the precision Excel uses: 15 significant digits.
 ///
-/// Excel 比较、显示一个数都只看 15 位有效数字，公式的缓存值却按双精度的 17 位写进文件：
-/// `=0.1+0.2` 存成 0.30000000000000004，`=1.1*1.1-1` 存成 0.21000000000000019，Excel 里
-/// 看到的是 0.3 和 0.21。原样写出来，正文、引文和抽出来的值都带着这截二进制的尾巴。先舍到
-/// 15 位有效数字，再写最短的十进制；本来就干净的数（19.9、1200、45306）一个字不变
+/// Excel compares and displays a number using only 15 significant digits, but a formula's cached value is written to the file with 17 digits at double precision:
+/// `=0.1+0.2` is stored as 0.30000000000000004, and `=1.1*1.1-1` as 0.21000000000000019, which Excel shows as
+/// 0.3 and 0.21. Written out as-is, body text, quotes and extracted values all carry that binary tail. First round to
+/// 15 significant digits, then write the shortest decimal; numbers that are already clean (19.9, 1200, 45306) stay unchanged
 fn excel_number(value: f64) -> String {
     if !value.is_finite() {
         return value.to_string();
@@ -1247,7 +1247,7 @@ pub fn csv_text(bytes: &[u8], tsv: bool) -> anyhow::Result<(String, Vec<crate::P
             }),
         });
     }
-    // 第一条记录是列头（csv 的惯例）；渲染不出表时退回竖线分隔的行
+    // The first record is the column header (csv convention); if the table can't be rendered, fall back to pipe-separated lines
     let text = match crate::table::render_records(&rows) {
         Some(md) => md + "\n",
         None => {
@@ -1261,7 +1261,7 @@ pub fn csv_text(bytes: &[u8], tsv: bool) -> anyhow::Result<(String, Vec<crate::P
     Ok((text, warnings))
 }
 
-// ---- 工具 ----
+// ---- helpers ----
 
 fn read_zip_entry(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
@@ -1273,8 +1273,8 @@ fn read_zip_entry(
     Ok(content)
 }
 
-/// 从 PPTX 的 slide XML 里读文字。表外的 `a:p`/`a:br` 仍按原来的换行规则；
-/// `a:tbl` 里的每个 `a:tr` 收成一行，每个 `a:tc` 收成一格，格内段落用空格连接。
+/// Reads text from a PPTX slide XML. Outside tables, `a:p`/`a:br` still follow the original line-break rules;
+/// each `a:tr` in an `a:tbl` becomes a row, each `a:tc` becomes a cell, and paragraphs inside a cell are joined with spaces.
 fn pptx_xml_to_text(xml: &str) -> anyhow::Result<String> {
     #[derive(Default)]
     struct TableCell {
@@ -1320,7 +1320,7 @@ fn pptx_xml_to_text(xml: &str) -> anyhow::Result<String> {
                 }
                 "a:tr" if table_depth == 1 => row.clear(),
                 "a:tc" if table_depth == 1 => {
-                    // DrawingML 的合并属性属于 a:tc，后面的 a:tcPr 只描述样式。
+                    // DrawingML's merge attributes belong to a:tc; the a:tcPr that follows only describes styling.
                     cell = Some(TableCell {
                         span: attr(&e, "gridSpan")
                             .and_then(|v| v.parse().ok())
@@ -1523,7 +1523,7 @@ mod tests {
 <w:tr><w:tc><w:p><w:r><w:t>Devices</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>$</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>300</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
 <w:p><w:r><w:t>After the table.</w:t></w:r></w:p></w:body></w:document>"#;
 
-    /// docx 的表：跨列的列头按列拼，"$" 并回数字，表前后的段落照旧
+    /// docx tables: column headers spanning several columns are joined per column, "$" is merged back into its number, and paragraphs before and after the table are unchanged
     #[test]
     fn a_docx_table_is_rendered_under_its_headings() {
         let text = docx_xml_to_text(DOC, &Default::default()).unwrap();
@@ -1537,7 +1537,7 @@ mod tests {
         assert!(text.ends_with("After the table.\n\n"), "{text}");
     }
 
-    /// 套在格子里的表不单独成表：它的字算外层格子的字
+    /// A table nested in a cell is not a table of its own: its text counts as the outer cell's text
     #[test]
     fn a_nested_docx_table_is_its_cells_text() {
         let xml = r#"<w:document xmlns:w="x"><w:body><w:tbl>
@@ -1549,7 +1549,7 @@ mod tests {
         assert!(text.contains("| North | inner 7 |"), "{text}");
     }
 
-    /// 标题样式按大纲级别认，其次按内置名字，再顺着 basedOn 找；样式 id 不作数
+    /// Heading styles are recognized by outline level, then by built-in name, then by following basedOn; the style id does not count
     #[test]
     fn heading_styles_are_known_by_outline_level_then_name_then_parent() {
         let styles = r#"<w:styles xmlns:w="x">
@@ -1581,7 +1581,7 @@ mod tests {
         );
     }
 
-    /// csv 的第一条记录是列头，哪怕列头是年份
+    /// The first record of a csv is the column header, even if the column headers are years
     #[test]
     fn a_csv_is_a_table_whose_first_record_is_the_header() {
         let text = csv_text(b"Item,2025,2024\nRevenue,10,8\nCost,4,3\n", false)
@@ -1593,7 +1593,7 @@ mod tests {
         );
     }
 
-    /// 列头之后只填了一个序号的行也是记录，不是列头的第二行
+    /// A row that has only a sequence number filled in after the header is also a record, not a second header row
     #[test]
     fn a_lone_number_row_after_the_header_is_a_record() {
         let text = csv_text(
@@ -1610,7 +1610,7 @@ mod tests {
         assert!(text.contains("| 2 | Ada | 9 |"), "{text}");
     }
 
-    /// 一格数字都没有的 csv 也是表，字段仍按原列分开
+    /// A csv with no numeric cells at all is still a table; its fields are still kept apart by their original columns
     #[test]
     fn a_csv_of_words_is_still_a_table() {
         let text = csv_text(b"name,role\nAda,engineer\nGrace,admiral\n", false)

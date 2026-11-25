@@ -46,7 +46,7 @@ fn parsed(parts: &Parts) -> String {
 fn logical_order_and_page_numbers_do_not_depend_on_zip_or_part_order() {
     let mut parts = deck();
     let expected = parsed(&parts);
-    // 第一页是开头，没有标题；第二页起每页一节
+    // The first slide is the opening and has no heading; from the second slide on, each slide is a section
     assert!(
         expected.starts_with("SECOND-CREATED & 中 <raw>"),
         "{expected}"
@@ -219,8 +219,8 @@ fn empty_presentations_and_manifest_free_legacy_packages_keep_their_behavior() {
     assert_eq!(parsed(&no_root), parsed(&deck()));
 }
 
-/// 封面写在任何标题之前：它说的日期管整份演示，不只管它自己那一页（0064 的范围看标题）。
-/// 第一页没有字的演示没有开头，其余各页照旧各是一节
+/// A cover sits before any heading: the date it states governs the whole deck, not just its own slide (the 0064 range is by heading).
+/// A deck whose first slide has no text has no opening; the remaining slides are each a section, as before
 #[test]
 fn the_first_slide_opens_the_deck_and_later_slides_are_sections() {
     let text = parsed(&deck());

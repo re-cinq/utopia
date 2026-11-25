@@ -1,4 +1,4 @@
-//! 拿真实公开本体探一遍投影结果。用法：cargo run -p utopia-ingest --example owl_probe -- <文件>
+//! Probe the projection result against a real public ontology. Usage: cargo run -p utopia-ingest --example owl_probe -- <file>
 fn main() -> anyhow::Result<()> {
     let path = std::env::args().nth(1).expect("需要文件路径");
     let bytes = std::fs::read(&path)?;

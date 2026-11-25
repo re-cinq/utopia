@@ -1,21 +1,21 @@
-//! 转写服务交回的分段 → 一份正文 + 出处（0040 第三刀）。
+//! Segments returned by the transcription service → one body text + provenance (0040, third slice).
 //!
-//! 请求走 OpenAI 的 `/audio/transcriptions`，要 `diarized_json`：`segments` 里每一句带
-//! `speaker`、`text`、`start`、`end`（秒）。
+//! The request goes to OpenAI's `/audio/transcriptions` and asks for `diarized_json`: each sentence in `segments` carries
+//! `speaker`, `text`, `start`, and `end` (in seconds).
 //!
-//! **说话人写进正文。**抽取只读文字，锚点里的说话人它看不见；「我们三季度交付」谁说的，要在
-//! 那一行字上。连着是同一个人说的几句并成一段（一个发言轮次），换人另起一段，段首写
-//! `Speaker A:`——前缀是结构，标签是服务给的，不猜名字。
+//! **Speakers are written into the body text.** Extraction only reads text and cannot see the speaker in the anchor; who said "we delivered in Q3" has to be
+//! on that line of text. Consecutive sentences from the same person are merged into one paragraph (one speaking turn); a change of speaker starts a new one, and each paragraph opens with
+//! `Speaker A:`. The prefix is structure, the label is what the service gave, and no names are guessed.
 //!
-//! 整段录音是一段出处，块按预算切；每块的锚点取它盖住的那几句的最早开始、最晚结束和
-//! 出现过的说话人（按出场顺序）。一句的时间精确到它自己，一块的时间就是那几句连起来。
+//! The whole recording is one provenance segment, and chunks are cut to a size budget; each chunk's anchor takes the earliest start, the latest end and the
+//! speakers who appear (in order of appearance) across the sentences it covers. A sentence's time is exact to itself; a chunk's time is those sentences joined together.
 
 use crate::provenance::{Origin, Provenance, Segment};
 use crate::reading::{Place, Reading, Region};
 use crate::{NoSpeakers, Unreadable};
 use serde_json::{json, Value};
 
-/// 读转写结果。有一句带字却没有说话人，整份拒收
+/// Reads the transcription result. If any sentence has text but no speaker, the whole result is rejected
 pub fn reading(response: &Value, model: &str) -> anyhow::Result<Reading> {
     let segments = response["segments"]
         .as_array()
@@ -56,7 +56,7 @@ pub fn reading(response: &Value, model: &str) -> anyhow::Result<Reading> {
         last_speaker = Some(speaker);
     }
     if text.is_empty() {
-        // 整段没有一句话；只有一句不分段的全文，也是分不出谁说的
+        // The whole thing has no sentences; a single undivided block of text also cannot tell who is speaking
         if response["text"]
             .as_str()
             .is_some_and(|t| !t.trim().is_empty())
@@ -72,7 +72,7 @@ pub fn reading(response: &Value, model: &str) -> anyhow::Result<Reading> {
         } => (*start_ms, *end_ms),
         Place::Page { .. } => (0, 0),
     };
-    // 段上的锚点先盖住整段录音，切块之后按每块盖住的那几句改写
+    // The segment's anchor first covers the whole recording; after chunking, it is rewritten from the sentences each chunk covers
     let anchor = json!({
         "start_ms": whole(&first.place).0,
         "end_ms": whole(&last.place).1,
@@ -133,7 +133,7 @@ mod tests {
             pieces[0].provenance.anchor,
             Some(json!({ "start_ms": 0, "end_ms": 9050, "speaker": ["A", "B"] }))
         );
-        // 块小一点：每块只记它自己那几句的时间和说话人
+        // Keep chunks a little smaller: each chunk records only the times and speakers of its own sentences
         let small = r.chunk(12);
         assert!(small.len() > 1, "{small:#?}");
         let last = small.last().unwrap();

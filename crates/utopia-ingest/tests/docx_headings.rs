@@ -1,8 +1,8 @@
-//! Word 文档的标题读成标题。
+//! Word document headings are read as headings.
 //!
-//! 照中文 Word 写出来的样子拼一份：样式 id 是 `1`、`2`（正文是 `a`），样式名是英文的
-//! `heading 1`，大纲级别写在样式里。一份里两份周报各有自己的日期——同一篇里分节，
-//! 是 0064 按节取日期要认的形状。
+//! Built the way Chinese-locale Word writes it: style ids are `1` and `2` (body text is `a`), style names are English
+//! `heading 1`, with the outline level set in the style. The file holds two weekly reports, each with its own date; splitting by section within one document
+//! is the shape that 0064's per-section date lookup has to recognize.
 
 use std::io::{Cursor, Write};
 
@@ -46,18 +46,18 @@ fn reports() -> String {
         styled("a3", &run("周报汇编")),
         styled("1", &run("第一周周报（2024-03-01）")),
         plain("上周销售额增长 5%。"),
-        // 标题里换了行：标题还是一行
+        // A line break inside the heading: the heading is still one line
         styled(
             "1",
             &format!("{}<w:r><w:br/><w:t>（2024-03-08）</w:t></w:r>", run("第二周周报")),
         ),
         styled("2", &run("明细")),
         plain("上周退货 3 单。"),
-        // 段落自己写的大纲级别，不靠样式
+        // Outline level set on the paragraph itself, not through the style
         r#"<w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:t>附录</w:t></w:r></w:p>"#.into(),
-        // 借了标题样式、又把大纲级别改回正文的一段
+        // A paragraph that borrows the heading style but switches its outline level back to body text
         r#"<w:p><w:pPr><w:pStyle w:val="1"/><w:outlineLvl w:val="9"/></w:pPr><w:r><w:t>借了标题样式的正文</w:t></w:r></w:p>"#.into(),
-        // 修订：原来是标题，改成了正文；w:pPrChange 里记的是改之前的样式
+        // Revision: was a heading, changed to body text; w:pPrChange records the style from before the change
         r#"<w:p><w:pPr><w:pPrChange w:id="1" w:author="A" w:date="2024-03-09T00:00:00Z"><w:pPr><w:pStyle w:val="1"/></w:pPr></w:pPrChange></w:pPr><w:r><w:t>改回正文的一段</w:t></w:r></w:p>"#.into(),
         format!(
             "<w:tbl><w:tr><w:tc>{}</w:tc><w:tc>{}</w:tc></w:tr><w:tr><w:tc>{}</w:tc><w:tc>{}</w:tc></w:tr></w:tbl>",
@@ -99,7 +99,7 @@ fn each_report_is_its_own_section_in_the_chunks() {
             .map(|p| p.text[..p.text.find(sentence).unwrap()].to_string())
             .unwrap_or_else(|| panic!("{sentence} is in no chunk: {pieces:#?}"))
     };
-    // 分节看的是块里这句话前面的标题行（`headings_at` 读的就是它们）
+    // Sections are assigned from the heading lines before this sentence in the block (which headings_at reads)
     let first = chunk("上周销售额增长");
     assert!(first.contains("# 第一周周报（2024-03-01）"), "{first}");
     let second = chunk("上周退货");
