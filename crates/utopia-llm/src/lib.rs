@@ -1,5 +1,5 @@
-//! utopia-llm: OpenAI 兼容协议的薄客户端。
-//! 一套代码适配 DeepSeek / Qwen(DashScope 兼容模式) / GLM / OpenAI / Ollama / vLLM。
+//! utopia-llm: a thin client for the OpenAI-compatible protocol.
+//! One codebase adapts to DeepSeek / Qwen (DashScope compatibility mode) / GLM / OpenAI / Ollama / vLLM.
 
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -12,21 +12,21 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-/// OpenAI 协议的工具调用（assistant 回合携带）。
+/// Tool call under the OpenAI protocol (carried on assistant turns).
 #[derive(Debug, Clone)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
-    /// JSON 字符串参数（协议原样透传）
+    /// JSON string arguments (passed through verbatim per the protocol)
     pub arguments: String,
-    /// 端点挂在调用上的私货，原样带回。Gemini 3 在每个 function call 上给一个
-    /// `extra_content.google.thought_signature`，同一回合把结果送回去时**必须**
-    /// 原样附上，否则 400「Function call is missing a thought_signature」；上一回合
-    /// 的可以不带。内容不解读，不是对象就当没有。
+    /// Opaque data the endpoint attaches to a call, passed back unchanged. Gemini 3 puts one
+    /// `extra_content.google.thought_signature` on each function call; when the results are sent back in the same turn it **must**
+    /// be echoed back unchanged, otherwise 400 "Function call is missing a thought_signature"; the one from the previous turn
+    /// may be omitted. Contents are not interpreted; anything that is not an object is treated as absent.
     pub extra_content: Option<serde_json::Value>,
 }
 
-/// 工具对话的一个 assistant 回合：文本与工具调用至少其一。
+/// One assistant turn of a tool conversation: at least one of text or tool calls.
 #[derive(Debug)]
 pub struct AssistantTurn {
     /// Preserve the provider value; absent is not an implicit `stop`.
@@ -38,7 +38,7 @@ pub struct AssistantTurn {
 }
 
 impl AssistantTurn {
-    /// 还原为 OpenAI 协议的 assistant 消息（回灌对话历史用）。
+    /// Converts back to an OpenAI-protocol assistant message (used when replaying conversation history).
     pub fn to_message(&self) -> serde_json::Value {
         let mut msg = json!({ "role": "assistant", "content": self.content });
         if let Some(reasoning) = &self.reasoning_content {
@@ -65,13 +65,13 @@ impl AssistantTurn {
     }
 }
 
-/// 一段 tool_call 增量归到哪个调用。写了 `index` 的听它的；没写的，带着 `id`
-/// 就是一个新调用，什么都不带就是上一个调用的续篇。
+/// Decides which call a tool_call delta belongs to. If it has `index`, that wins; if not, a delta with `id`
+/// starts a new call, and a delta with neither is a continuation of the previous call.
 ///
-/// **不写 `index` 的端点把并行调用也不编号。** Gemini 的 OpenAI 兼容端点一个
-/// 调用一块，块上没有 `index`、有 `id`、参数一次给全；两个并行调用都按 0 归并，
-/// 名字就拼成了 `find_entitiessearch_chunks`，于是「未知工具」整轮作废。续篇的
-/// 判据是没有 `id`：OpenAI 的续篇只带参数碎片，开头那块才带 `id`
+/// **Endpoints that don't write `index` also don't number parallel calls.** Gemini's OpenAI-compatible endpoint sends one
+/// call per chunk, with no `index` but with `id`, and all arguments at once; two parallel calls both merge under 0,
+/// and the name becomes `find_entitiessearch_chunks`, so the whole round is voided as "unknown tool". The continuation
+/// check is the absence of `id`: OpenAI continuations carry only argument fragments, and only the opening chunk carries `id`.
 fn tool_call_slot(delta: &serde_json::Value, seen: usize) -> usize {
     if let Some(index) = delta["index"].as_u64() {
         return index as usize;
@@ -84,74 +84,74 @@ fn tool_call_slot(delta: &serde_json::Value, seen: usize) -> usize {
     }
 }
 
-/// 工具结果消息（role=tool）。
+/// Tool result message (role=tool).
 pub fn tool_result_message(tool_call_id: &str, content: &str) -> serde_json::Value {
     json!({ "role": "tool", "tool_call_id": tool_call_id, "content": content })
 }
 
-/// 一条工具调用上端点挂的 `extra_content`：是对象才算，别的形状不猜。
+/// The `extra_content` the endpoint attaches to a tool call: only counts if it is an object; other shapes are not guessed.
 fn extra_content_of(call: &serde_json::Value) -> Option<serde_json::Value> {
     call.get("extra_content").filter(|v| v.is_object()).cloned()
 }
 
-/// 带工具的流式回合事件。
+/// Streaming turn event with tools.
 #[derive(Debug)]
 pub enum ToolStreamItem {
-    /// 增量正文（即时转发给前端）
+    /// Incremental text (forwarded to the frontend immediately)
     Delta(String),
-    /// 流结束：完整回合（累积正文 + 归并后的工具调用）
+    /// Stream end: the complete turn (accumulated text + merged tool calls)
     Turn(AssistantTurn),
 }
 
-/// **没能从端点拿到一个能解析的回答。** 两种：连不上（DNS、连接、TLS、超时），
-/// 或者连上了、状态码说成功、可回来的东西解不成 JSON——根本不是这个 API。
+/// **Could not get a parseable answer from the endpoint.** Two cases: cannot connect (DNS, connection, TLS, timeout),
+/// or connected, the status says success, but what came back cannot be parsed as JSON - this is not the API at all.
 ///
-/// 合成一类是有意的：从用户那边看这两种是同一件事——"你配的这个地址不是模型 API"，
-/// 该做的也是同一件事：去看 URL、看代理。第一版只收传输层失败，结果最常见的那种
-/// 故障（URL 配错、代理挡在中间回了 HTML）一条告警都不产生，
-/// 正是"失败无声"本身。
+/// Lumping these two together is deliberate: from the user's side they are the same thing, "the address you configured is not a model API",
+/// and the fix is the same: check the URL and the proxy. The first version only catches transport-layer failures; the most common
+/// failure (wrong URL, a proxy in between returning HTML) produces no alert at all,
+/// which is exactly the "silent failure" itself.
 ///
-/// **不含**端点回的 4xx/5xx，即使错误体不是 JSON：那说明服务器已经回答，
-/// 错误体本身就是诊断——另一类问题，该找的人也不同。
+/// **Does not include** 4xx/5xx returned by the endpoint, even if the error body is not JSON: the server did answer,
+/// and the error body is itself the diagnosis - a different problem, with different people to look at it.
 ///
-/// 有类型而不是匹配错误文本：调用链上任何一层加一句 context 都会改文本，
-/// 而 `anyhow` 的 source 链让 `downcast_ref` 一路都认得出来。
+/// Typed rather than matched on error text: any layer on the call chain that adds a context line changes the text,
+/// while the source chain of `anyhow` lets `downcast_ref` see it all the way down.
 #[derive(Debug, thiserror::Error)]
 #[error("LLM endpoint gave no usable answer: {0}")]
 pub struct Unreachable(#[from] pub reqwest::Error);
 
-/// anyhow 错误链里有没有 [`Unreachable`]。
+/// Whether the anyhow error chain contains an [`Unreachable`].
 pub fn is_unreachable(err: &anyhow::Error) -> bool {
     err.chain().any(|e| e.is::<Unreachable>())
 }
 
-/// 端点在限流。**跟 [`Unreachable`] 一样做成类型**，理由也一样：调用方要据此
-/// 决定「等一会儿再来」而不是「这块废了」，而错误文本一路都在被 context 改写。
+/// The endpoint is rate limiting. **Made a type just like [`Unreachable`]**, for the same reason: the caller must use it to decide
+/// "wait a while and try again" rather than "this chunk is dead", and error text keeps being rewritten by context along the way.
 ///
-/// 限流与其他 4xx 的区别是**它会自己好**。密钥错了重试一万次还是错，配额满了
-/// 等一分钟就过去——两者混在一起，重试预算就会花在永远不会好的那一类上。
+/// The difference between rate limiting and other 4xx is that **it clears up by itself**. A wrong key stays wrong no matter how often you retry; an exhausted quota
+/// is gone after a minute. Mixing the two would spend the retry budget on the kind that never gets better.
 #[derive(Debug, thiserror::Error)]
 #[error("LLM endpoint is rate limiting ({status}): {detail}")]
 pub struct RateLimited {
     pub status: u16,
-    /// **常常是 `None`。** 多数厂商的 429 不带 `Retry-After`（实测 SiliconFlow
-    /// 就不带），所以调用方必须自带退避，把这一项当「有则更准」的补充而不是判据。
+    /// **Often `None`.** Most vendors' 429 has no `Retry-After` (measured: SiliconFlow
+    /// doesn't send one), so callers must supply their own backoff and treat this field as a "more precise if present" supplement, not as the criterion.
     pub retry_after: Option<Duration>,
     pub detail: String,
 }
 
-/// anyhow 错误链里的 [`RateLimited`]，穿透 context 层。
+/// The [`RateLimited`] in the anyhow error chain, passing through the context layers.
 pub fn rate_limited(err: &anyhow::Error) -> Option<&RateLimited> {
     err.chain().find_map(|e| e.downcast_ref::<RateLimited>())
 }
 
-/// 值得再试一次的那几类失败，连它们各自的「等多久」。**判据是「它会自己好」**：
-/// 端点在限流、端点这会儿不可用（502/503/504）、请求根本没送到（连接被重置、响应中断）。
+/// The failure kinds worth retrying, along with how long each says to wait. **The criterion is "it clears up by itself"**:
+/// the endpoint is rate limiting, the endpoint is unavailable for the moment (502/503/504), or the request never arrived (connection reset, response cut off).
 ///
-/// **读超时不在里面。** `READ_TIMEOUT` 是 300 秒没有第一个字节，重试五次就是 25 分钟；
-/// 一个总是超时的调用不会因为多等而变好，它要的是更小的分块或更快的端点。
+/// **Read timeouts are not in there.** `READ_TIMEOUT` is 300 seconds without a first byte; five retries is 25 minutes;
+/// a call that always times out does not get better by waiting longer. It needs smaller chunks or a faster endpoint.
 ///
-/// 实测一篇 32 块的文档在一小时里两类都撞上：502 四次、连接没送到两次。
+/// Measured: a 32-chunk document hit both kinds within one hour: 502 four times, request-not-delivered twice.
 pub fn transient(err: &anyhow::Error) -> Option<(&'static str, Option<Duration>)> {
     if let Some(hit) = rate_limited(err) {
         return Some(("LLM endpoint is rate limiting", hit.retry_after));
@@ -169,46 +169,46 @@ pub fn transient(err: &anyhow::Error) -> Option<(&'static str, Option<Duration>)
     sending.map(|_| ("LLM request could not be sent", None))
 }
 
-/// 端点开口了又半路没了：流断在一句话中间，既没有 `[DONE]` 也没有 `finish_reason`。
+/// The endpoint opened and then dropped halfway: the stream was cut off in the middle of a sentence, with neither `[DONE]` nor `finish_reason`.
 ///
-/// **做成类型是因为它长得像成功。** 拼到一半的回复是一段合法的字符串，调用方看不出
-/// 它本该更长；抽取会把它当成模型给的全部答案，少掉的那些陈述无声无息。
+/// **Typed because it looks like success.** A half-finished reply is a legal string; the caller cannot tell
+/// that it should have been longer. Extraction would treat it as the model's complete answer, and the missing statements would vanish silently.
 #[derive(Debug, thiserror::Error)]
 #[error("LLM stream ended in the middle of the answer ({got} chars in)")]
 pub struct Interrupted {
-    /// 断掉时已经拼到多少字——报障时它说明「不是一开口就断」
+    /// How much had been assembled when it dropped. When reporting a fault, it shows the drop was not right from the first byte.
     pub got: usize,
 }
 
-/// 端点这会儿不可用：502 / 503 / 504，或者它自己说的 408。**跟 [`RateLimited`] 同一类，
-/// 理由也同一条：它会自己好。** 网关抽风、上游重启、排队超时都是几秒到几十秒的事，
-/// 而 400（提示词不合法）、401（密钥错）重试一万次还是错。
+/// The endpoint is unavailable for the moment: 502 / 503 / 504, or 408 if it says so itself. **Same class as [`RateLimited`],
+/// same reason: it clears up by itself.** Gateway glitches, upstream restarts, and queue timeouts all last seconds to tens of seconds,
+/// while 400 (invalid prompt) and 401 (wrong key) stay wrong no matter how often you retry.
 ///
-/// 混在 [`Rejected`] 里的代价实测过：本地代理对上游的一次 `fetch failed` 回 502，
-/// 32 块的一篇文档里随机几块就此报废，整篇抽取失败重来——一次调用 5% 的失败率，
-/// 一篇长文档第一遍几乎必失败（1 − 0.95³² ≈ 81%），而任务只重试三次。
+/// The cost of mixing these into [`Rejected`] was measured: a local proxy returned 502 for an upstream `fetch failed`,
+/// and in a 32-chunk document a few random chunks were lost that way, failing the whole extraction and forcing a rerun. A 5% per-call failure rate
+/// makes a long document almost always fail the first pass (1 - 0.95^32 is about 81%), while the task only retries three times.
 #[derive(Debug, thiserror::Error)]
 #[error("LLM endpoint is unavailable ({status}): {detail}")]
 pub struct Unavailable {
     pub status: u16,
-    /// 端点给的 `Retry-After`（有则更准，多数不给）
+    /// The endpoint's `Retry-After` (more accurate if present; most don't send one)
     pub retry_after: Option<Duration>,
     pub detail: String,
 }
 
-/// anyhow 错误链里的 [`Unavailable`]，穿透 context 层。
+/// The [`Unavailable`] in the anyhow error chain, passing through the context layers.
 pub fn unavailable(err: &anyhow::Error) -> Option<&Unavailable> {
     err.chain().find_map(|e| e.downcast_ref::<Unavailable>())
 }
 
-/// 账号付不起这次请求：欠费，或者套餐配额用尽。
+/// The account cannot pay for this request: out of credit, or the plan quota used up.
 ///
-/// **跟 [`RateLimited`] 分开，因为它不会自己好。** 限流等一分钟就过去，
-/// 欠费等到天亮也还是欠费——重试只是在把同一个错误说三遍，而真正该发生的事
-/// （有人去充值）不会因为重试而发生。
+/// **Separate from [`RateLimited`], because it does not clear up by itself.** Rate limiting is over after a minute;
+/// out of credit stays out of credit until someone pays. Retrying only repeats the same error, and the thing that should happen
+/// (someone topping up) does not happen because of retries.
 ///
-/// 实测：一次跑测里 14 篇文档因为它整篇失败，而当时它跟普通失败走同一条路，
-/// 唯一能知道原因的办法是去数据库里翻 `graph_error`。
+/// Measured: in one test run 14 documents failed whole because of it, and it took the same path as ordinary failures.
+/// The only way to learn the cause was to look through `graph_error` in the database.
 #[derive(Debug, thiserror::Error)]
 #[error("LLM account cannot pay for this request ({status}): {detail}")]
 pub struct OutOfCredit {
@@ -216,68 +216,68 @@ pub struct OutOfCredit {
     pub detail: String,
 }
 
-/// anyhow 错误链里的 [`OutOfCredit`]，穿透 context 层。
+/// The [`OutOfCredit`] in the anyhow error chain, passing through the context layers.
 pub fn out_of_credit(err: &anyhow::Error) -> Option<&OutOfCredit> {
     err.chain().find_map(|e| e.downcast_ref::<OutOfCredit>())
 }
 
-/// 端点回答了，而且回的是「不」：欠费与限流之外的所有非 2xx。
+/// The endpoint answered, and the answer was "no": every non-2xx except out-of-credit and rate limiting.
 ///
-/// **做成类型是为了让状态码留下来。** 对话循环要在「这家不支持 tool calling」
-/// （400，请求形状被拒）与「网断了」「密钥错了」之间做不同的事：前者退成一次性
-/// RAG 还能答，后者退了也答不了。从前这一类只剩一段文本，状态码埋在字符串里，
-/// 于是循环把**任何**首轮错误都当成不支持工具——一次网络抖动就退成了 RAG，
-/// 然后 RAG 也死在同一个抖动上。
+/// **Made a type so the status code survives.** The conversation loop must do different things for "this provider does not support tool calling"
+/// (400, request shape rejected) versus "the network is down" or "the key is wrong". The former falls back to one-shot
+/// RAG that can still answer; the latter cannot be answered even after falling back. Previously this class was only a block of text with the status code buried in the string,
+/// so the loop treated **any** first-turn error as "tools unsupported". One network blip fell back to RAG,
+/// and then RAG died on the same blip.
 #[derive(Debug, thiserror::Error)]
 #[error("{kind} request failed ({reason}): {detail}")]
 pub struct Rejected {
-    /// 哪一类请求（`LLM` / `Embedding`），只进错误文本
+    /// Which kind of request (`LLM` / `Embedding`); it only goes into the error text
     pub kind: String,
     pub status: u16,
-    /// 状态码带原因短语，如 `400 Bad Request`——错误文本从前就是这么写的
+    /// The status code carries its reason phrase, e.g. `400 Bad Request`. The error text has always been written this way
     pub reason: String,
     pub detail: String,
 }
 
-/// anyhow 错误链里的 [`Rejected`]，穿透 context 层。
+/// The [`Rejected`] in the anyhow error chain, passing through the context layers.
 pub fn rejected(err: &anyhow::Error) -> Option<&Rejected> {
     err.chain().find_map(|e| e.downcast_ref::<Rejected>())
 }
 
-/// 提示超过了模型的上下文窗口——既不是「不支持工具」，也不是补全上限（#964）。
+/// The prompt exceeded the model's context window. It is neither "tools unsupported" nor the completion cap (#964).
 ///
-/// 文字保持中性并带着状态码：`failure` 是抽取、治理和对话共用的，一个超长的 chunk
-/// 不是「对话太长」；对话自己的那句话在界面文案里（错误码 `context_too_long`）
+/// The wording stays neutral and keeps the status code: `failure` is shared by extraction, governance and conversation. An oversized chunk
+/// is not "the conversation is too long"; the conversation's own sentence lives in the UI copy (error code `context_too_long`)
 #[derive(Debug, thiserror::Error)]
 #[error("LLM request failed ({reason}): the prompt exceeds the model's context window: {detail}")]
 pub struct ContextTooLong {
     pub status: u16,
-    /// 状态码带原因短语，同 `Rejected`
+    /// The status code carries its reason phrase, same as `Rejected`
     pub reason: String,
     pub detail: String,
-    /// 端点报出的窗口（token）。只在数字紧跟着「窗口」这个词、而且不小于
-    /// `MIN_CONTEXT_WINDOW_TOKENS` 时才有
+    /// The window reported by the endpoint (tokens). Only taken when the number directly follows the word "window" and is not less
+    /// than `MIN_CONTEXT_WINDOW_TOKENS`.
     pub window: Option<u32>,
 }
 
-/// 历史的缺省字符预算。DeepSeek 一次收下了 25 万 token 的提示（2026-09-27 实测），
-/// 这个数远在任何窗口之下；它管的是别把二十轮表格原样搬回去，不是贴着窗口走
+/// Default character budget for history. DeepSeek once accepted a 250k-token prompt (measured 2026-09-27),
+/// so this figure is far below any window. Its job is to keep twenty rounds of tables from being carried back verbatim, not to hug the window.
 const DEFAULT_HISTORY_CHARS: usize = 32_000;
-/// 历史预算的下限：学到的窗口只降不升、一直用到设置改动或重启，一条报了小数字的
-/// 错误不能把历史饿死（#973 评审）
+/// Lower bound of the history budget. A learned window only goes down, and is used until the settings change or a restart. An error that reports a small number
+/// must not starve the history (#973 review)
 const MIN_HISTORY_CHARS: usize = 2_000;
-/// 比这小的「窗口」不信，和 `stated_completion_ceiling` 一个道理：没有模型的窗口那么小，
-/// 那多半是别的数字
+/// A "window" smaller than this is not trusted, for the same reason as `stated_completion_ceiling`: no model has a window that small,
+/// so the number is most likely something else.
 const MIN_CONTEXT_WINDOW_TOKENS: u32 = 1024;
 
 pub fn context_too_long(err: &anyhow::Error) -> Option<&ContextTooLong> {
     err.chain().find_map(|e| e.downcast_ref::<ContextTooLong>())
 }
 
-/// `Retry-After` 的整数秒形态。
+/// The integer-seconds form of `Retry-After`.
 ///
-/// 规范还允许 HTTP-date，这里**不解析**：为一个很少有人发的头引一个日期库不划算，
-/// 而解析失败当成没有正是对的——调用方本来就得有退避，多猜一个数只会更难查。
+/// The spec also allows HTTP-date, but this **does not parse it**: pulling in a date library for a header few people send is not worth it.
+/// Treating a parse failure as absent is exactly right. Callers need backoff anyway, and one more guessed number would only make things harder to debug.
 fn retry_after_of(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     headers
         .get(reqwest::header::RETRY_AFTER)?
@@ -289,10 +289,10 @@ fn retry_after_of(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
-/// 非 2xx 统一在这里成型，分成三类：欠费、限流、其他。
+/// Non-2xx responses are shaped here in one place, into three classes: out of credit, rate limiting, other.
 ///
-/// **503 不算限流**：它可能是端点真挂了、也可能是中间代理，把它算进来会让
-/// 「等一会儿再来」用在等不回来的地方。判据窄一点，宁可退回「其他」。
+/// **503 is not rate limiting**: it may be the endpoint really down, or an intermediate proxy. Counting it in would make
+/// "wait and retry" apply where waiting never helps. Keep the criterion narrow; falling back to "other" is preferred.
 fn failure(
     kind: &str,
     status: reqwest::StatusCode,
@@ -301,12 +301,12 @@ fn failure(
     raw: &str,
 ) -> anyhow::Error {
     let detail = err_detail(body, raw);
-    // **欠费要先判，而且不能只看状态码。**
+    // **Out-of-credit must be checked first, and not by status code alone.**
     //
-    // 402 是标准答案（SiliconFlow 用它），但 OpenAI 的余额耗尽走的是 **429**，
-    // 靠 body 里的 `insufficient_quota` 区分。只按状态码分类的话，一个没钱的
-    // OpenAI 账号会被当成限流，然后无限退避重试一个永远不会好的东西——
-    // 而退避越久，症状越像"端点慢"，越查不到根上。
+    // 402 is the standard answer (SiliconFlow uses it), but OpenAI's out-of-balance comes back as **429**,
+    // and is told apart by `insufficient_quota` in the body. Classifying by status code alone, a broke
+    // OpenAI account would be treated as rate limiting, and backed off and retried forever on something that never gets better.
+    // The longer the backoff, the more the symptom looks like "the endpoint is slow", and the harder the root cause is to find.
     if status == reqwest::StatusCode::PAYMENT_REQUIRED || says_out_of_credit(body) {
         return anyhow::Error::new(OutOfCredit {
             status: status.as_u16(),
@@ -320,8 +320,8 @@ fn failure(
             detail,
         });
     }
-    // 网关与排队的那几个：等一等再来。**500 不在里面**——它可以是端点自己的 bug，
-    // 重试只是把同一个崩溃再触发一遍
+    // The gateway and queueing ones: wait and retry. **500 is not in here**. It can be a bug in the endpoint itself,
+    // and retrying only triggers the same crash again
     if matches!(
         status,
         reqwest::StatusCode::REQUEST_TIMEOUT
@@ -354,14 +354,14 @@ fn failure(
     })
 }
 
-/// 把一个非成功状态的响应变成错误（#527）。
+/// Turns a non-success status response into an error (#527).
 ///
-/// **先看状态码，再决定怎么读 body。** 从前成功与失败都先 `resp.json()`，于是一个回了
-/// 纯文本的 400——LM Studio 那句「request (105140 tokens) exceeds the available context」——
-/// 解不成 JSON 就被当成 `Unreachable`，报告者只好架代理抓包才看见它。现在 body 只按
-/// 原文读一次：是 JSON 就按几种常见形状取消息，不是就把原文截一段引出来。
+/// **Check the status code first, then decide how to read the body.** Previously success and failure both called `resp.json()` first, so a plain-text
+/// 400 (LM Studio's "request (105140 tokens) exceeds the available context") could not be parsed as JSON and was classed as `Unreachable`,
+/// so reporters had to set up a proxy to see it. Now the body is read as raw text only once:
+/// if it is JSON, the message is taken from several common shapes; if not, a chunk of the raw text is quoted.
 ///
-/// 只有 body **读不出来**（连接半路断了）才仍是 `Unreachable`：那才是传输层的事。
+/// Only when the body **cannot be read** (the connection dropped midway) is it still `Unreachable`. That is a transport-layer matter.
 async fn response_failure(
     kind: &str,
     status: reqwest::StatusCode,
@@ -373,25 +373,25 @@ async fn response_failure(
     Ok(failure(kind, status, retry_after, &body, &raw))
 }
 
-/// 流式问答的结果：整段答案，连端点给的收尾原因。
+/// Result of a streaming Q&A: the full answer, plus the endpoint's closing reason.
 ///
-/// **为什么原因要带出来**：`finish_reason: length` 是端点说「我是被截断的」，
-/// 而截断的回复长得和完整的一模一样——解析器只看得见 JSON 少了尾巴，看不见
-/// 少的原因。带着它，丢弃行才能说「撞上了 token 上限」，而不只是「解析不了」。
+/// **Why the reason is carried along:** `finish_reason: length` is the endpoint saying "I was cut off",
+/// and a truncated reply looks exactly like a complete one. The parser only sees the JSON missing its tail, not
+/// why it is missing. With the reason attached, the drop can say "hit the token limit", not just "could not parse".
 #[derive(Debug)]
 pub struct Reply {
     pub text: String,
-    /// 端点给的收尾原因（`stop` / `length` / …）。流里没有这一项就是 `None`：
-    /// 有的实现只发 `[DONE]`，缺席不代表答案是完整的
+    /// The endpoint's closing reason (`stop` / `length` / ...). If the stream has none, this is `None`:
+    /// some implementations only send `[DONE]`, so absence does not mean the answer is complete.
     pub finish_reason: Option<String>,
-    /// 端点报的用量（最后一帧）。不报就是 `None`——账上不编数字
+    /// Usage reported by the endpoint (last frame). If it reports none, this is `None`. No numbers are made up for the books.
     pub usage: Option<Usage>,
-    /// 回复在复读，是我们停了读（#1301），不是端点收的尾。与 `finish_reason` 分开记：
-    /// 记成 `length` 的话丢弃行会说「撞上了 token 上限」，看的人就去查那个上限了
+    /// The reply was repeating itself and we stopped reading (#1301); this is not the endpoint's closing reason. Recorded separately from `finish_reason`:
+    /// if recorded as `length`, the drop line would say "hit the token limit", and whoever reads it would go check that limit
     pub repeating: bool,
 }
 
-/// 一次调用的 token 用量，端点自己报的
+/// Token usage of a single call, as reported by the endpoint itself
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
     pub prompt_tokens: u64,
@@ -399,7 +399,7 @@ pub struct Usage {
 }
 
 impl Reply {
-    /// 端点说这段是被 token 上限截断的。
+    /// The endpoint says this segment was cut off by the token limit.
     pub fn hit_token_ceiling(&self) -> bool {
         self.finish_reason.as_deref() == Some("length")
     }
@@ -440,78 +440,78 @@ pub struct LlmClient {
     base_url: String,
     api_key: Option<String>,
     pub model: String,
-    /// OpenAI 兼容口的 `reasoning_effort`；设了就带进每个对话请求体
+    /// `reasoning_effort` for the OpenAI-compatible endpoint; when set, it goes into every conversation request body
     reasoning_effort: Option<String>,
-    /// 流式调用发的补全上限。起点是 [`MAX_COMPLETION_TOKENS`]；端点用 400 说出自己更低的
-    /// 上限后记在这里，同一个客户端（含它的克隆）此后都按它发，一个进程只吃一次拒绝
-    /// （#891，#892 评审）。只降不升
+    /// The completion cap sent in streaming calls. It starts at [`MAX_COMPLETION_TOKENS`]; when the endpoint's 400 states its own lower
+    /// cap, it is recorded here, and the same client (and its clones) sends by it from then on, so one process eats one rejection
+    /// (#891, #892 review). Only goes down, never up.
     completion_ceiling: std::sync::Arc<std::sync::atomic::AtomicU32>,
-    /// 端点拒绝过的参数记在客户端上，克隆也共用；下一块不再为同一种请求吃一次 400（#1376）。
+    /// Parameters the endpoint has rejected are recorded on the client and shared with clones; the next chunk does not spend another 400 on the same kind of request (#1376).
     use_max_completion_tokens: std::sync::Arc<std::sync::atomic::AtomicBool>,
     suppress_temperature: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// 端点报过的上下文窗口（token），起初是 `u32::MAX`。同一个客户端（含它的克隆）此后
-    /// 都按它算历史预算，只降不升；对话客户端按工作区留着，所以下一轮也记得（#964）
+    /// Context window (tokens) reported by the endpoint, starts at `u32::MAX`. The same client (and its clones) from then on
+    /// computes the history budget from it, only going down. The conversation client is kept per workspace, so the next turn remembers too (#964).
     context_window: std::sync::Arc<std::sync::atomic::AtomicU32>,
-    /// 端点说过带工具的请求不收推理强度之后置位（#1353）：此后带工具的请求体都写
-    /// `reasoning_effort: "none"`，别的调用照旧按设置发。同一个客户端（含克隆）只吃一次拒绝
+    /// Set once the endpoint says requests with tools do not accept a reasoning effort (#1353). From then on, requests with tools write
+    /// `reasoning_effort: "none"`, and other calls still send the setting as configured. The same client (and clones) takes the rejection only once
     tools_without_effort: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// 建连多久算失败。
+/// How long to connect before it counts as failed.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// **多久没有新字节算这个请求死了。**
+/// **How long without new bytes before the request counts as dead.**
 ///
-/// 不能用 `Client::timeout`（请求总时长）：`chat_tools_stream` 是真流式，
-/// 一次长对话正当地跑几分钟，总时长封顶会把它拦腰砍断。而 `read_timeout`
-/// 量的是**沉默**——流式下 token 持续到达，永远碰不到它；非流式下它兜住的
-/// 正是「请求发出去就石沉大海」。
+/// Cannot use `Client::timeout` (total request duration): `chat_tools_stream` is truly streaming,
+/// and a long conversation legitimately runs for minutes. A total cap would cut it off in the middle. `read_timeout`
+/// measures **silence**. With streaming, tokens keep arriving and it never trips; in non-streaming, what it guards
+/// is exactly "request sent and vanished into silence".
 ///
-/// 为什么是 300 秒而不是 60：非流式调用的首字节要等模型把整段生成完，
-/// 大提示词的抽取正常就要 60–120 秒，服务端排队时更久。设小了会把正常请求
-/// 判死，而这条路上「误杀」比「晚 5 分钟发现」贵得多——它会让本来能成的抽取失败。
+/// Why 300 seconds and not 60: in a non-streaming call the first byte waits for the model to finish generating the whole reply,
+/// and extraction with a large prompt normally takes 60-120 seconds, more when the server queues. Set too small, it would kill normal requests.
+/// On this path a false kill costs far more than finding out five minutes later: it would fail extractions that could have succeeded.
 ///
-/// **没有它的代价实测过**：`reqwest::Client::new()` 默认不设任何超时，
-/// 32 路并发打同一个账号时请求全部挂住，32 个 worker 槽被永久占满，
-/// 流水线停摆而**一条错误都不报**（jobs 的孤儿回收只在进程启动时跑一次，
-/// 进程活着就永远收不了尸）。7459 块的一次灌入死在第 55 块上。
+/// **The cost of not having it was measured:** `reqwest::Client::new()` sets no timeout by default.
+/// With 32 concurrent requests to one account, all requests hung and the 32 worker slots stayed occupied forever,
+/// and the pipeline stalled with **no error reported at all**. The orphan reaper for jobs only runs once at process startup,
+/// so while the process lives it never reaps. One ingestion of 7459 chunks died at chunk 55.
 const READ_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// **一次回复我们要多少 token**（#760）。
+/// **How many tokens we allow a reply** (#760).
 ///
-/// 不送这个字段，答案在哪里断由端点自己的默认值说了算：关掉推理时，一块密集
-/// 正文的答案实测停在**正好 4,096** 个 completion token 上，`finish_reason`
-/// 是 `length`，那段 JSON 于是解析不了。上限归我们，答案才在我们定的地方断。
+/// Without this field, where the answer gets cut is decided by the endpoint's own default. With reasoning off, a dense body chunk's
+/// answer measured stopping at **exactly 4,096** completion tokens, with `finish_reason` set to `length`, so the JSON could not be parsed.
+/// The cap is ours, so the answer stops where we decide.
 ///
-/// 为什么是 65,536，而不是照着答案的长度定：`max_tokens` 在各家不是一个意思。
-/// Anthropic 把思考算在里面，OpenAI 的 `max_completion_tokens` 也把推理 token
-/// 算进去。在那样的端点上，这个数就不是答案的天花板，而是**思考的预算**——而
-/// 0044 的「What a reasoning cap costs」量过把思考压到一万五六：885 条陈述掉到
-/// 729，表格数字漏掉从 2% 涨到 16%。那正是被否掉的那个杆，不能让它从这里溜回来。
+/// Why 65,536 and not sized to the answer: `max_tokens` means different things across vendors.
+/// Anthropic counts thinking within it, and OpenAI's `max_completion_tokens` also counts reasoning tokens.
+/// On such endpoints the number is not the answer's ceiling but **the thinking budget**. And
+/// 0044's "What a reasoning cap costs" measured that capping thinking at around 15-16 thousand dropped 885 statements to
+/// 729, and the table-figure misses rose from 2% to 16%. That is exactly the lever that was rejected, and it must not sneak back in here.
 ///
-/// 这条路上量到的最大一次完成是 45,428 个 token（开着推理）。取它之上的一档，
-/// 于是它永远只是「防端点那 4,096 的默认值」，永远变不成推理上限。答案本身约
-/// 1,500 个 token，离这条线远得很。
+/// The largest completion measured on this path was 45,428 tokens (with reasoning on). Going one tier above that
+/// keeps it forever as "a guard against the endpoint's 4,096 default", never a reasoning cap. The answer itself is about
+/// 1,500 tokens, far from this line.
 ///
-/// **开着推理时这个端点不读它**——一次 capped 到 4,096 的调用回了 45,428 个
-/// completion token 还正常收尾。送它因此是「读的地方有用，不读的地方不亏」，
-/// 不是一条能指望所有端点都认的保证。
+/// **With reasoning on, this endpoint does not read it.** A call capped at 4,096 returned
+/// 45,428 completion tokens and still finished normally. Sending it is therefore "useful where it is read, no loss where it isn't",
+/// not a guarantee that every endpoint honors.
 const MAX_COMPLETION_TOKENS: u32 = 65_536;
 
-/// 推理模型的思考过程不该进下游（#690）。
+/// Reasoning models' thinking process must not reach downstream (#690).
 ///
-/// DeepSeek-V4-Flash 这类推理模型把思考过程以内联 `<think>…</think>` 写进
-/// `message.content`，而不是单独的 `reasoning_content` 字段——这里本来就只读
-/// `content`，那个字段碰不到。后果在两处当场撞见：`settings/test` 拿回
-/// `"OK</think>OK"`；抽取的 `json_block` 取"第一个 `{` 到最后一个 `}`"，
-/// 思考过程里的一对大括号就能把起止位置带偏。
+/// Reasoning models such as DeepSeek-V4-Flash write their thinking inline as `<think>…</think>` in
+/// `message.content`, rather than in a separate `reasoning_content` field. This code only reads
+/// `content`, so that field is never touched. The consequences were seen on two fronts: `settings/test` got back
+/// `"OK</think>OK"`, and extraction's `json_block` takes "first `{` to last `}`", so a pair of braces
+/// inside the thinking can throw off the start and end positions.
 ///
-/// 切掉**最后一个** `</think>` 之前的一切：它是协议标记，不是正文词汇；
-/// 取最后一个，是防着正文里引用它。没有标记就原样返回——非推理模型
-/// 走这里不受影响。
+/// Cut off **everything before the last** `</think>`. It is a protocol marker, not body vocabulary;
+/// taking the last one guards against the body quoting it. With no marker it is returned as-is, so non-reasoning models
+/// go through here unaffected.
 ///
-/// 只管非流式 `chat`：抽取、裁决、连通性测试都走它。流式路径逐片向界面吐字，
-/// 前半截切掉会让已吐出的字对不上号，那是另一题，不管。
+/// Applies only to non-streaming `chat`: extraction, adjudication, and connectivity tests all use it. The streaming path emits text to the UI chunk by chunk,
+/// and cutting the front half would misalign the text already emitted. That is a separate problem, not handled here.
 fn strip_reasoning(reply: &str) -> &str {
     match reply.rfind("</think>") {
         Some(pos) => &reply[pos + "</think>".len()..],
@@ -519,19 +519,19 @@ fn strip_reasoning(reply: &str) -> &str {
     }
 }
 
-/// 回复的尾巴是不是同一段在复读（#1301）。
+/// Whether the tail of the reply is the same segment repeating (#1301).
 ///
-/// 温度 0 的小模型会掉进复读：同一行陈述一遍遍写下去，直到撞上
-/// [`MAX_COMPLETION_TOKENS`]。本地 qwen3-8b 上约 3% 的抽取调用如此，每次占一个槽
-/// 一个多小时，吃掉六成的生成量。上限本身不能降（开推理的端点上它是思考预算），
-/// 所以看尾巴：同一段（至少 30 字节）一字不差连着出现五次，就不是在答题了——
-/// 真实的陈述行彼此不同。按字节比，多字节字符切在哪都不影响。
+/// Small models at temperature 0 fall into repetition: the same statement line written over and over until it hits
+/// [`MAX_COMPLETION_TOKENS`]. About 3% of extraction calls on local qwen3-8b do this, each holding a slot
+/// for over an hour and eating 60% of the generation volume. The cap itself cannot be lowered (on endpoints with reasoning it is the thinking budget),
+/// so look at the tail: if the same segment (at least 30 bytes) appears five times in a row, byte for byte, it is not answering the question.
+/// Real statement lines differ from one another. Comparing by bytes, it does not matter where multi-byte characters are split.
 ///
-/// 只算**最短周期**也有 30 字节的尾巴：每条陈述以原文引文开头，一段 150 字节以上的
-/// 短周期串照样能拆成 30 字节以上的段——目录行 200 个点的引导线、一排二十个空
-/// `<td></td>`，不加这一条就可能被当成复读截断（看每 256 字节的检查落在哪），引文之后
-/// 的全丢了。真复读是整行在重复；短于 30 字节的行复读时这里不截（一夜 57 次截断里有
-/// 4 次是这种），宁可让它跑到上限，也不截断引文
+/// Only the **shortest period** is counted, and the tail is still at least 30 bytes. Each statement opens with a quoted original text, and a short-period
+/// string over 150 bytes can still split into 30+ byte segments: a leader line of 200 dots in a table of contents, or twenty empty
+/// `<td></td>` in a row. Without this rule it could be cut off as repetition (depending on where the per-256-byte check falls), and everything after the quoted
+/// text would be lost. Real repetition is a whole line repeating. Lines shorter than 30 bytes are not cut when they repeat here (of 57 truncations one night,
+/// 4 were of this kind). It is better to let it run to the cap than to cut a quotation
 fn repeats_at_tail(text: &[u8]) -> bool {
     const REPEATS: usize = 5;
     (30..=600.min(text.len() / REPEATS)).any(|span| {
@@ -546,9 +546,9 @@ impl LlmClient {
         Self::with_timeouts(base_url, api_key, model, CONNECT_TIMEOUT, READ_TIMEOUT)
     }
 
-    /// 推理强度（`reasoning_effort`）。推理模型默认边想边答，抽取一次调用出的 token 九成是
-    /// 思考；minimal 把它归零而答案不变（bench README，2026-09-24）。有的端点 minimal 关不掉，
-    /// 要 none（DeepSeek）。空 = 不带字段
+    /// `reasoning_effort`. Reasoning models think while answering by default. For extraction about 90% of a call's tokens are
+    /// thinking; `minimal` zeroes that without changing the answer (bench README, 2026-09-24). Some endpoints cannot turn off `minimal`,
+    /// and need `none` (DeepSeek). Empty means no field is sent.
     pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
         self.reasoning_effort = effort.filter(|e| !e.trim().is_empty());
         self
@@ -561,8 +561,8 @@ impl LlmClient {
         body
     }
 
-    /// 超时可注入，只为**测得动**——生产走 [`LlmClient::new`]。
-    /// 拿 300 秒去测一次挂死要跑 5 分钟，那样的测试没人会留着。
+    /// The timeout is injectable, only so it can be **tested in reasonable time**. Production uses [`LlmClient::new`].
+    /// Testing a hang with 300 seconds would take five minutes, and nobody would keep a test like that.
     pub fn with_timeouts(
         base_url: &str,
         api_key: Option<&str>,
@@ -575,8 +575,8 @@ impl LlmClient {
                 .connect_timeout(connect)
                 .read_timeout(read)
                 .build()
-                // 只在 TLS 后端起不来时失败，那种情况下退回默认客户端也没有意义，
-                // 但也不该让整个进程崩在这里
+                // Only fails when the TLS backend cannot start. In that case falling back to the default client is pointless,
+                // but the whole process should not crash here either
                 .unwrap_or_else(|e| {
                     tracing::error!(error = %e, "HTTP 客户端建不起来，退回无超时的默认客户端");
                     reqwest::Client::new()
@@ -597,10 +597,10 @@ impl LlmClient {
         }
     }
 
-    /// 历史的字符预算。不是分词器估算：端点报过窗口就取窗口的**一半**当字数——中文差不多
-    /// 一字一 token，按 token 数原样当字数会在小窗口上超出（#973 评审）——另一半留给提示、
-    /// 工具和回答；再夹在 `MIN_HISTORY_CHARS` 与 `DEFAULT_HISTORY_CHARS` 之间。估得不准的
-    /// 那一次由一轮一次的恢复兜着
+    /// Character budget for history. Not a tokenizer estimate: when the endpoint has reported a window, take **half** of the window as a character count. Chinese is roughly
+    /// one character per token, so using the token count as-is overruns on small windows (#973 review). The other half is left for the prompt, tools and answer.
+    /// It is then clamped between `MIN_HISTORY_CHARS` and `DEFAULT_HISTORY_CHARS`. An estimate that is off
+    /// is caught by the once-per-turn recovery
     pub fn history_char_budget(&self) -> usize {
         let window = self
             .context_window
@@ -608,7 +608,7 @@ impl LlmClient {
         ((window / 2) as usize).clamp(MIN_HISTORY_CHARS, DEFAULT_HISTORY_CHARS)
     }
 
-    /// 端点在拒绝里说了自己的窗口就记住它，只降不升
+    /// When the endpoint states its window in a rejection, remember it. It only goes down.
     pub fn remember_context_window(&self, err: &anyhow::Error) {
         if let Some(window) = context_too_long(err).and_then(|e| e.window) {
             self.context_window
@@ -624,13 +624,13 @@ impl LlmClient {
         req
     }
 
-    /// 非流式对话（连通性测试等轻量场景）。不传温度：请求体与从前一字不变，端点用它的缺省
+    /// Non-streaming conversation (lightweight cases such as connectivity tests). No temperature is passed, so the request body is unchanged from before and the endpoint uses its default
     pub async fn chat(&self, messages: &[ChatMessage]) -> anyhow::Result<String> {
         self.chat_at(messages, None).await
     }
 
-    /// 非流式对话，指定采样温度。抽取这类「照抄原文」的活要 0：端点缺省是 1.0，同一段
-    /// 文字连问两次，一次给 6 条陈述一次给 19 条（#729 实测），密度全看运气
+    /// Non-streaming conversation with a specified sampling temperature. Extraction, a task of "copying the source verbatim", needs 0. The endpoint default is 1.0, and the same text
+    /// asked twice gave 6 statements one time and 19 the other (measured #729), so density was pure luck
     pub async fn chat_at(
         &self,
         messages: &[ChatMessage],
@@ -677,18 +677,18 @@ impl LlmClient {
             .ok_or_else(|| anyhow::anyhow!("Unexpected LLM response shape: {body}"))
     }
 
-    /// 一次问答，**走流式但整段返回**：调用方拿到的和 [`Self::chat_at`] 一样是一个
-    /// 字符串，区别只在字节怎么到。
+    /// One Q&A, **streamed internally but returned whole**: the caller gets one string, the same as [`Self::chat_at`].
+    /// The only difference is how the bytes arrive.
     ///
-    /// **为什么长提示词的那几条路要用它**：[`READ_TIMEOUT`] 量的是「多久没有新字节」，
-    /// 而非流式调用的第一个字节要等模型把整段生成完——于是模型思考的时间全部算作沉默。
-    /// 开着推理，一块密集的正文实测首字节 227 秒、偶尔越过 300 秒被判死；同一块流式下
-    /// 2.6 秒就有字节（思考过程在流），总时长一样是 230 秒左右。流式不会更快，它让
-    /// 「沉默」回到它本来的意思，超时于是只杀真正卡住的请求。
+    /// **Why the long-prompt paths use this:** [`READ_TIMEOUT`] measures "how long without new bytes", while
+    /// a non-streaming call's first byte waits for the model to generate the whole reply, so all of the model's thinking time counts as silence.
+    /// With reasoning on, a dense body chunk measured first byte at 227 seconds, occasionally past 300 seconds, and was killed. Under streaming the same chunk got
+    /// bytes at 2.6 seconds (the thinking is in the stream), and the total duration was still about 230 seconds. Streaming is not faster. It restores
+    /// "silence" to its real meaning, so the timeout only kills requests that are truly stuck.
     ///
-    /// 思考过程不进返回值：只收 `delta.content`，推理的增量（`reasoning` /
-    /// `reasoning_content`）读都不读；`<think>` 混在 content 里的那种照旧由
-    /// [`strip_reasoning`] 切掉。
+    /// The thinking process is not in the return value: only `delta.content` is collected. Reasoning deltas (`reasoning` /
+    /// `reasoning_content`) are never read. The kind with `<think>` mixed into content is still cut by
+    /// [`strip_reasoning`].
     pub async fn chat_at_streaming(
         &self,
         messages: &[ChatMessage],
@@ -699,8 +699,8 @@ impl LlmClient {
             "model": self.model,
             "messages": messages,
             "stream": true,
-            // 用量随最后一帧回来：比较两次运行的第一件事是看 completion token，
-            // 换成流式不能把这个数弄丢
+            // Usage arrives with the last frame. The first thing to compare between two runs is completion tokens,
+            // so switching to streaming must not lose that number
             "stream_options": { "include_usage": true },
         });
         let mut body = self.with_effort(body);
@@ -715,7 +715,7 @@ impl LlmClient {
         // paying the 400 again (extraction calls once per chunk).
         let mut ceiling = self.completion_ceiling.load(Ordering::Relaxed);
         let mut lowered = false;
-        // 每种调整每次调用只试一次：网关可能把我们已删掉的参数重新加回来（#1232）。
+        // Each adjustment is tried only once per call: the gateway may re-add a parameter we already removed (#1232).
         let mut renamed = self.use_max_completion_tokens.load(Ordering::Relaxed);
         let resp = loop {
             let limit_key = if renamed {
@@ -723,7 +723,7 @@ impl LlmClient {
             } else {
                 "max_tokens"
             };
-            // 上限归我们，不归端点的默认值（[`MAX_COMPLETION_TOKENS`]）；改字段名也不能丢掉它。
+            // The cap is ours, not the endpoint default ([`MAX_COMPLETION_TOKENS`]); renaming the field must not drop it.
             body[limit_key] = json!(ceiling);
             let resp = self
                 .request("/chat/completions")
@@ -782,9 +782,9 @@ impl LlmClient {
         let (mut checked, mut repeating) = (0, false);
         'read: while let Some(part) = bytes.next().await {
             let part = part.map_err(Unreachable)?;
-            // 网络片段可能断在 UTF-8 字符中间，等完整 SSE 帧到齐再解码。
+            // Network chunks can break in the middle of a UTF-8 character, so wait until the full SSE frame has arrived before decoding.
             buf.push(&part);
-            // SSE 帧以空行分隔；最后一个不完整的帧留在 buf 里等下一片
+            // SSE frames are separated by blank lines; the last incomplete frame stays in buf waiting for the next chunk
             while let Some(frame) = buf.next_frame() {
                 self.take_frame(
                     &frame,
@@ -794,9 +794,9 @@ impl LlmClient {
                     &mut finish_reason,
                     &mut usage,
                 );
-                // 复读了就不再读，回复记成 `repeating`：抽取当它是半截的，前面完整的陈述照收，
-                // 不再等它写到 65,536 个 token。丢掉响应流，连接一关，端点那边也就停了。按帧看
-                // 而不是按网络片段看：一个片段可能装着整段复读。每多 256 字节看一次
+                // Once it repeats, stop reading. The reply is recorded as `repeating`: extraction treats it as partial, and the complete statements before it are still kept,
+                // and it does not wait for it to reach 65,536 tokens. Dropping the response stream closes the connection, so the endpoint stops too. Check by frame,
+                // not by network chunk: one chunk may hold a whole repetition. Check once per additional 256 bytes
                 if !ended && answer.len() >= checked + 256 {
                     checked = answer.len();
                     if repeats_at_tail(answer.as_bytes()) {
@@ -814,7 +814,7 @@ impl LlmClient {
                 }
             }
         }
-        // **收尾那一帧也算**：末尾不跟空行的实现有的是，丢掉它就是丢掉答案的尾巴
+        // **The closing frame also counts**: some implementations omit the trailing blank line, and dropping it would drop the tail of the answer
         let rest = String::from_utf8_lossy(&buf.bytes);
         if !rest.trim().is_empty() {
             self.take_frame(
@@ -838,8 +838,8 @@ impl LlmClient {
                 "llm usage"
             );
         }
-        // 端点开口了又半路没了：拼到一半的回复长得像成功，不做成错误就会被当成
-        // 模型给的全部答案
+        // The endpoint opened and then dropped halfway. A half-finished reply looks like success, and unless it is made an error it will be taken as
+        // the model's complete answer
         if !ended {
             return Err(anyhow::Error::new(Interrupted {
                 got: answer.chars().count(),
@@ -853,7 +853,7 @@ impl LlmClient {
         })
     }
 
-    /// 一个 SSE 帧：取内容增量、认终止信号、顺手记用量。推理的增量读都不读。
+    /// One SSE frame: take the content delta, recognize the termination signal, and record usage on the way. Reasoning deltas are never read.
     fn take_frame(
         &self,
         frame: &str,
@@ -878,18 +878,18 @@ impl LlmClient {
             if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
                 answer.push_str(delta);
             }
-            // 模型自己说完了：正常收尾（stop）或撞上它的输出上限（length），两种都是
-            // 端点把话说完了，与「流断在半路」不同。
+            // The model finished on its own: a normal close (stop) or hitting its output limit (length). Both mean
+            // the endpoint completed the reply, unlike "the stream dropped halfway".
             //
-            // 是哪一种要留下来：两种都让 `ended` 为真，可 `length` 的回复是半截的，
-            // 不带出去就只剩「解析不了」，说不出它为什么不全（#760）
+            // Which one must be kept: both set `ended` to true, but a `length` reply is partial,
+            // and if not carried out it leaves only "could not parse", without saying why it is incomplete (#760)
             if let Some(reason) = v["choices"][0]["finish_reason"].as_str() {
                 *ended = true;
                 *finish_reason = Some(reason.to_string());
             }
-            // 用量只在最后一帧（choices 为空）出现
-            // 有的网关每一帧都带累计用量：这里只记下来，流结束时记一次日志，否则一次调用
-            // 在日志里成了几百行「用量」，按行加总的人会把 token 高估几百倍
+            // Usage appears only in the last frame (choices empty)
+            // Some gateways attach cumulative usage to every frame. Here we only record it and log once when the stream ends, otherwise one call
+            // becomes hundreds of "usage" lines in the log, and someone summing by line overstates tokens by hundreds of times
             if !v["usage"].is_null() {
                 let u = &v["usage"];
                 *usage = Some(Usage {
@@ -900,8 +900,8 @@ impl LlmClient {
         }
     }
 
-    /// 工具对话（非流式）：messages 为 OpenAI 协议原始 JSON
-    /// （支持 assistant.tool_calls 与 role=tool 回合），tools 为 function 定义数组。
+    /// Tool conversation (non-streaming): messages are raw OpenAI-protocol JSON
+    /// (supports assistant.tool_calls and role=tool turns); tools is an array of function definitions.
     pub async fn chat_tools(
         &self,
         messages: &[serde_json::Value],
@@ -910,10 +910,10 @@ impl LlmClient {
         self.chat_tools_with(messages, Some(tools), None).await
     }
 
-    /// 带工具的请求体。`tools` 为 None 就不带工具字段——**不是空数组**：
-    /// 有的端点见到 `"tools": []` 会 400。`tool_choice` 按 OpenAI 协议原样透传
-    /// （`"auto"` / `"none"` / `"required"` / `{"type":"function",...}`），
-    /// 也只在给了的时候才写进去。
+    /// Request body with tools. `tools` None means no tools field is sent, **not an empty array**:
+    /// some endpoints return 400 on `"tools": []`. `tool_choice` is passed through as-is per the OpenAI protocol
+    /// (`"auto"` / `"none"` / `"required"` / `{"type":"function",...}`),
+    /// and is only written when given.
     fn tools_body(
         &self,
         messages: &[serde_json::Value],
@@ -941,10 +941,10 @@ impl LlmClient {
         body
     }
 
-    /// 发一个带工具的请求。推理部署上，端点可能整个拒收带工具又带推理强度的请求体
-    /// （Azure：`Function tools with reasoning_effort are not supported`），而部署本身的默认
-    /// 强度就算数，不发这个字段也一样被拒——于是对话退回一步检索，治理的第二眼跑不了（#1353）。
-    /// 吃到这句 400 就记在客户端上，改发 `none` 重试一次；只动带工具的请求，抽取与对齐照旧
+    /// Sends a request with tools. On reasoning deployments an endpoint may reject the whole body that carries tools plus a reasoning effort
+    /// (Azure: `Function tools with reasoning_effort are not supported`), and the deployment's own default effort counts too, so not sending the field is rejected as well.
+    /// The conversation then falls back to one-step retrieval, so governance's second look cannot run (#1353).
+    /// On hitting that 400, record it on the client and retry once with `none`. Only tool-carrying requests are affected; extraction and alignment carry on as before
     async fn post_tools(
         &self,
         messages: &[serde_json::Value],
@@ -979,8 +979,8 @@ impl LlmClient {
                 retried = true;
                 continue;
             }
-            // 改发 none 也被拒，且错误还是在说推理强度：这个端点连 none 都不收，记住它只会让以后每一问都带着一个错的值。
-            // 别的 400（上下文超长、工具定义不对）跟 none 无关，记住的值留着
+            // Retrying with none is also rejected, and the error is still about reasoning effort. This endpoint does not accept even none; remembering it would only make every later question carry a wrong value.
+            // Other 400s (context too long, bad tool definitions) have nothing to do with none, so the remembered value stays.
             if retried
                 && status == reqwest::StatusCode::BAD_REQUEST
                 && err_detail(&parsed, &raw)
@@ -1001,7 +1001,7 @@ impl LlmClient {
             .len()
     }
 
-    /// 工具对话（非流式），工具清单与 `tool_choice` 都可选。
+    /// Tool conversation (non-streaming), with the tool list and `tool_choice` both optional.
     pub async fn chat_tools_with(
         &self,
         messages: &[serde_json::Value],
@@ -1047,8 +1047,8 @@ impl LlmClient {
         })
     }
 
-    /// 工具对话（流式）：正文增量即时产出，工具调用按 OpenAI 协议的
-    /// index 分片归并（id/name 首帧到达，arguments 逐帧续传），流末给出完整回合。
+    /// Tool conversation (streaming): text deltas are produced immediately, and tool calls are merged by the
+    /// index fragments of the OpenAI protocol (id/name arrive in the first frame, arguments continue frame by frame). The complete turn is given at stream end.
     pub async fn chat_tools_stream(
         &self,
         messages: &[serde_json::Value],
@@ -1058,7 +1058,7 @@ impl LlmClient {
             .await
     }
 
-    /// 工具对话（流式），工具清单与 `tool_choice` 都可选；见 [`Self::chat_tools_stream`]。
+    /// Tool conversation (streaming), with the tool list and `tool_choice` both optional; see [`Self::chat_tools_stream`].
     pub async fn chat_tools_stream_with(
         &self,
         messages: &[serde_json::Value],
@@ -1077,7 +1077,7 @@ impl LlmClient {
             let mut done = false;
             'outer: while let Some(part) = bytes.next().await {
                 let part = part?;
-                // 网络片段可能断在 UTF-8 字符中间，等完整 SSE 帧到齐再解码。
+                // Network chunks can break in the middle of a UTF-8 character, so wait until the full SSE frame has arrived before decoding.
                 buf.push(&part);
                 while let Some(frame) = buf.next_frame() {
                     for line in frame.lines() {
@@ -1134,8 +1134,8 @@ impl LlmClient {
                     }
                 }
             }
-            // HTTP 正常结束也可能只送到半个模型回合，不能把没收完的工具调用
-            // 当作完整回合交给 agent。
+            // Even when HTTP ends normally, only half a model turn may have arrived. Do not hand an unfinished tool call
+            // to the agent as a complete turn.
             if !done {
                 Err(Interrupted { got: content.chars().count() })?;
             }
@@ -1146,7 +1146,7 @@ impl LlmClient {
         Ok(stream)
     }
 
-    /// 流式对话：产出增量文本片段。
+    /// Streaming conversation: yields incremental text fragments.
     pub async fn chat_stream(
         &self,
         messages: &[ChatMessage],
@@ -1158,7 +1158,7 @@ impl LlmClient {
         self.chat_stream_raw(&messages).await
     }
 
-    /// 流式对话（原始 JSON 消息，可携带工具回合上下文）。
+    /// Streaming conversation (raw JSON messages, can carry tool-turn context).
     pub async fn chat_stream_raw(
         &self,
         messages: &[serde_json::Value],
@@ -1184,9 +1184,9 @@ impl LlmClient {
             let mut got = 0;
             while let Some(part) = bytes.next().await {
                 let part = part?;
-                // 网络片段可能断在 UTF-8 字符中间，等完整 SSE 帧到齐再解码。
+                // Network chunks can break in the middle of a UTF-8 character, so wait until the full SSE frame has arrived before decoding.
                 buf.push(&part);
-                // SSE 帧以空行分隔；逐帧取出已完整到达的部分
+                // SSE frames are separated by blank lines; take out the parts that have fully arrived, frame by frame
                 while let Some(frame) = buf.next_frame() {
                     for line in frame.lines() {
                         let Some(data) = line.strip_prefix("data:").map(str::trim) else {
@@ -1216,7 +1216,7 @@ impl LlmClient {
         Ok(stream)
     }
 
-    /// 批量 embedding。
+    /// Batch embedding.
     pub async fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
         let resp = self
             .request("/embeddings")
@@ -1248,15 +1248,15 @@ impl LlmClient {
     }
 }
 
-/// 把返回的向量和输入的文本配对。响应里写了数字 `index` 的条目归到那个输入；
-/// 取不出数的（没写、`null`、字符串、浮点、负数）按它到达的位置配——网关打乱了
-/// 顺序也认得回来，不写索引的端点也照旧能用。
+/// Pairs the returned vectors with the input texts. An entry that writes a numeric `index` is attributed to that input.
+/// An entry without a usable number (absent, `null`, string, float, negative) is matched by its arrival position. Gateways that scramble
+/// the order are still recognized, and endpoints that omit the index still work.
 ///
-/// **两种形状可以混在一批里。** Gemini 的 OpenAI 兼容端点只在第一条上省掉 `index`
-/// （零是它的默认值，默认值不写），三条输入回来是 `[{embedding}, {index: 1},
-/// {index: 2}]`。混合不是矛盾：每条要么说了自己是谁，要么站在自己的位置上。真正的
-/// 矛盾是两条认领同一个输入、索引超出这一批、或条数和输入对不上——那是端点在说谎，
-/// 拒绝，不猜。
+/// **Both shapes can be mixed in one batch.** Gemini's OpenAI-compatible endpoint omits `index` only on the first item.
+/// (Zero is its default, and defaults aren't written.) Three inputs come back as `[{embedding}, {index: 1},
+/// {index: 2}]`. Mixing is not a contradiction: each item either says who it is, or stands in its own position. A real
+/// contradiction is two items claiming the same input, an index outside this batch, or a count that does not match the inputs. That means the endpoint is lying,
+/// so reject it rather than guess.
 fn ordered_by_index(
     data: &[serde_json::Value],
     expected: usize,
@@ -1285,17 +1285,17 @@ fn ordered_by_index(
     Ok(ordered.into_iter().flatten().collect())
 }
 
-/// 记一次调用的 token 开销。**缓存命中数是这里最重要的一列**：抽取靠
-/// "system 消息在一篇文档内逐块完全相同" 吃供应商的前缀缓存，
-/// 往 system 里塞逐块变化的内容会让它悄悄归零——只有这个数看得见。
+/// Records a call's token overhead. **The cache-hit count is the most important column here**: extraction relies on
+/// "the system message is byte-identical across chunks of one document" to get the provider's prefix cache.
+/// Putting per-chunk-varying content into the system message silently zeroes it, and only this number makes that visible.
 ///
-/// 字段名各家不一：OpenAI 用 prompt_tokens_details.cached_tokens，
-/// DeepSeek 用 prompt_cache_hit_tokens。两个都读，谁在读谁。
-/// 这一次调用是干什么的：系统消息的头一句，截到六十个字符。
+/// Field names differ by vendor: OpenAI uses prompt_tokens_details.cached_tokens,
+/// while DeepSeek uses prompt_cache_hit_tokens. Both are read, whichever is present.
+/// What this call is for: the first sentence of the system message, cut at sixty characters.
 ///
-/// 用量日志从前只有模型和两个数，一篇文档三万 token 花在哪一种调用上（抽取、两票、提规则、
-/// 读数、时间解释）从日志里分不出来，只能按时间窗口猜。系统消息是各处写死的常量，头一句
-/// 各不相同，拿它当标签不必改任何一个调用方。没有系统消息的（对话）标 `-`
+/// The usage log used to carry only the model and two numbers, so you could not tell which kind of call (extraction, two-vote, rule extraction,
+/// reading, time interpretation) a document's 30k tokens went to. System messages are constants hard-coded in each place, and their first sentences
+/// differ, so using them as a label needs no change to any caller. Calls without a system message (conversation) are labelled `-`
 fn call_label(messages: &[ChatMessage]) -> String {
     let Some(system) = messages.iter().find(|m| m.role == "system") else {
         return "-".into();
@@ -1306,7 +1306,7 @@ fn call_label(messages: &[ChatMessage]) -> String {
         .next()
         .unwrap_or("")
         .trim();
-    // 标签里不留空格和引号：日志是 `key=value` 的一行，拆的人按空格拆
+    // No spaces or quotes in the label: the log is one `key=value` line, and whoever splits it splits on spaces
     first
         .chars()
         .take(60)
@@ -1334,21 +1334,21 @@ fn log_usage(model: &str, call: &str, body: &serde_json::Value) {
         prompt = n("prompt_tokens"),
         completion = n("completion_tokens"),
         cached,
-        // 排在后面：读日志的脚本按 `model=… prompt=… completion=…` 的次序认这一行
+        // Placed later: the scripts that read the log expect the line in the order `model=… prompt=… completion=…`
         call,
         "llm usage"
     );
 }
 
-/// 引用原文时最多带多少字。到目前见过的诊断没有一条超过它，而这段字会进日志、
-/// 告警和文档的错误栏，一个回 HTML 页面的代理不该把整页塞进去。按字符数不按字节，
-/// 中文错误信息切在字符中间就成了乱码。
+/// Maximum characters of quoted original text. No diagnostic seen so far has exceeded it, and this text goes into logs,
+/// alerts, and the document's error column. A proxy returning an HTML page should not dump the whole page in. Counted in characters, not bytes,
+/// so a Chinese error message cut mid-character would become garbage.
 const MAX_ERROR_DETAIL_CHARS: usize = 500;
 
-/// 从错误体里取一句给人看的话。依次试 OpenAI 的 `error.message`、SiliconFlow 那种
-/// 顶层 `message`、以及 `error` 直接是一个字符串的写法；都不是就引用原文本身。
-/// 「unknown error」只留给 body 真的是空的那种情况——它从前是所有认不出的形状的
-/// 归宿，把最有用的那句话吞掉了（#527）。
+/// Pulls a human-readable sentence from the error body. It tries, in order, OpenAI's `error.message`, SiliconFlow's
+/// top-level `message`, and the form where `error` is directly a string. If none match, it quotes the raw body itself.
+/// "unknown error" is reserved for when the body is truly empty. It used to be the destination of every unrecognized shape,
+/// swallowing the most useful sentence (#527).
 fn err_detail(body: &serde_json::Value, raw: &str) -> String {
     body["error"]["message"]
         .as_str()
@@ -1362,7 +1362,7 @@ fn err_detail(body: &serde_json::Value, raw: &str) -> String {
         .unwrap_or_else(|| "unknown error".to_string())
 }
 
-/// 先认参数名和错误码；Azure 可能只给一段消息。笼统的温度无效不足以丢掉调用方的设置。
+/// Check parameter names and error codes first; Azure may give only a message. A vague "invalid temperature" must not drop the caller's setting.
 fn says_temperature_unsupported(body: &serde_json::Value, raw: &str) -> bool {
     if let Some(parameter) = body["error"]["param"].as_str() {
         if parameter != "temperature" {
@@ -1380,21 +1380,21 @@ fn says_temperature_unsupported(body: &serde_json::Value, raw: &str) -> bool {
         && (detail.contains("not support") || detail.contains("unsupported"))
 }
 
-/// 端点说不说「带工具的请求不收推理强度」。只有措辞可认：Azure 给的 code 是笼统的
-/// `invalid_request_error`。两样都得提到——只说工具或只说推理强度的 400 是别的毛病
+/// Whether the endpoint says "requests with tools do not accept a reasoning effort". Only the wording is recognizable: the code Azure gives is the vague
+/// `invalid_request_error`. Both must be mentioned. A 400 that mentions only tools or only reasoning effort is a different fault.
 fn says_tools_refuse_effort(detail: &str) -> bool {
     let d = detail.to_lowercase();
     d.contains("reasoning_effort") && (d.contains("tool") || d.contains("function"))
 }
 
-/// 响应体说不说这是余额问题。
+/// Whether the response body says this is a balance problem.
 ///
-/// **给 429 用的**：OpenAI 用同一个状态码表示「太快了」和「没钱了」，
-/// `error.code` 或 `error.type` 里的 `insufficient_quota` 才是分界。
+/// **Used for 429**: OpenAI uses the same status code for "too fast" and "out of money".
+/// `insufficient_quota` in `error.code` or `error.type` is the dividing line.
 ///
-/// 只认这一个标识、不去匹配 message 的自由文本：措辞会改、会本地化，
-/// 而 `code` 是接口契约的一部分。认不出来就退回按状态码判，那是安全的一侧
-/// （当成限流退避几次，比当成欠费直接放弃温和）。
+/// Only this one identifier is recognized, not free-text matching on the message: wording changes and gets localized,
+/// while `code` is part of the interface contract. When it is not recognized, fall back to classifying by status code, which is the safe side
+/// (backing off as rate limiting a few times is better than giving up gently as out-of-credit).
 fn says_out_of_credit(body: &serde_json::Value) -> bool {
     ["code", "type"]
         .iter()
@@ -1402,12 +1402,12 @@ fn says_out_of_credit(body: &serde_json::Value) -> bool {
         .any(|v| v == "insufficient_quota")
 }
 
-/// 响应体说不说这是上下文超了。
+/// Whether the response body says the context is exceeded.
 ///
-/// **先看结构化的 code，再看措辞。** OpenAI 的 code 是 `context_length_exceeded`，措辞随
-/// 版本变；DeepSeek 的 code 只是笼统的 `invalid_request_error`，认的是那句
-/// 「This model's maximum context length is 1048576 tokens. However, you requested …」
-/// （2026-09-27 实测）。code 在 `err_detail` 只留 message 之前读，不然就丢了
+/// **Check the structured code first, then the wording.** OpenAI's code is `context_length_exceeded`, and the wording changes with
+/// versions. DeepSeek's code is only the vague `invalid_request_error`, so it is recognized by the sentence
+/// "This model's maximum context length is 1048576 tokens. However, you requested …"
+/// (measured 2026-09-27). The code is read in `err_detail` before only the message is kept, or it is lost.
 fn says_context_too_long(body: &serde_json::Value, detail: &str) -> bool {
     let says = [
         body.pointer("/error/code"),
@@ -1419,14 +1419,14 @@ fn says_context_too_long(body: &serde_json::Value, detail: &str) -> bool {
     .filter_map(|v| v.as_str())
     .any(|code| code == "context_length_exceeded")
         || context_wording(detail);
-    // 账目说 messages 装得下、超的是我们自己要的 completion：那不是对话太长，是上限要按
-    // 窗口剩下的来（`stated_completion_ceiling`），重试就能过（#973 评审的后续）
+    // The accounting says messages fit and what overflowed is the completion we asked for. That is not a conversation that is too long: the cap has to be taken from
+    // the window's remainder (`stated_completion_ceiling`), and a retry gets through (follow-up to #973 review)
     says && completion_overflows(detail).is_none()
 }
 
-/// 拒绝里的账目：窗口 W，我们发的 messages 占了 N、completion 要了 M。OpenAI、DeepSeek 和
-/// vLLM 一家的写法："maximum context length is W tokens. However, you requested T tokens
-/// (N in the messages, M in the completion)"。读不全就是 None——别的写法分不出哪部分超了
+/// The accounting in the rejection: window W, the messages we sent take N, and the completion asked for M. OpenAI, DeepSeek and
+/// vLLM write it this way: "maximum context length is W tokens. However, you requested T tokens
+/// (N in the messages, M in the completion)". If it cannot be read in full, it is None, since other wordings cannot tell which part overflowed.
 fn overflow_ledger(detail: &str) -> Option<(u32, u32, u32)> {
     let lower = detail.to_ascii_lowercase();
     let number_before = |marker: &str| -> Option<u32> {
@@ -1444,17 +1444,17 @@ fn overflow_ledger(detail: &str) -> Option<(u32, u32, u32)> {
     ))
 }
 
-/// 超的是 completion 时，窗口给回答留下的余地；messages 本身就装不下（余地不到
-/// `MIN_CONTEXT_WINDOW_TOKENS`，一段像样的回答都放不进）就是 None，那才是对话太长。
-/// 从前这种拒绝把窗口本身当上限重试，N + W 照样超，重试必然再挨一次
+/// When the completion overflowed: the room the window leaves for the answer. If the messages alone do not fit (the room is under
+/// `MIN_CONTEXT_WINDOW_TOKENS`, too little for a reasonable answer), it is None, and that is the conversation being too long.
+/// Previously this kind of rejection retried with the window itself as the cap. N + W still overflows, so the retry was bound to hit the same error again.
 fn completion_overflows(detail: &str) -> Option<u32> {
     let (window, messages, completion) = overflow_ledger(detail)?;
     let room = window.checked_sub(messages)?;
     (room >= MIN_CONTEXT_WINDOW_TOKENS && room < completion).then_some(room)
 }
 
-/// 各家说「超长」的话。只收实测过或文档写明的：OpenAI 与 DeepSeek 的 "maximum context
-/// length"、Anthropic 的 "prompt is too long"、LM Studio 的 "exceeds the available context"
+/// Ways each provider says "too long". Only ones measured or documented are taken: OpenAI and DeepSeek's "maximum context
+/// length", Anthropic's "prompt is too long", LM Studio's "exceeds the available context"
 fn context_wording(detail: &str) -> bool {
     let detail = detail.to_ascii_lowercase();
     [
@@ -1468,10 +1468,10 @@ fn context_wording(detail: &str) -> bool {
     .any(|wording| detail.contains(wording))
 }
 
-/// 拒绝里报出的窗口有多大（token）。
+/// How large the window reported in a rejection is (tokens).
 ///
-/// **只认紧跟着「窗口」的那个数。** 同一句话里还有我们发了多少 token、模型的版本号、
-/// 补全上限，学错一个就把历史裁没了；数字后面还得跟着 tokens 这个词
+/// **Only the number directly after "window" is accepted.** The same sentence also has the tokens we sent, the model version number,
+/// and the completion cap. Learning the wrong one would cut the history away. The number must also be followed by the word tokens
 fn stated_context_window(detail: &str) -> Option<u32> {
     let lower = detail.to_ascii_lowercase();
     for marker in ["maximum context length", "context window"] {
@@ -1543,7 +1543,7 @@ fn stated_completion_ceiling(detail: &str, sent: u32) -> Option<u32> {
         let Some(n) = number_with_separators(word) else {
             continue;
         };
-        // 数字之后可以隔一个修饰词（completion / output / new）再到 tokens
+        // A modifier (completion / output / new) may sit between the number and tokens
         let says_tokens = words[i + 1..].iter().take(2).any(|w| {
             w.trim_matches(|c: char| !c.is_ascii_alphabetic())
                 .eq_ignore_ascii_case("tokens")
@@ -1557,7 +1557,7 @@ fn stated_completion_ceiling(detail: &str, sent: u32) -> Option<u32> {
     best
 }
 
-/// `16384`、`16,384`、`16384.`：去掉千分位逗号和收尾标点后的整数；别的不是数
+/// `16384`, `16,384`, `16384.`: an integer after removing thousands commas and trailing punctuation. Anything else is not a number
 fn number_with_separators(word: &str) -> Option<u32> {
     let trimmed = word.trim_end_matches(['.', ',', ';', ':']);
     if trimmed.is_empty() || !trimmed.chars().all(|c| c.is_ascii_digit() || c == ',') {
@@ -1571,8 +1571,8 @@ fn number_with_separators(word: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    /// 账目说 messages 装得下、超的是 completion：不是对话太长，按窗口剩下的余地重试；
-    /// messages 本身装不下（或余地不到 1,024）才是上下文拒绝
+    /// The accounting says the messages fit and the overflow is the completion. That is not a conversation that is too long: retry with the room the window leaves.
+    /// If the messages themselves do not fit (or the room is under 1,024), it is a context rejection
     #[test]
     fn a_completion_overflow_is_a_ceiling_to_lower_and_not_a_context_refusal() {
         let fits = "This model's maximum context length is 8192 tokens. However, you requested 69536 tokens (4000 in the messages, 65536 in the completion). Please reduce the length of the messages or completion.";
@@ -1604,7 +1604,7 @@ mod tests {
         }
     }
 
-    /// 整条路：小窗口模型拒了我们 65,536 的 max_tokens，重试按窗口剩下的余地要，过了
+    /// The whole path: a small-window model rejected our 65,536 max_tokens. The retry asks for what the window leaves, and the
     #[tokio::test]
     async fn a_completion_overflow_is_retried_at_what_the_window_leaves() {
         let refusal = r#"{"error":{"message":"This model's maximum context length is 8192 tokens. However, you requested 65736 tokens (200 in the messages, 65536 in the completion). Please reduce the length of the messages or completion.","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}"#;
@@ -1644,7 +1644,7 @@ mod tests {
 
     #[test]
     fn context_refusals_keep_the_code_and_only_learn_a_stated_window() {
-        // DeepSeek 的原话（2026-09-27 实测，deepseek-chat）：code 只是 invalid_request_error
+        // DeepSeek's exact words (measured 2026-09-27, deepseek-chat): code is only invalid_request_error
         let deepseek = json!({"error":{"message":"This model's maximum context length is 1048576 tokens. However, you requested 1200006 tokens (1200005 in the messages, 1 in the completion). Please reduce the length of the messages or completion. (request_id: 3c27dcba)","type":"invalid_request_error","param":null,"code":"invalid_request_error"}});
         for (body, raw, window, budget) in [
             (json!({"error":{"code":"context_length_exceeded","message":"Request rejected"}}), "", None, 32_000),
@@ -1909,11 +1909,11 @@ mod tests {
         serde_json::json!([])
     }
 
-    /// 把请求整个读完：头读到空行，正文按 Content-Length。
+    /// Read the whole request: headers up to the blank line, body by Content-Length.
     ///
-    /// **必须先读再答。** 收到的数据还没读就关连接，Windows 会发 RST，客户端那边
-    /// 已经到手的响应连同错误一起变成「连接被中止」（os error 10053）——这组测试
-    /// 在 Linux 上绿、在 Windows 上红，就是这个原因
+    /// **Must read before answering.** If the connection is closed with data not yet read, Windows sends an RST, and the response the client
+    /// already received gets turned into "connection aborted" (os error 10053) along with the error. These tests
+    /// are green on Linux and red on Windows for exactly this reason
     async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
         use tokio::io::AsyncReadExt;
         let mut buf = Vec::new();
@@ -1944,9 +1944,9 @@ mod tests {
         String::from_utf8_lossy(&buf).into_owned()
     }
 
-    /// 一个只答一次的 HTTP 服务：读完请求，把这份响应原样写回去，关掉。
-    /// 用裸 socket 而不是 mock 库，是因为要造的正是「不像模型 API 的回答」——
-    /// 纯文本、不完整、什么都行。返回的句柄要 await：它跑完才说明响应真的发出去了
+    /// A service that answers once: it reads the request, writes this response back verbatim, and closes.
+    /// It uses a raw socket rather than a mock library, because what it has to fake is exactly "an answer that doesn't look like a model API":
+    /// plain text, incomplete, anything at all. The returned handle must be awaited, since only when it finishes is it proven the response actually went out
     async fn an_http_response(
         status: &str,
         content_type: &str,
@@ -1970,8 +1970,8 @@ mod tests {
         (addr, server)
     }
 
-    /// 同上，另外把**请求**原样交回来：要断言的是我们发出去了什么
-    /// （`max_tokens` 有没有真的写进请求体），不是端点答了什么。
+    /// Same as above, but also returns the **request** verbatim. What has to be asserted is what we sent
+    /// (whether `max_tokens` really got written into the body), not what the endpoint answered.
     async fn an_http_response_capturing(
         status: &str,
         content_type: &str,
@@ -2059,7 +2059,7 @@ mod tests {
         body["max_tokens"].clone()
     }
 
-    // HTTP 分块可以断在 UTF-8 字符中间，与 SSE 帧边界无关。
+    // HTTP chunks can break in the middle of a UTF-8 character, regardless of SSE frame boundaries.
     async fn bytewise_sse(body: &str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2268,7 +2268,7 @@ mod tests {
         an_http_response("502 Bad Gateway", "text/plain", body).await
     }
 
-    /// 声称 body 有 100 字节、只发 1 个就挂断：读 body 会半路失败
+    /// Claims the body is 100 bytes, sends only 1, and hangs up: reading the body fails midway
     async fn an_incomplete_http_error() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2284,7 +2284,7 @@ mod tests {
         (addr, server)
     }
 
-    /// 错误里带着端点那句话，且没被判成 Unreachable
+    /// The error carries the endpoint's own sentence, and is not classed as Unreachable
     async fn assert_diagnosis<T>(
         result: anyhow::Result<T>,
         diagnosis: &str,
@@ -2359,7 +2359,7 @@ mod tests {
         reply
     }
 
-    /// 复读的回复按截断收下（#1301）：这条流没有收尾，没有护栏就是「流断在半路」
+    /// A repeating reply is accepted as truncated (#1301). This stream has no closing frame; without a guard it is "the stream dropped halfway"
     #[tokio::test]
     async fn a_reply_that_keeps_repeating_comes_back_cut() {
         let row = r#"[null,"a","is on","b",null,{},null,null],"#;
@@ -2375,7 +2375,7 @@ mod tests {
         );
     }
 
-    /// 引文里一条 200 个点的目录引导线不是复读：周期是一个点，不是一整行
+    /// A 200-dot table-of-contents leader in a quote is not a repetition: the period is one dot, not a whole line
     #[tokio::test]
     async fn a_quoted_dot_leader_comes_back_whole() {
         let sse = content_frame(r#"{"e":[["Introduction","section",true]],"s":[["Introduction "#)
@@ -2554,8 +2554,8 @@ mod tests {
         }
     }
 
-    /// 流式的一次问答收成整段：只要 `delta.content`，推理的增量不进返回值，
-    /// 用量那一帧不当内容，没有一帧是错（端点开了流却什么都没发）
+    /// Collapses a streaming Q&A into one whole piece: only `delta.content` counts. Reasoning deltas are not in the return value,
+    /// the usage frame is not treated as content, and no frame is an error (the endpoint opened the stream but sent nothing)
     #[tokio::test]
     async fn a_streamed_answer_arrives_whole_without_its_reasoning() {
         let sse = [
@@ -2585,8 +2585,8 @@ mod tests {
         server.await.unwrap();
         assert_eq!(answer.text, "{\"e\":[]}", "只收 content 的增量，拼成整段");
 
-        // 开了流却一帧都没发：那不是空答案，那是没答
-        // 末帧不跟空行：尾巴不能丢
+        // Stream opened but no frame was sent: that is not an empty answer, it is no answer
+        // The final frame has no trailing blank line: the tail must not be dropped
         let tail = "data: {\"choices\":[{\"delta\":{\"content\":\"head\"}}]}
 
 data: {\"choices\":[{\"delta\":{\"content\":\"tail\"},\"finish_reason\":\"stop\"}]}";
@@ -2609,7 +2609,7 @@ data: {\"choices\":[{\"delta\":{\"content\":\"tail\"},\"finish_reason\":\"stop\"
             "端点给的收尾原因要带出来"
         );
 
-        // 开口了又半路没了：那不是一个短答案，那是没答完，值得再试一次
+        // Opened and then dropped halfway: that is not a short answer, it is an unfinished one, worth retrying
         let cut = "data: {\"choices\":[{\"delta\":{\"content\":\"half an ans\"}}]}
 
 ";
@@ -2884,7 +2884,7 @@ data: {\"choices\":[{\"delta\":{\"content\":\"tail\"},\"finish_reason\":\"stop\"
                     "param": parameter, "code": "unsupported_parameter",
                     "message": "Repeated refusal"
                 }})))
-                // 第三次会拿到 404，让没有次数上限的重试立即暴露。
+                // The third time it gets a 404, so a retry with no attempt limit exposes itself immediately.
                 .up_to_n_times(2)
                 .expect(2)
                 .mount(&server)
@@ -2973,13 +2973,13 @@ data: {\"choices\":[{\"delta\":{\"content\":\"tail\"},\"finish_reason\":\"stop\"
         assert!(err.to_string().contains("temperature"), "{err}");
     }
 
-    /// 上限归我们，被截断这件事说得出来（#760）。
+    /// The cap is ours, so being truncated can be stated (#760).
     ///
-    /// 两件事一起测，因为它们是同一个毛病的两半：不送 `max_tokens`，答案在哪里
-    /// 断由端点的默认值说了算；送了却把 `finish_reason` 丢掉，断了也没人知道为什么。
+    /// The two are tested together because they are two halves of one fault. Without `max_tokens`, where the answer
+    /// gets cut is up to the endpoint's default. Sending it but dropping `finish_reason` means nobody knows why it was cut even when it is.
     #[tokio::test]
     async fn a_token_ceiling_is_ours_and_a_cut_reply_says_so() {
-        // `length` = 端点说「我是撞上上限停的」。这样的回复长得和正常收尾一模一样
+        // `length` = the endpoint says "I stopped because I hit the cap". Such a reply looks exactly like a normal close
         let cut = [
             r#"data: {"choices":[{"delta":{"content":"{\"e\":[{\"n\":\"half"}}]}"#,
             r#"data: {"choices":[{"delta":{},"finish_reason":"length"}]}"#,
@@ -3005,7 +3005,7 @@ data: {\"choices\":[{\"delta\":{\"content\":\"tail\"},\"finish_reason\":\"stop\"
             .unwrap();
         server.await.unwrap();
 
-        // 一、请求里真的带了上限，而且是我们那个数
+        // First, the request really carried a cap, and it was ours
         let sent = request.await.unwrap();
         let body: serde_json::Value =
             serde_json::from_str(sent.split_once("\r\n\r\n").expect("请求该有 body").1)
@@ -3016,13 +3016,13 @@ data: {\"choices\":[{\"delta\":{\"content\":\"tail\"},\"finish_reason\":\"stop\"
             "不送这个字段，答案断在哪里就是端点的默认值说了算：{body}"
         );
 
-        // 二、被截断这件事到得了调用方。答案照旧是完整的那半段——半截的回复
-        // 仍然有价值，丢的是尾巴不是全部
+        // Second, the truncation reaches the caller. The answer is still the complete half: a half reply
+        // is still valuable. What is lost is the tail, not everything
         assert!(reply.hit_token_ceiling(), "{:?}", reply.finish_reason);
         assert_eq!(reply.finish_reason.as_deref(), Some("length"));
         assert!(reply.text.starts_with(r#"{"e":["#), "{}", reply.text);
 
-        // 正常收尾不是截断：两者都让流正常结束，只有原因分得开
+        // A normal close is not a truncation: both end the stream normally, and only the reasons are told apart
         let whole =
             "data: {\"choices\":[{\"delta\":{\"content\":\"{}\"},\"finish_reason\":\"stop\"}]}
 
@@ -3044,8 +3044,8 @@ data: [DONE]
         assert!(!reply.hit_token_ceiling(), "stop 不是截断");
     }
 
-    /// 会自己好的与不会自己好的分开：网关那几个是 [`Unavailable`]，密钥错那类照旧
-    /// 是 [`Rejected`]，欠费与限流各归各位。调用方据此决定「等一会儿再来」还是「这块废了」
+    /// Separates what will clear up by itself from what won't: the gateway ones are [`Unavailable`], a wrong key stays
+    /// [`Rejected`], and out-of-credit and rate limiting each go their own way. The caller decides from this whether to "wait a while and try again" or "this chunk is dead"
     #[tokio::test]
     async fn a_gateway_failure_is_transient_and_a_bad_key_is_not() {
         for status in [
@@ -3072,7 +3072,7 @@ data: [DONE]
             );
         }
 
-        // 请求根本没送到（连不上）：也是会自己好的一类
+        // The request never arrived (could not connect). This is also a class that clears up by itself
         let nowhere = ChatMessage {
             role: "user".into(),
             content: "hi".into(),
@@ -3086,7 +3086,7 @@ data: [DONE]
             "{err:#}"
         );
 
-        // 密钥错、请求不合法：重试一万次还是错，不能混进去
+        // Wrong key or invalid request: retrying ten thousand times is still wrong, so it must not be mixed in
         for status in [
             "401 Unauthorized",
             "400 Bad Request",
@@ -3112,8 +3112,8 @@ data: [DONE]
         }
     }
 
-    /// #527 的正题：一个回纯文本的 502，五条请求路径（对话、工具对话、两种流式、嵌入）
-    /// 都要把那句话原样带出来，而不是报「unknown error」或「连不上」。
+    /// The thesis of #527: a plain-text 502, and all five request paths (chat, tool chat, both streaming kinds, embedding)
+    /// must carry that sentence through verbatim, instead of reporting "unknown error" or "could not connect".
     #[tokio::test]
     async fn a_body_that_is_not_json_is_quoted_and_not_called_unreachable() {
         let diagnosis = "proxy says the model context is too long";
@@ -3163,8 +3163,8 @@ data: [DONE]
         assert_diagnosis(client.embed(&["hi".to_string()]).await, diagnosis, server).await;
     }
 
-    /// 反面：body 读到一半连接断了，这是传输层的事，仍归 Unreachable——
-    /// 别把「引用原文」做过头，把真的连接故障也说成端点的诊断
+    /// The opposite: the body was cut off midway through reading. That is a transport-layer matter and still belongs to Unreachable.
+    /// Do not go so far in quoting the original that a real connection failure gets reported as the endpoint's diagnosis.
     #[tokio::test]
     async fn a_body_that_cannot_be_read_stays_unreachable() {
         let (addr, server) = an_incomplete_http_error().await;
@@ -3178,7 +3178,7 @@ data: [DONE]
         );
     }
 
-    /// 成功路径原样：状态码先行没有改变成功响应的解析
+    /// The success path is unchanged: checking the status first does not change how the success response is parsed
     #[tokio::test]
     async fn successful_responses_still_parse() {
         let (addr, server) = an_http_response(
@@ -3215,10 +3215,10 @@ data: [DONE]
         assert_eq!(result.unwrap(), vec![vec![1.0]]);
     }
 
-    /// #690 的正题：推理模型把思考过程以内联 `<think>` 写进回复正文，
-    /// `chat` 只返回标记之后的那半——抽取、裁决、连通性测试都读它。
-    /// 思考过程里特意放一对大括号：`json_block` 取"第一个 `{` 到最后一个 `}`"，
-    /// 不切掉这里，下游就会卡在思考过程里取错起止。
+    /// The thesis of #690: a reasoning model writes its thinking inline as `<think>` in the reply body,
+    /// and `chat` returns only the half after the marker. Extraction, adjudication and connectivity tests all read that.
+    /// A pair of braces is deliberately placed in the thinking: `json_block` takes "first `{` to last `}`".
+    /// Without cutting it here, downstream would get stuck in the thinking and pick the wrong start and end.
     #[tokio::test]
     async fn a_reasoning_reply_keeps_only_what_follows_think() {
         let (addr, server) = an_http_response(
@@ -3233,7 +3233,7 @@ data: [DONE]
         assert_eq!(result.unwrap(), r#"{"facts": []}"#);
     }
 
-    /// 反面：没有标记的回复原样返回——非推理模型走这里不受影响
+    /// The opposite: a reply without a marker is returned as-is. Non-reasoning models are unaffected by this path
     #[tokio::test]
     async fn a_reply_without_a_think_marker_is_untouched() {
         let (addr, server) = an_http_response(
@@ -3248,7 +3248,7 @@ data: [DONE]
         assert_eq!(result.unwrap(), r#"{"facts": []}"#);
     }
 
-    /// 取最后一个标记：防着正文里引用它
+    /// Takes the last marker, to guard against the body quoting it
     #[test]
     fn strip_reasoning_cuts_before_the_last_marker() {
         assert_eq!(
@@ -3258,13 +3258,13 @@ data: [DONE]
         );
     }
 
-    /// `settings/test` 当场撞见的形状（#690）：`"OK</think>OK"`
+    /// The shape measured by `settings/test` (#690): `"OK</think>OK"`
     #[test]
     fn strip_reasoning_fixes_the_settings_test_echo() {
         assert_eq!(strip_reasoning("OK</think>OK"), "OK");
     }
 
-    /// `{"error": "…"}` 这种把错误直接写成字符串的端点（LM Studio 就是），从前认不出
+    /// Endpoints that write the error directly as a string, like `{"error": "…"}` (LM Studio is one), were previously not recognized
     #[test]
     fn an_error_given_as_a_string_is_forwarded() {
         let body = serde_json::json!({ "error": "model is unavailable" });
@@ -3275,14 +3275,14 @@ data: [DONE]
         );
     }
 
-    /// OpenAI 形状照旧
+    /// OpenAI shape unchanged
     #[test]
     fn a_body_with_error_message_still_reads_it() {
         let body = serde_json::json!({ "error": { "message": "bad request" } });
         assert_eq!(err_detail(&body, ""), "bad request");
     }
 
-    /// 截断按字符数：501 个「界」截成 500 个，而不是在某个字的字节中间切开
+    /// Truncation is by characters: a 501-character string is cut to 500, rather than split in the middle of a character's bytes
     #[test]
     fn a_long_body_is_truncated() {
         let raw = "界".repeat(MAX_ERROR_DETAIL_CHARS + 1);
@@ -3290,8 +3290,8 @@ data: [DONE]
         assert_eq!(detail.chars().count(), MAX_ERROR_DETAIL_CHARS);
     }
 
-    /// 真发一次注定失败的请求，拿一个货真价实的 `reqwest::Error`。
-    /// 端口 1 上不会有东西监听，而 127.0.0.1 不走代理。
+    /// Really sends a request that is bound to fail, to get a genuine `reqwest::Error`.
+    /// Nothing listens on port 1, and 127.0.0.1 does not go through a proxy.
     async fn a_real_transport_error() -> reqwest::Error {
         reqwest::Client::builder()
             .no_proxy()
@@ -3303,17 +3303,17 @@ data: [DONE]
             .expect_err("端口 1 不该连得上")
     }
 
-    /// **接了连接却一个字节都不回**的服务端。
+    /// **A server that accepts the connection but never sends a byte.**
     ///
-    /// 这是生产上真正发生的形态，也是最难发现的一种：TCP 连得上、TLS 握得成、
-    /// 请求发得出去，然后没了。连接错误会立刻报，这种不会——没有超时的话
-    /// `send().await` 就永远停在那里，而调用它的 worker 槽再也不释放。
+    /// This is the form that really happens in production, and the hardest to spot: TCP connects, TLS completes,
+    /// and the request goes out, then nothing. Connection errors report immediately; this one does not. Without a timeout,
+    /// `send().await` stays parked there forever, and the worker slot calling it is never released.
     async fn a_server_that_never_answers() -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            // 收下连接就攥着不放。**必须持有 socket**：一 drop 就是 FIN，
-            // 那样测的又变成了连接被关闭，不是沉默
+            // Accepts the connection and holds on to it. **Must hold the socket**: a drop sends a FIN,
+            // and the test would then be measuring a closed connection, not silence
             let mut held = Vec::new();
             while let Ok((sock, _)) = listener.accept().await {
                 held.push(sock);
@@ -3322,10 +3322,10 @@ data: [DONE]
         addr
     }
 
-    /// 请求挂住时必须**报错返回**，而不是永远等下去。
+    /// When a request hangs it must **return an error**, not wait forever.
     ///
-    /// 没有这条守着，回归的样子是：一次灌入死在第 55 块，32 个 worker 槽被
-    /// 永久占满，jobs 表里全是 running，而日志和界面上一个字都没有。
+    /// Without this guard the regression looks like this: one ingestion dies at chunk 55, the 32 worker slots are
+    /// permanently occupied, the jobs table is all running, and the logs and UI show nothing at all.
     #[tokio::test]
     async fn a_silent_server_ends_in_an_error_not_a_hang() {
         let addr = a_server_that_never_answers().await;
@@ -3346,7 +3346,7 @@ data: [DONE]
         )
         .await;
 
-        // 外层 timeout 触发 = 客户端自己没有把它掐掉，正是要修的那个 bug
+        // The outer timeout firing means the client did not cut it off itself, which is exactly the bug to fix
         let inner = out.expect("客户端没有超时，请求一直挂着");
         assert!(inner.is_err(), "沉默的服务端不该被当成成功");
         assert!(
@@ -3356,11 +3356,11 @@ data: [DONE]
         );
     }
 
-    /// **判定必须穿透 context 层。**
+    /// **The check must pass through the context layers.**
     ///
-    /// 这是整条链上最容易悄悄坏掉的一环：调用方每加一句 `.context("抽取失败")`
-    /// 就换掉一次错误文本，靠文本匹配的判定当天就废——而症状是告警再也不出现，
-    /// 没有任何测试会红，用户也不会来报"我没收到告警"。
+    /// This is the link in the chain most likely to break quietly. Every time a caller adds one `.context("extraction failed")`
+    /// it rewrites the error text, and a check that matches on text breaks the same day. The symptom is that alerts stop appearing,
+    /// no test turns red, and no user comes to report "I didn't get the alert".
     #[tokio::test]
     async fn unreachable_survives_context_layers() {
         let raw = a_real_transport_error().await;
@@ -3368,22 +3368,22 @@ data: [DONE]
             .context("embedding 失败")
             .context("process_document 失败");
         assert!(is_unreachable(&err));
-        // 顺带钉住"文本会变"这件事本身：最外层已经不含端点的任何字样
+        // Also pins down the fact that "the text changes": the outermost layer no longer contains any of the endpoint's wording
         assert!(!err.to_string().contains("endpoint"));
     }
 
-    /// 反面：普通错误不该被认成端点问题，否则告警会对任何失败都亮。
+    /// The opposite: an ordinary error should not be recognized as an endpoint problem, or alerts would fire for every failure.
     #[tokio::test]
     async fn an_ordinary_failure_is_not_the_endpoint() {
         let e = anyhow::anyhow!("Embedding 响应缺少向量").context("抽取失败");
         assert!(!is_unreachable(&e));
     }
 
-    /// **限流要穿透 context 层被认出来。**
+    /// **Rate limiting must be recognized through the context layers.**
     ///
-    /// 与 [`unreachable_survives_context_layers`] 同一个理由，后果更重：认不出来
-    /// 就退回「这块废了」，而限流本来一分钟后就过去了。实测一次 1884 块的灌入里
-    /// 55/60 篇文档因此整篇失败。
+    /// Same reason as [`unreachable_survives_context_layers`], with heavier consequences. Failing to recognize it falls back to "this chunk is dead",
+    /// while rate limiting would clear up a minute later. In one ingestion of 1884 chunks,
+    /// 55 of 60 documents failed whole because of this.
     #[tokio::test]
     async fn a_rate_limit_survives_context_layers() {
         let err = anyhow::Error::new(RateLimited {
@@ -3398,10 +3398,10 @@ data: [DONE]
         assert!(!err.to_string().contains("rate limiting"));
     }
 
-    /// **没有 `Retry-After` 是常规情况，不是异常。**
+    /// **No `Retry-After` is the normal case, not an exception.**
     ///
-    /// 多数厂商的 429 不带这个头。判定必须只看类型，退避由调用方自己出——
-    /// 把 `retry_after.is_some()` 当判据的话，这些厂商一个都识别不了。
+    /// Most vendors' 429 does not carry this header. The check must look only at the type; backoff is supplied by the caller.
+    /// If `retry_after.is_some()` were the criterion, none of these vendors would be recognized.
     #[tokio::test]
     async fn a_rate_limit_without_retry_after_is_still_a_rate_limit() {
         let err = anyhow::Error::new(RateLimited {
@@ -3413,7 +3413,7 @@ data: [DONE]
         assert!(rate_limited(&err).unwrap().retry_after.is_none());
     }
 
-    /// 反面：限流不该被当成端点不可达，两者的处置完全不同。
+    /// The opposite: rate limiting should not be treated as an unreachable endpoint. The two are handled completely differently.
     #[tokio::test]
     async fn a_rate_limit_is_not_an_unreachable_endpoint() {
         let err = anyhow::Error::new(RateLimited {
@@ -3428,9 +3428,9 @@ data: [DONE]
         );
     }
 
-    /// **429 不一定是限流。** OpenAI 用同一个状态码表示「太快了」和「没钱了」，
-    /// 分界在 `error.code`。只按状态码分类的话，一个没钱的账号会被无限退避
-    /// 重试——而重试越久，症状越像「端点慢」，越查不到根上。
+    /// **429 is not necessarily rate limiting.** OpenAI uses the same status code for "too fast" and "out of money".
+    /// The dividing line is in `error.code`. Classifying by status code alone, a broke account would be backed off and
+    /// retried without end. The longer the retries, the more it looks like "the endpoint is slow", and the harder it is to trace to the root.
     #[test]
     fn a_429_that_says_insufficient_quota_is_a_billing_problem() {
         let body = serde_json::json!({
@@ -3447,7 +3447,7 @@ data: [DONE]
         assert!(rate_limited(&e).is_none(), "不该判成限流");
     }
 
-    /// 402 是标准答案，SiliconFlow 用的就是它。
+    /// 402 is the standard answer. SiliconFlow uses exactly that.
     #[test]
     fn a_402_is_a_billing_problem() {
         let body = serde_json::json!({ "message": "Sorry, your account balance is insufficient" });
@@ -3461,7 +3461,7 @@ data: [DONE]
         assert!(out_of_credit(&e).is_some());
     }
 
-    /// 反面：不带那个标识的 429 还是限流，别把会自己好的事判成要人动手。
+    /// The opposite: a 429 without that identifier is still rate limiting. Do not classify something that clears up by itself as needing a human to act.
     #[test]
     fn a_plain_429_is_still_a_rate_limit() {
         let body = serde_json::json!({ "error": { "message": "TPM limit reached" } });
@@ -3476,15 +3476,15 @@ data: [DONE]
         assert!(out_of_credit(&e).is_none());
     }
 
-    /// 反面：别的 4xx 不是限流。密钥错了重试一万次还是错。
+    /// The opposite: other 4xx are not rate limiting. A wrong key stays wrong no matter how often you retry.
     #[tokio::test]
     async fn an_auth_failure_is_not_a_rate_limit() {
         let e = anyhow::anyhow!("LLM request failed (401 Unauthorized): bad key");
         assert!(rate_limited(&e).is_none());
     }
 
-    /// 端点干干净净地回了 4xx 不算——那说明它就是模型 API，
-    /// 只是密钥或模型名不对，该找的人和该做的事都不一样。
+    /// A clean 4xx from the endpoint does not count as "not reachable". It means it is a model API,
+    /// only the key or model name is wrong, and the people to ask and what to do are different.
     #[tokio::test]
     async fn a_clean_api_error_is_a_different_problem() {
         let e = anyhow::anyhow!("LLM request failed (401 Unauthorized): bad key");
@@ -3500,8 +3500,8 @@ data: [DONE]
         result
     }
 
-    /// 写了 index 却取不出数的（`null`、字符串、浮点）按没有索引算。这些形状今天能用，
-    /// 按键判断会把它们送进索引分支再报错，于是整批失败
+    /// An entry that writes index but yields no number (`null`, string, float) counts as having no index. These shapes work today,
+    /// and a key-based check would send them into the index branch and error out, failing the whole batch
     #[tokio::test]
     async fn an_index_that_is_not_a_number_falls_back_to_position() {
         for data in [
@@ -3527,8 +3527,8 @@ data: [DONE]
         assert_eq!(out, vec![vec![1.0, 10.0], vec![2.0, 20.0]]);
     }
 
-    /// Gemini 的兼容端点只省掉第一条的 `index`（零是默认值）：三条输入回来是
-    /// `[{embedding}, {index: 1}, {index: 2}]`。没写索引的那条站在自己的位置上
+    /// Gemini's compatible endpoint omits only the first item's `index` (zero is the default). Three inputs come back as
+    /// `[{embedding}, {index: 1}, {index: 2}]`. An entry with no index stands in its own position
     #[tokio::test]
     async fn an_item_without_an_index_takes_its_position_beside_indexed_ones() {
         let body = json!({ "data": [
@@ -3546,7 +3546,7 @@ data: [DONE]
         assert_eq!(out, vec![vec![1.0], vec![2.0], vec![3.0]]);
     }
 
-    /// 负数取不出 `u64`，和 `null`、字符串一样按位置算——哪怕同一批里别的条目写了索引
+    /// A negative number cannot become a `u64`, so like `null` and strings it counts by position, even if other items in the same batch do write indexes
     #[tokio::test]
     async fn a_negative_index_falls_back_to_position_beside_indexed_ones() {
         let out = embeddings_from(json!([
@@ -3583,8 +3583,8 @@ data: [DONE]
         assert_eq!(out, vec![vec![1.0, 10.0], vec![2.0, 20.0]]);
     }
 
-    /// Gemini 3 的形状：tool_call 不带 `index`，带 `extra_content.google.thought_signature`，
-    /// finish_reason 说 `stop`。两种传输都要把 `extra_content` 留住，回灌时原样带回
+    /// Gemini 3's shape: the tool_call has no `index`, but has `extra_content.google.thought_signature`, and
+    /// finish_reason says `stop`. Both transports must keep `extra_content` and echo it back when replaying
     #[tokio::test]
     async fn a_tool_call_keeps_its_extra_content_in_both_transports() {
         use futures_util::TryStreamExt;
@@ -3624,7 +3624,7 @@ data: [DONE]
         assert_eq!(turn.to_message()["tool_calls"][0]["extra_content"], extra);
     }
 
-    /// 没有 `extra_content`、或它不是对象的调用，回灌时也不长出这个键
+    /// A call without `extra_content`, or whose value is not an object, does not get this key added back when replayed
     #[tokio::test]
     async fn a_tool_call_without_extra_content_echoes_none() {
         for call in [
@@ -3650,8 +3650,8 @@ data: [DONE]
         }
     }
 
-    /// Gemini 的并行调用：一块一个，块上没有 `index`，各带自己的 `id`。两个调用，
-    /// 名字和参数各归各
+    /// Gemini's parallel calls: one per chunk, with no `index` on the chunk, each with its own `id`. Two calls,
+    /// with names and arguments each their own
     #[tokio::test]
     async fn parallel_tool_calls_without_an_index_stay_separate() {
         use futures_util::TryStreamExt;
@@ -3692,7 +3692,7 @@ data: [DONE]
         );
     }
 
-    /// 没有 `index` 也没有 `id` 的增量是上一个调用的续篇：参数碎片接在后面
+    /// A delta with neither `index` nor `id` is a continuation of the previous call: its argument fragment is appended
     #[tokio::test]
     async fn an_unindexed_delta_without_an_id_continues_the_last_call() {
         use futures_util::TryStreamExt;
