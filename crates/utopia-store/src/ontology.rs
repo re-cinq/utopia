@@ -872,7 +872,7 @@ pub async fn update_relation_type(
 ) -> AppResult<()> {
     // The whole change goes into one transaction: if the criterion changed, before writing, record the violations detected under the old ontology,
     // after writing re-detect against the new ontology and adopt the rows of the old criterion — `open` means "reconciled against the current ontology"
-    // (0062), and no open violation that holds only under the old criterion may pass the commit point
+    //(0062), and no open violation that holds only under the old criterion may pass the commit point
     let mut tx = pool.begin().await?;
     // The name attribute is built in (0041): marking it functional would make every second name a conflict,
     // and even turn off the primary name; renaming it or changing its tense serves no legitimate purpose either
@@ -1795,7 +1795,7 @@ pub struct BulkRelation {
 ///
 /// `kind` decides whether it goes through the relation channel or the attribute channel; `datatype` is meaningful only for attributes, relations pass `None`.
 /// `temporal` is written per row: an ontology without a `utopia:temporal` annotation is always `state`
-/// (consistent with the default in the single-row version), and written ones follow what they state.
+///(consistent with the default in the single-row version), and written ones follow what they state.
 pub async fn create_relation_types_bulk(
     pool: &PgPool,
     kb_id: Uuid,

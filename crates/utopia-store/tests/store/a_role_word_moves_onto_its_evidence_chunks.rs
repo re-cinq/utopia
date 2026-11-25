@@ -1,10 +1,10 @@
 //! 0121: the role word moves onto every evidence chunk of its fact (0070 decision 1, #1267).
 //!
 //! Open an isolated database, migrate to 0120, plant rows in the old shape, then run 0121:
-//!     - each evidence chunk (including superseded ones) gets the statement's role word, and it still reads back as one value;
-//!     - a typed row gets the word only on the chunks of a source statement that says that word and has the same value;
-//!     - the role word of an invalidated fact with no evidence (left behind by purge) is deleted;
-//!     - a live fact with a role word but no evidence aborts the whole migration.
+//!   - each evidence chunk (including superseded ones) gets the statement's role word, and it still reads back as one value;
+//!   - a typed row gets the word only on the chunks of a source statement that says that word and has the same value;
+//!   - the role word of an invalidated fact with no evidence (left behind by purge) is deleted;
+//!   - a live fact with a role word but no evidence aborts the whole migration.
 //!
 //! Failing to create the database (an environment where the role lacks permission) is handled the same as having no UTOPIA_DATABASE_URL: skip.
 

@@ -53,11 +53,11 @@ impl Authenticated {
 /// **SHA-256, not argon2.** This differs from how passwords are stored, for two reasons:
 ///
 /// 1. **Tokens are high-entropy random strings, not passwords a person picked.** argon2 is slow so that brute-forcing
-///       "password123" becomes unprofitable; against a 244-bit random number, being a million times slower still gets nowhere,
-///       and buys nothing.
+///    "password123" becomes unprofitable; against a 244-bit random number, being a million times slower still gets nowhere,
+///    and buys nothing.
 /// 2. **argon2 salts differ per row, so you cannot look up by them.** Verification is on the hot path (once per tool call),
-///       and `WHERE token_hash = $1` on a unique index is a single hit; with argon2 you would have to
-///       fetch every token back and verify each one -- the more that are issued, the slower it gets.
+///    and `WHERE token_hash = $1` on a unique index is a single hit; with argon2 you would have to
+///    fetch every token back and verify each one -- the more that are issued, the slower it gets.
 fn hash(token: &str) -> String {
     Sha256::digest(token.as_bytes())
         .iter()

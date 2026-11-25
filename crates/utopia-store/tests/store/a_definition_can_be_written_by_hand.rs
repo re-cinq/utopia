@@ -4,7 +4,7 @@
 //! 1. **Written means confirmed**, and it records who wrote it (`written_by`); those that exploration proposed have it empty.
 //! 2. **The same (concept, source) is not silently overwritten**: if one already exists, a conflict is reported; changing it goes through `revise`.
 //! 3. **Exploration cannot overwrite what a person wrote**: `propose` only refreshes rows that are `proposed` -- the same rule as its refusal to reset a
-//!       rejection back to pending.
+//!    rejection back to pending.
 
 use sqlx::PgPool;
 use uuid::Uuid;

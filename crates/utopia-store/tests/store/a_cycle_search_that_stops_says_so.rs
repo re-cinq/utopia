@@ -4,9 +4,9 @@
 //! `MAX_CYCLES_PER_PREDICATE` / `MAX_CYCLE_STEPS` stops. Three things are pinned:
 //!
 //! 1. **Reported in the output**: `cycles_capped` counts this predicate; the cycles stored do not exceed the cap; and the same data
-//!       rerun neither inserts nor clears -- where it stops depends only on the data
+//!    rerun neither inserts nor clears -- where it stops depends only on the data
 //! 2. **For a predicate whose search did not finish, the previous round's open cycles are not cleared**: first a cycle exists, then later a dense
-//!       cluster grows on the same predicate, and the search stops before reaching that cycle. That row stays -- not reaching it does not mean it does not exist
+//!    cluster grows on the same predicate, and the search stops before reaching that cycle. That row stays -- not reaching it does not mean it does not exist
 //! 3. **A predicate whose search was not capped is cleared as usual**: a cycle on another predicate, once one edge is removed, is cleared as it always is
 //!
 //! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.

@@ -6,14 +6,14 @@
 //! `DEFERRABLE INITIALLY DEFERRED` makes it re-check at commit, when the whole batch is in place.
 //!
 //! Writes come in three shapes, each with a different wall:
-//!     - **Multi-row INSERT / COPY**: one statement, one batch of rows -- the deferred FK sees the whole batch at the commit boundary;
-//!         a cross-library reference fails, a forward chain within one library gets in;
-//!     - **Sequential statements**: the deferred FK again defers the check to commit -- within one transaction, "insert the reference first,
-//!         the target after" is now legal, and a target that never arrives is blocked at commit;
-//!     - **Replica session** (the shape of pg_restore --disable-triggers): this layer has no wall at all --
-//!         triggers are off, and the FK's constraint triggers are silent too, so the same-library check does not block the load.
-//!         Such bad rows already in storage are caught by the export pre-check and the §0 audit; this file only verifies
-//!         the commit boundary of ordinary transactions.
+//!   - **Multi-row INSERT / COPY**: one statement, one batch of rows -- the deferred FK sees the whole batch at the commit boundary;
+//!     a cross-library reference fails, a forward chain within one library gets in;
+//!   - **Sequential statements**: the deferred FK again defers the check to commit -- within one transaction, "insert the reference first,
+//!     the target after" is now legal, and a target that never arrives is blocked at commit;
+//!   - **Replica session** (the shape of pg_restore --disable-triggers): this layer has no wall at all --
+//!     triggers are off, and the FK's constraint triggers are silent too, so the same-library check does not block the load.
+//!     Such bad rows already in storage are caught by the export pre-check and the §0 audit; this file only verifies
+//!     the commit boundary of ordinary transactions.
 
 use sqlx::{Acquire, PgPool};
 use uuid::Uuid;

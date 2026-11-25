@@ -3,10 +3,10 @@
 //! Only two boundaries are tested:
 //!
 //! 1. The same wait condition goes through `Deferred` twice, and `attempts` does **not** climb to `max_attempts` --
-//!       each time the job is handed back, **the budget is not spent**. This is the difference between "wait for the ontology vectors to be backfilled" and "retry
-//!       a failed call": the former is one clock; the latter should back off and increase.
+//!    each time the job is handed back, **the budget is not spent**. This is the difference between "wait for the ontology vectors to be backfilled" and "retry
+//!    a failed call": the former is one clock; the latter should back off and increase.
 //! 2. `run_at` really is pushed into the future -- rather than "try again immediately", which would contend with the running
-//!       `embed_ontology` job for the same library-level lock.
+//!    `embed_ontology` job for the same library-level lock.
 //!
 //! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set (see `utopia_store::test_db`).
 

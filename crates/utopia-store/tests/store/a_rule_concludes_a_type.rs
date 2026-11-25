@@ -6,7 +6,7 @@
 //! - A hit really lands in `derived_facts` on the **literal-value channel**, with `attribute_rule_id` attached
 //! - The premise chain goes into `fact_derivations` -- "which two readings this rests on"
 //! - **Rerunning does not produce a second row**: the identity index treats NULL objects as the same one (this is the spot most easily missed when widening the table:
-//!     miss it and every round adds another row)
+//!   miss it and every round adds another row)
 //! - Raising the threshold and rerunning **retracts the old conclusion rather than deleting it**; the record axis keeps "was once derived from this"
 //!
 //! Also pinned is how this coexists with the axioms pass: the two passes merge into one reconciliation, and neither should mark the other's rows

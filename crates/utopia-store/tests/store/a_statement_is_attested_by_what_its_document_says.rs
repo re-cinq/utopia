@@ -5,7 +5,7 @@
 //! - `attest_statement` writes the attestation and the name of that date, and only ever moves it earlier;
 //! - A materialized typed row follows its source statement;
 //! - A row computed by a rule also follows the statement it reads; a row a category-word rule derives from an entity has no attestation; a row a person wrote gets an attestation
-//!     only when a rule's conclusion merges into it -- the attestation is still the moment the person wrote it.
+//!   only when a rule's conclusion merges into it -- the attestation is still the moment the person wrote it.
 //!
 //! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 

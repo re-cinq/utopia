@@ -5,7 +5,7 @@
 //! Five things are guarded here:
 //!
 //! 1. **Only facts with no other source are voided.** A fact attested by both documents A and B is left alone when A is deleted; a fact attested only by A is voided.
-//!       The chunks are marked but the body text remains; the document no longer appears in the list.
+//!    The chunks are marked but the body text remains; the document no longer appears in the list.
 //! 2. **Deleting twice raises an error.**
 //! 3. **Undo returns everything to where it was.** The document, the chunks marked by this deletion, and the facts voided by this deletion come back; facts that were already voided before the deletion
 //!    are not on the list, so they are not wrongly rescued. Undoing a deletion that never happened is an error.

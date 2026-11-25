@@ -2,11 +2,11 @@
 //! Two kinds of dates can appear that the source sentence does not contain:
 //!
 //! - An end point derived from the timeline: Li Si has led Aurora since 2024-07-05, Zhou Qi took over on 2025-09-01, and `leads` allows only one lead per project,
-//!     so reconciliation closes Li Si's span at 2025-09-01 -- `end_derived`;
+//!   so reconciliation closes Li Si's span at 2025-09-01 -- `end_derived`;
 //! - A span a person edited: Zhang San's start was changed by a person from 2023-01-10 to 2023-02-01 -- `time_corrected`, and the edit changed the
-//!     start (`corrected_ends`, written with the correction row). If the row is rewritten later it stays marked; editing the end too makes both ends person-set.
-//!     The mark lives on the row, not on the audit that the correction route writes after the fact: when Li Si's start was edited there was no audit, yet the mark is still there.
-//!     When a person hands over the whole span, Li Si's derived end is pinned even if the person kept its value unchanged, so both ends count as the person's.
+//!   start (`corrected_ends`, written with the correction row). If the row is rewritten later it stays marked; editing the end too makes both ends person-set.
+//!   The mark lives on the row, not on the audit that the correction route writes after the fact: when Li Si's start was edited there was no audit, yet the mark is still there.
+//!   When a person hands over the whole span, Li Si's derived end is pinned even if the person kept its value unchanged, so both ends count as the person's.
 //!
 //! A span a person closed by hand is neither of those -- it is still a correction row (`corrected`, which the wording in the web evidence panel follows).
 //!

@@ -6,7 +6,7 @@
 //! gated on an index that could never be filled, and documents eventually failed on deadline. Three things are pinned:
 //!
 //! 1. **Once embedded, not stale**: classes whose description ends in a newline and spaces, and whose label has tabs at both ends (the whole text and the label
-//!       both), and relations; after `set_type_embeddings` writes back, `types_needing_embedding` is empty
+//!    both), and relations; after `set_type_embeddings` writes back, `types_needing_embedding` is empty
 //! 2. **Changing the description still re-embeds**: the criterion was not loosened by this
 //! 3. **Changing the model re-embeds everything**
 //!
