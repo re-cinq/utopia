@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from comments import CJK, code_projection, copied_translations, missing_anchors, comment_text, is_rust_path, split_lines
+from comments import CJK, blanked_comments, code_projection, copied_translations, missing_anchors, comment_text, is_rust_path, split_lines
 
 
 def read_at_revision(revision: str, path: str) -> list[str]:
@@ -48,7 +48,11 @@ def violations_in(path: str, base_revision: str) -> list[str]:
         f"{path}:{number}: same translation sits on a line with a different original"
         for number in copied_translations(before_comments, after_comments)
     ]
-    return changed_code + left_in_comments + moved_anchors + copies
+    blanks = [
+        f"{path}:{number}: comment was emptied"
+        for number in blanked_comments(before_comments, after_comments)
+    ]
+    return changed_code + left_in_comments + moved_anchors + copies + blanks
 
 
 def neighbourhood(comments: list[str], number: int) -> str:

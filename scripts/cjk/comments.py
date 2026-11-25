@@ -8,6 +8,7 @@ RUST_SUFFIXES = (".rs",)
 TS_SUFFIXES = (".ts", ".tsx", ".mjs", ".js")
 ANCHOR = re.compile(r"#\d+|\d{2,}(?:\.\d+)?|[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z0-9_]+)+|[A-Za-z]+_[A-Za-z0-9_]+|[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+")
 MIN_COPY_LENGTH = 40
+COMMENT_MARKER = re.compile(r"^(?://[/!]?|/\*[*!]?|\*/?)")
 REWRITTEN_NUMBER_WORDS = re.compile(r"[万亿千百年月日]")
 RAW_STRING_OPENER = re.compile(r'(?<![A-Za-z0-9_])b?r(#*)"')
 
@@ -58,6 +59,19 @@ def missing_anchors(before: str, after: str) -> list[str]:
     if REWRITTEN_NUMBER_WORDS.search(before):
         lost = {anchor for anchor in lost if not anchor[0].isdigit()}
     return sorted(lost)
+
+
+def blanked_comments(before_comments: list[str], after_comments: list[str]) -> list[int]:
+    """Lines whose comment had words and has none after the translation."""
+    return [
+        number
+        for number, (old, new) in enumerate(zip(before_comments, after_comments), start=1)
+        if _words_of(old) and not _words_of(new)
+    ]
+
+
+def _words_of(comment: str) -> str:
+    return COMMENT_MARKER.sub("", comment.strip()).strip()
 
 
 def copied_translations(before_comments: list[str], after_comments: list[str]) -> list[int]:
