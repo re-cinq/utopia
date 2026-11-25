@@ -1,5 +1,5 @@
-//! utopia-search: 内嵌 Tantivy 全文索引（jieba 中文分词）+ RRF 融合。
-//! 单索引多 KB：kb_id 作过滤字段；chunk 正文在 Postgres，索引里只存 id 映射。
+//! utopia-search: embedded Tantivy full-text index (jieba Chinese tokenization) + RRF fusion.
+//! One index for many KBs: kb_id is a filter field; chunk bodies live in Postgres, and the index only stores the id mapping.
 
 mod docs;
 pub use docs::{DocsIndex, DocsSection};
@@ -62,9 +62,9 @@ impl SearchIndex {
             .register(JIEBA, tantivy_jieba::JiebaTokenizer::new());
 
         let writer = index.writer(WRITER_HEAP)?;
-        // 每次写都在 writer 锁里自己 reload；再留着自动重载，那条异步重载可能晚到、
-        // 带着更旧的提交把刚写进去的文档又遮掉。这个进程握着唯一的 writer，
-        // 没有别人会提交，手动重载不会漏掉什么
+        // Every write reloads itself under the writer lock; keeping automatic reload on top of that would let an async reload land late
+        // and, carrying an older commit, hide a document that was just written. This process holds the only writer,
+        // so nobody else commits, and a manual reload misses nothing
         let reader = index
             .reader_builder()
             .reload_policy(tantivy::ReloadPolicy::Manual)
@@ -85,7 +85,7 @@ impl SearchIndex {
         })
     }
 
-    /// 重建某文档的索引条目（先删后加，幂等），随后 commit。
+    /// Rebuild the index entries of a document (delete then add, idempotent), then commit.
     pub fn reindex_document(
         &self,
         kb_id: &str,
@@ -103,7 +103,7 @@ impl SearchIndex {
             writer.add_document(doc)?;
         }
         writer.commit()?;
-        // 写后即可读：不等 reader 的异步重载窗口
+        // Readable right after writing: do not wait for the reader's async reload window
         self.reader.reload()?;
         Ok(())
     }
@@ -126,9 +126,9 @@ impl SearchIndex {
         Ok(())
     }
 
-    /// 索引里有多少条分块。**启动时拿它跟库里的数对账**——索引目录是独立于
-    /// 数据库的一份文件（换机器、卷没挂上、损坏都可能让它落空），而落空之后
-    /// 检索只会静默回零，界面上看不出任何异样。
+    /// Number of chunks in the index. **Reconcile it against the database count at startup**: the index directory is a file separate
+    /// from the database (a new machine, an unmounted volume, or corruption can all leave it empty), and once it is empty,
+    /// search silently returns zero results, with no visible sign in the UI.
     pub fn len(&self) -> usize {
         self.reader.searcher().num_docs() as usize
     }
@@ -137,11 +137,11 @@ impl SearchIndex {
         self.len() == 0
     }
 
-    /// BM25 检索（限定 kb）。
-    /// 查询用与索引完全一致的 jieba analyzer 切词后按 OR 组合——
-    /// 不能走 QueryParser：CJK 整句会被当成短语查询（要求词连续出现），召回归零。
+    /// BM25 search (scoped to a kb).
+    /// The query is tokenized with the exact same jieba analyzer as the index, then combined with OR --
+    /// QueryParser cannot be used: a whole CJK sentence would be treated as a phrase query (words must appear consecutively), and recall drops to zero.
     ///
-    /// `documents`：只在这些文档里找。它和 kb 一样是 `Must`，`limit` 数的就只是允许的块
+    /// `documents`: search only within these documents. Like kb, it is a `Must`, and `limit` counts only the allowed chunks
     pub fn search(
         &self,
         kb_id: &str,
@@ -201,8 +201,8 @@ impl SearchIndex {
     }
 }
 
-/// 融合后的一条：RRF 总分，和它在每一路里的名次（0 起；没进那一路是 None）。
-/// 分数只在同一次查询里可比，换一句话就是另一把尺子
+/// One fused entry: the RRF total score, and its rank in each channel (0-based; None if it did not make that channel).
+/// Scores are only comparable within the same query; in other words, each query has its own ruler
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fused {
     pub id: String,
@@ -210,7 +210,7 @@ pub struct Fused {
     pub ranks: Vec<Option<usize>>,
 }
 
-/// Reciprocal Rank Fusion：融合多路召回的排名（k=60 为经验常数）。
+/// Reciprocal Rank Fusion: fuses rankings from multiple retrieval channels (k=60 is an empirical constant).
 pub fn rrf_fuse(lists: &[Vec<String>], limit: usize) -> Vec<String> {
     rrf_fuse_scored(lists, limit)
         .into_iter()
@@ -218,7 +218,7 @@ pub fn rrf_fuse(lists: &[Vec<String>], limit: usize) -> Vec<String> {
         .collect()
 }
 
-/// 同 [`rrf_fuse`]，但把分数和各路名次一并交回来
+/// Same as [`rrf_fuse`], but also returns the scores and each channel's rank
 pub fn rrf_fuse_scored(lists: &[Vec<String>], limit: usize) -> Vec<Fused> {
     const K: f64 = 60.0;
     let mut by_id: HashMap<String, Fused> = HashMap::new();
@@ -234,7 +234,7 @@ pub fn rrf_fuse_scored(lists: &[Vec<String>], limit: usize) -> Vec<Fused> {
         }
     }
     let mut ranked: Vec<Fused> = by_id.into_values().collect();
-    // 同分按 id 定序，否则 HashMap 的随机顺序会改变上限内保留的证据和口径。
+    // Ties are ordered by id; otherwise HashMap's random iteration order would change which evidence and cutoff survive the limit.
     ranked.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -253,22 +253,22 @@ mod rrf_tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
-    /// 一路召回就是那一路的顺序，融合不许重排
+    /// A single channel's results are that channel's order; fusion must not reorder them
     #[test]
     fn one_list_comes_back_in_its_own_order() {
         let lists = vec![ids(&["a", "b", "c"])];
         assert_eq!(rrf_fuse(&lists, 10), ids(&["a", "b", "c"]));
     }
 
-    /// 两路都点名的排最前；只在一路里的按各自名次的倒数相加比大小：
-    /// a = 1/61 + 1/62，c = 1/63 + 1/61，b = 1/62
+    /// Items named by both channels rank first; items in only one channel are compared by summing their reciprocal ranks:
+    /// a = 1/61 + 1/62, c = 1/63 + 1/61, b = 1/62
     #[test]
     fn two_lists_follow_the_reciprocal_rank_arithmetic() {
         let lists = vec![ids(&["a", "b", "c"]), ids(&["c", "a"])];
         assert_eq!(rrf_fuse(&lists, 10), ids(&["a", "c", "b"]));
     }
 
-    /// 分数就是各路名次倒数之和，名次记在各自那一路的位置上（#1271）
+    /// The score is the sum of reciprocal ranks, with each rank recorded at its position in its own channel (#1271)
     #[test]
     fn scored_fusion_reports_the_sum_and_each_channels_rank() {
         let lists = vec![ids(&["a", "b", "c"]), ids(&["c", "a"])];
@@ -295,14 +295,14 @@ mod rrf_tests {
         );
     }
 
-    /// 空的那一路不是失败的那一路：它什么分都不加，也不影响别人
+    /// An empty channel is not a failed channel: it adds no score and affects no one else
     #[test]
     fn an_empty_list_contributes_nothing() {
         let lists = vec![ids(&["a", "b"]), Vec::new()];
         assert_eq!(rrf_fuse(&lists, 10), ids(&["a", "b"]));
     }
 
-    /// 上限在融合之后裁，不是每路各裁
+    /// The limit is applied after fusion, not per channel
     #[test]
     fn the_limit_cuts_after_fusion() {
         let lists = vec![ids(&["a", "b"]), ids(&["b", "c"])];

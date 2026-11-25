@@ -1,5 +1,5 @@
-//! 内置文档（Charter）的内存索引：启动时从打包 markdown 建，进程生命周期内只读。
-//! 协议中立——chat 的 search_docs 工具臂与将来的 MCP 工具面共用这一个入口。
+//! In-memory index of the built-in docs (Charter): built at startup from the bundled markdown, read-only for the life of the process.
+//! Protocol-neutral: the chat search_docs tool arm and the future MCP tool surface share this one entry point.
 
 use anyhow::Context;
 use tantivy::collector::TopDocs;
@@ -12,7 +12,7 @@ use tantivy::{Index, IndexReader, TantivyDocument, Term};
 
 const JIEBA: &str = "jieba";
 
-/// 一节文档（按 h2 切分；anchor 与前端 Docs 页的标题锚点同法生成）。
+/// One docs section (split by h2; the anchor is generated the same way as the heading anchors on the frontend Docs page).
 #[derive(Debug, Clone)]
 pub struct DocsSection {
     pub slug: String,
@@ -44,7 +44,7 @@ impl DocsIndex {
         let f_heading = schema_builder.add_text_field("heading", STORED);
         let f_anchor = schema_builder.add_text_field("anchor", STORED);
         let f_body = schema_builder.add_text_field("body", STORED);
-        // 检索域 = 节标题 + 正文（标题词权重靠重复出现自然获得）
+        // Search field = section heading + body (heading terms gain weight naturally by appearing twice)
         let f_text = schema_builder.add_text_field(
             "text",
             TextOptions::default().set_indexing_options(text_indexing),
@@ -52,7 +52,7 @@ impl DocsIndex {
         let schema = schema_builder.build();
 
         let index = Index::create_in_ram(schema);
-        // 语料是英文为主的 markdown；内存索引每次启动重建，折小写不涉及重建索引
+        // The corpus is mostly English markdown; the in-memory index is rebuilt on every start, so lowercasing does not involve rebuilding the index
         index.tokenizers().register(
             JIEBA,
             TextAnalyzer::builder(tantivy_jieba::JiebaTokenizer::new())
@@ -90,7 +90,7 @@ impl DocsIndex {
         })
     }
 
-    /// BM25 检索。切词方式与 SearchIndex 一致（手工 OR 组合，避开 CJK 短语查询陷阱）。
+    /// BM25 search. Tokenization matches SearchIndex (manual OR combination, avoiding the CJK phrase-query trap).
     pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<DocsSection>> {
         let mut analyzer = self.analyzer.clone();
         let mut stream = analyzer.token_stream(query);
@@ -152,7 +152,7 @@ mod tests {
         }
     }
 
-    /// chat 的 search_docs 由模型随手写查询，大小写不由文档定
+    /// chat's search_docs gets queries the model writes casually, and letter case is not set by the docs
     #[test]
     fn a_query_finds_the_section_whatever_its_letter_case() {
         let index = DocsIndex::build(&[

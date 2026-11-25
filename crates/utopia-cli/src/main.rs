@@ -80,8 +80,8 @@ struct ManifestDataDir {
 /// whose `schema_version` is greater than this (forward-incompatible) and
 /// warns when older. Kept as a constant — bumping is a deliberate decision,
 /// not a side effect of a code change.
-// 是迁移文件的**个数**，不是最大的编号（守卫 `schema_version_policy_compares_against_current`
-// 按个数比）：编号有空缺时两者不同——0071 由一个开放 PR 占着，0072 先落，个数是 71
+// It is the **count** of migration files, not the highest number (the guard `schema_version_policy_compares_against_current`
+// compares by count): the two differ when numbers have gaps — 0071 is held by an open PR, 0072 landed first, so the count is 71
 const CURRENT_SCHEMA_VERSION: u32 = 128;
 
 #[tokio::main]
@@ -495,7 +495,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 恢复
+// Restore
 // ---------------------------------------------------------------------------
 
 async fn run_restore(args: RestoreArgs) -> anyhow::Result<()> {
@@ -679,10 +679,10 @@ fn check_restore_data_target(target: &Path, force: bool) -> anyhow::Result<PathB
             target.display()
         );
     }
-    // 先移除末尾分隔符和 `/.`，否则 lstat 也会跟随符号链接。
+    // Strip the trailing separator and `/.` first, otherwise lstat would also follow symlinks.
     let normalized: PathBuf = target.components().collect();
     let absolute = std::path::absolute(normalized)?;
-    // 允许父目录尚未创建，但文件或悬空链接不能充当父目录。
+    // The parent directory may not exist yet, but a file or dangling link cannot act as a parent.
     let mut resolved = None;
     for parent in absolute.ancestors().skip(1) {
         match std::fs::metadata(parent) {
@@ -697,7 +697,7 @@ fn check_restore_data_target(target: &Path, force: bool) -> anyhow::Result<PathB
                         target.display()
                     );
                 }
-                // 固定实际父路径，避免移走旧目录后无法访问暂存文件和回滚路径。
+                // Pin the actual parent path so the staging file and rollback path stay reachable after the old directory is moved.
                 resolved = Some(parent.canonicalize()?.join(suffix));
                 break;
             }
@@ -762,7 +762,7 @@ async fn preflight_restore(
     let mut connection = PgConnection::connect(target_db)
         .await
         .context("cannot connect to target database for restore preflight")?;
-    // 空表、schema 等用户对象也算非空；命名空间依赖还能覆盖函数、类型等对象。
+    // Empty tables, schemas and other user objects also count as non-empty; namespace dependencies also cover functions, types and other objects.
     let nonempty: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1 FROM pg_catalog.pg_namespace n
@@ -802,7 +802,7 @@ async fn apply_restore(
         .components()
         .collect();
     let pg_dump_path = stage.join(dump_relative);
-    // 先在目标文件系统准备新目录；复制或数据库恢复失败时，旧目录仍保留原位。
+    // Prepare the new directory on the target filesystem first; if the copy or database restore fails, the old directory stays in place.
     let prepared = if manifest.components.data_dir.present {
         let parent = target_data_dir
             .parent()
@@ -820,7 +820,7 @@ async fn apply_restore(
     } else {
         None
     };
-    // 等待确认和准备文件期间目标可能变化，启动 pg_restore 前必须重新检查。
+    // The target may change while waiting for confirmation and preparing files, so it must be re-checked before pg_restore starts.
     let checked_target = preflight_restore(
         pg_restore_bin,
         target_db,
@@ -830,7 +830,7 @@ async fn apply_restore(
         force,
     )
     .await?;
-    // 暂存文件已绑定首次解析的物理路径，复查不能悄悄切换到另一个目标。
+    // The staged files are bound to the physical path resolved the first time; the recheck must not quietly switch to another target.
     if checked_target.as_path() != target_data_dir {
         anyhow::bail!(
             "target data dir resolved to a different location after confirmation; retry with writers stopped"
@@ -884,8 +884,8 @@ async fn apply_restore(
             )
         })?;
         if !target_data_dir.join(SECRET_KEY_FILE).is_file() {
-            // 没有钥匙，库里那些封存的凭据就打不开。与其让人在服务起来之后
-            // 看见一串解不开的错误，不如现在说清楚该做什么
+            // Without the key, the sealed credentials in the database cannot be opened. Rather than let someone
+            // see a string of undecryptable errors after the service starts, say now what to do
             tracing::warn!(
                     "this archive carries no {SECRET_KEY_FILE}: sealed credentials (model keys,                      source credentials) will not open. Set UTOPIA_SECRET_KEY on this host to the                      key the backup was taken with, or re-enter them after starting the server"
                 );
@@ -948,9 +948,9 @@ mod tests {
         assert!(parse(&args).is_err());
     }
 
-    /// 备份包里默认没有封存密钥。库里存的凭据是用它加密的，两样装在同一个
-    /// 压缩包里，封存就等于没有——而压缩包恰恰是那个会被拷来拷去、交给别人去
-    /// 恢复的东西
+    /// The backup bundle does not contain the sealing key by default. Credentials stored in the database are encrypted with it,
+    /// and if both sit in the same archive, sealing is pointless — and the archive is exactly what gets copied around and handed
+    /// to someone else to restore
     #[test]
     fn the_sealing_key_stays_out_of_the_archive_unless_asked() {
         let src = std::env::temp_dir().join(format!("utopia-seckey-{}", std::process::id()));
