@@ -11,7 +11,7 @@ use sqlx::{postgres::PgConnectOptions, ConnectOptions, Connection, Executor, PgC
 fn pg_restore_stub() -> PathBuf {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        // 共享替身放在构建目录，由 cargo clean 统一清理。
+        // The shared test double lives in the build directory and is cleaned up by cargo clean.
         let binary = std::env::current_exe().unwrap().with_file_name(format!(
             "utopia-pg-restore-test-{}{}",
             std::process::id(),
@@ -52,13 +52,13 @@ impl RestoreTest {
         .to_lowercase();
         let options = PgConnectOptions::from_str(&admin_url).unwrap();
         let mut admin = PgConnection::connect_with(&options).await.unwrap();
-        // 只修改和删除本例新建的数据库，不触碰 guard 提供的数据库。
+        // Only modify and drop the database created by this case; do not touch the database the guard provides.
         admin
             .execute(format!("CREATE DATABASE {database}").as_str())
             .await
             .unwrap();
         let mut target_url = options.database(&database).to_url_lossy();
-        // SQLx 自动追加的客户端参数不被 libpq 的 pg_dump/pg_restore 接受。
+        // Client parameters that SQLx appends automatically are not accepted by libpq's pg_dump/pg_restore.
         let parameters: Vec<_> = target_url
             .query_pairs()
             .filter(|(name, _)| name != "statement-cache-capacity")
@@ -187,7 +187,7 @@ impl RestoreTest {
                     break Ok(());
                 }
             };
-            // 超时后接收端会关闭，此时发送失败属于正常清理。
+            // After a timeout the receiver is closed, so a failed send at this point is normal cleanup.
             let _ = sender.send((result, stderr, prompt));
         });
         let error = match receiver.recv_timeout(Duration::from_secs(30)) {
@@ -254,7 +254,7 @@ impl Drop for RestoreTest {
         .join();
         if let Err(panic_payload) = cleanup {
             eprintln!("failed to clean up test database {}", self.database);
-            // 清理失败时保留最初的测试错误，避免 Drop 中二次 panic 中止整个进程。
+            // Keep the original test error when cleanup fails, so a second panic in Drop does not abort the whole process.
             if !std::thread::panicking() {
                 std::panic::resume_unwind(panic_payload);
             }
@@ -753,7 +753,7 @@ async fn real_postgres_backup_and_restore_require_force_and_preserve_files_on_sq
         .execute("CREATE TABLE restored (value integer); INSERT INTO restored VALUES (7)")
         .await
         .unwrap();
-    // 使用环境密钥的部署即使要求备份密钥，也可能没有磁盘 secret.key。
+    // Deployments that use an environment key may have no secret.key on disk, even when they require the backup key.
     std::fs::remove_file(fixture.source().join("data/secret.key")).unwrap();
     let backup = |archive: &Path| {
         fixture
@@ -834,7 +834,7 @@ async fn real_postgres_backup_and_restore_require_force_and_preserve_files_on_sq
     assert!(!fixture.target().join("files/old.bin").exists());
     assert!(!fixture.target().join("secret.key").exists());
 
-    // 准备连接的会话设置允许建索引；pg_restore 的新连接没有该设置，索引重建会失败。
+    // The prepared connection's session settings allow index creation; pg_restore's new connections lack that setting, so the index rebuild would fail.
     connection
         .execute(
             "CREATE FUNCTION fail_restore(integer) RETURNS integer
@@ -862,7 +862,7 @@ async fn real_postgres_backup_and_restore_require_force_and_preserve_files_on_sq
     assert_failure(&failed, "pg_restore exited");
     assert!(String::from_utf8_lossy(&failed.stderr).contains("simulated index restore failure"));
     fixture.assert_old_data();
-    // 索引重建错误应回滚整次数据库恢复，恢复前的值和原数据目录都必须保留。
+    // An index rebuild error should roll back the whole database restore; the pre-restore value and the original data directory must both be kept.
     let unchanged: i32 = sqlx::query_scalar("SELECT value FROM restored")
         .fetch_one(&mut connection)
         .await
