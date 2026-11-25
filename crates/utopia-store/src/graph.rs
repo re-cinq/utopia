@@ -704,10 +704,10 @@ pub(crate) async fn insert_fact_on(
         }
     }
     /* **An observation that something ended on some day (no start, but an end) hits an open row of the same assertion: close it, do not open a separate row.**
-Opening a separate row leaves two accounts that disagree, and the open one is still read as "still the case" — measured: "removed from the blacklist"
-and "resigned from the board" each gained an extra `- → date` row, while the original stayed open. Events have no open row
-(both ends at the same moment), so only states take this path. Corrections go via supersede (invalidate and rewrite, with the evidence and the attributes on the edge
-moving with the row), the same path as #393's closing on "unknown day"; an open row whose start is later than the period the end describes is not part of this span */
+    Opening a separate row leaves two accounts that disagree, and the open one is still read as "still the case" — measured: "removed from the blacklist"
+    and "resigned from the board" each gained an extra `- → date` row, while the original stayed open. Events have no open row
+    (both ends at the same moment), so only states take this path. Corrections go via supersede (invalidate and rewrite, with the evidence and the attributes on the edge
+    moving with the row), the same path as #393's closing on "unknown day"; an open row whose start is later than the period the end describes is not part of this span */
     if temporal == Temporal::State && validity.from.is_none() {
         if let Some(to) = validity.to {
             let precision = validity.to_precision.unwrap_or("day");
@@ -2417,14 +2417,14 @@ pub async fn entity_history(
             JOIN entity_types tt ON tt.id = r.to_type_id
             WHERE r.kb_id = $1 AND r.entity_id = $2 AND r.reverted_at IS NOT NULL
         ),
-        /* A merge is also a change of understanding about this entity, and the largest one: from then on it and another
-entity are one and the same thing. **Previously this axis could not see it** — it only saw the facts that the merge invalidated along the way
-(`merged`), so the interface reports the result, not what happened. Since #337
-`entity_merges` has its own clock (created_at / reverted_at), which can simply be wired in.
+        /* 合并也是这个实体身上的一次认识改变，而且是最大的一次：从此它和另一个
+           实体算同一个东西。**从前这条轴看不见它**——只看得见合并顺手作废的那些
+           事实（`merged`），于是界面在说结果，不说发生了什么。#337 之后
+           `entity_merges` 有了自己的时钟（created_at / reverted_at），接进来即可。
 
-The two directions are recorded separately: `merged_in` = someone else merged into it (facts moved to its name),
-`merged_away` = it merged into someone else (this id no longer exists on its own from then on). Saying both in one breath
-would make "who absorbed whom" unreadable, and rollback works by direction. */
+           两个方向分开记：`merged_in` = 别人并进了它（事实搬到它名下），
+           `merged_away` = 它并进了别人（这个 id 从此不再单独存在）。同一句话
+           说两件事会让「谁吸收了谁」读不出来，而回滚正是按方向做的。 */
         mg AS (
             SELECT m.created_at AS at,
                    CASE WHEN m.target_id = $2 THEN 'merged_in' ELSE 'merged_away' END AS kind,
