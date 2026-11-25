@@ -24,13 +24,58 @@ pub struct Job {
     pub locked_at: DateTime<Utc>,
 }
 
+/// 去重比较的条件：载荷去掉 `deferred_since` 后与 `$2` 相同。推迟（`persist_outcome`）会把它写进排着的
+/// 任务载荷里，它是记账、不属于任务要做的事，所以去重要忽略它，否则被推迟过的任务永远吸收不了新入队。
+/// 用宏是为了能拼进 `concat!` 的常量 SQL；`md5(...)` 那半句必须与迁移 9015 的索引表达式逐字一致，
+/// 计划器才用得上索引。
+macro_rules! same_payload_ignoring_deferral {
+    () => {
+        "md5((payload - 'deferred_since')::text) = md5($2::text) AND (payload - 'deferred_since') = $2"
+    };
+}
+
 /// `enqueue_unless_pending` 的 SQL（文本未改，仅提出来供计划测试使用）。
-const ENQUEUE_UNLESS_PENDING_SQL: &str = "INSERT INTO jobs (kind, payload, run_at)
+const ENQUEUE_UNLESS_PENDING_SQL: &str = concat!(
+    "INSERT INTO jobs (kind, payload, run_at)
          SELECT $1, $2, now() + make_interval(secs => $3)
-          WHERE NOT EXISTS (SELECT 1 FROM jobs
-                             WHERE kind = $1 AND md5(payload::text) = md5($2::text) AND payload = $2
-                               AND status IN ('queued', 'running'))
-         RETURNING id";
+          WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = $1 AND ",
+    same_payload_ignoring_deferral!(),
+    " AND status IN ('queued', 'running'))
+         RETURNING id"
+);
+
+const ENQUEUE_UNLESS_QUEUED_SQL: &str = concat!(
+    "INSERT INTO jobs (kind, payload)
+         SELECT $1, $2
+          WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = $1 AND ",
+    same_payload_ignoring_deferral!(),
+    " AND status = 'queued')
+         RETURNING id"
+);
+
+const ENQUEUE_UNLESS_QUEUED_AFTER_SQL: &str = concat!(
+    "INSERT INTO jobs (kind, payload, run_at)
+         SELECT $1, $2, now() + make_interval(secs => $3)
+          WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = $1 AND ",
+    same_payload_ignoring_deferral!(),
+    " AND status = 'queued')
+         RETURNING id"
+);
+
+const ENQUEUE_QUEUED_ONCE_SQL: &str = concat!(
+    "INSERT INTO jobs (kind, payload, max_attempts)
+         SELECT $1, $2, $3
+          WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = $1 AND ",
+    same_payload_ignoring_deferral!(),
+    " AND status = 'queued')
+         RETURNING id"
+);
+
+const FIND_QUEUED_SQL: &str = concat!(
+    "SELECT id FROM jobs WHERE kind = $1 AND ",
+    same_payload_ignoring_deferral!(),
+    " AND status = 'queued' ORDER BY id LIMIT 1"
+);
 
 /// 同种任务、同样载荷已经排着就不再排：一批文档各自抽完都想触发同一个库级任务
 /// （类型消解、对账），排十次跑十次是浪费，而且后九次看到的是第一次跑完的库。
@@ -84,20 +129,50 @@ pub async fn enqueue_unless_queued_tx(
     kind: &str,
     payload: serde_json::Value,
 ) -> AppResult<Option<i64>> {
-    let row: Option<(i64,)> = sqlx::query_as(
-        "INSERT INTO jobs (kind, payload)
-         SELECT $1, $2
-          WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = $1 AND md5(payload::text) = md5($2::text) AND payload = $2 AND status = 'queued')
-         RETURNING id",
-    )
-    .bind(kind)
-    .bind(payload)
-    .fetch_optional(&mut **tx)
-    .await?;
+    let row: Option<(i64,)> = sqlx::query_as(ENQUEUE_UNLESS_QUEUED_SQL)
+        .bind(kind)
+        .bind(payload)
+        .fetch_optional(&mut **tx)
+        .await?;
     if row.is_some() {
         notify_worker_tx(tx).await?;
     }
     Ok(row.map(|(id,)| id))
+}
+
+/// 同 [`enqueue_unless_queued_tx`]，但并进排着的那份时返回**它的 id**（调用方要把 job id 交出去）。
+/// 只认排着的、不认在跑的（决策 0051：在跑的任务可能已经读过这次判定之前的状态）。
+/// 末尾的 `None` 分支是竞态：排着的那份在检查与插入之间被领走了，就老实再排一份；测试里造不出来。
+pub async fn enqueue_queued_once_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    kind: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+) -> AppResult<i64> {
+    if !(1..=32).contains(&max_attempts) {
+        return Err(utopia_core::AppError::Validation(
+            "max_attempts must be between 1 and 32".into(),
+        ));
+    }
+    let inserted: Option<i64> = sqlx::query_scalar(ENQUEUE_QUEUED_ONCE_SQL)
+        .bind(kind)
+        .bind(&payload)
+        .bind(max_attempts)
+        .fetch_optional(&mut **tx)
+        .await?;
+    if let Some(id) = inserted {
+        notify_worker_tx(tx).await?;
+        return Ok(id);
+    }
+    let existing: Option<i64> = sqlx::query_scalar(FIND_QUEUED_SQL)
+        .bind(kind)
+        .bind(&payload)
+        .fetch_optional(&mut **tx)
+        .await?;
+    match existing {
+        Some(id) => Ok(id),
+        None => enqueue_with_max_attempts_tx(tx, kind, payload, max_attempts).await,
+    }
 }
 
 /// 同 [`enqueue_unless_queued`]，但晚一点跑。挡的只是排着的，不挡在跑的——调用方
@@ -109,17 +184,12 @@ pub async fn enqueue_unless_queued_after(
     after: Duration,
 ) -> AppResult<Option<i64>> {
     let mut tx = pool.begin().await?;
-    let row: Option<(i64,)> = sqlx::query_as(
-        "INSERT INTO jobs (kind, payload, run_at)
-         SELECT $1, $2, now() + make_interval(secs => $3)
-          WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = $1 AND md5(payload::text) = md5($2::text) AND payload = $2 AND status = 'queued')
-         RETURNING id",
-    )
-    .bind(kind)
-    .bind(payload)
-    .bind(after.as_secs_f64())
-    .fetch_optional(&mut *tx)
-    .await?;
+    let row: Option<(i64,)> = sqlx::query_as(ENQUEUE_UNLESS_QUEUED_AFTER_SQL)
+        .bind(kind)
+        .bind(payload)
+        .bind(after.as_secs_f64())
+        .fetch_optional(&mut *tx)
+        .await?;
     if row.is_some() {
         notify_worker_tx(&mut tx).await?;
     }
