@@ -3,6 +3,7 @@
 //! `claim_one` 认领的是全库的任务，所以这两条放在一百年前，排在库里别的一切前面。
 
 use super::claim_one;
+use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgConnection, PgPool};
 
 #[tokio::test]
@@ -29,6 +30,159 @@ async fn a_later_intake_job_is_claimed_before_an_earlier_extraction() -> anyhow:
             .await?;
         assert_eq!(claimed.as_deref(), Some(kind));
     }
+    Ok(())
+}
+
+/// 一条连接的池：临时表只在这条连接上遮住 public.jobs，库里别的任务碰不到它。
+/// 每行是（标签, 种类, 相对现在的 run_at）。
+async fn isolated_queue(rows: &[(&str, &str, &str)]) -> anyhow::Result<Option<PgPool>> {
+    let Some(url) = crate::test_db::url() else {
+        return Ok(None);
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await?;
+    sqlx::raw_sql("CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL)")
+        .execute(&pool)
+        .await?;
+    for (label, kind, offset) in rows {
+        sqlx::query(
+            "INSERT INTO jobs (kind, payload, run_at)
+             VALUES ($1, jsonb_build_object('label', $2::text), now() + $3::interval)",
+        )
+        .bind(kind)
+        .bind(label)
+        .bind(offset)
+        .execute(&pool)
+        .await?;
+    }
+    Ok(Some(pool))
+}
+
+/// 认领到队列空为止，按认领顺序返回标签。
+async fn claimed_labels(pool: &PgPool, fast_lane: bool) -> anyhow::Result<Vec<String>> {
+    let mut labels = Vec::new();
+    while let Some(job) = claim_one(pool, fast_lane).await? {
+        labels.push(
+            sqlx::query_scalar("SELECT payload->>'label' FROM jobs WHERE id = $1")
+                .bind(job.id)
+                .fetch_one(pool)
+                .await?,
+        );
+    }
+    Ok(labels)
+}
+
+#[tokio::test]
+async fn a_later_time_resolution_is_claimed_before_an_earlier_extraction() -> anyhow::Result<()> {
+    let Some(pool) = isolated_queue(&[
+        ("extraction", "extract_document", "-2 hours"),
+        ("resolution", "resolve_time", "-1 hour"),
+    ])
+    .await?
+    else {
+        return Ok(());
+    };
+    assert_eq!(
+        claimed_labels(&pool, false).await?,
+        ["resolution", "extraction"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_later_intake_job_is_claimed_before_an_earlier_time_resolution() -> anyhow::Result<()> {
+    let Some(pool) = isolated_queue(&[
+        ("resolution", "resolve_time", "-2 hours"),
+        ("intake", "sync_source", "-1 hour"),
+    ])
+    .await?
+    else {
+        return Ok(());
+    };
+    assert_eq!(
+        claimed_labels(&pool, false).await?,
+        ["intake", "resolution"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_fast_lane_leaves_a_lone_time_resolution_queued() -> anyhow::Result<()> {
+    let Some(pool) = isolated_queue(&[("resolution", "resolve_time", "-1 hour")]).await? else {
+        return Ok(());
+    };
+    assert_eq!(claimed_labels(&pool, true).await?, Vec::<String>::new());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_time_resolution_due_later_is_not_claimed_while_an_extraction_is_due(
+) -> anyhow::Result<()> {
+    let Some(pool) = isolated_queue(&[
+        ("extraction", "extract_document", "-1 hour"),
+        ("resolution", "resolve_time", "1 hour"),
+    ])
+    .await?
+    else {
+        return Ok(());
+    };
+    assert_eq!(claimed_labels(&pool, false).await?, ["extraction"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_earlier_of_two_time_resolutions_is_claimed_first() -> anyhow::Result<()> {
+    let Some(pool) = isolated_queue(&[
+        ("later", "resolve_time", "-1 hour"),
+        ("earlier", "resolve_time", "-2 hours"),
+    ])
+    .await?
+    else {
+        return Ok(());
+    };
+    assert_eq!(claimed_labels(&pool, false).await?, ["earlier", "later"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn other_model_work_keeps_run_at_order_beside_extraction() -> anyhow::Result<()> {
+    let Some(pool) = isolated_queue(&[
+        ("extraction", "extract_document", "-1 hour"),
+        ("phrases", "align_phrases", "-3 hours"),
+        ("govern", "govern", "-2 hours"),
+    ])
+    .await?
+    else {
+        return Ok(());
+    };
+    assert_eq!(
+        claimed_labels(&pool, false).await?,
+        ["phrases", "govern", "extraction"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reapplying_the_time_resolution_migration_keeps_the_priorities() -> anyhow::Result<()> {
+    let Some(url) = crate::test_db::url() else {
+        return Ok(());
+    };
+    let mut conn = PgConnection::connect(&url).await?;
+    let mut tx = conn.begin().await?;
+    let migration = include_str!(
+        "../../../migrations/9016_a_time_resolution_is_claimed_before_new_extraction.sql"
+    );
+    sqlx::raw_sql(migration).execute(&mut *tx).await?;
+    sqlx::raw_sql(migration).execute(&mut *tx).await?;
+    let priorities: Vec<i16> = sqlx::query_scalar(
+        "SELECT job_priority(kind) FROM unnest(ARRAY['sync_source', 'resolve_time', 'extract_document']) AS kind",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+    assert_eq!(priorities, [0, 1, 2]);
     Ok(())
 }
 
