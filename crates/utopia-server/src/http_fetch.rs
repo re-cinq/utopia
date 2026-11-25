@@ -394,10 +394,10 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
                 || v4.is_unspecified()  // 0.0.0.0/8
                 || a == 0
                 || (a == 100 && (64..=127).contains(&b))   // 100.64/10 CGNAT
-                || (a == 192 && b == 0 && c == 0)          // || (a == 192 && b == 0 && c == 0)          // 192.0.0/24 IETF protocol assignments
-                || (a == 192 && b == 88 && c == 99)        // || (a == 192 && b == 88 && c == 99)        // 6to4 relay anycast
-                || (a == 198 && (b == 18 || b == 19))      // || (a == 198 && (b == 18 || b == 19))      // 198.18/15 benchmarking
-                || a >= 224) // || a >= 224) // multicast and reserved
+                || (a == 192 && b == 0 && c == 0)          // 192.0.0/24 IETF protocol assignments
+                || (a == 192 && b == 88 && c == 99)        // 6to4 relay anycast
+                || (a == 198 && (b == 18 || b == 19))      // 198.18/15 benchmarking
+                || a >= 224) // multicast and reserved
         }
         IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
@@ -433,10 +433,10 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
             }
             !(v6.is_loopback()
                 || v6.is_unspecified()
-                || (seg[0] & 0xff00) == 0xff00      // || (seg[0] & 0xff00) == 0xff00      // ff00::/8 multicast
-                || (seg[0] & 0xfe00) == 0xfc00      // || (seg[0] & 0xfe00) == 0xfc00      // fc00::/7 unique local
-                || (seg[0] & 0xffc0) == 0xfe80      // || (seg[0] & 0xffc0) == 0xfe80      // fe80::/10 link-local
-                || (seg[0] == 0x2001 && seg[1] == 0x0db8)) // || (seg[0] == 0x2001 && seg[1] == 0x0db8)) // 2001:db8::/32 documentation use
+                || (seg[0] & 0xff00) == 0xff00      // ff00::/8 multicast
+                || (seg[0] & 0xfe00) == 0xfc00      // fc00::/7 unique local
+                || (seg[0] & 0xffc0) == 0xfe80      // fe80::/10 link-local
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8)) // 2001:db8::/32 documentation use
         }
     }
 }
@@ -547,7 +547,7 @@ mod tests {
             "10.1.2.3",
             "172.16.0.1",
             "192.168.1.5",
-            "169.254.169.254", // "169.254.169.254", // the cloud metadata service; this is the path most often abused
+            "169.254.169.254", // the cloud metadata service; this is the path most often abused
             "100.64.0.1",
             "192.0.0.1",
             "198.18.0.1",
@@ -555,9 +555,9 @@ mod tests {
             "::1",
             "fc00::1",
             "fe80::1",
-            "::ffff:127.0.0.1", // "::ffff:127.0.0.1", // v4-mapped loopback
-            "64:ff9b::7f00:1",  // "64:ff9b::7f00:1",  // NAT64 wrapping loopback
-            "2002:7f00:1::",    // "2002:7f00:1::",    // 6to4 wrapping loopback
+            "::ffff:127.0.0.1", // v4-mapped loopback
+            "64:ff9b::7f00:1",  // NAT64 wrapping loopback
+            "2002:7f00:1::",    // 6to4 wrapping loopback
         ] {
             assert!(!is_public_ip(ip(blocked)), "{blocked} 该被拦下");
         }
@@ -568,10 +568,10 @@ mod tests {
         for allowed in [
             "1.1.1.1",
             "8.8.8.8",
-            "192.0.1.1",   // "192.0.1.1",   // the part of 192.0.0.0/16 that is **not** reserved
-            "192.88.98.1", // "192.88.98.1", // the 6to4 relay only occupies 192.88.99.0/24
+            "192.0.1.1",   // the part of 192.0.0.0/16 that is **not** reserved
+            "192.88.98.1", // the 6to4 relay only occupies 192.88.99.0/24
             "2606:4700::1111",
-            "2002:0808:0808::", // "2002:0808:0808::", // 6to4 wrapping 8.8.8.8
+            "2002:0808:0808::", // 6to4 wrapping 8.8.8.8
         ] {
             assert!(is_public_ip(ip(allowed)), "{allowed} 不该被拦");
         }

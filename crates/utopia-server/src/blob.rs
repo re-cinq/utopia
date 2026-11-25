@@ -16,7 +16,7 @@ pub trait BlobStore: Send + Sync {
     /// Idempotent write: if the same fingerprint already exists, skip.
     async fn put(&self, sha256: &str, bytes: &[u8]) -> anyhow::Result<()>;
     async fn get(&self, sha256: &str) -> anyhow::Result<Vec<u8>>;
-    #[allow(dead_code)] // #[allow(dead_code)] // Interface completeness: a future consumer of the replay/GC path
+    #[allow(dead_code)] // Interface completeness: a future consumer of the replay/GC path
     async fn exists(&self, sha256: &str) -> anyhow::Result<bool>;
     /// Real delete (#268, second half): call only after the store confirms that no one still references this fingerprint. Idempotent: not existing also counts as success
     async fn delete(&self, sha256: &str) -> anyhow::Result<()>;

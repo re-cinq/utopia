@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn user_agent_is_capped_at_256_bytes() {
-        let long = "Mozilla/5.0 ".repeat(50); // let long = "Mozilla/5.0 ".repeat(50); // 600 bytes, well above the limit
+        let long = "Mozilla/5.0 ".repeat(50); // 600 bytes, well above the limit
         let h = headers(&[("user-agent", long.as_str())]);
         let got = user_agent(&h).unwrap();
         assert_eq!(got.len(), 256);
