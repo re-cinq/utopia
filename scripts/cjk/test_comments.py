@@ -1,6 +1,6 @@
 import unittest
 
-from comments import anchors, blanked_comments, reindented, code_projection, copied_translations, missing_anchors, comment_text, split_lines
+from comments import anchors, blanked_comments, code_repeated_in_comment, marker_spacing_changed, reindented, code_projection, copied_translations, missing_anchors, comment_text, split_lines
 
 
 def comments_of(lines, is_rust=True):
@@ -120,6 +120,32 @@ class Reindented(unittest.TestCase):
 
     def test_unchanged_indentation_is_fine(self):
         self.assertEqual(reindented(["    注释", "\t注释"], ["    note", "\tnote"]), [])
+
+
+class MarkerSpacing(unittest.TestCase):
+    def test_list_continuation_with_different_spaces_after_the_marker_is_reported(self):
+        self.assertEqual(marker_spacing_changed(["///    续行"], ["///       continued"]), [1])
+
+    def test_same_spaces_after_the_marker_is_fine(self):
+        self.assertEqual(marker_spacing_changed(["///    续行", "// 一行"], ["///    continued", "// a line"]), [])
+
+    def test_code_before_the_comment_is_ignored(self):
+        self.assertEqual(marker_spacing_changed(["let a = 1; //  注释"], ["let a = 1; //  note"]), [])
+
+
+class CodeRepeatedInComment(unittest.TestCase):
+    def test_comment_that_contains_the_code_before_it_is_reported(self):
+        before = ['"192.0.1.1",   // 保留的那部分']
+        after = ['"192.0.1.1",   // "192.0.1.1",   // the reserved part']
+        self.assertEqual(code_repeated_in_comment(before, after, True), [1])
+
+    def test_ordinary_trailing_comment_is_fine(self):
+        before = ['let long = x.repeat(50); // 六百字节']
+        after = ['let long = x.repeat(50); // 600 bytes']
+        self.assertEqual(code_repeated_in_comment(before, after, True), [])
+
+    def test_short_code_is_ignored(self):
+        self.assertEqual(code_repeated_in_comment(["a; // 注"], ["a; // a; note"], True), [])
 
 
 if __name__ == "__main__":

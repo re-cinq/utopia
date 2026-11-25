@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from comments import CJK, blanked_comments, code_projection, copied_translations, reindented, missing_anchors, comment_text, is_rust_path, split_lines
+from comments import CJK, blanked_comments, code_projection, code_repeated_in_comment, copied_translations, marker_spacing_changed, reindented, missing_anchors, comment_text, is_rust_path, split_lines
 
 
 def read_at_revision(revision: str, path: str) -> list[str]:
@@ -55,7 +55,17 @@ def violations_in(path: str, base_revision: str) -> list[str]:
     moved_indentation = [
         f"{path}:{number}: leading whitespace changed" for number in reindented(before, after)
     ]
-    return changed_code + left_in_comments + moved_anchors + copies + blanks + moved_indentation
+    moved_spacing = [
+        f"{path}:{number}: spaces after the comment marker changed"
+        for number in marker_spacing_changed(before, after)
+    ]
+    repeats = [
+        f"{path}:{number}: the comment repeats the code before it"
+        for number in code_repeated_in_comment(before, after, is_rust)
+    ]
+    return (
+        changed_code + left_in_comments + moved_anchors + copies + blanks + moved_indentation + moved_spacing + repeats
+    )
 
 
 def neighbourhood(comments: list[str], number: int) -> str:
