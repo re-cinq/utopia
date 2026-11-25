@@ -123,7 +123,11 @@ mod tests {
     fn the_shape_says_where_the_class_came_from() {
         assert_eq!(shape_for("https://schema.org/Person"), "square");
         assert_eq!(shape_for(""), "circle");
-        assert_eq!(shape_for("   "), "circle", "空白也算没有 IRI");
+        assert_eq!(
+            shape_for("   "),
+            "circle",
+            "whitespace also counts as no IRI"
+        );
     }
 
     /// **The front end's colorForKey must match this one bit for bit.**
@@ -144,9 +148,15 @@ mod tests {
             "前端缺 colorForKey——新建类的颜色就会跟后端对不上"
         );
         // Getting any one of these three wrong silently shifts the computed colour
-        assert!(ts.contains("0xcbf29ce484222325n"), "FNV 初值不对");
-        assert!(ts.contains("0x100000001b3n"), "FNV 质数不对");
-        assert!(ts.contains("0xff51afd7ed558ccdn"), "雪崩混合常量不对");
+        assert!(
+            ts.contains("0xcbf29ce484222325n"),
+            "FNV initial value is wrong"
+        );
+        assert!(ts.contains("0x100000001b3n"), "FNV prime is wrong");
+        assert!(
+            ts.contains("0xff51afd7ed558ccdn"),
+            "avalanche mixing constant is wrong"
+        );
         assert!(
             ts.contains("TextEncoder"),
             "必须按 UTF-8 字节遍历：按 char code 走，中文 key 会算出别的颜色"
@@ -164,8 +174,8 @@ mod tests {
         let ts = include_str!("../../../web/src/palette.ts");
         let start = ts
             .find("export const ENTITY_PALETTE")
-            .expect("前端找不到 ENTITY_PALETTE");
-        let body = &ts[start..start + ts[start..].find("];").expect("色板没有结尾") + 2];
+            .expect("frontend cannot find ENTITY_PALETTE");
+        let body = &ts[start..start + ts[start..].find("];").expect("palette has no end") + 2];
         let front: Vec<&str> = body
             .lines()
             .filter_map(|l| {

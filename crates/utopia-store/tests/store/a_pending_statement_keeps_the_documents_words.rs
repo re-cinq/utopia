@@ -98,7 +98,10 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
     let run = async {
         let (quote_start, quote_end) = span_of(&f.text, SENTENCE);
         let (time_start, _) = span_of(&f.text, TIME_WORDS);
-        assert!(quote_start > 0, "入库的文本带时间戳前缀，偏移不能从 0 起");
+        assert!(
+            quote_start > 0,
+            "stored text carries a timestamp prefix, offsets cannot start at 0"
+        );
         let qualifiers = serde_json::json!([{ "role": "on", "value": "2026-03-15" }]);
         let time_words = serde_json::json!([{ "text": TIME_WORDS, "char_start": time_start }]);
         let propose = |phrase: &'static str| {
@@ -126,22 +129,32 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
 
         // 1. The proposal does not go onto the graph; the one in the queue carries the document's own words
         let first = propose(PHRASE).await?;
-        assert!(matches!(first, Outcome::Proposed(_)), "第一次该进队列");
-        assert_eq!(live_facts(&pool, f.kb).await?, 0, "提议阶段图上不能有活边");
+        assert!(
+            matches!(first, Outcome::Proposed(_)),
+            "first time should enter the queue"
+        );
+        assert_eq!(
+            live_facts(&pool, f.kb).await?,
+            0,
+            "no live edges in the graph during the proposal stage"
+        );
         let queued = pending::for_chunk(&pool, f.kb, f.chunk).await?;
         assert_eq!(queued.len(), 1);
         let q = &queued[0];
         assert_eq!(q.subject_name, "Acme");
         assert_eq!(q.object_name.as_deref(), Some("Shenzhen"));
         assert_eq!(q.phrase.as_deref(), Some(PHRASE));
-        assert!(q.predicate_id.is_none(), "开放陈述没有谓词");
+        assert!(q.predicate_id.is_none(), "open statement has no predicate");
         assert_eq!(q.qualifiers.as_ref(), Some(&qualifiers));
         assert_eq!(q.time_words.as_ref(), Some(&time_words));
         assert_eq!(
             (q.quote_start, q.quote_end),
             (Some(quote_start), Some(quote_end))
         );
-        assert_eq!(q.quote, f.text, "原句要跟着提议一起给人看");
+        assert_eq!(
+            q.quote, f.text,
+            "the original sentence must be shown to the person along with the proposal"
+        );
 
         // 2. Re-extracting the same sentence does not propose it again
         assert_eq!(propose(PHRASE).await?, Outcome::AlreadyPending);
@@ -151,8 +164,11 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
             unreachable!()
         };
         let done = pending::confirm(&pool, f.kb, id).await?;
-        assert!(done.created, "确认该落一条新事实");
-        assert_eq!(done.conflicts, 0, "开放陈述不做时态对账");
+        assert!(done.created, "confirmation should land one new fact");
+        assert_eq!(
+            done.conflicts, 0,
+            "open statements do no temporal reconciliation"
+        );
         assert_eq!(done.snapshot["phrase"], PHRASE);
         assert_eq!(done.snapshot["qualifiers"], qualifiers);
         assert_eq!(live_facts(&pool, f.kb).await?, 1);
@@ -176,7 +192,10 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
         .await?;
         assert_eq!(row.layer, "open");
         assert_eq!(row.phrase.as_deref(), Some(PHRASE));
-        assert!(row.predicate_id.is_none(), "开放陈述没有谓词");
+        assert!(
+            row.predicate_id.is_none(),
+            "open statement has no predicate"
+        );
         assert_eq!(row.object_id, Some(f.shenzhen));
         assert!(
             row.valid_from.is_none() && row.valid_to.is_none(),
@@ -200,8 +219,15 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
         .bind(done.fact_id)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(ev_chunk, f.chunk, "证据要指回那句记忆");
-        assert_eq!(ev_proposed.as_deref(), Some(PHRASE), "表层谓词就是短语");
+        assert_eq!(
+            ev_chunk, f.chunk,
+            "evidence must point back to that memory sentence"
+        );
+        assert_eq!(
+            ev_proposed.as_deref(),
+            Some(PHRASE),
+            "the surface predicate is the phrase"
+        );
         assert_eq!((ev_start, ev_end), (Some(quote_start), Some(quote_end)));
         // The quote is exactly the sentence cut out by the offsets, not the whole block (the whole block carries a timestamp prefix, and would also be cut to 120 characters)
         let (ev_quote, at_span): (Option<String>, String) = sqlx::query_as(
@@ -243,7 +269,10 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
         assert_eq!(mentions.len(), 1);
         assert_eq!(mentions[0].0, TIME_WORDS);
         assert_eq!(mentions[0].1, time_start);
-        assert_eq!(mentions[0].2, TIME_WORDS, "偏移指回的就是块里的那几个字");
+        assert_eq!(
+            mentions[0].2, TIME_WORDS,
+            "the offsets point back to those characters in the chunk"
+        );
 
         assert!(
             pending::for_chunk(&pool, f.kb, f.chunk).await?.is_empty(),
@@ -255,7 +284,7 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
 
         // 5. The shake of the head blocks this sentence: the phrase went into the refusal record; the same pair of entities can still be proposed with another sentence
         let Outcome::Proposed(bad) = propose("closed its office in").await? else {
-            panic!("换一个短语该是新提议");
+            panic!("a different phrase should be a new proposal");
         };
         pending::reject(&pool, f.kb, bad, None).await?;
         let rejected: Vec<Option<String>> =
@@ -269,7 +298,11 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
             matches!(propose("opened a lab in").await?, Outcome::Proposed(_)),
             "拒绝只挡那一句话，不挡这一对实体之间的一切"
         );
-        assert_eq!(live_facts(&pool, f.kb).await?, 1, "拒绝不碰图");
+        assert_eq!(
+            live_facts(&pool, f.kb).await?,
+            1,
+            "rejection does not touch the graph"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;

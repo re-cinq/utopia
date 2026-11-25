@@ -104,7 +104,7 @@ async fn a_time_mention_resolves_inside_the_chunk_and_sets_no_date() -> anyhow::
         let words = "去年冬天";
         let byte_start = TEXT.find(words).unwrap();
         let char_start = TEXT[..byte_start].chars().count() as i32;
-        assert_eq!(char_start, 4, "「星云科技」四个字之后");
+        assert_eq!(char_start, 4, "after the four characters 'Xingyun Keji'");
         assert_ne!(
             byte_start as i32, char_start,
             "中文里字节偏移与字符偏移不同"

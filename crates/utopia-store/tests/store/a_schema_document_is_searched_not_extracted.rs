@@ -86,12 +86,19 @@ async fn a_source_that_does_not_extract_keeps_its_documents_out_of_the_queue() -
 
         // A full rebuild goes through exactly this path (source_id = None)
         let queued = utopia_store::documents::queue_extraction(&pool, kb, None).await?;
-        assert_eq!(queued, vec![prose_doc], "只有普通来源下的文档该被排上");
+        assert_eq!(
+            queued,
+            vec![prose_doc],
+            "only documents under a normal source should be enqueued"
+        );
         assert!(!queued.contains(&schema_doc));
 
         // Re-extracting by source: the source itself says not to extract, so what gets queued is empty
         let queued = utopia_store::documents::queue_extraction(&pool, kb, Some(schemas.id)).await?;
-        assert!(queued.is_empty(), "不抽取的来源按来源重抽也该是空");
+        assert!(
+            queued.is_empty(),
+            "a non-extracted source re-extracted by source should also be empty"
+        );
 
         Ok::<_, anyhow::Error>(())
     }

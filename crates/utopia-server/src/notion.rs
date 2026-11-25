@@ -461,7 +461,11 @@ mod tests {
                     "Status": { "type": "select", "select": { "name": "Done" } }
                 }
             });
-            assert_eq!(page_title(&page), "季度复盘", "属性名 {key} 时找不到标题");
+            assert_eq!(
+                page_title(&page),
+                "季度复盘",
+                "no title found for property name {key}"
+            );
         }
     }
 
@@ -539,7 +543,10 @@ mod tests {
             "{}",
             p.external_key
         );
-        assert!(p.text.starts_with("# "), "正文该以标题开头");
+        assert!(
+            p.text.starts_with("# "),
+            "body should start with the heading"
+        );
         assert!(
             p.last_edited.is_some(),
             "last_edited_time 是 doc_time 的来源"

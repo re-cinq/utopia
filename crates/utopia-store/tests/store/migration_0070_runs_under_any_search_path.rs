@@ -52,7 +52,7 @@ async fn migration_under(pool: &PgPool, version: i64, path: &str) -> Result<(), 
     let m = migrator
         .iter()
         .find(|m| m.version == version)
-        .unwrap_or_else(|| panic!("{version} 必须在迁移集里"));
+        .unwrap_or_else(|| panic!("{version} must be in the migration set"));
     let mut conn = pool.acquire().await?;
     let mut tx = conn.begin().await?;
     sqlx::query(&format!("SET LOCAL search_path = {path}"))
@@ -90,7 +90,9 @@ async fn scratch(suffix: &str) -> anyhow::Result<Option<(String, PgPool)>> {
         drop_scratch(&name).await;
         return Ok(None);
     };
-    let (head, _) = url.rsplit_once('/').expect("UTOPIA_DATABASE_URL 缺库名段");
+    let (head, _) = url
+        .rsplit_once('/')
+        .expect("UTOPIA_DATABASE_URL is missing the database name segment");
     let pool = PgPool::connect(&format!("{head}/{name}")).await?;
     if let Err(e) = migrate_to(&pool, 69).await {
         pool.close().await;
@@ -173,7 +175,10 @@ async fn assert_installed(pool: &PgPool) -> anyhow::Result<()> {
     )
     .fetch_one(pool)
     .await?;
-    assert_eq!(fns, 10, "全部触发器函数都必须落在 public schema");
+    assert_eq!(
+        fns, 10,
+        "all trigger functions must live in the public schema"
+    );
 
     // Composite foreign keys: one for each edge whose source row carries its own kb_id, 26 in all
     let fks: i64 = sqlx::query_scalar(
@@ -197,7 +202,10 @@ async fn assert_installed(pool: &PgPool) -> anyhow::Result<()> {
     )
     .fetch_one(pool)
     .await?;
-    assert_eq!(fks, 26, "每条声明式边一个复合外键，一条都不能少");
+    assert_eq!(
+        fks, 26,
+        "every declared edge gets one composite foreign key, none may be missing"
+    );
 
     // Supporting unique constraints: one (kb_id, id) per referenced table family
     let uniques: i64 = sqlx::query_scalar(
@@ -208,7 +216,10 @@ async fn assert_installed(pool: &PgPool) -> anyhow::Result<()> {
     )
     .fetch_one(pool)
     .await?;
-    assert_eq!(uniques, 8, "每个被引表一条 (kb_id, id) 唯一约束");
+    assert_eq!(
+        uniques, 8,
+        "every referenced table gets one (kb_id, id) unique constraint"
+    );
 
     // Self-referencing edges within the same table are really deferred: both condeferrable and condeferred bits are set
     let deferred: i64 = sqlx::query_scalar(
@@ -221,7 +232,10 @@ async fn assert_installed(pool: &PgPool) -> anyhow::Result<()> {
     )
     .fetch_one(pool)
     .await?;
-    assert_eq!(deferred, 4, "同表自指边的提交边界检查必须在场");
+    assert_eq!(
+        deferred, 4,
+        "the commit-boundary check for same-table self-referencing edges must be present"
+    );
 
     // Edges attested by the parent row and DB non-transferability: trigger counts (the FK's own internal triggers are not counted)
     let trg: i64 = sqlx::query_scalar(
@@ -240,7 +254,10 @@ async fn assert_installed(pool: &PgPool) -> anyhow::Result<()> {
     )
     .fetch_one(pool)
     .await?;
-    assert_eq!(trg, 22, "父行作证的边与不可过户，一条都不能少");
+    assert_eq!(
+        trg, 22,
+        "edges where a parent row vouches, and the non-transferable ones, none may be missing"
+    );
     Ok(())
 }
 
@@ -254,7 +271,7 @@ async fn assert_0091_installed(pool: &PgPool) -> anyhow::Result<()> {
     )
     .fetch_one(pool)
     .await?;
-    assert_eq!(fns, 1, "触发器函数必须落在 public schema");
+    assert_eq!(fns, 1, "trigger functions must live in the public schema");
 
     let fks: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_constraint WHERE contype = 'f' AND conname IN (
@@ -270,7 +287,10 @@ async fn assert_0091_installed(pool: &PgPool) -> anyhow::Result<()> {
     )
     .fetch_one(pool)
     .await?;
-    assert_eq!(fks, 13, "0091 的复合外键要么全在要么全不在");
+    assert_eq!(
+        fks, 13,
+        "the composite foreign keys of 0091 are either all present or all absent"
+    );
 
     let uniques: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_constraint WHERE contype = 'u' AND conname IN (
@@ -279,7 +299,10 @@ async fn assert_0091_installed(pool: &PgPool) -> anyhow::Result<()> {
     )
     .fetch_one(pool)
     .await?;
-    assert_eq!(uniques, 3, "每个新被引表一条 (kb_id, id) 唯一约束");
+    assert_eq!(
+        uniques, 3,
+        "every new referenced table gets one (kb_id, id) unique constraint"
+    );
 
     let trg: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname IN (
@@ -290,7 +313,10 @@ async fn assert_0091_installed(pool: &PgPool) -> anyhow::Result<()> {
     )
     .fetch_one(pool)
     .await?;
-    assert_eq!(trg, 6, "归属推导与不可过户触发器,一个都不能少");
+    assert_eq!(
+        trg, 6,
+        "ownership derivation and non-transferable triggers, none may be missing"
+    );
     Ok(())
 }
 
@@ -1069,7 +1095,11 @@ async fn a_protected_edge_missing_from_preflight_fails_the_guard() -> anyhow::Re
 fn the_preflight_check_notices_a_dropped_or_stray_edge() -> anyhow::Result<()> {
     let surface = preflight_surface()?;
     // The same file is counted once in each direction: 61 structural edges + 5 merged filter checks
-    assert_eq!(surface.edges.len(), 61, "preflight 必须覆盖全部保护边");
+    assert_eq!(
+        surface.edges.len(),
+        61,
+        "preflight must cover all protected edges"
+    );
     assert_eq!(
         surface.filters,
         [
@@ -1129,10 +1159,10 @@ fn the_preflight_check_notices_a_dropped_or_stray_edge() -> anyhow::Result<()> {
 async fn the_migration_installs_under_an_empty_search_path() -> anyhow::Result<()> {
     with_scratch("empty", |pool| async move {
         let r = migration_70_under(&pool, "''").await;
-        assert!(r.is_ok(), "search_path 为空时装得上 0070: {r:?}");
+        assert!(r.is_ok(), "0070 installs when search_path is empty: {r:?}");
         assert_installed(&pool).await?;
         let r = finish_chain_then_91_under(&pool, "''").await;
-        assert!(r.is_ok(), "search_path 为空时装得上 0091: {r:?}");
+        assert!(r.is_ok(), "0091 installs when search_path is empty: {r:?}");
         assert_0091_installed(&pool).await
     })
     .await
@@ -1161,10 +1191,16 @@ async fn the_migration_installs_under_a_hostile_search_path() -> anyhow::Result<
         .await?;
 
         let r = migration_70_under(&pool, "decoy, public").await;
-        assert!(r.is_ok(), "首位被占的 search_path 下也装得上 0070: {r:?}");
+        assert!(
+            r.is_ok(),
+            "0070 also installs when the first search_path entry is taken: {r:?}"
+        );
         assert_installed(&pool).await?;
         let r = finish_chain_then_91_under(&pool, "decoy, public").await;
-        assert!(r.is_ok(), "首位被占的 search_path 下也装得上 0091: {r:?}");
+        assert!(
+            r.is_ok(),
+            "0091 also installs when the first search_path entry is taken: {r:?}"
+        );
         assert_0091_installed(&pool).await?;
         // The decoy is left as it is: it was never selected once
         let decoy_fn: i64 = sqlx::query_scalar(
@@ -1174,7 +1210,10 @@ async fn the_migration_installs_under_a_hostile_search_path() -> anyhow::Result<
         )
         .fetch_one(&pool)
         .await?;
-        assert_eq!(decoy_fn, 2, "decoy 函数不该被覆盖也不该被删掉");
+        assert_eq!(
+            decoy_fn, 2,
+            "the decoy function must be neither overwritten nor deleted"
+        );
         Ok(())
     })
     .await
@@ -1184,10 +1223,10 @@ async fn the_migration_installs_under_a_hostile_search_path() -> anyhow::Result<
 async fn the_migration_installs_under_a_normal_search_path() -> anyhow::Result<()> {
     with_scratch("norm", |pool| async move {
         let r = migration_70_under(&pool, "public").await;
-        assert!(r.is_ok(), "正常 search_path 下装得上 0070: {r:?}");
+        assert!(r.is_ok(), "0070 installs under a normal search_path: {r:?}");
         assert_installed(&pool).await?;
         let r = finish_chain_then_91_under(&pool, "public").await;
-        assert!(r.is_ok(), "正常 search_path 下装得上 0091: {r:?}");
+        assert!(r.is_ok(), "0091 installs under a normal search_path: {r:?}");
         assert_0091_installed(&pool).await
     })
     .await
@@ -1256,7 +1295,10 @@ async fn migration_91_refuses_a_ledger_with_cross_kb_sources() -> anyhow::Result
         )
         .fetch_one(&pool)
         .await?;
-        assert_eq!(leftovers, 0, "失败的迁移不许留半套装上的机制");
+        assert_eq!(
+            leftovers, 0,
+            "a failed migration must not leave a half-installed mechanism behind"
+        );
         Ok(())
     })
     .await

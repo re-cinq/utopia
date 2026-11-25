@@ -150,7 +150,7 @@ async fn search_entities_degree_respects_as_of() -> anyhow::Result<()> {
     // Now: alpha=1, beta=1 (the old one is invalidated, the new one is alive)
     let now_rows =
         utopia_store::graph::search_entities(&pool, kb, "Person", 50, 0, None, false).await?;
-    assert_eq!(find_degree(&now_rows.0, alpha), 1, "当下 alpha degree=1");
+    assert_eq!(find_degree(&now_rows.0, alpha), 1, "alpha degree=1 now");
     assert_eq!(
         find_degree(&now_rows.0, beta),
         1,
@@ -168,7 +168,11 @@ async fn search_entities_degree_respects_as_of() -> anyhow::Result<()> {
         false,
     )
     .await?;
-    assert_eq!(find_degree(&feb_rows.0, alpha), 1, "2 月 alpha degree=1");
+    assert_eq!(
+        find_degree(&feb_rows.0, alpha),
+        1,
+        "alpha degree=1 in February"
+    );
     assert_eq!(
         find_degree(&feb_rows.0, beta),
         1,
@@ -186,7 +190,11 @@ async fn search_entities_degree_respects_as_of() -> anyhow::Result<()> {
         false,
     )
     .await?;
-    assert_eq!(find_degree(&apr_rows.0, alpha), 1, "4 月 alpha degree=1");
+    assert_eq!(
+        find_degree(&apr_rows.0, alpha),
+        1,
+        "alpha degree=1 in April"
+    );
     assert_eq!(
         find_degree(&apr_rows.0, beta),
         0,
@@ -204,7 +212,7 @@ async fn search_entities_degree_respects_as_of() -> anyhow::Result<()> {
         false,
     )
     .await?;
-    assert_eq!(find_degree(&jun_rows.0, alpha), 1, "6 月 alpha degree=1");
+    assert_eq!(find_degree(&jun_rows.0, alpha), 1, "alpha degree=1 in June");
     assert_eq!(
         find_degree(&jun_rows.0, beta),
         1,
@@ -317,7 +325,7 @@ async fn a_search_in_replay_lists_the_entities_of_that_moment() -> anyhow::Resul
         seen.sort();
         let mut want = vec![(a, 1), (b, 1)];
         want.sort();
-        assert_eq!(seen, want, "三月：A 还没并进 B，各一度；C 还没建");
+        assert_eq!(seen, want, "March: A not yet merged into B, each one degree; C not yet created");
         assert_eq!(total, 2);
 
         let (march_exact, march_exact_total) = utopia_store::graph::search_entities(

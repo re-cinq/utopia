@@ -137,7 +137,7 @@ async fn call_and_parse_one_chunk(
             Ok(r) => r,
             Err(e) if utopia_llm::out_of_credit(&e).is_some() => return Err(e),
             Err(e) => {
-                tracing::warn!(%document_id, seq = chunk.seq, error = %e, "开放抽取调用失败，跳过该分块");
+                tracing::warn!(%document_id, seq = chunk.seq, error = %e, "open extraction call failed, skipping this chunk");
                 drop_signal(
                     state,
                     kb_id,
@@ -151,7 +151,7 @@ async fn call_and_parse_one_chunk(
                 return Ok(None);
             }
         };
-        tracing::debug!(%document_id, seq = chunk.seq, reply = %reply.text, "开放抽取的原始回复");
+        tracing::debug!(%document_id, seq = chunk.seq, reply = %reply.text, "raw reply from open extraction");
         // The parser sees only that the JSON lost its tail, not why, so the reason has to be carried over from the reply (#760)
         let cut = if reply.repeating {
             Some(Cut::Repeating)
@@ -165,7 +165,7 @@ async fn call_and_parse_one_chunk(
     let mut extraction = match utopia_extract::open::parse_open_response(&reply_text) {
         Ok(x) => x,
         Err(e) => {
-            tracing::warn!(%document_id, seq = chunk.seq, error = %e, hit_token_ceiling = matches!(cut, Some(Cut::Ceiling)), repeating = matches!(cut, Some(Cut::Repeating)), "开放抽取回复解析失败，跳过该分块");
+            tracing::warn!(%document_id, seq = chunk.seq, error = %e, hit_token_ceiling = matches!(cut, Some(Cut::Ceiling)), repeating = matches!(cut, Some(Cut::Repeating)), "failed to parse open extraction reply, skipping this chunk");
             // A whole chunk did not make it into the graph, and the reasons differ: hitting the limit means "the answer was too long", which can be changed; repetition is the model stuck on one line;
             // other parse failures mean "the reply is malformed". Writing these as one sentence would make them indistinguishable
             let (why, detail) = match cut {
@@ -998,7 +998,7 @@ async fn embed_names(
                 );
             }
             Err(e) => {
-                tracing::warn!(error = %e, "名字向量没算出来，这一批退回字面召回");
+                tracing::warn!(error = %e, "name vectors not computed, this batch falls back to literal recall");
             }
         }
     }
@@ -1017,7 +1017,7 @@ pub(crate) async fn embed_names_job(state: &AppState, kb_id: Uuid) -> anyhow::Re
     };
     let filled = embed_pending_names(state, &settings, &client, kb_id).await?;
     if filled > 0 {
-        tracing::info!(%kb_id, names = filled, "名字向量已补");
+        tracing::info!(%kb_id, names = filled, "name vectors backfilled");
     }
     // After filling in names, queue another: while one is running, documents extracted meanwhile that hit "already running" do not queue (see the exclusion there),
     // and the names they wrote are filled by the next run; and a full batch means there may well be more. Only one is queued, so this runs at most one extra empty pass
@@ -1052,7 +1052,11 @@ async fn embed_pending_names(
         let _permit = crate::llm_util::acquire_embed(state, settings).await;
         let vectors = client.embed(&texts).await?;
         if vectors.len() != batch.len() {
-            anyhow::bail!("嵌入返回 {} 条，送去的是 {} 条", vectors.len(), batch.len());
+            anyhow::bail!(
+                "embedding returned {} items, but {} were sent",
+                vectors.len(),
+                batch.len()
+            );
         }
         items.extend(
             batch
@@ -1167,7 +1171,7 @@ pub(crate) async fn run_open(
     for chunk in chunks.iter() {
         // If taken over, exit quietly (re-extraction bumps the epoch): the check comes before calling the model
         if utopia_store::documents::extract_epoch(pool, document_id).await? != my_epoch {
-            tracing::info!(%document_id, "抽取任务已被新一轮接管，退出");
+            tracing::info!(%document_id, "extraction task was taken over by a newer round, exiting");
             return Ok(());
         }
         let ctx: Option<&[f32]> = chunk.embedding.as_ref().map(|v| v.as_slice());
@@ -1211,7 +1215,7 @@ pub(crate) async fn run_open(
         };
         // During the model's reply a rebuild may have deleted the entities in the cache (#1361); the old reply must not write facts or mark the chunk complete
         if utopia_store::documents::extract_epoch(pool, document_id).await? != my_epoch {
-            tracing::info!(%document_id, "抽取任务已被新一轮接管，落库前退出");
+            tracing::info!(%document_id, "extraction task was taken over by a newer round, exiting before persisting");
             return Ok(());
         }
         let ChunkParsed {
@@ -1299,7 +1303,7 @@ pub(crate) async fn run_open(
         utopia_store::resolution::refresh_disambiguators(pool, kb_id, name).await?;
     }
     if utopia_store::documents::extract_epoch(pool, document_id).await? != my_epoch {
-        tracing::info!(%document_id, "抽取任务已被新一轮接管，收尾时退出");
+        tracing::info!(%document_id, "extraction task was taken over by a newer round, exiting during wrap-up");
         return Ok(());
     }
     // A chunk that was not extracted must not be marked done (the same rule as the typed path). **But those that were extracted finish as usual**:
@@ -1352,7 +1356,7 @@ pub(crate) async fn run_open(
     // (`bound_types` is a copy read at the start of extraction; the projection at the moment of writing cannot see entities built afterwards)
     let caught_up = utopia_store::type_bindings::apply_bound(pool, kb_id).await?;
     if caught_up > 0 {
-        tracing::info!(%document_id, entities = caught_up, "抽取途中绑上的类补到了后建的实体上");
+        tracing::info!(%document_id, entities = caught_up, "class bound during extraction was applied to entities created later");
     }
     // Newly appearing category words are bound to classes (0044 alignment, first slice): per library, and if one is already queued in the library it is not duplicated
     utopia_store::jobs::enqueue_unless_queued(
@@ -1367,7 +1371,7 @@ pub(crate) async fn run_open(
     if pushed {
         let bound = crate::phrase_alignment::bind_declared(pool, kb_id, document_id).await?;
         if bound > 0 {
-            tracing::info!(%document_id, bound, "推送的短语按声明的关系绑上");
+            tracing::info!(%document_id, bound, "pushed phrase is bound by the declared relation");
         }
         utopia_store::jobs::enqueue_unless_queued(
             pool,
@@ -1380,13 +1384,13 @@ pub(crate) async fn run_open(
             let closing =
                 utopia_store::unconfirmed::close_of_document(pool, kb_id, document_id).await?;
             if closing.closed > 0 {
-                tracing::info!(%document_id, closed = closing.closed, "推送条目的新版本闭合了它不再陈述的事实");
+                tracing::info!(%document_id, closed = closing.closed, "the new version of a pushed entry closes facts it no longer states");
             }
         }
     }
     // Only wake people when something was added to the queue: the Review count and the confirmation card in the conversation both depend on this signal
     if pending_count > 0 {
-        tracing::info!(%document_id, pending_count, "记忆抽出的陈述进了待确认队列");
+        tracing::info!(%document_id, pending_count, "statements extracted from memory went into the pending-confirmation queue");
         state.emit_pending(kb_id);
         state.emit_review(kb_id);
     }
@@ -1435,7 +1439,7 @@ pub(crate) async fn run_open(
     if let Some(msg) = incomplete {
         return Err(anyhow::anyhow!(msg));
     }
-    tracing::info!(%document_id, statements = statement_count, "开放图谱抽取完成");
+    tracing::info!(%document_id, statements = statement_count, "open graph extraction complete");
     Ok(())
 }
 
@@ -1464,12 +1468,15 @@ mod tests {
     fn a_value_must_be_in_the_sentence_that_is_quoted() {
         let row = "| Cost of revenue | $46 | $47 | $93 |";
         assert!(shows_value(row, "$46"));
-        assert!(shows_value(row, "46"), "货币符号不算数");
+        assert!(shows_value(row, "46"), "currency symbols do not count");
         assert!(
             shows_value("| Accounts payable | 1,915 |", "1915"),
             "千分位不算数"
         );
-        assert!(shows_value("revenue was $ 1,234", "$1,234"), "空白不算数");
+        assert!(
+            shows_value("revenue was $ 1,234", "$1,234"),
+            "whitespace does not count"
+        );
         assert!(
             !shows_value(
                 "(A) Acquisition-related costs are comprised of amortization.",
@@ -1477,7 +1484,10 @@ mod tests {
             ),
             "导语里没有这个数——正是压平表格那一行的错法"
         );
-        assert!(shows_value("anything", ""), "没有值就没什么可核的");
+        assert!(
+            shows_value("anything", ""),
+            "nothing to verify without a value"
+        );
         assert!(
             shows_value("| a | 4,600 |", "46"),
             "放得松：像是命中就放过，丢错一条比留下一条可疑的更糟"

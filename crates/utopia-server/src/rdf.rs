@@ -37,7 +37,7 @@ const UTOPIA: &str = "urn:utopia:ns:";
 fn nn(iri: impl Into<String>) -> NamedNode {
     // Every IRI built here comes from uuids / ontology keys / the configured base, and out-of-range characters are already
     // blocked in `Names::new`; if this still fails, it can only be a bug, and should not turn the whole export into a 500
-    NamedNode::new(iri.into()).expect("导出 IRI 必须合法")
+    NamedNode::new(iri.into()).expect("exported IRI must be valid")
 }
 
 fn owl(term: &str) -> NamedNode {
@@ -138,7 +138,7 @@ pub struct SharedBuf(Arc<Mutex<Vec<u8>>>);
 
 impl SharedBuf {
     pub fn take(&self) -> Vec<u8> {
-        let mut guard = self.0.lock().expect("导出缓冲区被毒化");
+        let mut guard = self.0.lock().expect("export buffer was poisoned");
         std::mem::take(&mut *guard)
     }
 }
@@ -147,7 +147,7 @@ impl Write for SharedBuf {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0
             .lock()
-            .expect("导出缓冲区被毒化")
+            .expect("export buffer was poisoned")
             .extend_from_slice(buf);
         Ok(buf.len())
     }
@@ -174,11 +174,13 @@ impl Sink {
     pub fn new(format: Format, buf: SharedBuf) -> Self {
         let mut s = oxrdfio::RdfSerializer::from_format(format.rdf_format());
         for (p, iri) in PREFIXES {
-            s = s.with_prefix(p, iri).expect("前缀表是常量，不该解析失败");
+            s = s
+                .with_prefix(p, iri)
+                .expect("prefix table is a constant, it should never fail to parse");
         }
         s = s
             .with_prefix("utopia", UTOPIA)
-            .expect("前缀表是常量，不该解析失败");
+            .expect("prefix table is a constant, it should never fail to parse");
         Sink(s.for_writer(buf))
     }
 
@@ -759,7 +761,7 @@ fn criterion_node(term: &str) -> NamedNode {
         match term {
             "rdfs:domain" => rdfs::DOMAIN.into(),
             "rdfs:range" => rdfs::RANGE.into(),
-            _ => unreachable!("criterion_terms 只产 owl:/rdfs: 词"),
+            _ => unreachable!("criterion_terms only produces owl:/rdfs: terms"),
         }
     }
 }
@@ -1110,7 +1112,7 @@ mod tests {
             },
         })
         .for_slice(&bytes)
-        .map(|q| q.expect("导出的文件必须解析得回来"))
+        .map(|q| q.expect("exported file must parse back"))
         .collect()
     }
 
@@ -1659,7 +1661,7 @@ mod tests {
             &bytes,
             utopia_ingest::ontology_rdf::RdfFormat::Turtle,
         )
-        .expect("导出的文件必须解析得回来");
+        .expect("exported file must parse back");
         let pairs = |items: &[(&str, &str)]| -> std::collections::BTreeMap<String, String> {
             items
                 .iter()
@@ -1733,7 +1735,10 @@ mod tests {
         let quads = export(Format::Turtle, |sink, names, vocab| {
             emit_fact(sink, names, vocab, &retracted, at("2026-06-01T00:00:00Z")).unwrap();
         });
-        assert!(!has(&quads, SUBJ, WORKS_FOR, OBJ), "撤回的不出平铺三元组");
+        assert!(
+            !has(&quads, SUBJ, WORKS_FOR, OBJ),
+            "retracted ones do not produce flat triples"
+        );
         assert_eq!(
             objects(&quads, STMT, "http://www.w3.org/ns/prov#invalidatedAtTime"),
             vec!["\"2026-03-01T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"]
@@ -1939,7 +1944,7 @@ mod tests {
             stmt,
             "http://www.w3.org/1999/02/22-rdf-syntax-ns#object",
         );
-        assert_eq!(obj.len(), 1, "结论要有宾语");
+        assert_eq!(obj.len(), 1, "conclusion must have an object");
         assert_eq!(
             obj[0], "\"gas_well\"",
             "分类结论的宾语该是类名本身的字符串字面量，拿到的是 {}",
@@ -2344,7 +2349,7 @@ mod tests {
                     && q.predicate.as_str() == "urn:utopia:ns:evidencePath"
             })
             .map(|q| q.object.clone())
-            .expect("环必须带着 path");
+            .expect("cycle must carry the path");
         let mut items = Vec::new();
         let mut node = head;
         while node != nil {
@@ -2355,7 +2360,7 @@ mod tests {
                         && q.predicate.as_str() == rdf::FIRST.as_str()
                 })
                 .map(|q| q.object.clone())
-                .expect("list 节点必有 first");
+                .expect("list node must have first");
             items.push(first.to_string());
             node = quads
                 .iter()
@@ -2364,7 +2369,7 @@ mod tests {
                         && q.predicate.as_str() == rdf::REST.as_str()
                 })
                 .map(|q| q.object.clone())
-                .expect("list 节点必有 rest");
+                .expect("list node must have rest");
         }
         items
     }

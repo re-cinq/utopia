@@ -891,10 +891,14 @@ mod tests {
         ]))
         .unwrap();
         let one_comments = comments_for_issue(&issues[0], &comments);
-        assert!(one_comments.is_empty(), "1 号没有评论");
+        assert!(one_comments.is_empty(), "issue 1 has no comments");
 
         let two_comments = comments_for_issue(&issues[1], &comments);
-        assert_eq!(two_comments.len(), 2, "其他工单和无法归属的评论不该混进来");
+        assert_eq!(
+            two_comments.len(),
+            2,
+            "other tickets and comments that cannot be attributed must not be mixed in"
+        );
         // Ascending: first "the first one" (01-03), then "the second one" (01-05)
         assert_eq!(two_comments[0].body.as_deref(), Some("第一条"));
     }
@@ -951,9 +955,12 @@ mod tests {
             events_by_issue: std::collections::HashMap<String, Vec<Event>>,
         }
         let raw = include_str!("../tests/fixtures/github_issues.json");
-        let f: Fixture = serde_json::from_str(raw).expect("真实响应该解得出来");
+        let f: Fixture = serde_json::from_str(raw).expect("a real response should parse");
 
-        assert!(!f.issues.is_empty(), "夹具是空的，这条测试就什么都没验");
+        assert!(
+            !f.issues.is_empty(),
+            "the fixture is empty, so this test verifies nothing"
+        );
         // If all are PRs, the PR-filter path is not covered by this fixture
         assert!(
             f.issues.iter().all(|i| i.pull_request.is_none()),
@@ -993,11 +1000,18 @@ mod tests {
                 .cloned()
                 .unwrap_or_default(),
         );
-        assert!(!events.is_empty(), "夹具里 #{} 没有事件", first.number);
+        assert!(
+            !events.is_empty(),
+            "fixture #{} has no events",
+            first.number
+        );
         let es: Vec<&Event> = events.iter().collect();
         let doc = render(first, &cs, &es);
-        assert!(doc.contains("## History"), "历史一节缺失：{doc}");
-        assert!(doc.contains("— closed by"), "关闭事件没写进历史：{doc}");
+        assert!(doc.contains("## History"), "history section missing: {doc}");
+        assert!(
+            doc.contains("— closed by"),
+            "close event not written to history: {doc}"
+        );
     }
 
     /// An empty comment should not leave an empty section with only a heading in the body.
@@ -1014,6 +1028,9 @@ mod tests {
         }))
         .unwrap();
         let out = render(&i, &[&c], &[]);
-        assert!(!out.contains("### x"), "空评论不该留下小节：{out}");
+        assert!(
+            !out.contains("### x"),
+            "an empty comment must not leave a section: {out}"
+        );
     }
 }

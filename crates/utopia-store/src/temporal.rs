@@ -1911,7 +1911,10 @@ mod tests {
                 (rows[1].id, End::At(day(2020, 3, 1), "day".into())),
             ]
         );
-        assert!(plan.held.is_empty(), "锚不到的一对没有什么可判的");
+        assert!(
+            plan.held.is_empty(),
+            "a pair that cannot be anchored has nothing to judge"
+        );
     }
 
     /// When reading, the successor that closes a row is found with the same "rendered from a figure description" criterion the engine uses; only the alias is swapped (#970)

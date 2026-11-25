@@ -230,7 +230,11 @@ async fn the_answers_agree_with_and_without_the_index() -> anyhow::Result<()> {
             None
         );
         let exact = ask(&pool, &f).await?;
-        assert_eq!(exact.nearest_in_big, Some(f.planted), "重合的那一条最近");
+        assert_eq!(
+            exact.nearest_in_big,
+            Some(f.planted),
+            "the one that coincides is the nearest"
+        );
         assert_eq!(
             exact.small_limit_10,
             vec![f.only],
@@ -241,8 +245,14 @@ async fn the_answers_agree_with_and_without_the_index() -> anyhow::Result<()> {
             vec![f.other_dims],
             "5 维的查询只找 5 维的"
         );
-        assert!(!exact.big_top_10_has_superseded, "顶掉的不是命中");
-        assert!(!exact.big_top_10_has_other_dims, "7 维的查询看不见 5 维的");
+        assert!(
+            !exact.big_top_10_has_superseded,
+            "what was pushed out is not a hit"
+        );
+        assert!(
+            !exact.big_top_10_has_other_dims,
+            "a 7-dimension query cannot see 5-dimension ones"
+        );
         // March 1: the chunk that was superseded is still alive, and it coincides with the query — two identical vectors, distances tie, settled by id.
         // If undetermined, the exact path and HNSW each sort their own way, and the "index changed the answer" check below would flip between red and green (#652)
         assert_eq!(
@@ -266,14 +276,14 @@ async fn the_answers_agree_with_and_without_the_index() -> anyhow::Result<()> {
 
         // ---- 2. Build the index: the task body, outside a transaction, idempotent twice
         let built = vector_index::build(&pool, Target::Chunks, DIMS).await?;
-        assert!(built.created, "第一次建");
+        assert!(built.created, "first build");
         assert_eq!(built.name, "chunks_embedding_hnsw_7");
         assert_eq!(
             vector_index::status(&pool, Target::Chunks, DIMS).await?,
             Some(true)
         );
         let again = vector_index::build(&pool, Target::Chunks, DIMS).await?;
-        assert!(!again.created, "第二次是空操作");
+        assert!(!again.created, "second run is a no-op");
         let def: (String,) = sqlx::query_as(
             "SELECT pg_get_indexdef(indexrelid) FROM pg_index
               WHERE indexrelid = 'chunks_embedding_hnsw_7'::regclass",
@@ -290,7 +300,7 @@ async fn the_answers_agree_with_and_without_the_index() -> anyhow::Result<()> {
 
         // ---- 3. With the index: the same six questions, the answers must be identical
         let indexed = ask(&pool, &f).await?;
-        assert_eq!(indexed, exact, "索引改了答案");
+        assert_eq!(indexed, exact, "the index changed the answer");
         Ok::<_, anyhow::Error>(())
     }
     .await;

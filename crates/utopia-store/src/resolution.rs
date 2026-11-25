@@ -2430,11 +2430,11 @@ pub async fn merge_entities(
     {
         Ok(broken) if !broken.is_empty() => {
             if let Err(e) = crate::reasoning::record_signature_breaks(pool, kb_id, &broken).await {
-                tracing::warn!(%kb_id, error = %e, "合并后的签名违规没能入库");
+                tracing::warn!(%kb_id, error = %e, "merged signature violation failed to be stored");
             }
         }
         Ok(_) => {}
-        Err(e) => tracing::warn!(%kb_id, error = %e, "合并后的签名检查失败"),
+        Err(e) => tracing::warn!(%kb_id, error = %e, "merged signature check failed"),
     }
     let report = crate::temporal::reconcile_moved_facts(pool, kb_id, &moved_all).await?;
     if !report.corrected.is_empty() {

@@ -201,13 +201,16 @@ async fn a_rule_types_a_well_and_says_which_readings_did_it() -> anyhow::Result<
         let r = rule(&pool, &f, 8.0).await?;
 
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(report.attribute_rules, 1, "规则要被读进来");
-        assert_eq!(report.rule_hits, 1, "两条读数满足合取");
+        assert_eq!(report.attribute_rules, 1, "the rule must be read in");
+        assert_eq!(report.rule_hits, 1, "two readings satisfy the conjunction");
 
         let rows = derived(&pool, &f).await?;
-        assert_eq!(rows.len(), 1, "一条派生归类");
+        assert_eq!(rows.len(), 1, "one derived classification");
         let d = &rows[0];
-        assert!(d.object_id.is_none(), "归类走字面值通道，没有实体宾语");
+        assert!(
+            d.object_id.is_none(),
+            "classification goes through the literal-value channel, has no entity object"
+        );
         assert_eq!(
             d.object_value
                 .as_ref()
@@ -216,7 +219,11 @@ async fn a_rule_types_a_well_and_says_which_readings_did_it() -> anyhow::Result<
             Some("gas_well"),
             "没有 IRI 时退回 key，记的是类而不是标签"
         );
-        assert_eq!(d.attribute_rule_id, Some(r), "结论指回它的规则");
+        assert_eq!(
+            d.attribute_rule_id,
+            Some(r),
+            "the conclusion points back to its rule"
+        );
         assert_eq!(
             d.valid_from.map(|t| t.to_rfc3339()),
             Some("2023-06-01T00:00:00+00:00".into()),
@@ -231,15 +238,22 @@ async fn a_rule_types_a_well_and_says_which_readings_did_it() -> anyhow::Result<
         .fetch_all(&pool)
         .await?;
         let got: Vec<Uuid> = premises.into_iter().map(|(x,)| x).collect();
-        assert_eq!(got.len(), 2, "两条前提都要记下来");
+        assert_eq!(got.len(), 2, "both premises must be recorded");
         assert!(got.contains(&a) && got.contains(&b));
 
         // **Rerunning must not add a row.** The object_id of a literal-value conclusion is NULL, and Postgres by default
         // treats NULLs as distinct -- if the identity index is written wrong, every round adds one more row here
         let again = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(again.inserted, 0, "同一条结论重跑不再插");
-        assert_eq!(again.invalidated, 0, "也不该把自己判成陈旧");
-        assert_eq!(derived(&pool, &f).await?.len(), 1, "库里还是一行");
+        assert_eq!(
+            again.inserted, 0,
+            "rerunning the same conclusion does not insert again"
+        );
+        assert_eq!(again.invalidated, 0, "nor should it judge itself stale");
+        assert_eq!(
+            derived(&pool, &f).await?.len(),
+            1,
+            "still one row in the database"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -305,7 +319,7 @@ async fn either_group_concludes_and_names_only_its_own_reading() -> anyhow::Resu
         .await?;
 
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(report.rule_hits, 1, "第二组独自成立，一次命中");
+        assert_eq!(report.rule_hits, 1, "the second group holds on its own, one hit");
 
         let rows = derived(&pool, &f).await?;
         assert_eq!(rows.len(), 1);
@@ -316,7 +330,7 @@ async fn either_group_concludes_and_names_only_its_own_reading() -> anyhow::Resu
         .fetch_all(&pool)
         .await?;
         let got: Vec<Uuid> = premises.into_iter().map(|(x,)| x).collect();
-        assert_eq!(got, vec![a], "前提只有这一组用到的那条读数");
+        assert_eq!(got, vec![a], "a reading used only by this group as a premise");
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -366,12 +380,12 @@ async fn raising_the_threshold_invalidates_without_deleting() -> anyhow::Result<
         .execute(&pool)
         .await?;
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(report.rule_hits, 0, "抬高之后不再命中");
+        assert_eq!(report.rule_hits, 0, "after raising it, no longer hits");
         assert_eq!(report.invalidated, 1);
 
         let rows = derived(&pool, &f).await?;
-        assert_eq!(rows.len(), 1, "行还在——作废不是删除");
-        assert!(rows[0].invalidated_at.is_some(), "标了作废时刻");
+        assert_eq!(rows.len(), 1, "row still there: voiding is not deletion");
+        assert!(rows[0].invalidated_at.is_some(), "voiding time is marked");
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -417,8 +431,11 @@ async fn disabling_a_rule_retires_what_it_concluded() -> anyhow::Result<()> {
             .execute(&pool)
             .await?;
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(report.attribute_rules, 0, "关掉的规则不参与求值");
-        assert_eq!(report.invalidated, 1, "它推出来的东西跟着退场");
+        assert_eq!(
+            report.attribute_rules, 0,
+            "a disabled rule does not take part in evaluation"
+        );
+        assert_eq!(report.invalidated, 1, "what it derived retires with it");
         let rows = derived(&pool, &f).await?;
         assert!(rows[0].invalidated_at.is_some());
         Ok::<_, anyhow::Error>(())
@@ -467,7 +484,10 @@ async fn retracting_a_reading_retires_the_conclusion() -> anyhow::Result<()> {
             .execute(&pool)
             .await?;
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(report.rule_hits, 0, "少了全烃这条前提就不成立");
+        assert_eq!(
+            report.rule_hits, 0,
+            "without the total hydrocarbon premise it does not hold"
+        );
         assert_eq!(report.invalidated, 1);
         Ok::<_, anyhow::Error>(())
     }
@@ -514,9 +534,9 @@ async fn the_asserted_type_is_left_alone() -> anyhow::Result<()> {
             .bind(f.w1)
             .fetch_one(&pool)
             .await?;
-        assert_eq!(t, Some(f.well), "实体的断言类型仍然是 Well");
+        assert_eq!(t, Some(f.well), "the entity's asserted type is still Well");
         let rows = derived(&pool, &f).await?;
-        assert_eq!(rows.len(), 1, "GasBearingWell 只作为派生存在");
+        assert_eq!(rows.len(), 1, "GasBearingWell exists only as a derivation");
         assert_eq!(rows[0].object_id, None);
         // The conclusion lands on built-in is_a
         let (p,): (Uuid,) = sqlx::query_as("SELECT predicate_id FROM derived_facts WHERE id = $1")
@@ -610,14 +630,24 @@ async fn changing_the_conclusion_retires_the_old_one() -> anyhow::Result<()> {
         .fetch_one(&pool)
         .await?;
         assert_eq!(kind, "attribute");
-        assert!(class.is_none(), "换了形状，旧的那一格要清空");
+        assert!(
+            class.is_none(),
+            "shape changed, the old cell must be cleared"
+        );
 
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(report.rule_hits, 1, "同一份读数照样命中，只是结论变了");
-        assert_eq!(report.invalidated, 1, "旧结论退场");
+        assert_eq!(
+            report.rule_hits, 1,
+            "same readings still hit, only the conclusion changed"
+        );
+        assert_eq!(report.invalidated, 1, "old conclusion retires");
 
         let rows = derived(&pool, &f).await?;
-        assert_eq!(rows.len(), 2, "两行：作废的旧结论 + 新结论");
+        assert_eq!(
+            rows.len(),
+            2,
+            "two rows: voided old conclusion + new conclusion"
+        );
         let old = rows.iter().find(|d| d.invalidated_at.is_some()).unwrap();
         let new = rows.iter().find(|d| d.invalidated_at.is_none()).unwrap();
         assert_eq!(
@@ -695,7 +725,11 @@ async fn a_capped_expansion_is_remembered() -> anyhow::Result<()> {
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
         assert_eq!(report.rule_capped, 0);
         assert!(report.rule_hits > 0);
-        assert_eq!(capped_of(&pool, f.kb, r).await?, 0, "归零，不累积");
+        assert_eq!(
+            capped_of(&pool, f.kb, r).await?,
+            0,
+            "reset to zero, not accumulated"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -779,8 +813,8 @@ async fn capped_of(pool: &PgPool, kb: Uuid, rule_id: Uuid) -> anyhow::Result<i64
     let r = rules
         .iter()
         .find(|r| r["id"].as_str() == Some(&rule_id.to_string()))
-        .expect("规则在列表里");
-    Ok(r["capped"].as_i64().expect("capped 是个数"))
+        .expect("the rule is in the list");
+    Ok(r["capped"].as_i64().expect("capped is a number"))
 }
 
 /// "Not in" written to the database, read back, and actually evaluated (0029 / #476).
@@ -838,7 +872,7 @@ async fn a_rule_that_says_not_one_of_is_not_silently_skipped() -> anyhow::Result
         .await?;
 
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(report.attribute_rules, 1, "规则要被读进来");
+        assert_eq!(report.attribute_rules, 1, "the rule must be read in");
         assert_eq!(
             report.rule_hits, 1,
             "「水层」不属于 {{气测异常}}，这条规则应当命中——从前它整条被跳过"

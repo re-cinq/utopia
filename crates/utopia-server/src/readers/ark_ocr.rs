@@ -168,7 +168,7 @@ impl<'a> ArkOcr<'a> {
                 Err(PageError::Fatal(e)) => return Err(e),
                 Err(PageError::Transient(e)) => match backoff.next() {
                     Some(wait) => {
-                        tracing::warn!(error = %e, wait_secs = wait.as_secs(), "方舟这一页没读成，退避后重试");
+                        tracing::warn!(error = %e, wait_secs = wait.as_secs(), "Ark page could not be read, backing off and retrying");
                         tokio::time::sleep(*wait).await;
                     }
                     None => return Err(e.context("the OCR model kept failing on one page")),

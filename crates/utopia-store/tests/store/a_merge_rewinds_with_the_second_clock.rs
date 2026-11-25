@@ -199,9 +199,15 @@ async fn a_merged_entity_comes_back_before_the_merge() -> anyhow::Result<()> {
 
     // 1. Now: B is merged (does not appear), C is undone (appears as usual)
     let (ids, total) = nodes(None).await?;
-    assert!(!ids.contains(&f.zhang_b), "仍并着的实体不该出现在画布上");
-    assert!(ids.contains(&f.zhang_c), "撤销过的合并不该继续吞掉那个实体");
-    assert_eq!(total, 4, "节点总数与画布同一口径");
+    assert!(
+        !ids.contains(&f.zhang_b),
+        "an entity still merged must not appear on the canvas"
+    );
+    assert!(
+        ids.contains(&f.zhang_c),
+        "a reverted merge must not keep swallowing that entity"
+    );
+    assert_eq!(total, 4, "node total uses the same basis as the canvas");
     assert_eq!(
         facts_of(&pool, f.kb, f.zhang_a, None).await?,
         sorted(vec![f.fact_a, f.fact_b])
@@ -230,7 +236,10 @@ async fn a_merged_entity_comes_back_before_the_merge() -> anyhow::Result<()> {
     // 3. Mid-May: C's merge was **in effect** at the time (it was undone in June). The undo has already moved the rows back to C,
     //    so this cell can only be read from the entity_merges array
     let (ids, total) = nodes(Some("2026-05-15T00:00:00Z")).await?;
-    assert!(!ids.contains(&f.zhang_c), "五月中 C 正并在 A 里");
+    assert!(
+        !ids.contains(&f.zhang_c),
+        "mid-May C is being merged into A"
+    );
     assert!(!ids.contains(&f.zhang_b));
     assert_eq!(total, 3);
     assert_eq!(
@@ -241,7 +250,7 @@ async fn a_merged_entity_comes_back_before_the_merge() -> anyhow::Result<()> {
 
     // 4. January: the entities have not been created yet, the graph is empty, rather than degenerating into the present
     let (ids, total) = nodes(Some("2026-01-01T00:00:00Z")).await?;
-    assert!(ids.is_empty(), "一月这些实体还不存在");
+    assert!(ids.is_empty(), "these entities do not exist yet in January");
     assert_eq!(total, 0);
 
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
@@ -252,6 +261,6 @@ async fn a_merged_entity_comes_back_before_the_merge() -> anyhow::Result<()> {
         .bind(f.org)
         .execute(&pool)
         .await?;
-    assert_eq!(gone.rows_affected(), 1, "一次性 org 没删掉");
+    assert_eq!(gone.rows_affected(), 1, "one-off org was not deleted");
     Ok(())
 }

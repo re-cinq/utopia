@@ -443,7 +443,12 @@ pub(super) async fn install_packs(
     for (pack, bytes) in &packs {
         crate::owl_import::apply(state, kb_id, actor, via_token, pack.filename, bytes)
             .await
-            .map_err(|e| AppError::Other(anyhow::anyhow!("装本体包 {} 失败：{e}", pack.id)))?;
+            .map_err(|e| {
+                AppError::Other(anyhow::anyhow!(
+                    "failed to install ontology package {}: {e}",
+                    pack.id
+                ))
+            })?;
     }
     // Second pass: cross-pack domain / range. Packs are installed one at a time, so an earlier pack cannot see classes from later ones:
     // W3C Org's headOf needs FOAF's Agent (#222). With only one pack installed there is no "other pack"
@@ -453,9 +458,12 @@ pub(super) async fn install_packs(
                 crate::owl_import::relink_domains_ranges(state, kb_id, pack.filename, bytes)
                     .await
                     .map_err(|e| {
-                        AppError::Other(anyhow::anyhow!("补本体包 {} 的签名失败：{e}", pack.id))
+                        AppError::Other(anyhow::anyhow!(
+                            "failed to add signature for ontology package {}: {e}",
+                            pack.id
+                        ))
                     })?;
-            tracing::debug!(%kb_id, pack = pack.id, domains = d, ranges = r, "跨包签名补链");
+            tracing::debug!(%kb_id, pack = pack.id, domains = d, ranges = r, "backfilling cross-package signature chain");
         }
     }
     Ok(())

@@ -253,7 +253,7 @@ pub async fn sync_schema(
             // log, while Invalid is not logged, so one line is logged here by hand
             match e.downcast_ref::<SchemaUnreadable>() {
                 Some(unreadable) => {
-                    tracing::warn!(%kb_id, %ds_id, error = %unreadable, "数据源结构读取失败");
+                    tracing::warn!(%kb_id, %ds_id, error = %unreadable, "failed to read data source schema");
                     Err(AppError::invalid_detail(
                         "schema_sync_failed",
                         "The data source's schema could not be read",

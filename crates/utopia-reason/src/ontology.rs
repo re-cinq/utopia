@@ -416,9 +416,21 @@ mod tests {
         // 1 → 2 → 3 → 1
         let ring = [(c(1), c(2)), (c(2), c(3)), (c(3), c(1))];
         let d = check_ontology(&none, &ring, &[]);
-        assert_eq!(kinds(&d), vec![Defect::SubclassCycle], "三个类绕成一圈");
-        assert_eq!(d.len(), 1, "同一个环只报一次，不是每个类各报一次");
-        assert_eq!(d[0].path.len(), 3, "路径要带上环上全部三个类");
+        assert_eq!(
+            kinds(&d),
+            vec![Defect::SubclassCycle],
+            "three classes form a loop"
+        );
+        assert_eq!(
+            d.len(),
+            1,
+            "the same cycle is reported only once, not once per class"
+        );
+        assert_eq!(
+            d[0].path.len(),
+            3,
+            "the path must include all three classes on the cycle"
+        );
     }
 
     #[test]
@@ -438,7 +450,11 @@ mod tests {
         let d = check_ontology(&none, &parents, &dis);
         assert_eq!(kinds(&d), vec![Defect::DisjointWithAncestor]);
         assert_eq!(d[0].subject, c(1));
-        assert_eq!(d[0].other, Some(c(3)), "指出跟哪个祖先互斥——人要去改那一条");
+        assert_eq!(
+            d[0].other,
+            Some(c(3)),
+            "says which ancestor it is disjoint with, so the person knows which one to change"
+        );
     }
 
     #[test]
@@ -449,7 +465,11 @@ mod tests {
         let dis = [(c(2), c(3)), (c(3), c(2))];
         let d = check_ontology(&none, &parents, &dis);
         assert_eq!(kinds(&d), vec![Defect::InheritsDisjoint]);
-        assert_eq!(d.len(), 1, "展开成两行的 disjoint 不该报两遍");
+        assert_eq!(
+            d.len(),
+            1,
+            "a disjoint expanded into two rows should not be reported twice"
+        );
         assert_eq!(d[0].subject, c(1));
     }
 
@@ -572,10 +592,14 @@ mod inverse_and_sub_property_tests {
         let one = d
             .iter()
             .find(|x| x.kind == Defect::InverseNotMutual)
-            .expect("该报 InverseNotMutual");
+            .expect("should report InverseNotMutual");
         assert_eq!(one.subject, c(1));
         assert_eq!(one.other, Some(c(2)));
-        assert_eq!(one.path, vec![c(1), c(2), c(3)], "路径要说清指到哪去了");
+        assert_eq!(
+            one.path,
+            vec![c(1), c(2), c(3)],
+            "the path must say where it points"
+        );
     }
 
     /// subPropertyOf cycle.
@@ -591,7 +615,11 @@ mod inverse_and_sub_property_tests {
             .iter()
             .filter(|x| x.kind == Defect::SubPropertyCycle)
             .collect();
-        assert_eq!(ring.len(), 1, "**整条环只报一次**，不是每个成员报一遍");
+        assert_eq!(
+            ring.len(),
+            1,
+            "**the whole cycle is reported only once**, not once per member"
+        );
         assert_eq!(ring[0].path.len(), 3);
     }
 

@@ -60,7 +60,9 @@ pub fn chunk_text(text: &str) -> Vec<ChunkPiece> {
 
 fn bpe() -> &'static CoreBPE {
     static BPE: OnceLock<CoreBPE> = OnceLock::new();
-    BPE.get_or_init(|| tiktoken_rs::cl100k_base().expect("cl100k 的排名表随 crate 内嵌"))
+    BPE.get_or_init(|| {
+        tiktoken_rs::cl100k_base().expect("the cl100k rank table is embedded in the crate")
+    })
 }
 
 fn tokens(s: &str) -> usize {
@@ -344,7 +346,7 @@ impl<'a> Packer<'a> {
         let n = candidate.len() - (self.pending.len() + 1);
         let mut rest = candidate.split_off(n);
         self.body = candidate;
-        let piece = rest.pop().expect("刚放进去的那一项");
+        let piece = rest.pop().expect("the item just pushed");
         if !self.body.is_empty() {
             self.flush();
             return self.place(piece);
@@ -460,7 +462,7 @@ impl<'a> Packer<'a> {
         // a chunk made of the explanatory sentence, the header and one row that is still over budget is emitted anyway: there is no better way to cut it
         let mut rows = rows.into_iter().peekable();
         while rows.peek().is_some() {
-            let mut taken: Vec<Range<usize>> = vec![rows.next().expect("peek 过")];
+            let mut taken: Vec<Range<usize>> = vec![rows.next().expect("already peeked")];
             while let Some(next) = rows.peek() {
                 let mut trial = taken.clone();
                 trial.push(next.clone());
@@ -473,7 +475,7 @@ impl<'a> Packer<'a> {
                 let mut body = headings;
                 body.push(piece);
                 if self.fits(&self.prefix_now(), &body) {
-                    taken.push(rows.next().expect("peek 过"));
+                    taken.push(rows.next().expect("already peeked"));
                 } else {
                     break;
                 }
@@ -716,7 +718,7 @@ The tenant pays rent monthly.
         let with_table = pieces
             .iter()
             .find(|p| p.text.contains("| Nominee |"))
-            .expect("有表的那块");
+            .expect("the chunk with the table");
         assert!(with_table
             .text
             .contains("The results of the voting were as follows:"));
@@ -817,7 +819,7 @@ The tenant pays rent monthly.
         let i = pieces
             .iter()
             .position(|p| p.text.contains("One sentence"))
-            .expect("长段落切出的第一块");
+            .expect("the first chunk split from a long paragraph");
         let source = |p: &ChunkPiece| &text[p.char_start as usize..p.char_end as usize];
         assert_eq!(
             pieces[i].text,
@@ -840,7 +842,10 @@ The tenant pays rent monthly.
             assert_eq!(p.seq as usize, i);
             assert!(!p.text.trim().is_empty());
         }
-        assert!(!pieces[0].text.contains("* * *"), "水平线不进块");
+        assert!(
+            !pieces[0].text.contains("* * *"),
+            "horizontal rule does not go into a chunk"
+        );
     }
 
     /// The page number "4" at the end of a press release: it does not form a chunk alone; it joins the previous chunk even if that chunk is already full.
@@ -877,7 +882,7 @@ The tenant pays rent monthly.
         let table = pieces
             .iter()
             .find(|p| p.text.contains("| Number of shares For |"))
-            .expect("有表的那块");
+            .expect("the chunk with the table");
         assert!(
             table
                 .text
@@ -911,7 +916,11 @@ The tenant pays rent monthly.
             .iter()
             .filter(|p| p.text.contains("| --- |"))
             .collect();
-        assert!(with_table.len() >= 2, "表该被切成几块: {}", pieces.len());
+        assert!(
+            with_table.len() >= 2,
+            "table should be split into several chunks: {}",
+            pieces.len()
+        );
         for p in &with_table {
             assert!(
                 p.text.contains("NVIDIA CORPORATION"),
@@ -947,7 +956,11 @@ The tenant pays rent monthly.
             .collect();
         let text = format!("{lead}\n\n| 项目 | 本期 |\n| --- | --- |\n{rows}");
         let pieces = chunk_with_budget(&text, BUDGET_TOKENS);
-        assert!(pieces.len() >= 2, "表该被切成几块: {}", pieces.len());
+        assert!(
+            pieces.len() >= 2,
+            "table should be split into at least 2 chunks: {}",
+            pieces.len()
+        );
         for (i, p) in pieces.iter().enumerate() {
             assert!(
                 p.text.starts_with(&format!("{lead}\n\n| 项目 | 本期 |")),
@@ -986,7 +999,7 @@ The tenant pays rent monthly.
         let huang = pieces
             .iter()
             .find(|p| p.text.contains("Jen-Hsun Huang"))
-            .expect("黄仁勋那块");
+            .expect("the Huang Renxun chunk");
         assert!(
             huang.text.contains("director nominees"),
             "续块丢了说明句:\n{}",

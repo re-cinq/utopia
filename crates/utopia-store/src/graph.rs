@@ -2168,7 +2168,7 @@ pub async fn reject_fact(pool: &PgPool, kb_id: Uuid, fact_id: Uuid) -> AppResult
         return Err(AppError::NotFound);
     }
     if let Err(e) = queue_typed_recompute(pool, kb_id, fact_id).await {
-        tracing::warn!(%kb_id, %fact_id, error = %e, "否决后的类型化重算没能入队");
+        tracing::warn!(%kb_id, %fact_id, error = %e, "the typed recompute after the veto could not be enqueued");
     }
     Ok(())
 }
@@ -2718,7 +2718,7 @@ mod temporal_shape_tests {
             (unknown.from, unknown.to, unknown.to_precision),
             (None, None, None)
         );
-        assert!(!unknown.has_ended(), "一刻没有「结束」可言");
+        assert!(!unknown.has_ended(), "a moment has no end");
     }
 
     /// Eternal: dates are stripped; state as-is

@@ -54,7 +54,7 @@ impl QueryEngine for PostgresEngine {
         let keys = match keys(&pool).await {
             Ok(k) => k,
             Err(e) => {
-                tracing::warn!(error = %e, "读不出主键/外键，schema 不带键标记");
+                tracing::warn!(error = %e, "could not read primary/foreign keys, schema has no key markers");
                 Keys::default()
             }
         };
@@ -266,7 +266,10 @@ mod tests {
         assert!(!note.is_primary_key && note.references_table.is_none());
         for c in ["order_id", "ordinal"] {
             let member = col(&cols, &a, "line", c);
-            assert!(!member.is_primary_key, "组合主键的成员 line.{c} 不标");
+            assert!(
+                !member.is_primary_key,
+                "composite primary key member line.{c} is not marked"
+            );
             let fk_member = col(&cols, &a, "line_note", c);
             assert!(
                 fk_member.references_table.is_none(),
@@ -297,9 +300,17 @@ mod tests {
         let target = |s: &str, t: &str, c: &str| col(&cols, s, t, c).references_table.clone();
         let p1 = format!("{a}.p1");
         let p2 = format!("{a}.p2");
-        assert_eq!(target(&a, "p1", "parent"), Some(p1.clone()), "自引用");
+        assert_eq!(
+            target(&a, "p1", "parent"),
+            Some(p1.clone()),
+            "self-reference"
+        );
         assert_eq!(target(&a, "c1", "x"), Some(p1.clone()));
-        assert_eq!(target(&a, "c2", "y"), Some(p2.clone()), "同名约束不串表");
+        assert_eq!(
+            target(&a, "c2", "y"),
+            Some(p2.clone()),
+            "constraints with the same name do not leak across tables"
+        );
         assert_eq!(target(&a, "c3", "z"), Some(p1.clone()));
         assert_eq!(
             target(&b, "orders", "item_id"),

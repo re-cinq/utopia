@@ -67,7 +67,10 @@ async fn a_document_still_extracting_is_not_counted_as_done() -> anyhow::Result<
         // The four ingested documents are all ready — the scope of the re-extraction is unchanged
         assert_eq!(page.ready, 4);
         assert_eq!(page.done, 1);
-        assert_eq!(page.extracting, 2, "queued 与 extracting 都算在抽");
+        assert_eq!(
+            page.extracting, 2,
+            "queued and extracting both count as extracting"
+        );
         assert_eq!(page.failed, 1);
         // So the progress bar is done / (done + extracting) = 1 / 3. The old form, ready / (ready + extracting),
         // would be 4 / 6: the two not yet extracted and the one that failed extraction all counted as complete

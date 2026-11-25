@@ -288,7 +288,7 @@ async fn an_unknown_bound_reaches_as_far_as_the_evidence() -> anyhow::Result<()>
             Some(t("2025-10-15T00:00:00Z")),
             "结束端读到文档日期"
         );
-        assert_eq!(by_id(a).holds_to, None, "仍在继续的还是开放的");
+        assert_eq!(by_id(a).holds_to, None, "ongoing ones are still open");
         assert_eq!(by_id(c).holds_from, Some(t("2025-10-15T00:00:00Z")));
         assert_eq!(
             by_id(c).holds_to,
@@ -358,7 +358,7 @@ async fn the_anchor_moves_earlier_and_is_inherited() -> anyhow::Result<()> {
             Validity::default().attested(Some(t("2023-12-01T00:00:00Z"))),
         )
         .await?;
-        assert_eq!(again, b, "同一断言复用同一行");
+        assert_eq!(again, b, "the same assertion reuses the same row");
         assert!(!created);
         assert_eq!(attested_at(&pool, b).await?, t("2023-12-01T00:00:00Z"));
         assert!(edges_at(&pool, &f, Some("2023-12-01T00:00:00Z"))
@@ -396,7 +396,7 @@ async fn the_anchor_moves_earlier_and_is_inherited() -> anyhow::Result<()> {
             },
         )
         .await?
-        .expect("改得动");
+        .expect("can still be corrected");
         assert_eq!(
             attested_at(&pool, corrected).await?,
             t("2023-12-01T00:00:00Z")
@@ -464,7 +464,7 @@ async fn an_ending_without_a_date_closes_the_dated_row_it_ends() -> anyhow::Resu
                 .attested(Some(t("2025-10-15T00:00:00Z"))),
         )
         .await?;
-        assert!(created, "关上是一条修正行，不是并进去");
+        assert!(created, "closing is a correction row, not a merge");
         assert_ne!(closed, open);
 
         // The old row is voided and the correction row chains on: start from the original text, end empty, precision unknown, anchored to the document that says it ended
@@ -473,7 +473,7 @@ async fn an_ending_without_a_date_closes_the_dated_row_it_ends() -> anyhow::Resu
                 .bind(open)
                 .fetch_one(&pool)
                 .await?;
-        assert!(invalidated.is_some(), "旧行作废，不删");
+        assert!(invalidated.is_some(), "the old row is voided, not deleted");
         assert!(supersedes.is_none());
         let row: ClosedRow = sqlx::query_as(
             "SELECT valid_from, valid_to, valid_to_precision, supersedes, attested_to
@@ -482,10 +482,14 @@ async fn an_ending_without_a_date_closes_the_dated_row_it_ends() -> anyhow::Resu
         .bind(closed)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(row.0, Some(t("2023-06-01T00:00:00Z")), "起点照旧");
+        assert_eq!(
+            row.0,
+            Some(t("2023-06-01T00:00:00Z")),
+            "start point unchanged"
+        );
         assert_eq!(row.1, None);
         assert_eq!(row.2.as_deref(), Some("unknown"));
-        assert_eq!(row.3, Some(open), "supersedes 链上");
+        assert_eq!(row.3, Some(open), "on the supersedes chain");
         assert_eq!(
             row.4,
             t("2025-10-15T00:00:00Z"),
@@ -507,7 +511,10 @@ async fn an_ending_without_a_date_closes_the_dated_row_it_ends() -> anyhow::Resu
             None,
         )
         .await?;
-        assert!(panel.is_empty(), "面板在 2026 年也不再列它：{panel:?}");
+        assert!(
+            panel.is_empty(),
+            "the panel no longer lists it in 2026 either: {panel:?}"
+        );
 
         // The same assertion says "ended" again: an already-closed row is not closed again, and no new one is created
         let (again, created) = fact(
@@ -521,7 +528,10 @@ async fn an_ending_without_a_date_closes_the_dated_row_it_ends() -> anyhow::Resu
                 .attested(Some(t("2025-12-01T00:00:00Z"))),
         )
         .await?;
-        assert!(!created, "没有开放行可关，也不是新信息");
+        assert!(
+            !created,
+            "there is no open row to close, and it is not new information"
+        );
         assert_eq!(again, closed);
         Ok::<_, anyhow::Error>(())
     }
@@ -640,17 +650,17 @@ async fn a_derivation_reads_no_further_than_its_premises() -> anyhow::Result<()>
         };
 
         // a ⊂ c: the start is the b ⊂ c evidence date (an anchor), no precision; the end is open
-        let ac = derived(a, c).await?.expect("a ⊂ c 推得出");
+        let ac = derived(a, c).await?.expect("a ⊂ c follows");
         assert_eq!(
             ac.0,
             Some(t("2024-02-20T00:00:00Z")),
             "从没起点那一环的证据起算"
         );
-        assert_eq!(ac.1, None, "来自锚点的一端没有精度");
+        assert_eq!(ac.1, None, "the end that comes from the anchor has no precision");
         assert_eq!(ac.2, None);
 
         // a ⊂ d: the start as above; the end is the c ⊂ d anchor (the document that says it ended), also no precision
-        let ad = derived(a, d).await?.expect("a ⊂ d 推得出");
+        let ad = derived(a, d).await?.expect("a ⊂ d follows");
         assert_eq!(ad.0, Some(t("2024-02-20T00:00:00Z")));
         assert_eq!(ad.1, None);
         assert_eq!(
@@ -658,10 +668,10 @@ async fn a_derivation_reads_no_further_than_its_premises() -> anyhow::Result<()>
             Some(t("2025-10-15T00:00:00Z")),
             "到结束的那份文档为止"
         );
-        assert_eq!(ad.3, None, "'unknown' 不是粒度，锚点顶上来的一端没有精度");
+        assert_eq!(ad.3, None, "'unknown' is not a granularity, and the end pulled up from the anchor has no precision");
 
         // b ⊂ d: the start is b ⊂ c's anchor, the end is c ⊂ d's anchor: both ends lack precision
-        let bd = derived(b, d).await?.expect("b ⊂ d 推得出");
+        let bd = derived(b, d).await?.expect("b ⊂ d follows");
         assert_eq!(
             (bd.0, bd.2),
             (
@@ -748,7 +758,10 @@ async fn a_bare_row_closes_with_an_anchor_at_each_end() -> anyhow::Result<()> {
                 .attested(Some(t("2025-10-15T00:00:00Z"))),
         )
         .await?;
-        assert!(created, "关上是一条修正行，不再是并进去");
+        assert!(
+            created,
+            "closing is now a correction row, no longer a merge"
+        );
         assert_ne!(closed, bare);
 
         let (from, to_prec, attested_from, attested_to): BareClosedRow = sqlx::query_as(
@@ -758,7 +771,7 @@ async fn a_bare_row_closes_with_an_anchor_at_each_end() -> anyhow::Result<()> {
         .bind(closed)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(from, None, "起点原文没给，仍然没给");
+        assert_eq!(from, None, "the source gives no start, and still none");
         assert_eq!(to_prec.as_deref(), Some("unknown"));
         assert_eq!(
             attested_from,

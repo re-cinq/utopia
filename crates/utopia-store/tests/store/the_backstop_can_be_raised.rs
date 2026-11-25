@@ -39,9 +39,11 @@ async fn every_value_rust_accepts_the_database_accepts_too(pool: &PgPool) -> any
         for v in [1_i32, 33, 64, 255, 256] {
             utopia_store::access::set_worker_concurrency(pool, v)
                 .await
-                .map_err(|e| anyhow::anyhow!("Rust 放行了 {v}，数据库却拒绝：{e}"))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("Rust let {v} through, but the database rejected it: {e}")
+                })?;
             let got = utopia_store::access::worker_concurrency(pool).await?;
-            assert_eq!(got, v, "写进去 {v} 读回来却是 {got}");
+            assert_eq!(got, v, "wrote {v} but read back {got}");
         }
 
         // The reverse: what Rust rejects must not be silently stored
@@ -78,7 +80,7 @@ async fn the_two_defaults_say_the_same_number(pool: &PgPool) -> anyhow::Result<(
         .as_deref()
         .and_then(|s| s.split("::").next())
         .and_then(|s| s.trim().parse().ok())
-        .ok_or_else(|| anyhow::anyhow!("读不出列缺省：{column_default:?}"))?;
+        .ok_or_else(|| anyhow::anyhow!("could not read the column default: {column_default:?}"))?;
 
     // Rust's fallback: hide the row and ask again
     let mut tx = pool.begin().await?;
@@ -89,7 +91,10 @@ async fn the_two_defaults_say_the_same_number(pool: &PgPool) -> anyhow::Result<(
         sqlx::query_as("SELECT worker_concurrency FROM deployment_settings LIMIT 1")
             .fetch_optional(&mut *tx)
             .await?;
-    assert!(fallback.is_none(), "行没删掉，下面这句就白测了");
+    assert!(
+        fallback.is_none(),
+        "the row was not deleted, so the assertion below tests nothing"
+    );
     tx.rollback().await?; // **Always roll back**: deployment_settings is a singleton, and deleting it leaves the service with no settings
 
     // The number in access.rs's unwrap_or

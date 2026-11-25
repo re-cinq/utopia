@@ -533,14 +533,14 @@ mod tests {
         let items = f.items();
         let raw = r#"{ "12": ["organization"], "13": [null], "14": [] }"#;
         let (choices, malformed) = parse_kind_word_response(raw, &items).unwrap();
-        assert_eq!(malformed, 1, "空数组不是一个答案");
+        assert_eq!(malformed, 1, "an empty array is not an answer");
         assert_eq!(
             choices,
             vec![choice(12, Some("organization")), choice(13, None)]
         );
         let raw = r#"{"b": [[12, ["organization", "person"]]]}"#;
         let (choices, malformed) = parse_kind_word_response(raw, &items).unwrap();
-        assert_eq!(malformed, 1, "两个键不是一个答案");
+        assert_eq!(malformed, 1, "two keys is not an answer");
         assert!(choices.is_empty());
         // The value repeats the id before the key: `{"0": [0, "organization"]}`
         let raw = r#"{"12": [12, "organization"], "13": [13, null]}"#;

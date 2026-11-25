@@ -318,7 +318,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         .bind(premise_derived)
         .execute(&pool)
         .await;
-        assert!(err.is_err(), "derivation premise: {what} 必须被拒");
+        assert!(err.is_err(), "derivation premise: {what} must be rejected");
     }
 
     // — Attributes on edges: a type from another KB is silently skipped by the vocabulary, and an entity from another KB would be minted with this KB's IRI
@@ -330,7 +330,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.rel_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "qualifier.type→foreign 必须被拒");
+    assert!(err.is_err(), "qualifier.type→foreign must be rejected");
     let err = sqlx::query(
         "INSERT INTO fact_qualifiers (fact_id, qualifier_type_id, entity_id)
          VALUES ($1, $2, $3)",
@@ -340,7 +340,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.ent_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "qualifier.entity→foreign 必须被拒");
+    assert!(err.is_err(), "qualifier.entity→foreign must be rejected");
 
     // — The five reference columns of the fact ontology (from_statement_id is a self-reference within the same table: the immediate end is
     //    on a BEFORE trigger, and is rejected on the spot once the target is already present)
@@ -364,7 +364,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         .bind(foreign_id)
         .execute(&pool)
         .await;
-        assert!(err.is_err(), "{what}→foreign 必须被拒");
+        assert!(err.is_err(), "{what}→foreign must be rejected");
     }
 
     // — Statement sources (typed_fact_sources, 0068): the row has no kb column of its own, so ownership is judged by the KB of its
@@ -374,7 +374,10 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         .bind(f.fact_b)
         .execute(&pool)
         .await;
-    assert!(err.is_err(), "factsource.statement→foreign 必须被拒");
+    assert!(
+        err.is_err(),
+        "factsource.statement→foreign must be rejected"
+    );
 
     // — Attributes of open statements (statement_qualifiers, 0061): the row has no kb column, so ownership is judged by the KB
     //    of its fact; an entity value from another KB would be minted with this KB's IRI
@@ -387,7 +390,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.chunk_a)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "squalifier.entity→foreign 必须被拒");
+    assert!(err.is_err(), "squalifier.entity→foreign must be rejected");
     // A role word recorded on a chunk in another KB (0070 decision 1)
     let err = sqlx::query(
         "INSERT INTO statement_qualifiers (fact_id, role, value, chunk_id)
@@ -397,7 +400,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.chunk_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "squalifier.chunk→foreign 必须被拒");
+    assert!(err.is_err(), "squalifier.chunk→foreign must be rejected");
 
     // — Time mentions (0061/0064): the mention's own kb must be in the same KB as the fact and chunk it refers to
     let err = sqlx::query(
@@ -410,7 +413,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.chunk_a)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "timemention.fact→foreign 必须被拒");
+    assert!(err.is_err(), "timemention.fact→foreign must be rejected");
     let err = sqlx::query(
         "INSERT INTO time_mentions (id, kb_id, fact_id, chunk_id, text, char_start)
          VALUES ($1, $2, $3, $4, '去年', 0)",
@@ -421,7 +424,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.chunk_b) // chunk in another KB
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "timemention.chunk→foreign 必须被拒");
+    assert!(err.is_err(), "timemention.chunk→foreign must be rejected");
 
     // — Type and phrase bindings (0065/0066): the bound class or attribute follows the bound row's own KB
     let err = sqlx::query(
@@ -433,7 +436,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.cls_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "binding.type→foreign 必须被拒");
+    assert!(err.is_err(), "binding.type→foreign must be rejected");
     let err = sqlx::query(
         "INSERT INTO phrase_bindings (id, kb_id, phrase, subject_type_id, status)
          VALUES ($1, $2, 'runs', $3, 'none')",
@@ -443,7 +446,10 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.cls_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "pbinding.subject_type→foreign 必须被拒");
+    assert!(
+        err.is_err(),
+        "pbinding.subject_type→foreign must be rejected"
+    );
     let err = sqlx::query(
         "INSERT INTO phrase_bindings (id, kb_id, phrase, relation_type_id,
                                      direction, status)
@@ -454,7 +460,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.rel_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "pbinding.relation→foreign 必须被拒");
+    assert!(err.is_err(), "pbinding.relation→foreign must be rejected");
 
     // — The five reference columns of the derived fact ontology
     for (col, foreign_id, what) in [
@@ -499,7 +505,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
             .execute(&pool)
             .await
         };
-        assert!(err.is_err(), "{what}→foreign 必须被拒");
+        assert!(err.is_err(), "{what}→foreign must be rejected");
     }
 
     // — The entity's class, class hierarchy, disjointness, and domain/range
@@ -511,14 +517,14 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.cls_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "entity.type→foreign 必须被拒");
+    assert!(err.is_err(), "entity.type→foreign must be rejected");
 
     let err = sqlx::query("INSERT INTO entity_type_parents (child_id, parent_id) VALUES ($1, $2)")
         .bind(f.cls_a)
         .bind(f.cls_b)
         .execute(&pool)
         .await;
-    assert!(err.is_err(), "class.parent→foreign 必须被拒");
+    assert!(err.is_err(), "class.parent→foreign must be rejected");
 
     let err =
         sqlx::query("INSERT INTO entity_type_disjoint (kb_id, a_id, b_id) VALUES ($1, $2, $3)")
@@ -527,7 +533,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
             .bind(f.cls_b)
             .execute(&pool)
             .await;
-    assert!(err.is_err(), "class.disjoint→foreign 必须被拒");
+    assert!(err.is_err(), "class.disjoint→foreign must be rejected");
 
     for (table, what) in [
         ("relation_type_domains", "relation.domain"),
@@ -540,7 +546,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         .bind(f.cls_b)
         .execute(&pool)
         .await;
-        assert!(err.is_err(), "{what}→foreign 必须被拒");
+        assert!(err.is_err(), "{what}→foreign must be rejected");
     }
 
     // — Self-reference of relations within the same table, and the declaration of edge attributes: owl:inverseOf /
@@ -553,7 +559,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.rel_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "relation.inverse→foreign 必须被拒");
+    assert!(err.is_err(), "relation.inverse→foreign must be rejected");
     let err = sqlx::query(
         "INSERT INTO relation_types (id, kb_id, key, label, sub_property_of) VALUES ($1, $2, 'sub', 'sub', $3)",
     )
@@ -562,7 +568,10 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.rel_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "relation.sub_property→foreign 必须被拒");
+    assert!(
+        err.is_err(),
+        "relation.sub_property→foreign must be rejected"
+    );
     let err = sqlx::query(
         "INSERT INTO relation_type_qualifiers (relation_type_id, qualifier_type_id) VALUES ($1, $2)",
     )
@@ -570,7 +579,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.rel_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "relation.qualifier→foreign 必须被拒");
+    assert!(err.is_err(), "relation.qualifier→foreign must be rejected");
 
     // — Rule ontology: which predicate an axiom is written on, and which class a business rule looks at to reach which conclusion,
     //    all appear in the export now — their references must not cross KBs either
@@ -582,7 +591,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.rel_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "rule.predicate→foreign 必须被拒");
+    assert!(err.is_err(), "rule.predicate→foreign must be rejected");
     // Each conclusion shape's own required columns (the CHECK pins the column groups of typing / attribute / computed),
     // one legal shape per reference column
     let err = sqlx::query(
@@ -596,7 +605,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.rel_a)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "arule.subject_type→foreign 必须被拒");
+    assert!(err.is_err(), "arule.subject_type→foreign must be rejected");
     let err = sqlx::query(
         "INSERT INTO attribute_rules (id, kb_id, name, subject_type_id, conclusion,
                                       conclude_type_id)
@@ -608,7 +617,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.cls_b) // conclude_type in another KB
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "arule.conclude_type→foreign 必须被拒");
+    assert!(err.is_err(), "arule.conclude_type→foreign must be rejected");
     let err = sqlx::query(
         "INSERT INTO attribute_rules (id, kb_id, name, subject_type_id, conclusion,
                                       conclude_predicate_id, conclude_value)
@@ -620,7 +629,10 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.rel_b) // conclude_predicate in another KB
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "arule.conclude_predicate→foreign 必须被拒");
+    assert!(
+        err.is_err(),
+        "arule.conclude_predicate→foreign must be rejected"
+    );
 
     // — #901: tables added after 0070 also fall under the same invariant —
     // The three reference columns of the entailment rule ontology (composite foreign keys)
@@ -639,7 +651,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         .bind(foreign_id)
         .execute(&pool)
         .await;
-        assert!(err.is_err(), "{what}→foreign 必须被拒");
+        assert!(err.is_err(), "{what}→foreign must be rejected");
     }
     let err = sqlx::query(
         "INSERT INTO implication_rules (id, kb_id, trigger, phrase,
@@ -651,7 +663,10 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.rel_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "irule.conclude_property→foreign 必须被拒");
+    assert!(
+        err.is_err(),
+        "irule.conclude_property→foreign must be rejected"
+    );
 
     // The entity answered by the reading cache (composite foreign key); the UPDATE path is blocked likewise
     let err = sqlx::query(
@@ -662,14 +677,17 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.ent_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "reading.entity→foreign 必须被拒");
+    assert!(err.is_err(), "reading.entity→foreign must be rejected");
     let err =
         sqlx::query("UPDATE phrase_readings SET entity_id = $1 WHERE kb_id = $2 AND phrase = 'r'")
             .bind(f.ent_b)
             .bind(f.a)
             .execute(&pool)
             .await;
-    assert!(err.is_err(), "reading.entity 改成别库也必须被拒");
+    assert!(
+        err.is_err(),
+        "changing reading.entity to another KB must also be rejected"
+    );
 
     // Provenance of implied facts (owner-derived trigger): the rule, the triggering statement, and the triggering entity
     // are all judged by the KB of their owning fact; the CHECK requires exactly one of statement / entity to be non-empty
@@ -682,7 +700,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.fact_a)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "implied.rule→foreign 必须被拒");
+    assert!(err.is_err(), "implied.rule→foreign must be rejected");
     let err = sqlx::query(
         "INSERT INTO implied_fact_sources (fact_id, rule_id, statement_id)
          VALUES ($1, $2, $3)",
@@ -692,7 +710,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.fact_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "implied.statement→foreign 必须被拒");
+    assert!(err.is_err(), "implied.statement→foreign must be rejected");
     let err = sqlx::query(
         "INSERT INTO implied_fact_sources (fact_id, rule_id, entity_id)
          VALUES ($1, $2, $3)",
@@ -702,7 +720,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.ent_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "implied.entity→foreign 必须被拒");
+    assert!(err.is_err(), "implied.entity→foreign must be rejected");
     // UPDATE path: first land a legal row, then change its rule to one from another KB — UPDATE OF watches it
     sqlx::query(
         "INSERT INTO implied_fact_sources (fact_id, rule_id, entity_id)
@@ -718,7 +736,10 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         .bind(f.fact_b)
         .execute(&pool)
         .await;
-    assert!(err.is_err(), "implied.rule 改成别库也必须被拒");
+    assert!(
+        err.is_err(),
+        "changing implied.rule to another KB must also be rejected"
+    );
 
     // Errata ledger: the document watched by run and the six reference columns on action are all composite foreign keys
     let err = sqlx::query("INSERT INTO errata_runs (id, kb_id, document_id) VALUES ($1, $2, $3)")
@@ -727,7 +748,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         .bind(f.doc_b)
         .execute(&pool)
         .await;
-    assert!(err.is_err(), "erratarun.document→foreign 必须被拒");
+    assert!(err.is_err(), "erratarun.document→foreign must be rejected");
     for (col, foreign_id, what) in [
         ("fact_id", f.fact_b, "errata.fact"),
         ("statement_id", f.fact_b, "errata.statement"),
@@ -745,7 +766,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         .bind(foreign_id)
         .execute(&pool)
         .await;
-        assert!(err.is_err(), "{what}→foreign 必须被拒");
+        assert!(err.is_err(), "{what}→foreign must be rejected");
     }
     // The run and document columns are checked through the UPDATE path: moving an existing action onto a run or document
     // in another KB, the composite foreign key still rejects it on the spot
@@ -760,7 +781,10 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
         .bind(f.eact_a)
         .execute(&pool)
         .await;
-        assert!(err.is_err(), "{what} 改成别库也必须被拒");
+        assert!(
+            err.is_err(),
+            "changing {what} to another KB must also be rejected"
+        );
     }
 
     // Rule definition history and the derivations inferred from it (the #913 table is also in scope)
@@ -776,7 +800,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.arule_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "arversion.rule→foreign 必须被拒");
+    assert!(err.is_err(), "arversion.rule→foreign must be rejected");
     // A derivation's "inferred from which version of the definition" must not point at another KB (the identity key does not include the rule column,
     // so changing object_value to a different value avoids colliding with an already-landed derivation)
     let err = sqlx::query(
@@ -810,7 +834,10 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.rel_b)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "arule.join_predicate→foreign 必须被拒");
+    assert!(
+        err.is_err(),
+        "arule.join_predicate→foreign must be rejected"
+    );
     let err = sqlx::query(
         "INSERT INTO name_vectors (fact_id, kb_id, entity_id, embedding)
          VALUES ($1, $2, $3, '[0]'::vector)",
@@ -820,7 +847,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
     .bind(f.ent_a)
     .execute(&pool)
     .await;
-    assert!(err.is_err(), "namevector.fact→foreign 必须被拒");
+    assert!(err.is_err(), "namevector.fact→foreign must be rejected");
 
     // — KB transfer: moving an already-referenced row to another KB amounts to turning every row pointing at it into a bad row at once
     for (table, id, what) in [
@@ -844,7 +871,7 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
             .bind(f.b)
             .execute(&pool)
             .await;
-        assert!(err.is_err(), "{what} 过户必须被拒");
+        assert!(err.is_err(), "transferring {what} must be rejected");
     }
     // The reading cache's key is not an id — moving it between KBs by (kb_id, reading, phrase) is likewise not allowed
     let err =
@@ -853,7 +880,10 @@ async fn new_cross_kb_writes_are_rejected_on_every_exported_edge() -> anyhow::Re
             .bind(f.a)
             .execute(&pool)
             .await;
-    assert!(err.is_err(), "phrase_readings.kb_id 过户必须被拒");
+    assert!(
+        err.is_err(),
+        "transferring phrase_readings.kb_id must be rejected"
+    );
 
     // — Guard against false positives: legal writes within the same KB still go through as usual
     sqlx::query(
@@ -1445,7 +1475,7 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
 
     let err = utopia_store::export::provenance_integrity(&mut pool.begin().await?, f.a).await;
     let msg = format!("{err:?}");
-    assert!(err.is_err(), "库 A 的体检必须拒导");
+    assert!(err.is_err(), "KB A's health check must refuse export");
     // The health check covers all structural edges protected by 0070 / 0091 — every kind of bad row buried must be named,
     // and so must the edges the export has not yet serialised (rules, bindings, time mentions, conditions): if a protected
     // same-KB reference is broken on the ledger, this export cannot be trusted. 57 error labels correspond to 58 structural edges
@@ -1510,7 +1540,10 @@ async fn malformed_rows_fail_every_exported_edge_closed() -> anyhow::Result<()> 
         "namevector.fact",
         "namevector.entity",
     ] {
-        assert!(msg.contains(edge), "体检该报 {edge}: {msg}");
+        assert!(
+            msg.contains(edge),
+            "the health check should report {edge}: {msg}"
+        );
     }
 
     // Page-by-page validation: wherever the bad row falls, that page is rejected — no forged IRI may leak out
@@ -1576,7 +1609,7 @@ async fn retained_row_validation_survives_dangling_and_late_state() -> anyhow::R
 
     let err = utopia_store::export::facts_page(&mut pool.begin().await?, f.a, None).await;
     let msg = format!("{err:?}");
-    assert!(err.is_err(), "悬空 document 指针必须拒");
+    assert!(err.is_err(), "a dangling document pointer must be rejected");
     assert!(
         msg.contains("evidence.document"),
         "该报 evidence.document: {msg}"
@@ -1605,7 +1638,7 @@ async fn retained_row_validation_survives_dangling_and_late_state() -> anyhow::R
 
     let err = utopia_store::export::derived_page(&mut pool.begin().await?, f.a, None).await;
     let msg = format!("{err:?}");
-    assert!(err.is_err(), "悬空前提必须拒");
+    assert!(err.is_err(), "a dangling premise must be rejected");
     assert!(
         msg.contains("derivation.premise_fact"),
         "该报 derivation.premise_fact: {msg}"

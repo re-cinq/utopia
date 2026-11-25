@@ -813,7 +813,10 @@ mod tests {
             md.contains("| Total current assets | 197,412 | 125,605 |"),
             "合计行回到小节外: {md}"
         );
-        assert!(!md.contains("Current assets:"), "小节行自己不再出现: {md}");
+        assert!(
+            !md.contains("Current assets:"),
+            "section line should no longer appear by itself: {md}"
+        );
     }
 
     #[test]

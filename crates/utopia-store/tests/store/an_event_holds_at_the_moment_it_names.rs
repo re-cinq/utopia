@@ -252,7 +252,10 @@ async fn an_event_is_one_moment_and_holds_through_the_bucket_it_names() -> anyho
 
         // The interval read back follows the bucket: from that day, up to the next day
         let (_, all) = utopia_store::graph::entity_detail(&pool, f.kb, f.nova, None, None).await?;
-        let read = all.iter().find(|x| x.id == day).expect("在面板上");
+        let read = all
+            .iter()
+            .find(|x| x.id == day)
+            .expect("shown on the panel");
         assert_eq!(read.holds_from, Some(t("2024-03-15T00:00:00Z")));
         assert_eq!(read.holds_to, Some(t("2024-03-16T00:00:00Z")));
         assert_eq!(read.temporal.as_deref(), Some("event"));
@@ -371,7 +374,10 @@ async fn a_span_an_ending_or_an_unknown_end_given_to_an_event_collapses() -> any
                 .bind(unknown)
                 .fetch_one(&pool)
                 .await?;
-        assert_eq!(attested_to, None, "没有「结束」这回事，也就没有结束的锚点");
+        assert_eq!(
+            attested_to, None,
+            "there is no 'end', so there is no end anchor"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -497,8 +503,15 @@ async fn an_eternal_relation_drops_its_dates_and_holds_at_every_moment() -> anyh
             );
         }
         let (_, all) = utopia_store::graph::entity_detail(&pool, f.kb, f.paris, None, None).await?;
-        let read = all.iter().find(|x| x.id == cap).expect("在面板上");
-        assert_eq!((read.holds_from, read.holds_to), (None, None), "两端开放");
+        let read = all
+            .iter()
+            .find(|x| x.id == cap)
+            .expect("shown on the panel");
+        assert_eq!(
+            (read.holds_from, read.holds_to),
+            (None, None),
+            "both ends open"
+        );
 
         // Said again: merged into the same row
         let (again, created) = fact(
@@ -545,7 +558,7 @@ async fn a_row_written_before_the_rule_reads_as_its_start_bucket() -> anyhow::Re
         .await?;
         assert!(holds(&pool, &f, f.nova, legacy, "2024-03-15T12:00:00Z").await?);
         assert!(!holds(&pool, &f, f.nova, legacy, "2024-03-16T00:00:00Z").await?);
-        assert!(!holds(&pool, &f, f.nova, legacy, "2025-01-01T00:00:00Z").await?, "不再是开放的");
+        assert!(!holds(&pool, &f, f.nova, legacy, "2025-01-01T00:00:00Z").await?, "no longer open");
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -587,7 +600,7 @@ async fn a_person_correcting_an_event_leaves_it_one_moment() -> anyhow::Result<(
             },
         )
         .await?
-        .expect("改得动");
+        .expect("can still be corrected");
         assert_eq!(
             span(&pool, corrected).await?,
             (
@@ -673,7 +686,7 @@ async fn a_derivation_reads_an_event_as_its_bucket_and_an_eternal_as_open() -> a
         // The reverse merger: that month, both ends carry month precision
         let back = derived(f.orion, f.merged_with, f.nova)
             .await?
-            .expect("对称推得出");
+            .expect("follows by symmetry");
         assert_eq!(
             back,
             (
@@ -687,7 +700,7 @@ async fn a_derivation_reads_an_event_as_its_bucket_and_an_eternal_as_open() -> a
         // The reverse border: both ends open, the evidence date does not come in
         let back = derived(f.paris, f.borders, f.france)
             .await?
-            .expect("对称推得出");
+            .expect("follows by symmetry");
         assert_eq!(back, (None, None, None, None));
         // A merger at an unknown time: an empty interval, nothing inferred
         assert!(

@@ -100,11 +100,11 @@ async fn an_embedded_row_with_surrounding_whitespace_stays_embedded() -> anyhow:
             .iter()
             .find(|t| t.field == EmbedField::Label)
             .map(|t| t.text.clone());
-        assert_eq!(label.as_deref(), Some("Place"), "送去嵌的是去掉首尾空白的 label");
+        assert_eq!(label.as_deref(), Some("Place"), "the label sent for embedding is the one with leading and trailing whitespace trimmed");
 
         // Embedded, so not stale: before this fix, these three were handed back unchanged every round, and the backfill never caught up
         let again = ontology::types_needing_embedding(&pool, kb, "model-a", None).await?;
-        assert!(again.is_empty(), "嵌过的行又判成陈的：{again:?}");
+        assert!(again.is_empty(), "an already embedded row was judged stale again: {again:?}");
 
         // ---- Part 2: the description changed, so only that one is re-embedded
         sqlx::query("UPDATE relation_types SET description = 'Where something is.' WHERE id = $1")

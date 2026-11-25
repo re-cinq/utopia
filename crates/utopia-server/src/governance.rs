@@ -107,14 +107,14 @@ pub async fn govern(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
     }
     let settings = utopia_store::settings::get(&state.pool, kb.workspace_id).await?;
     let Some(client) = settings.as_ref().and_then(llm_util::chat_client) else {
-        tracing::info!(%kb_id, "治理：没有配聊天模型，队列原地等");
+        tracing::info!(%kb_id, "governance: no chat model configured, queue waits in place");
         return Ok(());
     };
     // One governance task at a time per library. One is queued after each document is extracted, and queue dedup only blocks pairs already queued, not ones being processed:
     // failing to get the lock means someone is already governing this library; it will drain the queue, and if backlog remains after that, it queues another. It cannot see pairs that arrive after it read the head of the queue,
     // so here it queues another one a minute later: at most one queued, and only one runs
     let Some(base_lock) = gov::try_lock_base(&state.pool, kb_id).await? else {
-        tracing::info!(%kb_id, "治理：这个库已有任务在跑，一分钟后再看一眼");
+        tracing::info!(%kb_id, "governance: a task is already running on this library, check again in one minute");
         utopia_store::jobs::enqueue_unless_queued_after(
             &state.pool,
             "govern",
@@ -136,7 +136,7 @@ pub async fn govern(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
     gov::release_locks(&state.pool, kb_id).await?;
     let outcome = rounds(&ctx).await;
     if let Err(e) = gov::release_locks(&state.pool, kb_id).await {
-        tracing::warn!(%kb_id, error = %e, "治理：放锁失败");
+        tracing::warn!(%kb_id, error = %e, "governance: failed to release lock");
     }
     base_lock.release().await;
     state.emit_review(kb_id);
@@ -172,7 +172,7 @@ async fn rounds(ctx: &Ctx<'_>) -> anyhow::Result<bool> {
     for _ in 0..MAX_ROUNDS {
         // The queue terminates automatically once switched off: check before each round
         if !utopia_store::kbs::get(pool, kb_id).await?.governance {
-            tracing::info!(%kb_id, "治理：开关已关，停在这里");
+            tracing::info!(%kb_id, "governance: switch is off, stopping here");
             return Ok(false);
         }
 
@@ -482,19 +482,19 @@ async fn second_look(
     let spent = match gov::loop_calls_today(&ctx.state.pool, kb_id).await {
         Ok(n) => n,
         Err(e) => {
-            tracing::warn!(%kb_id, error = %e, "治理：数循环预算失败");
+            tracing::warn!(%kb_id, error = %e, "governance: failed to count loop budget");
             return None;
         }
     };
     if spent >= LOOP_DAILY_CALLS {
-        tracing::info!(%kb_id, spent, "治理：今天的循环预算用完，判不定的只写建议");
+        tracing::info!(%kb_id, spent, "governance: today's loop budget is used up, undecided items get suggestions only");
         return None;
     }
     match investigate(ctx, item, pair, look).await {
         Ok(l) => Some(l),
         // A layer-two failure does not drag down layer one: the pair is written as a suggestion per layer one's view
         Err(e) => {
-            tracing::warn!(%kb_id, review = %item.id, error = %e, "治理：第二层没跑完");
+            tracing::warn!(%kb_id, review = %item.id, error = %e, "governance: second layer did not finish");
             None
         }
     }
@@ -919,7 +919,7 @@ pub async fn fuse(state: &AppState, kb_id: Uuid) {
     let reverts = match gov::reverts_since(pool, kb_id, since).await {
         Ok(n) => n,
         Err(e) => {
-            tracing::warn!(%kb_id, error = %e, "治理：数撤回失败");
+            tracing::warn!(%kb_id, error = %e, "governance: failed to count withdrawals");
             return;
         }
     };
@@ -930,11 +930,11 @@ pub async fn fuse(state: &AppState, kb_id: Uuid) {
         Ok(true) => {}
         Ok(false) => return,
         Err(e) => {
-            tracing::warn!(%kb_id, error = %e, "治理：关开关失败");
+            tracing::warn!(%kb_id, error = %e, "governance: failed to turn off switch");
             return;
         }
     }
-    tracing::warn!(%kb_id, reverts, "治理：保险丝跳了，开关已关");
+    tracing::warn!(%kb_id, reverts, "governance: circuit breaker tripped, switch turned off");
     if let Err(e) = alerts::raise(
         pool,
         alerts::NewAlert {
@@ -951,7 +951,7 @@ pub async fn fuse(state: &AppState, kb_id: Uuid) {
     )
     .await
     {
-        tracing::warn!(%kb_id, error = %e, "上报 governance.tripped 失败");
+        tracing::warn!(%kb_id, error = %e, "failed to report governance.tripped");
     }
     let _ = utopia_store::audit::record_opt(
         pool,
@@ -971,7 +971,9 @@ pub async fn after_revert(state: &AppState, kb_id: Uuid, merge_id: Uuid, user_id
     match gov::settle_by_merge(&state.pool, kb_id, merge_id, user_id).await {
         Ok(Some(_)) => fuse(state, kb_id).await,
         Ok(None) => {}
-        Err(e) => tracing::warn!(%kb_id, merge = %merge_id, error = %e, "治理：记撤回失败"),
+        Err(e) => {
+            tracing::warn!(%kb_id, merge = %merge_id, error = %e, "governance: failed to record withdrawal")
+        }
     }
 }
 
@@ -989,11 +991,11 @@ pub async fn after_human_decision(
     for &id in review_ids {
         if let Some(action) = action {
             if let Err(e) = gov::answer_open(&state.pool, kb_id, id, action, user_id).await {
-                tracing::warn!(%kb_id, review = %id, error = %e, "治理：建议回答失败");
+                tracing::warn!(%kb_id, review = %id, error = %e, "governance: failed to answer suggestion");
             }
         }
         if let Err(e) = gov::supersede_siblings(&state.pool, kb_id, id).await {
-            tracing::warn!(%kb_id, review = %id, error = %e, "治理：建议作废失败");
+            tracing::warn!(%kb_id, review = %id, error = %e, "governance: failed to void suggestion");
         }
     }
     match utopia_store::kbs::get(&state.pool, kb_id).await {
@@ -1005,7 +1007,7 @@ pub async fn after_human_decision(
             )
             .await
             {
-                tracing::warn!(%kb_id, error = %e, "治理任务入队失败");
+                tracing::warn!(%kb_id, error = %e, "failed to enqueue governance task");
             }
         }
         _ => {}

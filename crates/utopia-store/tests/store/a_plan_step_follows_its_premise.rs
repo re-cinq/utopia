@@ -351,7 +351,10 @@ async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Re
         let sb = conclusions(&pool, &f, f.b, rule_b).await?;
         assert_eq!((sa.len(), sb.len()), (1, 1));
         assert_eq!(sa[0].valid_from, Some(t(T1)));
-        assert_eq!(sa[0].valid_to, None, "前提还开着，结论也开着");
+        assert_eq!(
+            sa[0].valid_to, None,
+            "premise still open, conclusion also still open"
+        );
         // The premise can be located: the derivation points to that reading, proving it can be read out
         assert_eq!(premises(&pool, sa[0].id).await?, vec![a_desk]);
         assert_eq!(premises(&pool, sb[0].id).await?, vec![b_shelf]);
@@ -387,7 +390,10 @@ async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Re
         observe(&pool, &f, f.a, f.location, "shelf", T2).await?;
         let desk = live_rows(&pool, &f, f.a, f.location, "desk").await?;
         assert_eq!(desk.len(), 1);
-        assert_ne!(desk[0].id, a_desk, "关上的是改写出来的新行，旧行作废");
+        assert_ne!(
+            desk[0].id, a_desk,
+            "what gets closed is the new row produced by the rewrite, the old row is voided"
+        );
         assert_eq!(desk[0].valid_to, Some(t(T2)));
         let r = reasoning::materialize(&pool, f.kb).await?;
         assert_eq!((r.inserted, r.invalidated), (1, 1), "{r:?}");
@@ -449,7 +455,10 @@ async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Re
             .into_iter()
             .map(|r| r.id)
             .collect();
-        assert_eq!(a_rows_after_end, a_rows_before_end, "关 B 不碰 A 的结论");
+        assert_eq!(
+            a_rows_after_end, a_rows_before_end,
+            "closing B does not touch A's conclusion"
+        );
 
         // ---- Retraction: B's reading is judged a misreading. The whole conclusion is voided, with no replacement; the proof can still read what it relied on at the time
         let b_closed = live_rows(&pool, &f, f.b, f.location, "shelf").await?;
@@ -465,7 +474,10 @@ async fn a_step_leaves_with_its_premise_and_the_other_step_stays() -> anyhow::Re
             .expect("an invalidated conclusion keeps its proof");
         assert!(history.derived.invalidated_at.is_some());
         assert_eq!(history.steps[0].fact_id, b_closed[0].id);
-        assert!(history.steps[0].retracted, "撤掉的前提照样列出并打上标记");
+        assert!(
+            history.steps[0].retracted,
+            "retracted premises are still listed and marked"
+        );
         anyhow::Ok(())
     }
     .await;
@@ -673,7 +685,10 @@ async fn an_explicit_reconcile_closes_the_earlier_place_and_the_step_leaves() ->
         );
         let desk = typed_desk(&pool, &f).await?;
         assert_eq!(desk.len(), 1);
-        assert_eq!(desk[0].valid_from, None, "没有模型读时间词：起点留空");
+        assert_eq!(
+            desk[0].valid_from, None,
+            "no model reads the time word: start point left empty"
+        );
         assert_eq!(
             desk[0].valid_to_precision.as_deref(),
             Some("unknown"),

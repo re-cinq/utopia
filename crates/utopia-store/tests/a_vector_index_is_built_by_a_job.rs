@@ -74,10 +74,16 @@ async fn the_first_write_of_a_dimension_queues_one_build() -> anyhow::Result<()>
 
     let run = async {
         let first = vector_index::request(&pool, Target::Chunks, DIMS).await?;
-        assert!(first.is_some(), "第一次写下 9 维：排上一条");
+        assert!(
+            first.is_some(),
+            "first write of 9 dimensions enqueues one job"
+        );
         assert_eq!(queued(&pool, DIMS).await?, 1);
         let second = vector_index::request(&pool, Target::Chunks, DIMS).await?;
-        assert_eq!(second, None, "队列里已经有一条，不再排");
+        assert_eq!(
+            second, None,
+            "a job is already queued, do not enqueue another"
+        );
         assert_eq!(queued(&pool, DIMS).await?, 1);
         // A worker has claimed it and is building: writes do not queue again. Each queued one takes a worker slot,
         // and would sit idle on the index build's advisory lock until the earlier one finishes (on a 3072-dimension database, one build takes over an hour)
@@ -87,7 +93,10 @@ async fn the_first_write_of_a_dimension_queues_one_build() -> anyhow::Result<()>
             .execute(&pool)
             .await?;
         let while_building = vector_index::request(&pool, Target::Chunks, DIMS).await?;
-        assert_eq!(while_building, None, "正在建的时候不再排");
+        assert_eq!(
+            while_building, None,
+            "do not enqueue while it is being built"
+        );
         assert_eq!(queued(&pool, DIMS).await?, 0);
 
         let built = vector_index::build(&pool, Target::Chunks, DIMS).await?;
@@ -103,7 +112,7 @@ async fn the_first_write_of_a_dimension_queues_one_build() -> anyhow::Result<()>
             .execute(&pool)
             .await?;
         let third = vector_index::request(&pool, Target::Chunks, DIMS).await?;
-        assert_eq!(third, None, "建好了：什么都不排");
+        assert_eq!(third, None, "built: enqueue nothing");
         assert_eq!(queued(&pool, DIMS).await?, 0);
 
         // A dimension beyond the limit
@@ -177,7 +186,7 @@ async fn two_dimensions_built_at_once_take_turns() -> anyhow::Result<()> {
                 "第 {round} 轮两条都建成：{a:?} {b:?}"
             ),
             (a, b) => {
-                outcome = Err(anyhow::anyhow!("第 {round} 轮：{a:?} / {b:?}"));
+                outcome = Err(anyhow::anyhow!("round {round}: {a:?} / {b:?}"));
                 break;
             }
         }

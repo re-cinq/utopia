@@ -82,7 +82,7 @@ async fn a_source_closes_only_the_facts_it_alone_stopped_stating() -> anyhow::Re
         .bind(kb.to_string())
         .fetch_one(&pool)
         .await?;
-        assert_eq!(queued, 1, "关了陈述就排一次类型化重算");
+        assert_eq!(queued, 1, "closing the statement enqueues one typed recompute");
         let second = unconfirmed::close_of_source(&pool, kb, source, 1000).await?;
         assert_eq!((second.closed, second.skipped, second.remaining), (1, 1, 0));
 
@@ -101,7 +101,7 @@ async fn a_source_closes_only_the_facts_it_alone_stopped_stating() -> anyhow::Re
             }
         };
         let closed_at = |layer: &str| Some((Some(ended), Some("second".into()), layer.into()));
-        assert_eq!(successor(statement).await?, closed_at("open"), "陈述关上后还是陈述");
+        assert_eq!(successor(statement).await?, closed_at("open"), "after closing, it is still a statement");
         assert_eq!(successor(lone).await?, closed_at("typed"));
         for untouched in [still_stated, shared, name, late] {
             assert_eq!(successor(untouched).await?, None);
@@ -117,7 +117,7 @@ async fn a_source_closes_only_the_facts_it_alone_stopped_stating() -> anyhow::Re
         .bind(based_in)
         .fetch_all(&pool)
         .await?;
-        assert_eq!(typed_end, vec![Some(ended)], "类型化行按关上的陈述重建");
+        assert_eq!(typed_end, vec![Some(ended)], "typed rows are rebuilt from the closed statement");
         anyhow::Ok(())
     }
     .await;

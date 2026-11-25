@@ -170,13 +170,13 @@ async fn a_fact_without_a_predicate_is_still_visible_everywhere() -> anyhow::Res
             .bind(f.surfaced)
             .fetch_one(&pool)
             .await?;
-        assert_eq!(word.as_deref(), Some("acquired"), "该取出现最多的说法");
+        assert_eq!(word.as_deref(), Some("acquired"), "should take the most frequent phrasing");
 
         let none: Option<String> = sqlx::query_scalar("SELECT fact_surface_predicate($1)")
             .bind(f.mute)
             .fetch_one(&pool)
             .await?;
-        assert!(none.is_none(), "连原文说法都没有时该是空，而不是编一个词");
+        assert!(none.is_none(), "when there is not even a source phrasing, it should be empty, not an invented word");
 
         // 2. The graph edges: both must be present, and both marked inferred
         let (_, edges) =
@@ -185,12 +185,12 @@ async fn a_fact_without_a_predicate_is_still_visible_everywhere() -> anyhow::Res
             .iter()
             .filter(|e| e.id == f.surfaced || e.id == f.mute)
             .collect();
-        assert_eq!(ours.len(), 2, "内连接会把没有谓词的边整条吞掉");
+        assert_eq!(ours.len(), 2, "an inner join would swallow the whole edge that has no predicate");
         let e = ours.iter().find(|e| e.id == f.surfaced).unwrap();
         assert_eq!(e.label.as_deref(), Some("acquired"));
-        assert!(e.inferred, "本体没认下，界面要看得出这词来自原文");
+        assert!(e.inferred, "the ontology did not confirm it, so the UI must show the word comes from the source");
         let m = ours.iter().find(|e| e.id == f.mute).unwrap();
-        assert!(m.label.is_none(), "说不出就是说不出，不该回落成「有关联」");
+        assert!(m.label.is_none(), "if it cannot be named, it is just unnamed; it must not fall back to 'related'");
 
         // 3. Entity panel
         let (_, facts) =
@@ -199,11 +199,11 @@ async fn a_fact_without_a_predicate_is_still_visible_everywhere() -> anyhow::Res
             .iter()
             .filter(|x| x.id == f.surfaced || x.id == f.mute)
             .collect();
-        assert_eq!(panel.len(), 2, "实体面板漏掉了没有谓词的事实");
+        assert_eq!(panel.len(), 2, "the entity panel missed facts without a predicate");
         let s = panel.iter().find(|x| x.id == f.surfaced).unwrap();
         assert_eq!(s.predicate_label.as_deref(), Some("acquired"));
         assert!(s.inferred);
-        assert!(s.temporal.is_none(), "没有谓词就谈不上时态类别");
+        assert!(s.temporal.is_none(), "without a predicate there is no temporal category");
 
         // 4. Document output (DocViewer reviewing block by block)
         let chunk_facts = utopia_store::graph::document_extractions(&pool, f.doc).await?;
@@ -241,15 +241,15 @@ async fn a_fact_without_a_predicate_is_still_visible_everywhere() -> anyhow::Res
         .await?;
         let chunk_facts = utopia_store::graph::document_extractions(&pool, f.doc).await?;
         let v = chunk_facts.iter().find(|c| c.fact_id == valued).unwrap();
-        assert_eq!(v.object.as_deref(), Some("Acme Inc."), "值宾语在文档页是空的");
-        assert!(v.object_id.is_none(), "字面值没有实体可跳");
-        assert!(v.is_open_statement, "有短语的原始陈述可添加案例");
-        assert_eq!(v.predicate.as_deref(), Some("known as"), "确认案例要显示原文短语");
+        assert_eq!(v.object.as_deref(), Some("Acme Inc."), "the value object is empty on the document page");
+        assert!(v.object_id.is_none(), "a literal value has no entity to jump to");
+        assert!(v.is_open_statement, "a raw statement with a phrase can have cases added");
+        assert_eq!(v.predicate.as_deref(), Some("known as"), "confirmed cases must show the source phrase");
 
         // 5. Entity history (the outer FROM is a CTE; a wrong alias fails directly with missing FROM-clause)
         let (hist, _) = utopia_store::graph::entity_history(&pool, f.kb, f.subject, 50, 0).await?;
         let h = hist.iter().find(|e| e.fact_id == Some(f.surfaced));
-        assert!(h.is_some(), "实体历史漏掉了没有谓词的事实");
+        assert!(h.is_some(), "entity history missed facts without a predicate");
         assert_eq!(h.unwrap().predicate_label.as_deref(), Some("acquired"));
 
         // 6. Ledger change feed
@@ -265,7 +265,7 @@ async fn a_fact_without_a_predicate_is_still_visible_everywhere() -> anyhow::Res
         )
         .await?;
         let c = changes.iter().find(|c| c.fact_id == f.surfaced);
-        assert!(c.is_some(), "变更流漏掉了没有谓词的事实");
+        assert!(c.is_some(), "the change feed missed facts without a predicate");
         assert_eq!(c.unwrap().predicate_label.as_deref(), Some("acquired"));
 
         // 7. **No mechanism can bring it back any more.**

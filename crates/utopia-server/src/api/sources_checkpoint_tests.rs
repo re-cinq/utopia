@@ -137,11 +137,11 @@ async fn the_source_list_carries_the_checkpoint() -> anyhow::Result<()> {
     let ticket = sources
         .iter()
         .find(|s| s["id"] == fx.ticket.to_string())
-        .expect("工单来源在列表里");
+        .expect("ticket source is in the list");
     let feed = sources
         .iter()
         .find(|s| s["id"] == fx.feed.to_string())
-        .expect("订阅来源在列表里");
+        .expect("subscription source is in the list");
 
     // **The instant itself must be given**, not a count: that cell says how far has been read
     assert_eq!(

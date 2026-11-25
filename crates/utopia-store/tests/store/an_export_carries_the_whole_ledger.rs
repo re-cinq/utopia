@@ -284,6 +284,6 @@ async fn an_export_reads_the_whole_ledger_not_the_current_view() -> anyhow::Resu
         .bind(f.org)
         .execute(&pool)
         .await?;
-    assert_eq!(gone.rows_affected(), 1, "一次性 org 没删掉");
+    assert_eq!(gone.rows_affected(), 1, "one-off org was not deleted");
     Ok(())
 }

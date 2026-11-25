@@ -165,7 +165,11 @@ async fn history_carries_the_merge_and_its_direction() -> anyhow::Result<()> {
         !kinds.contains(&"merged_away"),
         "keeper 从没被并走过：{kinds:?}"
     );
-    assert_eq!(total, events.len() as i64, "总数漏了合并这一支");
+    assert_eq!(
+        total,
+        events.len() as i64,
+        "the total missed the merge branch"
+    );
 
     // The other party's name must be present, otherwise the interface would only say "an entity was merged in"
     assert!(
@@ -192,7 +196,11 @@ async fn history_carries_the_merge_and_its_direction() -> anyhow::Result<()> {
     // The side that was merged away: the opposite direction, and it is visible that it disappeared in April
     let (events, _) = utopia_store::graph::entity_history(&pool, f.kb, f.absorbed, 50, 0).await?;
     let away: Vec<_> = events.iter().filter(|e| e.kind == "merged_away").collect();
-    assert_eq!(away.len(), 1, "它并进了别人，只有这一次");
+    assert_eq!(
+        away.len(),
+        1,
+        "it was merged into someone else, and only this once"
+    );
     assert_eq!(away[0].at, t("2026-04-01T00:00:00Z"));
     assert!(
         !events.iter().any(|e| e.kind == "merged_in"),
@@ -219,6 +227,6 @@ async fn history_carries_the_merge_and_its_direction() -> anyhow::Result<()> {
         .bind(f.org)
         .execute(&pool)
         .await?;
-    assert_eq!(gone.rows_affected(), 1, "一次性 org 没删掉");
+    assert_eq!(gone.rows_affected(), 1, "one-off org was not deleted");
     Ok(())
 }

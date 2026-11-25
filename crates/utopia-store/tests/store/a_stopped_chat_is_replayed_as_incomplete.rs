@@ -67,7 +67,7 @@ async fn a_stopped_chat_is_replayed_as_incomplete() -> anyhow::Result<()> {
             let messages = conversations::messages(&pool, conversation).await?;
             assert_eq!(messages.len(), 2);
             assert!(!messages[0].stopped);
-            assert_eq!(messages[1].content, content, "历史保留原文");
+            assert_eq!(messages[1].content, content, "history keeps the original text");
             assert_eq!(messages[1].stopped, stopped);
             assert_eq!(serde_json::to_value(&messages[1])?["stopped"], stopped);
 

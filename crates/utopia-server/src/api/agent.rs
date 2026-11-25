@@ -462,7 +462,11 @@ impl AgentHook for Policy {
             // answer". **The retry below is not stacked on top**: an endpoint that never speaks gets only one extra ask
             if !has_tool_call && !has_text {
                 if !shared.asked_again.swap(true, Ordering::Relaxed) {
-                    tracing::warn!(model = shared.model, turn, "模型回了空，重问一次");
+                    tracing::warn!(
+                        model = shared.model,
+                        turn,
+                        "model returned empty, asking once more"
+                    );
                     return ModelTurnAction::Retry(RetryRequest::Feedback(
                         EMPTY_REPLY_RETRY.into(),
                     ));

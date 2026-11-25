@@ -206,12 +206,12 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
             .await
         };
         let rows = live(pool.clone()).await?;
-        assert_eq!(rows.len(), 1, "同一个三元组只有一行");
+        assert_eq!(rows.len(), 1, "the same triple has only one row");
         let (typed_id, subject, object, predicate, from, vf, grade) = rows[0].clone();
         assert_eq!((subject, object, predicate, from), (bakery, port, hq, stated));
-        assert!(vf.is_some(), "世界轴时间抄过来");
+        assert!(vf.is_some(), "world-axis time is copied over");
         // How the start came about is copied over as well: the temporal engine judges on typed rows, and without a level it would have to guess again (0045 slice 3)
-        assert_eq!(grade.as_deref(), Some("B"), "起点的来历随日期一起抄过来");
+        assert_eq!(grade.as_deref(), Some("B"), "the origin of the start point is copied along with the date");
         let sources: i64 =
             sqlx::query_scalar("SELECT count(*) FROM typed_fact_sources WHERE fact_id = $1")
                 .bind(typed_id)
@@ -258,7 +258,7 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
                 .fetch_one(&pool)
                 .await?;
         assert_eq!(sources, 2);
-        assert_eq!(live(pool.clone()).await?.len(), 1, "还有来源，行留着");
+        assert_eq!(live(pool.clone()).await?.len(), 1, "still has a source, row is kept");
 
         // Binding flipped to reverse: old row voided, new row has subject and object swapped
         sqlx::query("UPDATE phrase_bindings SET direction = 'reverse' WHERE kb_id = $1 AND phrase IN ('is based in', 'operates from')")
@@ -269,14 +269,14 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
         assert_eq!(materialize(&pool, kb).await?, Outcome { retired: 1, added: 2, merged: 0, implied: 0, corrected: 0, conflicts: 0 });
         let rows = live(pool.clone()).await?;
         assert_eq!(rows.len(), 1);
-        assert_eq!((rows[0].1, rows[0].2), (port, bakery), "方向反了主宾对调");
+        assert_eq!((rows[0].1, rows[0].2), (port, bakery), "reversed direction swaps subject and object");
         let retired: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM facts WHERE from_statement_id = $1 AND invalidated_at IS NOT NULL",
         )
         .bind(stated)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(retired, 1, "旧行留着，只是作废了");
+        assert_eq!(retired, 1, "old row is kept, just voided");
 
         // Binding changed to none: row voided, not filled in again
         sqlx::query(

@@ -217,7 +217,7 @@ async fn a_succession_stays_out_of_review_and_an_overlap_comes_in() -> anyhow::R
 
         let r = reasoning::run(&pool, f.kb).await?;
         assert_eq!(r.edges, 6);
-        assert_eq!(r.found, 0, "三次接任，没有一处矛盾");
+        assert_eq!(r.found, 0, "three successions, no contradiction anywhere");
         assert!(open(&pool, &f).await?.is_empty());
 
         // ---- 2. Overlap alone is the contradiction. The object side is recorded as inverse_functional
@@ -237,12 +237,11 @@ async fn a_succession_stays_out_of_review_and_an_overlap_comes_in() -> anyhow::R
             (pair[0], pair[1]),
             "首尾是组里最小与最大的 id"
         );
-        assert_eq!(func.3, pair, "path 是整组，按 id 排序");
+        assert_eq!(func.3, pair, "path is the whole group, sorted by id");
 
-        let inv = rows
-            .iter()
-            .find(|r| r.0 == "inverse_functional")
-            .expect("宾语侧违规记成 inverse_functional，不冒充 functional");
+        let inv = rows.iter().find(|r| r.0 == "inverse_functional").expect(
+            "object-side violation is recorded as inverse_functional, not passed off as functional",
+        );
         assert_eq!(inv.3, sorted(vec![took_over, second_lead]));
         Ok::<_, anyhow::Error>(())
     }
@@ -287,7 +286,10 @@ async fn a_decision_follows_the_clash_not_the_scan_order() -> anyhow::Result<()>
             again.inserted, 0,
             "同一处冲突不因为读的顺序变了就成了另一行"
         );
-        assert_eq!(again.reopened, 1, "放宽公理的承诺没兑现，那一行回到 open");
+        assert_eq!(
+            again.reopened, 1,
+            "the promise to relax the axiom was not kept, that row goes back to open"
+        );
         let rows = open(&pool, &f).await?;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].3, sorted(vec![ab, ba]));
@@ -358,7 +360,10 @@ async fn an_acceptance_covers_the_facts_it_saw() -> anyhow::Result<()> {
         .bind(f.kb)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(accepted, 1, "人的认可活过这一整串重跑");
+        assert_eq!(
+            accepted, 1,
+            "human approval survives this whole chain of reruns"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;

@@ -696,32 +696,34 @@ pub async fn apply_import(
     let mut baseline_tx = state.pool.begin().await?;
     let was_detected = utopia_store::reasoning::detection_keys(&mut baseline_tx, kb_id).await?;
     baseline_tx.commit().await?;
-    let (import_id, plan) =
-        match crate::owl_import::apply(&state, kb_id, user.id, token_id, &filename, &bytes).await {
-            Ok(v) => v,
-            Err(e) => {
-                // apply makes several commits: if it fails midway, some criteria are already persisted. Best-effort reconciliation --
-                // a committed criterion is the "current ontology", and open rows must not carry stale criteria overnight. Reconciliation
-                // failing on its own only logs a warning; the original error is still returned, not swallowed
-                match state.pool.begin().await {
-                    Ok(mut tx) => {
-                        if let Err(re) = utopia_store::reasoning::reconcile_ontology(
-                            &mut tx,
-                            kb_id,
-                            &was_detected,
-                        )
-                        .await
-                        {
-                            tracing::warn!(error = ?re, "导入失败后的违规对账也没跑成");
-                        } else if let Err(ce) = tx.commit().await {
-                            tracing::warn!(error = ?ce, "导入失败后的违规对账提交失败");
-                        }
+    let (import_id, plan) = match crate::owl_import::apply(
+        &state, kb_id, user.id, token_id, &filename, &bytes,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            // apply makes several commits: if it fails midway, some criteria are already persisted. Best-effort reconciliation --
+            // a committed criterion is the "current ontology", and open rows must not carry stale criteria overnight. Reconciliation
+            // failing on its own only logs a warning; the original error is still returned, not swallowed
+            match state.pool.begin().await {
+                Ok(mut tx) => {
+                    if let Err(re) =
+                        utopia_store::reasoning::reconcile_ontology(&mut tx, kb_id, &was_detected)
+                            .await
+                    {
+                        tracing::warn!(error = ?re, "the violation reconciliation after the failed import also did not run");
+                    } else if let Err(ce) = tx.commit().await {
+                        tracing::warn!(error = ?ce, "failed to commit violation reconciliation after the failed import");
                     }
-                    Err(be) => tracing::warn!(error = ?be, "导入失败后连对账事务都开不了"),
                 }
-                return Err(e.into());
+                Err(be) => {
+                    tracing::warn!(error = ?be, "could not even open the reconciliation transaction after the failed import")
+                }
             }
-        };
+            return Err(e.into());
+        }
+    };
     // apply makes several commits on its own; this transaction only reconciles: `open` means reconciled against the current ontology
     let mut tx = state.pool.begin().await?;
     let violations =

@@ -77,7 +77,7 @@ impl DocsIndex {
         let analyzer = index
             .tokenizers()
             .get(JIEBA)
-            .context("jieba tokenizer 未注册")?;
+            .context("jieba tokenizer is not registered")?;
         Ok(Self {
             reader,
             analyzer,

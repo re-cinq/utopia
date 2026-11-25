@@ -180,7 +180,9 @@ async fn fused_hits(
         vector_channel(state, kb_id, workspace_id, query, recall, embeddings)
     );
     let bm25 = bm25
-        .map_err(|e| utopia_core::AppError::Other(anyhow::anyhow!("BM25 检索线程退出：{e}")))?
+        .map_err(|e| {
+            utopia_core::AppError::Other(anyhow::anyhow!("BM25 retrieval thread exited: {e}"))
+        })?
         .map_err(utopia_core::AppError::Other)?;
     let vector = vector?;
     let vector_used = vector.is_some();
@@ -233,7 +235,7 @@ pub fn record_retrievals(state: &AppState, mut document_ids: Vec<Uuid>) {
     let pool = state.pool.clone();
     tokio::spawn(async move {
         if let Err(e) = utopia_store::decay::record_retrievals(&pool, &document_ids).await {
-            tracing::warn!(error = %e, "记录文档被检索失败");
+            tracing::warn!(error = %e, "retrieving the record document failed");
         }
     });
 }
@@ -286,7 +288,7 @@ async fn vector_channel(
             let mut embeddings = match client.embed(&[query.to_string()]).await {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!(error = %e, "查询 embedding 失败，降级为纯 BM25");
+                    tracing::warn!(error = %e, "query embedding failed, falling back to BM25 only");
                     return Ok(None);
                 }
             };

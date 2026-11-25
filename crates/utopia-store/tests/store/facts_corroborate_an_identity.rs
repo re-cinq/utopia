@@ -152,8 +152,14 @@ async fn a_fact_in_the_text_settles_a_namesake_tie() -> anyhow::Result<()> {
             &[],
         )
         .await?;
-        assert!(!r.created, "原文点名了财务，不该再新建第三个张伟");
-        assert_eq!(r.entity_id, f.zhang_b, "该归到财务部那个张伟");
+        assert!(
+            !r.created,
+            "the source names the finance department, so a third Zhang Wei must not be created"
+        );
+        assert_eq!(
+            r.entity_id, f.zhang_b,
+            "should be filed under the Zhang Wei in finance"
+        );
         assert!(
             r.reviews.is_empty(),
             "事实已经把人分开了，不该再入人工审核对"
@@ -188,8 +194,15 @@ async fn a_clue_that_points_at_both_settles_nothing() -> anyhow::Result<()> {
             &[],
         )
         .await?;
-        assert!(r.created, "两边都命中就等于没命中，仍该新建实体");
-        assert_eq!(r.reviews.len(), 2, "仍该对两个候选各入一条人工审核对");
+        assert!(
+            r.created,
+            "hits on both sides equal no hit, a new entity should still be created"
+        );
+        assert_eq!(
+            r.reviews.len(),
+            2,
+            "still should queue one manual review pair for each of the two candidates"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -225,7 +238,11 @@ async fn an_employer_they_share_is_not_a_clue() -> anyhow::Result<()> {
             r.created,
             "两人共有的雇主没有分辨力，不该拿它把 mention 判给其中一个"
         );
-        assert_eq!(r.reviews.len(), 2, "仍是分不开，照旧入两条人工审核对");
+        assert_eq!(
+            r.reviews.len(),
+            2,
+            "still indistinguishable, so two manual review pairs are queued as before"
+        );
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -258,8 +275,15 @@ async fn text_that_names_neither_changes_nothing() -> anyhow::Result<()> {
             &[],
         )
         .await?;
-        assert!(with_text.created, "没有命中就该保持 #329 的行为");
-        assert_eq!(with_text.reviews.len(), 2, "两条人工审核对照旧");
+        assert!(
+            with_text.created,
+            "with no hit, the #329 behaviour should hold"
+        );
+        assert_eq!(
+            with_text.reviews.len(),
+            2,
+            "the two manual review pairs stay as they were"
+        );
         assert_ne!(with_text.entity_id, f.zhang_a);
         assert_ne!(with_text.entity_id, f.zhang_b);
         Ok::<_, anyhow::Error>(())
@@ -299,8 +323,8 @@ async fn the_grey_zone_listens_to_the_facts_too() -> anyhow::Result<()> {
             &[],
         )
         .await?;
-        assert!(!r.created, "灰区里原文点了名，就不该再新建一个同名实体");
-        assert_eq!(r.entity_id, f.zhang_b, "该归到财务部那个");
+        assert!(!r.created, "in the grey zone, if the source names them, a new same-name entity must not be created");
+        assert_eq!(r.entity_id, f.zhang_b, "should go to the finance one");
         Ok::<_, anyhow::Error>(())
     }
     .await;

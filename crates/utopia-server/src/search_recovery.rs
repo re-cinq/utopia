@@ -32,7 +32,9 @@ pub fn open(index_dir: &Path) -> anyhow::Result<SearchIndex> {
     // here, before it can reset an index the first process is still rebuilding.
     let search = SearchIndex::open(index_dir)?;
     if marker(index_dir).try_exists()? {
-        tracing::info!("全文索引重建曾中断，从库里重新开始");
+        tracing::info!(
+            "full-text index rebuild was interrupted earlier, restarting from the database"
+        );
         // Retrying in place would retain documents deleted from the database
         // between attempts. Keep the marker until the fresh run finishes.
         search.clear()?;

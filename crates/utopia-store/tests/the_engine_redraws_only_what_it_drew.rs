@@ -505,7 +505,7 @@ async fn a_revert_does_not_rewrite_what_the_merge_window_held() -> anyhow::Resul
     let back = timeline(&pool, &f, source).await?;
     cleanup(&pool, &f).await?;
     assert_eq!(after, before);
-    assert_eq!(back.len(), 1, "D 回到源实体上");
+    assert_eq!(back.len(), 1, "D returns to the source entity");
     Ok(())
 }
 
@@ -573,7 +573,10 @@ async fn a_deletion_that_waited_for_the_lock_still_takes_the_rewritten_row() -> 
         .fetch_one(&pool)
         .await?;
     cleanup(&pool, &f).await?;
-    assert!(!alive, "唯一的出处删掉了，改写出来的那一行也该作废");
+    assert!(
+        !alive,
+        "the only source was deleted, so the row rewritten from it should also be voided"
+    );
     Ok(())
 }
 
@@ -785,7 +788,9 @@ async fn the_migration_marks_the_ends_the_old_engine_drew() -> anyhow::Result<()
     };
     let backfill =
         include_str!("../../../migrations/0057_an_end_the_engine_drew_moves_with_what_follows.sql");
-    let backfill = &backfill[backfill.find("UPDATE facts c").expect("0057 回填语句")..];
+    let backfill = &backfill[backfill
+        .find("UPDATE facts c")
+        .expect("0057 backfill statement")..];
 
     let f = seed(&pool).await?;
     observe(&pool, &f, seen(&f, "v1", "2020-02-18")).await?;
@@ -839,7 +844,11 @@ async fn the_migration_marks_the_ends_the_old_engine_drew() -> anyhow::Result<()
     observe(&pool, &f, seen(&f, "v3", "2020-04-14")).await?;
     let n = overlaps(&pool, &f, f.lease).await?;
     cleanup(&pool, &f).await?;
-    assert_eq!(marked, vec!["v1".to_string()], "只有引擎关的那一段");
+    assert_eq!(
+        marked,
+        vec!["v1".to_string()],
+        "only the span the engine closed"
+    );
     assert_eq!(n, 0);
     Ok(())
 }
@@ -871,9 +880,12 @@ async fn undoing_the_first_merge_of_a_chain_brings_its_facts_home() -> anyhow::R
     let home = timeline(&pool, &f, source).await?;
     let tail = timeline(&pool, &f, chain_end).await?;
     cleanup(&pool, &f).await?;
-    assert_eq!(home.len(), 1, "S1 回到 S 上：{home:?}");
+    assert_eq!(home.len(), 1, "S1 returns to S: {home:?}");
     assert_eq!(home[0].0, "S1");
-    assert!(tail.iter().all(|s| s.0 != "S1"), "C 上不留 S1：{tail:?}");
+    assert!(
+        tail.iter().all(|s| s.0 != "S1"),
+        "no S1 left on C: {tail:?}"
+    );
     Ok(())
 }
 
@@ -905,7 +917,11 @@ async fn a_revert_keeps_the_conflict_its_rows_carried() -> anyhow::Result<()> {
     let back = timeline(&pool, &f, source).await?;
     let overlap = overlaps(&pool, &f, source).await?;
     cleanup(&pool, &f).await?;
-    assert_eq!(back.len(), 2, "D 与 E 回到源实体：{back:?}");
+    assert_eq!(
+        back.len(),
+        2,
+        "D and E return to the source entity: {back:?}"
+    );
     assert!(
         overlap == 0 || conflicts.contains(&"simultaneous".to_string()),
         "两行叠在一起就得有一条开着的冲突：{conflicts:?}"
@@ -957,7 +973,10 @@ async fn deleting_a_document_that_dates_many_timelines_still_works() -> anyhow::
     cleanup(&pool, &f).await?;
     assert_eq!(report.invalidated_facts, n);
     assert!(restored.is_ok(), "{:?}", restored.err());
-    assert_eq!(live, n as i64, "撤销删除之后全都回来");
+    assert_eq!(
+        live, n as i64,
+        "after undoing the deletion, everything comes back"
+    );
     Ok(())
 }
 

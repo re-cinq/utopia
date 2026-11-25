@@ -319,7 +319,7 @@ pub fn password_login(s: &AppState) -> bool {
 pub fn warn_about_scopes() {
     if let Ok(c) = config() {
         if !c.allowed_domains.is_empty() && !c.scopes.split_whitespace().any(|s| s == "email") {
-            tracing::warn!("UTOPIA_OIDC_SCOPES 里没有 email，而 UTOPIA_OIDC_ALLOWED_DOMAINS 已设：身份提供方多半不发 email，按域名关联和开户不会发生")
+            tracing::warn!("UTOPIA_OIDC_SCOPES has no email while UTOPIA_OIDC_ALLOWED_DOMAINS is set: the identity provider usually sends no email, so domain-based linking and account provisioning will not happen")
         }
     }
 }
@@ -332,7 +332,7 @@ pub fn warn_about_password_login(s: &AppState) {
     }
     match config() {
         Err(_) => {
-            tracing::warn!("UTOPIA_PASSWORD_LOGIN=false 被忽略：没配单点登录，关掉密码就谁都进不来")
+            tracing::warn!("UTOPIA_PASSWORD_LOGIN=false ignored: SSO is not configured, and turning off passwords would lock everyone out")
         }
         Ok(c) if c.allowed_domains.is_empty() => tracing::warn!(
             "密码登录已关、UTOPIA_OIDC_ALLOWED_DOMAINS 为空：只有绑定过身份的人能登录"
@@ -369,7 +369,7 @@ pub async fn start(
             )
         }
         Err(r) => {
-            tracing::warn!(code = r.code, reason = %r.reason, "单点登录没能开始");
+            tracing::warn!(code = r.code, reason = %r.reason, "single sign-on could not start");
             (jar, back_to(page, r.code))
         }
     }
@@ -679,13 +679,13 @@ pub async fn callback(
         Ok(Done::SignedIn(user_id)) => match auth::issue_token(&s, user_id) {
             Ok(token) => (jar.add(auth::auth_cookie(token, secure)), Redirect::to("/")),
             Err(e) => {
-                tracing::warn!(error = %e, "单点登录签发会话失败");
+                tracing::warn!(error = %e, "failed to issue session for single sign-on");
                 (jar, back_to("/login", "unavailable"))
             }
         },
         Ok(Done::Linked) => (jar, Redirect::to("/account?sso=linked")),
         Err(r) => {
-            tracing::warn!(code = r.code, reason = %r.reason, "单点登录被拒");
+            tracing::warn!(code = r.code, reason = %r.reason, "single sign-on rejected");
             // Failures go into the ledger too, under the same convention as the password login's `auth.login_failed`
             let _ = utopia_store::audit::record_opt(
                 &s.pool,
@@ -842,7 +842,7 @@ async fn account_of(s: &AppState, c: &Config, claims: &Claims) -> Result<Option<
         e => refuse("unavailable", format!("provision: {e}")),
     })?;
     let Some(user) = provisioned else {
-        tracing::warn!(%email, "单点登录：这个 email 属于一个停用的账号，不开新号");
+        tracing::warn!(%email, "single sign-on: this email belongs to a disabled account, so no new account is created");
         return Ok(None);
     };
     let _ = utopia_store::audit::record(

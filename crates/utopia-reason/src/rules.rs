@@ -895,7 +895,10 @@ mod tests {
         let facts = vec![fact(1, 50, 10, json!(12.3))];
         let spans = HashMap::from([(id(1), (Some(100), None))]);
         let (hits, _) = evaluate(&[rule], &facts, &spans, &[]);
-        assert!(hits.is_empty(), "第二个条件没有任何事实，不该命中");
+        assert!(
+            hits.is_empty(),
+            "the second condition has no facts and should not hit"
+        );
     }
 
     /// Two readings of the same attribute each hold → two intervals, not one row flipped (0021 decision 4)
@@ -922,7 +925,7 @@ mod tests {
             (id(2), (Some(300), Some(400))),
         ]);
         let (hits, _) = evaluate(&[rule], &facts, &spans, &[]);
-        assert_eq!(hits.len(), 2, "两次读数各自成立");
+        assert_eq!(hits.len(), 2, "two readings each hold on their own");
         let mut spans_out: Vec<_> = hits.iter().map(|h| (h.from, h.to)).collect();
         spans_out.sort();
         assert_eq!(
@@ -967,7 +970,10 @@ mod tests {
             (id(2), (Some(300), Some(400))),
         ]);
         let (hits, _) = evaluate(&[rule], &facts, &spans, &[]);
-        assert!(hits.is_empty(), "两条前提没有同时成立的时段");
+        assert!(
+            hits.is_empty(),
+            "two premises have no period where both hold"
+        );
     }
 
     /// Two groups joined by OR: a hit if either holds. The second group's premises do **not** include the first group's reading—
@@ -1010,7 +1016,7 @@ mod tests {
         let facts = vec![fact(3, 50, 12, json!("气层"))];
         let spans = HashMap::from([(id(3), (Some(100), Some(200)))]);
         let (hits, _) = evaluate(&[rule], &facts, &spans, &[]);
-        assert_eq!(hits.len(), 1, "第二组独自成立");
+        assert_eq!(hits.len(), 1, "the second group holds on its own");
         assert_eq!(hits[0].premises, vec![id(3)]);
         assert_eq!((hits[0].from, hits[0].to), (Some(100), Some(200)));
     }
@@ -1096,9 +1102,9 @@ mod tests {
             ],
         };
         let (hits, report) = evaluate(&[rule], &facts, &spans, &[]);
-        assert_eq!(hits.len(), 1, "第二组照样出结论");
+        assert_eq!(hits.len(), 1, "the second group still concludes");
         assert_eq!(hits[0].premises, vec![id(200)]);
-        assert_eq!(report.capped, 1, "(规则, 实体) 只报一次");
+        assert_eq!(report.capped, 1, "(rule, entity) is reported only once");
     }
 
     /// `is not one of`: a value outside the set counts as satisfied; **no such reading does not count**—that is "not recorded",
@@ -1126,16 +1132,19 @@ mod tests {
             &spans,
             &[],
         );
-        assert_eq!(hit.len(), 1, "读数在集合外");
+        assert_eq!(hit.len(), 1, "reading is outside the set");
         let (miss, _) = evaluate(
             std::slice::from_ref(&rule),
             &[fact(1, 50, 11, json!("气层"))],
             &spans,
             &[],
         );
-        assert!(miss.is_empty(), "读数在集合里");
+        assert!(miss.is_empty(), "reading is inside the set");
         let (none, _) = evaluate(&[rule], &[], &HashMap::new(), &[]);
-        assert!(none.is_empty(), "没有这条读数：不成立，而不是「不是它」");
+        assert!(
+            none.is_empty(),
+            "no such reading: it does not hold, rather than 'it is not that one'"
+        );
     }
 
     /// Numbers extracted as strings are still comparable. **This one guards against the hardest failure to spot**:
@@ -1272,7 +1281,10 @@ mod tests {
             spans.insert(id(i + 100), (None, None));
         }
         let (hits, report) = evaluate(&[rule], &facts, &spans, &[]);
-        assert_eq!(report.capped, 1, "100 种组合超过上限，要计数");
+        assert_eq!(
+            report.capped, 1,
+            "100 combinations exceed the cap, so the count must be recorded"
+        );
         assert!(hits.is_empty());
     }
 
@@ -1420,7 +1432,7 @@ mod tests {
             (id(3), (Some(100), Some(300))),
         ]);
         let (hits, _) = evaluate(&[rule], &facts, &spans, &[]);
-        assert_eq!(hits.len(), 2, "两条 revenue 各算一个 margin");
+        assert_eq!(hits.len(), 2, "two revenues each count one margin");
         let mut values: Vec<f64> = hits
             .iter()
             .filter_map(|h| h.value.as_ref()?.number())
@@ -1451,7 +1463,10 @@ mod tests {
         let facts = vec![fact(1, 50, 10, json!(300.0))];
         let spans = HashMap::from([(id(1), (Some(100), None))]);
         let (hits, _) = evaluate(&[rule], &facts, &spans, &[]);
-        assert!(hits.is_empty(), "cost 没记，margin 就不该有");
+        assert!(
+            hits.is_empty(),
+            "cost is not recorded, so margin must not exist"
+        );
     }
 
     /// Division by zero likewise yields nothing. A conclusion that cannot be computed is the same as one that does not hold: there is no
@@ -1501,10 +1516,14 @@ mod tests {
 
         let (hits, _) = evaluate(&[rule(1.5)], &facts, &spans, &[]);
         assert_eq!(hits.len(), 1, "300 > 120 × 1.5");
-        assert_eq!(hits[0].premises.len(), 2, "门槛读的那条也是前提");
+        assert_eq!(
+            hits[0].premises.len(),
+            2,
+            "the threshold reading is a premise too"
+        );
 
         let (none, _) = evaluate(&[rule(3.0)], &facts, &spans, &[]);
-        assert!(none.is_empty(), "300 不大于 120 × 3");
+        assert!(none.is_empty(), "300 is not greater than 120 × 3");
     }
 
     /// Two different values on the same interval are **two rows**, not one. The deduplication key includes the value, otherwise
@@ -1529,7 +1548,7 @@ mod tests {
         let facts = vec![fact(1, 50, 10, json!(300.0)), fact(2, 50, 10, json!(400.0))];
         let spans = HashMap::from([(id(1), (Some(100), None)), (id(2), (Some(100), None))]);
         let (hits, _) = evaluate(&[rule], &facts, &spans, &[]);
-        assert_eq!(hits.len(), 2, "同一段区间，两个值");
+        assert_eq!(hits.len(), 2, "the same interval, two values");
     }
 
     /// The formula's depth is computed correctly—the compile side relies on it to stop "someone writing a program here"

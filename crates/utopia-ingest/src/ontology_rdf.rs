@@ -237,7 +237,7 @@ fn read_triples(bytes: &[u8], format: RdfFormat) -> anyhow::Result<Vec<Triple>> 
         RdfFormat::Turtle => {
             let p = oxttl::TurtleParser::new()
                 .with_base_iri(BASE)
-                .map_err(|e| anyhow::anyhow!("base IRI 无效：{e}"))?;
+                .map_err(|e| anyhow::anyhow!("base IRI is invalid: {e}"))?;
             for r in p.for_reader(bytes) {
                 push(r?);
             }
@@ -245,7 +245,7 @@ fn read_triples(bytes: &[u8], format: RdfFormat) -> anyhow::Result<Vec<Triple>> 
         RdfFormat::RdfXml => {
             let p = oxrdfxml::RdfXmlParser::new()
                 .with_base_iri(BASE)
-                .map_err(|e| anyhow::anyhow!("base IRI 无效：{e}"))?;
+                .map_err(|e| anyhow::anyhow!("base IRI is invalid: {e}"))?;
             for r in p.for_reader(bytes) {
                 push(r?);
             }
@@ -1143,7 +1143,7 @@ mod tests {
         match m {
             // The intersection does not guess a type, but the value is still a literal, so it lands as text
             RangeMapping::Degraded(s) => assert!(s.contains('∩')),
-            other => panic!("多条 range 不该被精确映射: {other:?}"),
+            other => panic!("multiple ranges should not be mapped exactly: {other:?}"),
         }
     }
 
@@ -1406,7 +1406,10 @@ schema:knows a rdf:Property ;
             "integer",
             "data_type",
         ] {
-            assert!(!keys.contains(&gone), "{gone} 不该是实体类型：{keys:?}");
+            assert!(
+                !keys.contains(&gone),
+                "{gone} should not be an entity type: {keys:?}"
+            );
         }
         assert!(keys.contains(&"organization") && keys.contains(&"person"));
     }
@@ -1568,15 +1571,21 @@ mod axioms {
         let by = |k: &str| p.properties.iter().find(|x| x.key == k).unwrap().clone();
 
         let part_of = by("part_of");
-        assert!(part_of.transitive, "TransitiveProperty 要落到属性上");
-        assert!(part_of.asymmetric, "AsymmetricProperty 同上");
+        assert!(
+            part_of.transitive,
+            "TransitiveProperty should land on the property"
+        );
+        assert!(part_of.asymmetric, "AsymmetricProperty likewise");
         assert!(!part_of.symmetric);
 
         assert!(
             by("alias_of").symmetric,
             "对称属性双向出现是正确的，不是矛盾"
         );
-        assert!(by("reports_to").irreflexive, "非自反：自己汇报给自己是矛盾");
+        assert!(
+            by("reports_to").irreflexive,
+            "not reflexive: reporting to oneself is a contradiction"
+        );
 
         // Anything not declared is false: **the default is not "unknown" but "no such axiom"**.
         // OWL is open-world, but the consistency check can only judge by what is written: if nothing is written, there is no basis,
@@ -1601,7 +1610,10 @@ mod axioms {
         };
         assert_eq!(d("person"), vec!["http://acme.example/ax#Organization"]);
         assert_eq!(d("organization"), vec!["http://acme.example/ax#Person"]);
-        assert!(d("document").is_empty(), "没声明互斥的类不该凭空多出来");
+        assert!(
+            d("document").is_empty(),
+            "a class with no declared disjointness should not gain any out of thin air"
+        );
     }
 }
 
@@ -1617,11 +1629,12 @@ mod against_real_packs {
 
     fn load(name: &str) -> Vec<u8> {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../utopia-server/packs/");
-        let f = std::fs::File::open(format!("{path}{name}")).expect("包文件在");
+        let f =
+            std::fs::File::open(format!("{path}{name}")).expect("package file should be present");
         let mut out = Vec::new();
         flate2::read::GzDecoder::new(f)
             .read_to_end(&mut out)
-            .expect("解压");
+            .expect("unpack");
         out
     }
 
@@ -1639,7 +1652,7 @@ mod against_real_packs {
                 .classes
                 .iter()
                 .find(|c| c.key == key)
-                .unwrap_or_else(|| panic!("{key} 该被投影出来"));
+                .unwrap_or_else(|| panic!("{key} should be projected out"));
             assert_eq!(
                 c.disjoint_with.len(),
                 4,
@@ -1663,8 +1676,11 @@ mod against_real_packs {
             .classes
             .iter()
             .find(|c| c.label == "process profile")
-            .expect("IOF Core 里那个 BFO 类该被投影出来");
-        assert_eq!(c.key, "process_profile", "编号式 IRI 该改用 label 派生 key");
+            .expect("the BFO class in IOF Core should be projected out");
+        assert_eq!(
+            c.key, "process_profile",
+            "a numeric IRI should derive the key from its label instead"
+        );
         assert!(
             !p.classes.iter().any(|c| c.key.starts_with("bfo_0")),
             "不该再有编号形态的 key，实得 {:?}",
@@ -1690,7 +1706,10 @@ mod against_real_packs {
     fn iof_core_declares_transitive_properties() {
         let p = project(&load("iof-core.rdf.gz"), RdfFormat::RdfXml).unwrap();
         let n = p.properties.iter().filter(|x| x.transitive).count();
-        assert!(n >= 8, "IOF 该有一批传递属性,实得 {n}");
+        assert!(
+            n >= 8,
+            "IOF should have a batch of transitive properties, got {n}"
+        );
     }
 
     /// FOAF's Person ⊥ Organization / Document: **the pair that collides most often**.
@@ -1734,12 +1753,12 @@ schema:employees a rdf:Property ; rdfs:label "employees" ;
     schema:domainIncludes schema:Organization ; schema:rangeIncludes schema:Person ;
     schema:supersededBy schema:employee .
 "#;
-        let p = project(ttl.as_bytes(), RdfFormat::Turtle).expect("解析");
+        let p = project(ttl.as_bytes(), RdfFormat::Turtle).expect("parse");
         let by = |k: &str| {
             p.properties
                 .iter()
                 .find(|x| x.key == k)
-                .unwrap_or_else(|| panic!("没有 {k}"))
+                .unwrap_or_else(|| panic!("no {k}"))
         };
         assert_eq!(
             by("employees").superseded_by.as_deref(),
@@ -1760,12 +1779,12 @@ schema:employees a rdf:Property ; rdfs:label "employees" ;
     #[test]
     fn the_two_property_relations_survive_projection() {
         let ttl = include_str!("../tests/inverse_and_sub.ttl");
-        let p = project(ttl.as_bytes(), RdfFormat::Turtle).expect("解析");
+        let p = project(ttl.as_bytes(), RdfFormat::Turtle).expect("parse");
         let by = |k: &str| {
             p.properties
                 .iter()
                 .find(|x| x.key == k)
-                .unwrap_or_else(|| panic!("没有 {k}"))
+                .unwrap_or_else(|| panic!("no {k}"))
         };
         assert_eq!(
             by("employs").inverse_of.as_deref(),
@@ -1805,12 +1824,12 @@ ex:born_of a owl:ObjectProperty ; rdfs:label "born of" ; utopia:temporal "eterna
 ex:works_at a owl:ObjectProperty ; rdfs:label "works at" .
 ex:met a owl:ObjectProperty ; rdfs:label "met" ; utopia:temporal "sometimes" .
 "#;
-        let p = project(ttl.as_bytes(), RdfFormat::Turtle).expect("解析");
+        let p = project(ttl.as_bytes(), RdfFormat::Turtle).expect("parse");
         let by = |k: &str| {
             p.properties
                 .iter()
                 .find(|x| x.key == k)
-                .unwrap_or_else(|| panic!("没有 {k}"))
+                .unwrap_or_else(|| panic!("no {k}"))
         };
         assert_eq!(by("attended").temporal.as_deref(), Some("event"));
         assert_eq!(by("born_of").temporal.as_deref(), Some("eternal"));
@@ -1841,7 +1860,7 @@ ex:twice a owl:ObjectProperty ; rdfs:label "twice" ; utopia:role "children" ; ut
 "#;
 
     fn hinted() -> OwlProjection {
-        project(HINTED.as_bytes(), RdfFormat::Turtle).expect("解析")
+        project(HINTED.as_bytes(), RdfFormat::Turtle).expect("parse")
     }
 
     fn hints_of(p: &OwlProjection, key: &str) -> BTreeMap<String, String> {
@@ -1855,7 +1874,7 @@ ex:twice a owl:ObjectProperty ; rdfs:label "twice" ; utopia:role "children" ; ut
                     .find(|x| x.key == key)
                     .map(|x| x.display_hints.clone())
             })
-            .unwrap_or_else(|| panic!("没有 {key}"))
+            .unwrap_or_else(|| panic!("no {key}"))
     }
 
     fn pairs(items: &[(&str, &str)]) -> BTreeMap<String, String> {

@@ -111,7 +111,11 @@ pub async fn refresh_scoped(
             // If the counts do not match, abandon the whole batch: pairing is by position, and a misalignment would write person's vector onto
             // organization, and once that is committed the error can never be detected again
             if vectors.len() != batch.len() {
-                anyhow::bail!("嵌入返回 {} 条，送去的是 {} 条", vectors.len(), batch.len());
+                anyhow::bail!(
+                    "embedding returned {} items, but {} were sent",
+                    vectors.len(),
+                    batch.len()
+                );
             }
             let n = batch.len();
             let items: Vec<(TypeToEmbed, Vec<f32>)> = batch.into_iter().zip(vectors).collect();
@@ -127,19 +131,19 @@ pub async fn refresh_scoped(
             Ok(n) => done += n,
             Err(e) => {
                 failed += 1;
-                tracing::warn!(%kb_id, error = %e, "一批本体向量没嵌上，留给下一轮");
+                tracing::warn!(%kb_id, error = %e, "a batch of ontology vectors was not embedded, left for the next round");
             }
         }
     }
     // **The failure count must appear on this line.** Before, it only reported how many were backfilled, so in a run where all 24 batches failed,
     // the log still said "backfilled", and whoever read the log thought all was well
     if failed > 0 {
-        tracing::warn!(%kb_id, count = done, failed, "本体向量补了一部分，其余留给下一轮");
+        tracing::warn!(%kb_id, count = done, failed, "some ontology vectors were filled in, the rest left for the next round");
         // "Left for the next round" requires a next round to exist: before, this also reported success, no one queued it again, and properties missing vectors stayed missing
         // (alignment's shortlist fell back to all candidates, and the stage timed out). Returning an error lets the job retry within its budget
         anyhow::bail!("{failed} batches of ontology vectors failed; the job retries");
     }
-    tracing::info!(%kb_id, count = done, "本体向量已补齐");
+    tracing::info!(%kb_id, count = done, "ontology vectors are fully filled in");
     Ok(done)
 }
 
@@ -170,7 +174,11 @@ pub async fn nearest_for_each(
         let _permit = llm_util::acquire_embed(state, &settings).await;
         let got = client.embed(batch).await?;
         if got.len() != batch.len() {
-            anyhow::bail!("嵌入返回 {} 条，送去的是 {} 条", got.len(), batch.len());
+            anyhow::bail!(
+                "embedding returned {} items, but {} were sent",
+                got.len(),
+                batch.len()
+            );
         }
         vectors.extend(got);
     }
@@ -230,8 +238,14 @@ mod tests {
             "同一个库的第二次补齐应当排队"
         );
         // Other KBs: unaffected
-        assert!(lock_for(b).try_lock().is_ok(), "别的库不该被这把锁挡住");
+        assert!(
+            lock_for(b).try_lock().is_ok(),
+            "other libraries should not be blocked by this lock"
+        );
         drop(held);
-        assert!(lock_for(a).try_lock().is_ok(), "前一个放开后下一个才进");
+        assert!(
+            lock_for(a).try_lock().is_ok(),
+            "the next one only enters after the previous one is released"
+        );
     }
 }

@@ -202,7 +202,7 @@ async fn a_rewritten_row_gets_its_statements_back() -> anyhow::Result<()> {
         let after = correct_start(&pool, after[0], "2024-08-01T00:00:00Z").await?;
         let by_hand = correct_start(&pool, by_hand, "2022-02-01T00:00:00Z").await?;
         let after_links = links(&pool, after).await?;
-        assert_eq!(after_links.0, Some(kickoff), "#967 之后改写带着链接");
+        assert_eq!(after_links.0, Some(kickoff), "after #967 a rewrite carries its links");
         // Control: a fact a person approved gets a start filled in on a bare row -- the new row links to that materialized row, but it is a different observation
         let (refined, _) = graph::insert_fact(
             &pool,

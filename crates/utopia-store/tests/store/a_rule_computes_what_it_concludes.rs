@@ -147,7 +147,7 @@ async fn a_computed_conclusion_lands_with_the_readings_it_read() -> anyhow::Resu
         .await?;
 
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(report.attribute_rules, 1, "规则要编译得出来");
+        assert_eq!(report.attribute_rules, 1, "the rule must compile");
         assert_eq!(report.rule_hits, 1);
 
         let rows: Vec<(Uuid, Option<serde_json::Value>, Option<Uuid>)> = sqlx::query_as(
@@ -157,7 +157,11 @@ async fn a_computed_conclusion_lands_with_the_readings_it_read() -> anyhow::Resu
         .fetch_all(&pool)
         .await?;
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].2, Some(rule), "结论指回它的规则");
+        assert_eq!(
+            rows[0].2,
+            Some(rule),
+            "the conclusion points back to its rule"
+        );
         assert_eq!(
             rows[0]
                 .1
@@ -187,8 +191,8 @@ async fn a_computed_conclusion_lands_with_the_readings_it_read() -> anyhow::Resu
             .execute(&pool)
             .await?;
         let again = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(again.invalidated, 1, "180 那一行退场");
-        assert_eq!(again.inserted, 1, "250 那一行落下");
+        assert_eq!(again.invalidated, 1, "the 180 row retires");
+        assert_eq!(again.inserted, 1, "the 250 row lands");
         let live: Vec<(Option<serde_json::Value>,)> = sqlx::query_as(
             "SELECT object_value FROM derived_facts
               WHERE kb_id = $1 AND invalidated_at IS NULL",
@@ -243,7 +247,10 @@ async fn a_missing_reading_lands_nothing() -> anyhow::Result<()> {
         )
         .await?;
         let report = utopia_store::reasoning::materialize(&pool, f.kb).await?;
-        assert_eq!(report.rule_hits, 0, "cost 没记，margin 就不该有");
+        assert_eq!(
+            report.rule_hits, 0,
+            "cost not recorded, so margin should not exist"
+        );
         let n: (i64,) = sqlx::query_as("SELECT count(*) FROM derived_facts WHERE kb_id = $1")
             .bind(f.kb)
             .fetch_one(&pool)

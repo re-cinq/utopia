@@ -637,11 +637,15 @@ mod tests {
                     .into_iter()
                     .filter(|v| v.kind == Kind::Cycle)
                     .collect();
-                assert_eq!(v.len(), 1, "一个环只报一次");
+                assert_eq!(v.len(), 1, "a cycle is reported only once");
                 (v[0].left, v[0].right, v[0].path.clone())
             })
             .collect();
-        assert_eq!(shapes.len(), 1, "同一个环给出了不止一种形状: {shapes:?}");
+        assert_eq!(
+            shapes.len(),
+            1,
+            "the same cycle gave more than one shape: {shapes:?}"
+        );
         // The canonical shape starts from the smallest fact; the path is still one loop
         let (left, right, path) = shapes.into_iter().next().unwrap();
         assert_eq!(left, *path.iter().min().unwrap());
@@ -720,7 +724,7 @@ mod tests {
                 ..Default::default()
             }),
         );
-        assert!(checked.cycles_capped.is_empty(), "不该撞上上限");
+        assert!(checked.cycles_capped.is_empty(), "should not hit the cap");
         let cycles = checked
             .violations
             .iter()
@@ -763,8 +767,11 @@ mod tests {
             .iter()
             .filter(|v| v.kind == Kind::Cycle)
             .count();
-        assert!(cycles <= MAX_CYCLES_PER_PREDICATE, "报出 {cycles} 个");
-        assert!(cycles > 0, "撞上上限之前找到的照报");
+        assert!(cycles <= MAX_CYCLES_PER_PREDICATE, "reported {cycles}");
+        assert!(
+            cycles > 0,
+            "cycles found before hitting the cap are still reported"
+        );
 
         let mut rng = Rng(0x0642);
         for _ in 0..5 {
@@ -862,8 +869,8 @@ mod tests {
                 ..Default::default()
             }),
         );
-        assert_eq!(v.len(), 1, "一个环只报一次");
-        assert_eq!(v[0].path.len(), 4, "四条边都该在路径里");
+        assert_eq!(v.len(), 1, "a cycle is reported only once");
+        assert_eq!(v[0].path.len(), 4, "all four edges should be in the path");
     }
 
     /// **The same cycle is reached n times, starting from different nodes.** Deduplication is half the reason this function exists:
@@ -1006,12 +1013,24 @@ mod tests {
                 .iter()
                 .map(|p| shape(check(p, ax)))
                 .collect();
-            assert_eq!(shapes.len(), 1, "顺序换出了不同的行: {shapes:?}");
+            assert_eq!(
+                shapes.len(),
+                1,
+                "reordering the input produced different rows: {shapes:?}"
+            );
             let only = shapes.into_iter().next().unwrap();
             assert_eq!(only.len(), 1);
             let (_, left, right, path) = &only[0];
-            assert_eq!(path, &vec![f(1), f(2), f(3)], "整组，按 id 排序");
-            assert_eq!((*left, *right), (f(1), f(3)), "首尾是最小与最大");
+            assert_eq!(
+                path,
+                &vec![f(1), f(2), f(3)],
+                "the whole group, sorted by id"
+            );
+            assert_eq!(
+                (*left, *right),
+                (f(1), f(3)),
+                "the head and tail are the minimum and maximum"
+            );
         }
     }
 
@@ -1036,7 +1055,10 @@ mod tests {
             at(1, 1, 2, Some(0), Some(100)),
             at(2, 2, 1, Some(100), None),
         ];
-        assert!(cycles(&swapped).is_empty(), "前后相接的两段凑不成环");
+        assert!(
+            cycles(&swapped).is_empty(),
+            "two segments joined end to end cannot form a cycle"
+        );
 
         // Three edges overlap pairwise, but not all three: [0,100) ∩ [50,150) ∩ [100,200) = ∅
         let pairwise = [
@@ -1044,7 +1066,10 @@ mod tests {
             at(2, 2, 3, Some(50), Some(150)),
             at(3, 3, 1, Some(100), Some(200)),
         ];
-        assert!(cycles(&pairwise).is_empty(), "两两重叠不等于同时成立");
+        assert!(
+            cycles(&pairwise).is_empty(),
+            "pairwise overlap does not mean they hold at the same time"
+        );
 
         // All three share the span [90,100): it is a cycle, and it is still reported only once, in canonical shape
         let together = [
@@ -1233,7 +1258,11 @@ mod tests {
             let v = super::check(&edges, &transitive);
             let got = found(&v, Kind::Cycle);
             let unique: HashSet<Vec<Uuid>> = got.iter().cloned().collect();
-            assert_eq!(got.len(), unique.len(), "同一个环报了两次: {edges:?}");
+            assert_eq!(
+                got.len(),
+                unique.len(),
+                "the same cycle was reported twice: {edges:?}"
+            );
             assert_eq!(
                 unique,
                 cycles_by_brute_force(&edges),
@@ -1259,12 +1288,19 @@ mod tests {
             let by_fact: HashMap<Uuid, &TimedEdge> =
                 edges.iter().map(|t| (t.edge.fact, t)).collect();
             for c in v.iter().filter(|x| x.kind == Kind::Cycle) {
-                assert_eq!(c.left, *c.path.iter().min().unwrap(), "从最小的事实起头");
+                assert_eq!(
+                    c.left,
+                    *c.path.iter().min().unwrap(),
+                    "start from the smallest fact"
+                );
                 assert_eq!((c.left, c.right), (c.path[0], *c.path.last().unwrap()));
                 for w in 0..c.path.len() {
                     let here = by_fact[&c.path[w]].edge;
                     let next = by_fact[&c.path[(w + 1) % c.path.len()]].edge;
-                    assert_eq!(here.object, next.subject, "路径要真的首尾相连: {c:?}");
+                    assert_eq!(
+                        here.object, next.subject,
+                        "the path must really connect head to tail: {c:?}"
+                    );
                 }
             }
 
@@ -1276,7 +1312,10 @@ mod tests {
         }
         // The differential test only counts if it really hits cycles: if random graphs almost never form a cycle, this test proves nothing
         eprintln!("{with_cycles} 张图有环，{filtered_by_time} 张图上时间筛掉过环");
-        assert!(with_cycles > 1000, "只有 {with_cycles} 张图有环，样本太稀");
+        assert!(
+            with_cycles > 1000,
+            "only {with_cycles} graphs have cycles, the sample is too sparse"
+        );
         assert!(
             filtered_by_time > 1000,
             "只有 {filtered_by_time} 张图上时间筛掉过环，剪枝没怎么走到"
@@ -1332,7 +1371,7 @@ mod tests {
             for x in v.iter().filter(|x| x.kind != Kind::Cycle) {
                 let mut sorted = x.path.clone();
                 sorted.sort();
-                assert_eq!(x.path, sorted, "组按 id 排序");
+                assert_eq!(x.path, sorted, "the group is sorted by id");
                 assert_eq!((x.left, x.right), (x.path[0], *x.path.last().unwrap()));
             }
             assert_eq!(
@@ -1341,7 +1380,10 @@ mod tests {
                 "打乱输入换了输出: {edges:?}"
             );
         }
-        assert!(seen.iter().all(|&n| n > 500), "有一类几乎没碰到: {seen:?}");
+        assert!(
+            seen.iter().all(|&n| n > 500),
+            "one kind is almost never hit: {seen:?}"
+        );
     }
 
     /// **Pruning cannot lose a real cycle.** Between the same pair of nodes there are two edges: one whose interval makes the path non-intersecting, and another
@@ -1386,7 +1428,10 @@ mod tests {
             at(1, 1, 2, Some(jun23), Some(feb24)),
             at(2, 1, 3, Some(feb24), None),
         ];
-        assert!(super::check(&raise, &functional).is_empty(), "首尾相接");
+        assert!(
+            super::check(&raise, &functional).is_empty(),
+            "head and tail connected"
+        );
 
         let overlap = [
             at(1, 1, 2, Some(jun23), Some(feb24 + 1)),

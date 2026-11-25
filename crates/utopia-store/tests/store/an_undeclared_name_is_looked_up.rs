@@ -88,16 +88,32 @@ async fn a_known_name_is_found_by_any_spelling_and_an_unknown_one_is_not() -> an
             let pool = pool.clone();
             async move { utopia_store::resolution::existing_by_name(&pool, f.kb, name).await }
         };
-        assert_eq!(find("Acme Corporation").await?, Some(f.acme), "原名");
-        assert_eq!(find("acme corporation").await?, Some(f.acme), "大小写不论");
-        assert_eq!(find("ACME").await?, Some(f.acme), "别名也算");
+        assert_eq!(
+            find("Acme Corporation").await?,
+            Some(f.acme),
+            "original name"
+        );
+        assert_eq!(
+            find("acme corporation").await?,
+            Some(f.acme),
+            "case-insensitive"
+        );
+        assert_eq!(find("ACME").await?, Some(f.acme), "aliases count too");
         assert_eq!(
             find("Acme").await?,
             Some(f.acme),
             "泛用后缀词干互推：Acme ↔ Acme Corporation"
         );
-        assert_eq!(find("Nova Labs").await?, None, "并掉的不算");
-        assert_eq!(find("lawsuit against Acme").await?, None, "描述不是实体");
+        assert_eq!(
+            find("Nova Labs").await?,
+            None,
+            "merged-away ones do not count"
+        );
+        assert_eq!(
+            find("lawsuit against Acme").await?,
+            None,
+            "a description is not an entity"
+        );
         let _ = f.merged;
         anyhow::Ok(())
     }

@@ -169,7 +169,7 @@ async fn an_end_date_closes_the_open_span() -> anyhow::Result<()> {
         0.9,
     )
     .await?;
-    assert!(created, "关上一段是一次改写，不是复用");
+    assert!(created, "closing a span is a rewrite, not a reuse");
     assert_ne!(closed, first);
 
     let live: Vec<LiveRow> = sqlx::query_as(
@@ -180,20 +180,39 @@ async fn an_end_date_closes_the_open_span() -> anyhow::Result<()> {
     .bind(works_at)
     .fetch_all(&pool)
     .await?;
-    assert_eq!(live.len(), 1, "只剩一条活着的：那一段，关上了");
+    assert_eq!(
+        live.len(),
+        1,
+        "only one live row remains: that span, now closed"
+    );
     let (id, from, to, supersedes) = live[0];
     assert_eq!(id, closed);
-    assert_eq!(from, Some(day("2020-01-10")), "起点照旧");
-    assert_eq!(to, Some(day("2024-04-30")), "终点是离任那天");
-    assert_eq!(supersedes, Some(first), "修正行链回旧行");
+    assert_eq!(from, Some(day("2020-01-10")), "start point unchanged");
+    assert_eq!(
+        to,
+        Some(day("2024-04-30")),
+        "the end is the day they left office"
+    );
+    assert_eq!(
+        supersedes,
+        Some(first),
+        "the correction row links back to the old row"
+    );
     let old_dead: bool =
         sqlx::query_scalar("SELECT invalidated_at IS NOT NULL FROM facts WHERE id = $1")
             .bind(first)
             .fetch_one(&pool)
             .await?;
-    assert!(old_dead, "旧行在认知轴上作废，不删");
+    assert!(
+        old_dead,
+        "the old row is voided on the epistemic axis, not deleted"
+    );
     let quals = utopia_store::graph::fact_qualifiers_for(&pool, &[closed]).await?;
-    assert_eq!(quals[&closed].len(), 1, "职务随修正行");
+    assert_eq!(
+        quals[&closed].len(),
+        1,
+        "the position follows the correction row"
+    );
     assert_eq!(quals[&closed][0].value, Some(value));
 
     // A third document states the same departure day: the same event, so reuse that row
@@ -221,7 +240,10 @@ async fn an_end_date_closes_the_open_span() -> anyhow::Result<()> {
         0.9,
     )
     .await?;
-    assert_eq!(mentioned, closed, "任期内的无日期提及并进关上的那一段");
+    assert_eq!(
+        mentioned, closed,
+        "undated mentions within the term are merged into the span that was closed"
+    );
     assert!(!created);
     // A mention with no date after the tenure: could be a re-appointment, so a separate row, left for a person to rule
     let (later, created) = utopia_store::graph::insert_fact(
@@ -337,7 +359,11 @@ async fn a_span_told_in_two_halves_is_one_row() -> anyhow::Result<()> {
     .await?;
     assert!(created);
     let rows = live(&pool, kb, listed, a).await?;
-    assert_eq!(rows.len(), 1, "同起点带终点：关上原来那行");
+    assert_eq!(
+        rows.len(),
+        1,
+        "same start with an end: close the original row"
+    );
     assert_eq!(rows[0].0, closed);
     assert_eq!(rows[0].2, Some(day("2025-03-12")));
     assert_eq!(rows[0].3, Some(first));
@@ -365,10 +391,22 @@ async fn a_span_told_in_two_halves_is_one_row() -> anyhow::Result<()> {
     .await?;
     assert!(created);
     let rows = live(&pool, kb, listed, b).await?;
-    assert_eq!(rows.len(), 1, "起点后到：并进只知道终点的那行");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the start arrived later: merge into the row that only knows the end"
+    );
     assert_eq!(rows[0].0, merged);
-    assert_eq!(rows[0].1, Some(day("2024-11-05")), "起点是后到的");
-    assert_eq!(rows[0].2, Some(day("2025-03-12")), "终点沿用先到的");
+    assert_eq!(
+        rows[0].1,
+        Some(day("2024-11-05")),
+        "the start arrived later"
+    );
+    assert_eq!(
+        rows[0].2,
+        Some(day("2025-03-12")),
+        "the end keeps the one that arrived first"
+    );
     assert_eq!(rows[0].3, Some(end_only));
 
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")

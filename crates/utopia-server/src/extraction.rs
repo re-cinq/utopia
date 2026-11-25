@@ -87,7 +87,7 @@ pub(crate) async fn chat_retrying_rate_limits_at(
         tokio::time::sleep(delay).await;
         backoff = (backoff * 2).min(RATE_LIMIT_CAP);
     }
-    unreachable!("循环内必定 return")
+    unreachable!("loop always returns")
 }
 
 /// Facts the model derives from a chart description get their confidence pushed down to here (0040 decision 4): below the review's low-confidence threshold, so
@@ -448,11 +448,16 @@ mod tests {
     /// and all six **showed "extraction complete"**, with 80% of the content never reaching the graph, and nothing on screen said so.
     #[test]
     fn a_document_with_a_skipped_chunk_is_not_complete() {
-        assert_eq!(incomplete_reason(&[], 23), None, "全抽完才算完成");
+        assert_eq!(
+            incomplete_reason(&[], 23),
+            None,
+            "only complete once everything is extracted"
+        );
         let one = [(7, "request failed: timeout".to_string())];
-        let msg = incomplete_reason(&one, 23).expect("有块没抽成就不该算完成");
-        assert!(msg.contains("23"), "分母要说出来：{msg}");
-        assert!(msg.contains("#7"), "得指得出是哪一块：{msg}");
+        let msg = incomplete_reason(&one, 23)
+            .expect("must not count as complete if a chunk failed to extract");
+        assert!(msg.contains("23"), "the denominator must be stated: {msg}");
+        assert!(msg.contains("#7"), "must identify which chunk: {msg}");
     }
 
     /// The cause is often the same (if the vendor is unreachable, every chunk fails); naming three is enough,
@@ -461,9 +466,16 @@ mod tests {
     fn many_failures_are_summarised_without_hiding_the_count() {
         let many: Vec<(i32, String)> = (1..=20).map(|i| (i, "request failed".into())).collect();
         let msg = incomplete_reason(&many, 60).unwrap();
-        assert!(msg.contains("20"), "总数要在：{msg}");
-        assert!(msg.contains("; 17 more"), "省略掉的数量要说出来：{msg}");
-        assert_eq!(msg.matches("request failed").count(), 3, "只举三个");
+        assert!(msg.contains("20"), "the total must be present: {msg}");
+        assert!(
+            msg.contains("; 17 more"),
+            "the omitted count must be stated: {msg}"
+        );
+        assert_eq!(
+            msg.matches("request failed").count(),
+            3,
+            "only three examples given"
+        );
     }
 
     /// On retry, `chunks_for_extraction` takes only the chunks not yet extracted, so the denominator is **this round's** count,
@@ -785,8 +797,8 @@ mod tests {
             )
             .await?;
 
-            assert_ne!(c, a, "画像并列不该 attach 到 A——那是候选顺序掷出的硬币");
-            assert_ne!(c, b, "画像并列不该 attach 到 B——那是候选顺序掷出的硬币");
+            assert_ne!(c, a, "a profile tie must not attach to A, since that is a coin toss decided by candidate order");
+            assert_ne!(c, b, "a profile tie must not attach to B, since that is a coin toss decided by candidate order");
             assert!(
                 !needs_adjudication,
                 "同名并列只能等人裁，绝不该唤醒 LLM 裁决器"
@@ -800,7 +812,7 @@ mod tests {
                 0,
             )
             .await?;
-            assert_eq!(reviews.len(), 2, "对 A、对 B 各一条审核对");
+            assert_eq!(reviews.len(), 2, "one review pair each for A and for B");
             assert!(
                 reviews.iter().all(|review| review.stage == "human"),
                 "同名并列的审核对必须是人工阶段"

@@ -524,14 +524,14 @@ async fn shortlist(
             match client.embed(&batch_texts).await {
                 Ok(v) if v.len() == batch.len() => v,
                 Ok(v) => {
-                    tracing::warn!(%kb_id, sent = batch.len(), got = v.len(), "签名向量数量对不上，这一批不开短名单");
+                    tracing::warn!(%kb_id, sent = batch.len(), got = v.len(), "signature vector count mismatch, this batch does not open a shortlist");
                     continue;
                 }
                 // Running out of credit is not this batch's concern: skip it; every later batch and the next alignment hit the same 429, and the task
                 // still finishes done, no alert fires, and another is queued straight away (#1360). Carry it out with its type, so `alerting::hopeless` can see it
                 Err(e) if utopia_llm::out_of_credit(&e).is_some() => return Err(e),
                 Err(e) => {
-                    tracing::warn!(%kb_id, error = %e, "签名向量没算出来，这一批不开短名单");
+                    tracing::warn!(%kb_id, error = %e, "signature vectors were not computed, this batch does not open a shortlist");
                     continue;
                 }
             }
@@ -634,7 +634,7 @@ async fn shortlist_kind_words(
                 // Same as `shortlist`: running out of credit stops the whole round
                 Err(e) if utopia_llm::out_of_credit(&e).is_some() => return Err(e),
                 Ok(_) | Err(_) => {
-                    tracing::warn!(%kb_id, "类别词向量没算出来，这一批看全部候选");
+                    tracing::warn!(%kb_id, "category word vectors were not computed, this batch considers all candidates");
                     continue;
                 }
             }
@@ -721,7 +721,7 @@ pub async fn align_phrases_reasking(
         None
     };
     if let Some(what) = waiting_on {
-        tracing::info!(%kb_id, "短语对齐：{what}还没收尾，半分钟后再看");
+        tracing::info!(%kb_id, "phrase alignment: {what} not finished yet, checking again in half a minute");
         let payload = if reask == 0 {
             serde_json::json!({ "kb_id": kb_id })
         } else {
@@ -746,7 +746,7 @@ pub async fn align_phrases_reasking(
     if !locked {
         // A run in progress checks by itself at the end whether anything new has arrived (see the end of align_phrases_locked); here
         // it does not queue: queuing back would make it and the running one kick each other into a deadlock loop
-        tracing::info!(%kb_id, "短语对齐已有一份在跑，这次跳过");
+        tracing::info!(%kb_id, "phrase alignment already has a run in progress, skipping this one");
         return Ok(());
     }
     let result = align_phrases_locked(state, kb_id, reask, &settings, &client).await;
@@ -832,7 +832,7 @@ async fn align_phrases_locked(
             .then_some((s.key(), b))
         })
         .collect();
-    tracing::info!(%kb_id, signatures = sigs.len(), to_decide = todo.len(), properties = props.len(), "短语对齐开始");
+    tracing::info!(%kb_id, signatures = sigs.len(), to_decide = todo.len(), properties = props.len(), "phrase alignment started");
 
     // No attribute to bind to: each is "none"; once an attribute appears the fingerprint changes, and they will be handed back
     if props.is_empty() {
@@ -997,7 +997,7 @@ async fn align_phrases_locked(
                     // and it is not recorded as failed, since recording it would only queue another copy that hits the same 429 (#1360)
                     Err(e) if utopia_llm::out_of_credit(&e).is_some() => return Err(e),
                     Err(e) => {
-                        tracing::warn!(%kb_id, error = %e, "短语对齐调用失败，这一批留到下次");
+                        tracing::warn!(%kb_id, error = %e, "phrase alignment call failed, this batch is deferred to next time");
                         failed += 1;
                         continue;
                     }
@@ -1005,7 +1005,7 @@ async fn align_phrases_locked(
             let (choices, malformed) = match parse_phrase_response(&reply.text, &items) {
                 Ok(x) => x,
                 Err(e) => {
-                    tracing::warn!(%kb_id, error = %e, "短语对齐回复解析失败，这一批留到下次");
+                    tracing::warn!(%kb_id, error = %e, "phrase alignment reply failed to parse, this batch is deferred to next time");
                     failed += 1;
                     continue;
                 }
@@ -1034,7 +1034,7 @@ async fn align_phrases_locked(
             replied += 1;
             if malformed > 0 {
                 // What a bad vote looks like has to be visible: on the first real run half the signatures were judged bad votes, and it took a day to learn the model was answering with the label
-                tracing::info!(%kb_id, malformed, reply = %snippet(&reply.text), "短语对齐的回复里有坏票");
+                tracing::info!(%kb_id, malformed, reply = %snippet(&reply.text), "phrase alignment reply contains bad votes");
             }
             for c in choices {
                 let Ok(i) = usize::try_from(c.id) else {
@@ -1327,9 +1327,9 @@ async fn align_phrases_locked(
             }
         }
     }
-    tracing::info!(%kb_id, bound, none, undecided, skipped, failed, unanswered, marked, unsettled, "短语对齐完成");
+    tracing::info!(%kb_id, bound, none, undecided, skipped, failed, unanswered, marked, unsettled, "phrase alignment finished");
     if unanswered > 0 {
-        tracing::warn!(%kb_id, unanswered, "短语对齐有签名模型没答到，这些签名这轮没有结论");
+        tracing::warn!(%kb_id, unanswered, "phrase alignment: some signature models gave no answer, these signatures have no conclusion this round");
     }
     // Rule proposal (0044 decision 3, fifth slice): for the signatures judged this round, and things with category words, ask the model "what else does this shape
     // entail?". Only those judged this round are asked: shapes whose fingerprint is unchanged were already asked last round, and the answer (a proposal or the agent's rejection)
@@ -1427,18 +1427,20 @@ async fn align_phrases_locked(
             .await
             {
                 Ok((proposed, rule_failed)) => {
-                    tracing::info!(%kb_id, asked = asks.len(), proposed, failed = rule_failed, "提规则完成");
+                    tracing::info!(%kb_id, asked = asks.len(), proposed, failed = rule_failed, "rule extraction finished");
                     if proposed > 0 {
                         state.emit_review(kb_id);
                     }
                 }
-                Err(e) => tracing::warn!(%kb_id, error = %e, "提规则失败，下一轮再提"),
+                Err(e) => {
+                    tracing::warn!(%kb_id, error = %e, "rule extraction failed, will retry next round")
+                }
             }
         }
     }
     // Once the binding is settled, the view follows: signatures' statements that are bound become typed rows, and rows whose binding changed are voided (0067)
     let typed = utopia_store::materialize::materialize(pool, kb_id).await?;
-    tracing::info!(%kb_id, added = typed.added, merged = typed.merged, retired = typed.retired, "类型化事实按绑定算完");
+    tracing::info!(%kb_id, added = typed.added, merged = typed.merged, retired = typed.retired, "typed facts computed per binding");
     if typed.added > 0 || typed.merged > 0 || typed.retired > 0 {
         state.emit_graph(kb_id);
     }
@@ -1487,7 +1489,7 @@ async fn align_phrases_locked(
         .await?;
     } else if unfinished && reask < MAX_REASK {
         let delay = std::time::Duration::from_secs(20 * u64::from(reask + 1));
-        tracing::info!(%kb_id, failed, unanswered, reask = reask + 1, delay_secs = delay.as_secs(), "短语对齐没判完，稍后再问");
+        tracing::info!(%kb_id, failed, unanswered, reask = reask + 1, delay_secs = delay.as_secs(), "phrase alignment not decided yet, will ask again later");
         utopia_store::jobs::enqueue_unless_pending(
             pool,
             "align_phrases",
@@ -1496,7 +1498,7 @@ async fn align_phrases_locked(
         )
         .await?;
     } else if unfinished {
-        tracing::warn!(%kb_id, failed, unanswered, reask, "短语对齐问了几轮仍没判完，等下一篇文档或本体改动再问");
+        tracing::warn!(%kb_id, failed, unanswered, reask, "phrase alignment asked several rounds without deciding, will ask again after the next document or ontology change");
     }
     Ok(())
 }
@@ -1630,7 +1632,10 @@ mod tests {
         let ok = |p: &RelationTypeView, s: &PhraseSignature| fits(p, s, &Closure::new()).is_some();
         let hq = view("relation", vec![org], vec![place]);
         assert!(ok(&hq, &sig(Some(org), Some(place), false)));
-        assert!(ok(&hq, &sig(Some(place), Some(org), false)), "反向也算");
+        assert!(
+            ok(&hq, &sig(Some(place), Some(org), false)),
+            "reverse direction also counts"
+        );
         assert!(!ok(&hq, &sig(Some(person), Some(place), false)));
         assert!(
             !ok(&hq, &sig(None, Some(place), false)),
@@ -1641,7 +1646,10 @@ mod tests {
             ok(&any_to_place, &sig(None, Some(place), false)),
             "没声明的一端接受没绑到类的"
         );
-        assert!(!ok(&hq, &sig(Some(org), None, true)), "关系不接字面值");
+        assert!(
+            !ok(&hq, &sig(Some(org), None, true)),
+            "relation does not take literal values"
+        );
         let open = view("relation", vec![], vec![]);
         assert!(
             ok(&open, &sig(Some(person), Some(person), false)),

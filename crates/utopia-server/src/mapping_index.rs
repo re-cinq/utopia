@@ -56,7 +56,7 @@ pub async fn refresh(state: &AppState, kb_id: Uuid, workspace_id: Uuid) -> anyho
         return Ok(0);
     }
     if stale.len() >= REFRESH_PER_TURN {
-        tracing::info!(%kb_id, "口径向量这一问只补一部分，剩下的下一问接着补");
+        tracing::info!(%kb_id, "the caliber vector question only filled part of the gaps, the next question will fill the rest");
     }
     let mut done = 0usize;
     for batch in stale.chunks(BATCH) {
@@ -77,7 +77,7 @@ pub async fn refresh(state: &AppState, kb_id: Uuid, workspace_id: Uuid) -> anyho
         utopia_store::mappings::set_embeddings(&state.pool, model, &items).await?;
         done += items.len();
     }
-    tracing::info!(%kb_id, embedded = done, "口径向量已补齐");
+    tracing::info!(%kb_id, embedded = done, "caliber vectors are fully filled in");
     Ok(done)
 }
 
@@ -96,7 +96,7 @@ pub async fn relevant(
     }
     if let Err(e) = refresh(state, kb_id, workspace_id).await {
         // If they cannot be filled, use the existing vectors and lexical matching, so that one failed embedding does not sink the question
-        tracing::warn!(%kb_id, error = %e, "口径向量没补上，按已有的检索");
+        tracing::warn!(%kb_id, error = %e, "caliber vectors were not filled in, searching with what exists");
     }
 
     let texts = utopia_store::mappings::confirmed_texts(&state.pool, kb_id).await?;
@@ -105,14 +105,21 @@ pub async fn relevant(
         .map(|id| id.to_string())
         .collect();
 
-    let vector: Option<Vec<String>> =
-        match vector_channel(state, kb_id, workspace_id, query, embeddings).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(%kb_id, error = %e, "口径向量检索失败，只用词面");
-                None
-            }
-        };
+    let vector: Option<Vec<String>> = match vector_channel(
+        state,
+        kb_id,
+        workspace_id,
+        query,
+        embeddings,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(%kb_id, error = %e, "caliber vector search failed, using lexical match only");
+            None
+        }
+    };
 
     let mut lists = vec![lexical];
     if let Some(v) = vector {
@@ -287,7 +294,10 @@ mod tests {
             got.contains(&Uuid::from_u128(3)),
             "客单价的说明里也有「净销售额」"
         );
-        assert!(!got.contains(&Uuid::from_u128(4)), "运费一个词都不沾");
+        assert!(
+            !got.contains(&Uuid::from_u128(4)),
+            "shipping fee shares no term at all"
+        );
         // No word matches at all: empty, so the caller falls back to dictionary order
         assert!(lexical_rank("zzz", &texts, 8).is_empty());
     }

@@ -19,7 +19,7 @@ const ARTICLES: &[(&str, &str, &str)] = &[
 
 /// The index is built at startup; the corpus is a compile-time constant, so a failure is a program error: die loudly.
 pub fn build_index() -> DocsIndex {
-    DocsIndex::build(&sections()).expect("Charter 文档索引构建失败")
+    DocsIndex::build(&sections()).expect("failed to build Charter document index")
 }
 
 /// Splits by h2 sections: one index record per section, and a hit returns the specific section rather than the whole article.
@@ -100,7 +100,10 @@ mod tests {
     #[test]
     fn ingest_splits_into_sections() {
         let secs = sections();
-        assert!(secs.len() >= 4, "ingest.md 应切出引言 + 3 个以上小节");
+        assert!(
+            secs.len() >= 4,
+            "ingest.md should split into an intro plus 3 or more sections"
+        );
         assert!(secs.iter().any(|s| s.anchor == "shared-semantics"));
         // Intro section: empty anchor, heading uses the article title
         assert!(secs

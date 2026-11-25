@@ -132,7 +132,10 @@ mod tests {
             jail.set_env("UTOPIA_DATABASE_URL", "postgres://u:p@db:5432/utopia");
             jail.set_env("UTOPIA_MIGRATION_URL", "");
             let cfg = AppConfig::load().unwrap();
-            assert_eq!(cfg.migration_url, None, "空串要当作没设");
+            assert_eq!(
+                cfg.migration_url, None,
+                "empty string should be treated as unset"
+            );
             assert_eq!(cfg.migration_url(), cfg.database_url);
             Ok(())
         });

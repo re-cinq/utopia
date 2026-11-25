@@ -99,18 +99,30 @@ async fn a_retrieved_leaf_brings_its_ancestors() -> anyhow::Result<()> {
         let anc = utopia_store::ontology::ancestors_of(&pool, &leaves).await?;
 
         for k in ["audience", "thing", "organization"] {
-            assert!(anc.contains(&id(k)), "祖先里少了 {k}——地板没补上");
+            assert!(
+                anc.contains(&id(k)),
+                "{k} is missing from the ancestors, the floor was not filled in"
+            );
         }
         // An entity is not its own ancestor: the caller merges the two, and a duplicate would be just noise
         for k in ["researcher", "corporation"] {
-            assert!(!anc.contains(&id(k)), "{k} 是它自己，不该出现在祖先里");
+            assert!(
+                !anc.contains(&id(k)),
+                "{k} is itself and must not appear among its ancestors"
+            );
         }
 
         // **Diamond de-duplication**: agent reaches thing by two paths, but thing should appear only once
         let anc2 = utopia_store::ontology::ancestors_of(&pool, &[id("agent")]).await?;
         let things = anc2.iter().filter(|x| **x == id("thing")).count();
-        assert_eq!(things, 1, "菱形继承把 thing 展开了 {things} 次");
-        assert!(anc2.contains(&id("organization")), "多继承的另一条腿丢了");
+        assert_eq!(
+            things, 1,
+            "diamond inheritance expanded thing {things} times"
+        );
+        assert!(
+            anc2.contains(&id("organization")),
+            "the other leg of multiple inheritance was lost"
+        );
 
         // Empty input should not blow up, nor scan the whole table
         assert!(utopia_store::ontology::ancestors_of(&pool, &[])

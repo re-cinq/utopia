@@ -795,7 +795,7 @@ mod tests {
         let marker = "\"n\": [[\"Nebula Technologies Inc.\", \"Starl";
         let cut = FULL.find(marker).unwrap() + marker.len();
         let x = parse_open_response(&FULL[..cut]).unwrap();
-        assert!(x.truncated, "截断要标出来");
+        assert!(x.truncated, "truncation must be flagged");
         assert_eq!(x.entities.len(), 4);
         assert_eq!(x.statements.len(), 3);
         assert_eq!(x.statements[2].quote.as_deref(), Some(AWARD));
@@ -828,7 +828,10 @@ mod tests {
 "t": []}
 ```"#;
         let x = parse_open_response(raw).unwrap();
-        assert!(x.truncated, "读是读出来了，回复不合法要标出来");
+        assert!(
+            x.truncated,
+            "the read succeeded, but an invalid reply must be flagged"
+        );
         assert_eq!(x.entities.len(), 3);
         assert_eq!(
             x.statements
@@ -1244,8 +1247,8 @@ mod tests {
             assert!(!s.contains("Entity types"), "{s}");
             assert!(!s.contains("Relation types"), "{s}");
             assert!(!s.contains("Attributes ("), "{s}");
-            assert!(!s.contains("\"q\""), "没有引文表: {s}");
-            assert!(!s.contains("k1"), "句柄不给模型看: {s}");
+            assert!(!s.contains("\"q\""), "no citation table: {s}");
+            assert!(!s.contains("k1"), "handles are not shown to the model: {s}");
         }
         assert!(system.contains("Never compute, convert or normalise a date"));
         // 0064: dates the document itself states are reported by this block (`t`); time words go only into when / ended;
@@ -1268,7 +1271,10 @@ mod tests {
         assert!(user.contains("Annual Report 2019"));
         let recorded = user.find("Already recorded from earlier parts").unwrap();
         assert!(user.contains("\n- Nebula Technologies Inc. (organization)\n"));
-        assert!(user.contains("\n- Harbor Estates\n"), "空类型不留括号");
+        assert!(
+            user.contains("\n- Harbor Estates\n"),
+            "an empty type leaves no parentheses"
+        );
         assert!(user.contains("write its name exactly as it is listed here"));
         let passage = user
             .find("Passage:\nNebula leased the northern wing.")

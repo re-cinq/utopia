@@ -72,7 +72,7 @@ impl SearchIndex {
         let analyzer = index
             .tokenizers()
             .get(JIEBA)
-            .context("jieba tokenizer 未注册")?;
+            .context("jieba tokenizer is not registered")?;
 
         Ok(Self {
             writer: Mutex::new(writer),
@@ -92,7 +92,7 @@ impl SearchIndex {
         document_id: &str,
         chunks: &[(String, String)],
     ) -> anyhow::Result<()> {
-        let mut writer = self.writer.lock().expect("writer 锁中毒");
+        let mut writer = self.writer.lock().expect("writer lock is poisoned");
         writer.delete_term(Term::from_field_text(self.f_document_id, document_id));
         for (chunk_id, text) in chunks {
             let mut doc = TantivyDocument::default();
@@ -111,7 +111,7 @@ impl SearchIndex {
     /// Discard an incomplete rebuild while retaining the index's writer lock.
     /// Removing its directory first could erase another process's live index.
     pub fn clear(&self) -> anyhow::Result<()> {
-        let mut writer = self.writer.lock().expect("writer 锁中毒");
+        let mut writer = self.writer.lock().expect("writer lock is poisoned");
         writer.delete_all_documents()?;
         writer.commit()?;
         self.reader.reload()?;
@@ -119,7 +119,7 @@ impl SearchIndex {
     }
 
     pub fn delete_document(&self, document_id: &str) -> anyhow::Result<()> {
-        let mut writer = self.writer.lock().expect("writer 锁中毒");
+        let mut writer = self.writer.lock().expect("writer lock is poisoned");
         writer.delete_term(Term::from_field_text(self.f_document_id, document_id));
         writer.commit()?;
         self.reader.reload()?;

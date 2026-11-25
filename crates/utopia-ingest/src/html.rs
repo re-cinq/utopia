@@ -13,8 +13,14 @@ mod table_tests {
             .lines()
             .find(|l| l.contains("96,221"))
             .expect("the numbers survive");
-        assert!(row.contains("81,615"), "同一行的两个数应当在一行里: {md}");
-        assert!(row.contains("total"), "行标签应当与它的数在一行: {md}");
+        assert!(
+            row.contains("81,615"),
+            "the two numbers on the same row should be on one row: {md}"
+        );
+        assert!(
+            row.contains("total"),
+            "row label should be on the same row as its numbers: {md}"
+        );
     }
 
     #[test]
@@ -26,8 +32,14 @@ mod table_tests {
             .lines()
             .find(|l| l.contains("96,221"))
             .expect("row survives");
-        assert!(!row.contains("|  |"), "空列应当被砍掉: {row}");
-        assert!(row.contains("Revenue"), "有内容的列一个不能少: {row}");
+        assert!(
+            !row.contains("|  |"),
+            "empty column should be dropped: {row}"
+        );
+        assert!(
+            row.contains("Revenue"),
+            "a column with content must not be lost: {row}"
+        );
     }
 
     #[test]
@@ -36,15 +48,21 @@ mod table_tests {
             "|  |  |\n| --- | --- |\n| a. Tench Coxe |  |\n| shares For | 15,411 |",
         );
         let first = md.lines().next().expect("a line");
-        assert!(first.contains("Tench Coxe"), "表头该是真正的抬头: {md}");
-        assert!(md.contains("15,411"), "行不能丢: {md}");
+        assert!(
+            first.contains("Tench Coxe"),
+            "the header should be the real column heading: {md}"
+        );
+        assert!(md.contains("15,411"), "rows must not be lost: {md}");
     }
 
     #[test]
     fn a_column_with_any_content_is_kept() {
         let md = super::prune_empty_table_columns("| a |  | c |\n| --- | --- | --- |\n|  | b |  |");
         assert!(md.contains("| a |  | c |") || md.contains("a"), "{md}");
-        assert!(md.contains("b"), "有内容的列不能砍: {md}");
+        assert!(
+            md.contains("b"),
+            "a column with content must not be dropped: {md}"
+        );
     }
 
     /// The page title "Pricing" also appears in the table name "Pricing tiers": that is the table's name, not a heading in the body text

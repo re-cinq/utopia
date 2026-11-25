@@ -48,7 +48,7 @@ pub async fn review(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
     let pool = &state.pool;
     let due = errata::documents_due(pool, kb_id, DOCS_PER_JOB).await?;
     if due.is_empty() {
-        tracing::info!(%kb_id, "没有待勘误的文档");
+        tracing::info!(%kb_id, "no documents pending errata");
         return Ok(());
     }
     let kb = utopia_store::kbs::get(pool, kb_id).await?;
@@ -89,7 +89,7 @@ pub async fn review(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
                 held += o.held;
             }
             Err(e) => {
-                tracing::warn!(%kb_id, %document_id, error = %e, "这份文档的勘误没跑完，任务重试时再来");
+                tracing::warn!(%kb_id, %document_id, error = %e, "errata for this document did not finish, the task will come back on retry");
                 failed += 1;
             }
         }

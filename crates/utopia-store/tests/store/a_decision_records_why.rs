@@ -156,7 +156,7 @@ async fn a_decision_keeps_its_reason_and_the_precedent_carries_it() -> anyhow::R
     )
     .await?;
     let p = utopia_store::governance::precedents_for(&pool, f.kb, &item(&f)).await?;
-    assert_eq!(p.same_pair.len(), 1, "同对先例一条");
+    assert_eq!(p.same_pair.len(), 1, "one precedent for the same pair");
     assert_eq!(
         p.same_pair[0].why.as_deref(),
         Some("Acme Corp is the parent company; Acme is the product line"),
@@ -214,7 +214,7 @@ async fn a_decision_keeps_its_reason_and_the_precedent_carries_it() -> anyhow::R
             .bind(review2)
             .fetch_one(&pool)
             .await?;
-    assert!(blank.is_none(), "只有空格等于没写");
+    assert!(blank.is_none(), "whitespace only counts as not written");
 
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(f.kb)
@@ -228,6 +228,6 @@ async fn a_decision_keeps_its_reason_and_the_precedent_carries_it() -> anyhow::R
         .bind(f.org)
         .execute(&pool)
         .await?;
-    assert_eq!(gone.rows_affected(), 1, "一次性 org 没删掉");
+    assert_eq!(gone.rows_affected(), 1, "one-off org was not deleted");
     Ok(())
 }

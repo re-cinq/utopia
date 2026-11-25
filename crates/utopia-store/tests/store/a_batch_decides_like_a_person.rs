@@ -154,19 +154,19 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
     };
     let all =
         ids(utopia_store::resolution::list_reviews(pool, s.kb, TypeFilter::Any, 100, 0).await?);
-    assert_eq!(all.len(), 4, "全部四对都在等");
+    assert_eq!(all.len(), 4, "all four pairs are still waiting");
     let mut same =
         ids(utopia_store::resolution::list_reviews(pool, s.kb, TypeFilter::Same, 100, 0).await?);
     let mut want_same = vec![s.same_a, s.same_b];
     same.sort();
     want_same.sort();
-    assert_eq!(same, want_same, "同类：两对同名 Person");
+    assert_eq!(same, want_same, "same kind: two same-named Person pairs");
     let conflict =
         ids(
             utopia_store::resolution::list_reviews(pool, s.kb, TypeFilter::Conflict, 100, 0)
                 .await?,
         );
-    assert_eq!(conflict, vec![s.conflict], "冲突：Organization 对 Person");
+    assert_eq!(conflict, vec![s.conflict], "clash: Organization vs Person");
     assert!(
         !same.contains(&s.untyped) && !conflict.contains(&s.untyped),
         "一侧没类型的哪档都不进"
@@ -202,14 +202,20 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
         None,
     )
     .await?;
-    assert_eq!(outcomes.len(), 3, "每个 id 一条结果，顺序照旧");
+    assert_eq!(outcomes.len(), 3, "one result per id, order unchanged");
     assert!(
         outcomes[0].error.is_none(),
         "第一对合了: {:?}",
         outcomes[0].error
     );
-    assert!(outcomes[1].error.is_some(), "不存在的那条报出来");
-    assert!(outcomes[2].error.is_none(), "第三对不受第二条拖累");
+    assert!(
+        outcomes[1].error.is_some(),
+        "the nonexistent one is reported"
+    );
+    assert!(
+        outcomes[2].error.is_none(),
+        "the third pair is not dragged down by the second"
+    );
 
     let (status, decided_by): (String, Option<Uuid>) =
         sqlx::query_as("SELECT status, decided_by FROM resolution_reviews WHERE id = $1")
@@ -217,14 +223,18 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
             .fetch_one(pool)
             .await?;
     assert_eq!(status, "merged");
-    assert_eq!(decided_by, Some(user), "记的是这个人，与单条裁决一样");
+    assert_eq!(
+        decided_by,
+        Some(user),
+        "records the person, same as a single decision"
+    );
     let merged: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM entities WHERE id = ANY($1) AND merged_into IS NOT NULL",
     )
     .bind(vec![s.pair_a.0, s.pair_a.1])
     .fetch_one(pool)
     .await?;
-    assert_eq!(merged, 1, "一对里恰好一个被并进另一个");
+    assert_eq!(merged, 1, "exactly one of a pair is merged into the other");
 
     // Deciding again something already decided: error, no duplicate merge
     let again =
@@ -238,7 +248,7 @@ async fn run(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
             .await?;
     assert!(kept[0].error.is_none());
     let counts = utopia_store::review::counts(pool, s.kb).await?;
-    assert_eq!(counts.duplicates, 1, "只剩没类型的那对");
+    assert_eq!(counts.duplicates, 1, "only the untyped pair is left");
     assert_eq!(counts.duplicates_same_type, 0);
     assert_eq!(counts.duplicates_type_conflict, 0);
     Ok(())

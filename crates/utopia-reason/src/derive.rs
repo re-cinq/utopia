@@ -865,7 +865,7 @@ mod tests {
             .facts
             .iter()
             .find(|x| x.subject == n(4) && x.object == n(3))
-            .expect("4→3 应由 4→1→2→3 推出");
+            .expect("4 to 3 should be derived from 4 to 1 to 2 to 3");
         assert_eq!(
             to3.premises,
             vec![f(3), f(1), f(2)],
@@ -887,7 +887,10 @@ mod tests {
         // 1→2 and 2→3 already derive 1→3, and 1→3 was also asserted → not derived again
         let edges = [e(1, 1, 2), e(2, 2, 3), e(3, 1, 3)];
         let d = derive(&edges, &transitive());
-        assert!(d.facts.is_empty(), "断言过的三元组不该再派生一份");
+        assert!(
+            d.facts.is_empty(),
+            "asserted triples must not be derived again"
+        );
     }
 
     #[test]
@@ -966,7 +969,10 @@ mod tests {
             longest <= MAX_DEPTH,
             "证明长度不该超过深度上限，实际 {longest}"
         );
-        assert!(!d.facts.is_empty(), "有上限不等于什么都不推");
+        assert!(
+            !d.facts.is_empty(),
+            "having a limit does not mean derive nothing"
+        );
     }
 
     fn edges_with_shortcuts() -> Vec<TimedEdge> {
@@ -1005,11 +1011,15 @@ mod tests {
             .facts
             .iter()
             .find(|x| x.subject == n(11) && x.object == n(20))
-            .expect("12 条前提能走完的链不能被先到的长证明挡住");
+            .expect("a 12-premise chain must not be blocked by an earlier long proof");
         assert_eq!(chain.premises.len(), MAX_DEPTH);
         assert!(d.facts.iter().all(|x| x.premises.len() <= MAX_DEPTH));
         let distinct: HashSet<_> = d.facts.iter().map(|x| (x.subject, x.object)).collect();
-        assert_eq!(distinct.len(), d.facts.len(), "短证明不再物化同一段事实");
+        assert_eq!(
+            distinct.len(),
+            d.facts.len(),
+            "a short proof no longer materializes the same facts"
+        );
         assert!(d.capped.is_empty());
     }
 
@@ -1051,8 +1061,14 @@ mod tests {
         let edges = [e(1, 1, 2), e(2, 3, 2)];
         let d = derive(&edges, &both);
         let got = pairs(&d);
-        assert!(got.contains(&(2, 1)) && got.contains(&(2, 3)), "两条对称边");
-        assert!(got.contains(&(1, 3)), "对称推出来的边要能继续参与传递");
+        assert!(
+            got.contains(&(2, 1)) && got.contains(&(2, 3)),
+            "two symmetric edges"
+        );
+        assert!(
+            got.contains(&(1, 3)),
+            "an edge derived by symmetry must still take part in transitivity"
+        );
     }
 
     #[test]
@@ -1062,7 +1078,7 @@ mod tests {
         other.edge.predicate = n(98);
         let edges = [e(1, 1, 2), other];
         let d = derive(&edges, &transitive());
-        assert!(d.facts.is_empty(), "1 →(99) 2 →(98) 3 推不出任何东西");
+        assert!(d.facts.is_empty(), "1 (99) 2 (98) 3 derives nothing");
     }
 
     // ---- The two cross-predicate rules (inverseOf / subPropertyOf) ----
@@ -1130,13 +1146,17 @@ mod tests {
     #[test]
     fn the_inverse_swaps_the_ends_and_the_predicate() {
         let d = derive(&[ep(P, 1, 1, 2)], &inverse_pair());
-        assert_eq!(d.facts.len(), 1, "一条边只推出一条逆");
+        assert_eq!(d.facts.len(), 1, "an edge derives only one inverse");
         let got = &d.facts[0];
-        assert_eq!(got.predicate, Q, "**谓词换了**");
-        assert_eq!((got.subject, got.object), (n(2), n(1)), "**主宾也对调了**");
+        assert_eq!(got.predicate, Q, "**predicate changed**");
+        assert_eq!(
+            (got.subject, got.object),
+            (n(2), n(1)),
+            "**subject and object also swapped**"
+        );
         assert_eq!(got.rule, Rule::Inverse);
-        assert_eq!(got.via, P, "声明写在 P 上，产出落在 Q 上");
-        assert_eq!(got.premises, vec![f(1)], "证明就是那一条原边");
+        assert_eq!(got.via, P, "declared on P, the output lands on Q");
+        assert_eq!(got.premises, vec![f(1)], "the proof is that original edge");
     }
 
     /// `p⁻¹ = q` and `q⁻¹ = p` — mutual reference. The one inferred back has already been asserted,
@@ -1156,8 +1176,12 @@ mod tests {
         let d = derive(&[ep(P, 1, 1, 2)], &sub_property());
         assert_eq!(d.facts.len(), 1);
         let got = &d.facts[0];
-        assert_eq!(got.predicate, Q, "升到父属性");
-        assert_eq!((got.subject, got.object), (n(1), n(2)), "主宾不动");
+        assert_eq!(got.predicate, Q, "raised to the parent property");
+        assert_eq!(
+            (got.subject, got.object),
+            (n(1), n(2)),
+            "subject and object unchanged"
+        );
         assert_eq!(got.rule, Rule::SubProperty);
         assert_eq!(
             got.via, P,
@@ -1175,7 +1199,10 @@ mod tests {
         let d = derive(&[e(1, 1, 2), e(2, 2, 3)], &transitive());
         assert!(!d.facts.is_empty());
         for f in &d.facts {
-            assert_eq!(f.via, f.predicate, "传递不换谓词");
+            assert_eq!(
+                f.via, f.predicate,
+                "transitivity does not change the predicate"
+            );
         }
     }
 
@@ -1211,7 +1238,7 @@ mod tests {
             .map(|x| (x.predicate, x.subject.as_bytes()[0], x.object.as_bytes()[0]))
             .collect();
         got.sort();
-        assert!(got.contains(&(Q, 1, 2)), "先升成 works_at");
+        assert!(got.contains(&(Q, 1, 2)), "first raised to works_at");
         assert!(
             got.contains(&(R, 2, 1)),
             "**再转成 employs 的反方向**——跨了两个谓词，旧结构做不到"
@@ -1219,7 +1246,11 @@ mod tests {
         assert_eq!(got.len(), 2);
         // The proof has to grow along: the second hop uses the first of the two premises
         let employs = d.facts.iter().find(|x| x.predicate == R).unwrap();
-        assert_eq!(employs.premises, vec![f(1)], "根还是那条原始断言");
+        assert_eq!(
+            employs.premises,
+            vec![f(1)],
+            "the root is still the original assertion"
+        );
     }
 
     /// An edge produced by inversion must be connectable by transitivity: `p` is transitive, `q` is its inverse,
@@ -1289,7 +1320,7 @@ mod tests {
                         .facts
                         .iter()
                         .find(|x| x.predicate == target && x.subject == n(1) && x.object == n(3))
-                        .expect("右边晚一步推出，不能让已展开的左边再也接不上它");
+                        .expect("right side derived one step later must not leave the already-expanded left unable to connect to it");
                     assert_eq!(chain.rule, Rule::Transitive);
                     assert_eq!(chain.via, target);
                     assert_eq!(chain.premises, vec![f(1), f(2)]);
@@ -1339,7 +1370,7 @@ mod tests {
             .facts
             .iter()
             .find(|x| x.predicate == P && x.subject == n(1) && x.object == n(4))
-            .expect("右边跨两轮到达时，已派生的左边也要接得上");
+            .expect("when the right side arrives across two rounds, the derived left must still connect");
         assert_eq!(chain.premises, vec![f(1), f(2), f(3)]);
         assert_eq!(
             validity(&chain.premises, &spans),
@@ -1387,7 +1418,8 @@ mod tests {
                 .facts
                 .iter()
                 .map(|x| {
-                    let (from, to) = validity(&x.premises, &spans).expect("派生区间应当可求");
+                    let (from, to) = validity(&x.premises, &spans)
+                        .expect("derived interval should be computable");
                     (x.predicate, x.subject, x.object, from, to)
                 })
                 .collect();
@@ -1398,7 +1430,10 @@ mod tests {
         let early_first = closure([early, late, cb]);
         let late_first = closure([late, early, cb]);
 
-        assert_eq!(early_first, late_first, "闭包不能随 fact 输入顺序改变");
+        assert_eq!(
+            early_first, late_first,
+            "closure must not change with fact input order"
+        );
         assert!(
             early_first.contains(&(Q, n(2), n(1), Some(0), Some(10))),
             "第一段 B q A 也要保留"
@@ -1462,14 +1497,16 @@ mod tests {
                 .facts
                 .iter()
                 .filter(|x| x.subject == n(1) && x.object == n(4))
-                .map(|x| validity(&x.premises, &by_fact).expect("派生区间应当可求"))
+                .map(|x| {
+                    validity(&x.premises, &by_fact).expect("derived interval should be computable")
+                })
                 .collect();
             spans.sort();
             spans
         };
 
         let broad = (Some(0), Some(100));
-        assert_eq!(spans(edges), vec![broad], "只留下覆盖更宽的 [0,100)");
+        assert_eq!(spans(edges), vec![broad], "only the wider [0,100) is kept");
         assert_eq!(
             spans([edges[3], edges[2], edges[1], edges[0]]),
             vec![broad],
@@ -1657,7 +1694,7 @@ mod tests {
                 .collect();
             actual.sort();
             expected.sort();
-            assert_eq!(actual, expected, "区间 {narrow:?} 与 {broad:?}");
+            assert_eq!(actual, expected, "interval {narrow:?} vs {broad:?}");
         }
     }
 
@@ -1712,7 +1749,10 @@ mod tests {
         actual.sort();
         let mut expected = intervals.to_vec();
         expected.sort();
-        assert_eq!(actual, expected, "只能由单个区间覆盖，不能拿两段的并集替代");
+        assert_eq!(
+            actual, expected,
+            "must be covered by a single interval, not replaced by the union of two segments"
+        );
     }
 
     #[test]
@@ -1773,7 +1813,7 @@ mod tests {
             .facts
             .iter()
             .find(|fact| fact.subject == n(11) && fact.object == n(20))
-            .expect("较窄的捷径证明也要在 12 条前提内走完");
+            .expect("a narrower shortcut proof must also finish within 12 premises");
         assert_eq!(chain.premises.len(), MAX_DEPTH);
         assert!(chain.premises.contains(&shortcut_fact));
         assert_eq!(
@@ -1802,7 +1842,11 @@ mod tests {
             &d.facts[0].premises,
             &HashMap::from([(f(1), (Some(10), Some(20)))]),
         );
-        assert_eq!(v, Some((Some(10), Some(20))), "逆不改变有效期");
+        assert_eq!(
+            v,
+            Some((Some(10), Some(20))),
+            "an inverse does not change the validity period"
+        );
     }
 
     /// Being its own inverse = symmetric, but it should not infer a self-loop.
@@ -1816,7 +1860,10 @@ mod tests {
             },
         )]);
         let d = derive(&[ep(P, 1, 1, 1)], &ax);
-        assert!(d.facts.is_empty(), "`A p A` 的逆还是 `A p A`——自环不推");
+        assert!(
+            d.facts.is_empty(),
+            "the inverse of `A p A` is still `A p A`, a self loop derives nothing"
+        );
     }
 
     // ---------- Contradictions (0017) ----------

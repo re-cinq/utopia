@@ -54,7 +54,7 @@ impl RigModel {
                 Ok(s) => return Ok(s),
                 Err(e) if self.context.recover(&self.client, &e) => continue,
                 Err(e) if choice.is_some() && rejected_shape(&e) => {
-                    tracing::warn!(error = %e, "端点不接受 tool_choice，去掉重发");
+                    tracing::warn!(error = %e, "endpoint does not accept tool_choice, retrying without it");
                     choice = None;
                 }
                 Err(e) => return Err(completion_error(e)),
@@ -80,7 +80,7 @@ impl CompletionModel for RigModel {
                 Ok(t) => break t,
                 Err(e) if self.context.recover(&self.client, &e) => continue,
                 Err(e) if choice.is_some() && rejected_shape(&e) => {
-                    tracing::warn!(error = %e, "端点不接受 tool_choice，去掉重发");
+                    tracing::warn!(error = %e, "endpoint does not accept tool_choice, retrying without it");
                     choice = None;
                 }
                 Err(e) => return Err(completion_error(e)),
@@ -449,10 +449,13 @@ mod tests {
         assert_eq!(w.messages[0]["role"], "system");
         assert_eq!(w.messages[0]["content"], "be brief");
         assert_eq!(w.messages[1], json!({ "role": "user", "content": "hi" }));
-        let tools = w.tools.expect("工具在");
+        let tools = w.tools.expect("tools present");
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "search_chunks");
-        assert!(w.tool_choice.is_none(), "没说就不写 tool_choice");
+        assert!(
+            w.tool_choice.is_none(),
+            "when unspecified, do not write tool_choice"
+        );
     }
 
     /// The entity list used to pose as the user speaking, and the model would reply to it. Now it is a system message, right next to the current question
@@ -520,7 +523,10 @@ mod tests {
         );
         r.tool_choice = Some(ToolChoice::None);
         let w = wire(&r);
-        assert!(w.tools.is_none(), "None = 请求里根本没有工具字段");
+        assert!(
+            w.tools.is_none(),
+            "None = the request has no tools field at all"
+        );
         assert!(w.tool_choice.is_none());
     }
 

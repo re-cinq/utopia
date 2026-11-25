@@ -95,7 +95,7 @@ pub async fn put_deployment(
     // If adjusting the gate fails, only log it once: the next permit acquisition still reads the new limit
     if limits_changed {
         if let Err(e) = state.model_gates.refresh(&state.pool).await {
-            tracing::warn!(error = %e, "限额已保存，闸门要等下一次取许可才按新限额调");
+            tracing::warn!(error = %e, "limit saved; the gate applies the new limit only when it next grants a permit");
         }
     }
     Ok(Json(json!({ "ok": true })))

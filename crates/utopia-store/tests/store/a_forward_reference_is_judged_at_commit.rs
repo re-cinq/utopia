@@ -109,7 +109,10 @@ async fn a_multi_row_insert_is_judged_at_commit() -> anyhow::Result<()> {
     .bind(f.ent_b)
     .execute(&pool)
     .await;
-    assert!(r.is_err(), "多行 INSERT 里的跨库 supersedes 必须被拒");
+    assert!(
+        r.is_err(),
+        "cross-database supersedes in a multi-row INSERT must be rejected"
+    );
 
     // The same shape within one library: both rows in the same library, one statement -- legal
     let (newer2, older2) = (Uuid::now_v7(), Uuid::now_v7());
@@ -160,7 +163,10 @@ async fn a_copy_batch_is_judged_at_commit() -> anyhow::Result<()> {
     .await?;
     copy.finish().await?;
     let r = tx.commit().await;
-    assert!(r.is_err(), "COPY 批里的跨库 supersedes 必须在提交时被拦下");
+    assert!(
+        r.is_err(),
+        "cross-database supersedes in a COPY batch must be blocked at commit"
+    );
 
     // Same library: the same forward order, the whole chain is legal
     let (newer2, older2) = (Uuid::now_v7(), Uuid::now_v7());
@@ -212,7 +218,10 @@ async fn a_sequential_forward_reference_is_judged_at_commit() -> anyhow::Result<
     .execute(&mut *tx)
     .await?;
     let r = tx.commit().await;
-    assert!(r.is_err(), "目标始终不到的 supersedes 顺序写，提交时必须报");
+    assert!(
+        r.is_err(),
+        "a supersedes written in order whose target never arrives must be reported at commit"
+    );
 
     // Target arrives later in the same transaction: the whole chain is complete at commit -- legal
     let (newer2, older2) = (Uuid::now_v7(), Uuid::now_v7());
@@ -276,7 +285,10 @@ async fn an_update_to_a_foreign_supersedes_fails() -> anyhow::Result<()> {
         .await;
     if upd.is_ok() {
         let r = tx.commit().await;
-        assert!(r.is_err(), "UPDATE 装上的跨库 supersedes 最迟在提交时要报");
+        assert!(
+            r.is_err(),
+            "a cross-database supersedes set by UPDATE must be reported at commit at the latest"
+        );
     }
 
     cleanup(&pool, &f).await
@@ -355,7 +367,10 @@ async fn relation_self_links_are_judged_at_commit() -> anyhow::Result<()> {
     .bind(f.b)
     .execute(&pool)
     .await;
-    assert!(r.is_err(), "多行 INSERT 里的跨库 inverse_of 必须被拒");
+    assert!(
+        r.is_err(),
+        "cross-database inverse_of in a multi-row INSERT must be rejected"
+    );
 
     // sub_property_of in the same library, target row after: legal
     let (child, parent) = (Uuid::now_v7(), Uuid::now_v7());

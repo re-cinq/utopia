@@ -559,7 +559,7 @@ mod tests {
             "64:ff9b::7f00:1",  // NAT64 wrapping loopback
             "2002:7f00:1::",    // 6to4 wrapping loopback
         ] {
-            assert!(!is_public_ip(ip(blocked)), "{blocked} 该被拦下");
+            assert!(!is_public_ip(ip(blocked)), "{blocked} should be blocked");
         }
     }
 
@@ -573,7 +573,7 @@ mod tests {
             "2606:4700::1111",
             "2002:0808:0808::", // 6to4 wrapping 8.8.8.8
         ] {
-            assert!(is_public_ip(ip(allowed)), "{allowed} 不该被拦");
+            assert!(is_public_ip(ip(allowed)), "{allowed} should not be blocked");
         }
     }
 
@@ -602,7 +602,7 @@ mod tests {
         // The same address, but the source was typed in by this KB's own person: an internal service is a legitimate target
         let page = get(&url, Reach::Operator, Limits::default())
             .await
-            .expect("操作者填的内网地址该抓得到");
+            .expect("the internal address entered by the operator should be fetchable");
         assert_eq!(page.mime, "text/html");
         assert!(String::from_utf8_lossy(&page.bytes).contains("hello"));
     }

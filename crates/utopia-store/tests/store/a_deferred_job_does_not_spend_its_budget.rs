@@ -45,8 +45,14 @@ async fn a_deferred_job_does_not_spend_its_budget() -> anyhow::Result<()> {
             .bind(id)
             .fetch_one(&pool)
             .await?;
-    assert_eq!(status, "queued", "Deferred 应该让任务挂回 queued");
-    assert_eq!(attempts, 1, "attempts 应该被退回去：原 2 减 1 等于 1");
+    assert_eq!(
+        status, "queued",
+        "Deferred should put the job back to queued"
+    );
+    assert_eq!(
+        attempts, 1,
+        "attempts should be refunded: original 2 minus 1 equals 1"
+    );
     assert!(
         last_error.contains("waiting on ontology index"),
         "last_error 应当是让运维一眼知道在等什么的措辞；实际是：{last_error:?}"
@@ -83,7 +89,10 @@ async fn a_deferred_job_does_not_spend_its_budget() -> anyhow::Result<()> {
             .fetch_one(&pool)
             .await?;
     assert_eq!(status2, "queued");
-    assert_eq!(attempts2, 1, "第二次认领再 Deferred 不应消耗重试预算");
+    assert_eq!(
+        attempts2, 1,
+        "Deferred on the second claim should not spend the retry budget"
+    );
 
     // Cleanup: avoid polluting the next run (other tests share the same database)
     sqlx::query("DELETE FROM jobs WHERE id = $1")
@@ -122,7 +131,10 @@ async fn terminal_wins_over_deferred_when_both_attached() -> anyhow::Result<()> 
             .bind(id)
             .fetch_one(&pool)
             .await?;
-    assert_eq!(status, "failed", "Terminal 应该让任务直接进 failed");
+    assert_eq!(
+        status, "failed",
+        "Terminal should move the job straight to failed"
+    );
     // attempts is not handed back -- `failed` takes a different SQL path.
     assert_eq!(attempts, 1);
 
@@ -158,7 +170,10 @@ async fn a_wait_past_its_window_is_a_failure() -> anyhow::Result<()> {
             .bind(fresh)
             .fetch_one(&pool)
             .await?;
-    assert!(since.is_some(), "第一次等待应当记下 deferred_since");
+    assert!(
+        since.is_some(),
+        "the first wait should record deferred_since"
+    );
 
     // The deadline has passed: attempts is not handed back again, it takes ordinary backoff
     let job: jobs::Job = sqlx::query_as(
@@ -178,8 +193,11 @@ async fn a_wait_past_its_window_is_a_failure() -> anyhow::Result<()> {
             .bind(stale)
             .fetch_one(&pool)
             .await?;
-    assert_eq!(status, "queued", "还有预算，按退避重排");
-    assert_eq!(attempts, 1, "过了期限的等待要烧预算，attempts 不再退回");
+    assert_eq!(status, "queued", "budget remains, requeue with backoff");
+    assert_eq!(
+        attempts, 1,
+        "a wait past its deadline burns budget, attempts are no longer refunded"
+    );
 
     sqlx::query("DELETE FROM jobs WHERE id = ANY($1)")
         .bind(vec![fresh, stale])

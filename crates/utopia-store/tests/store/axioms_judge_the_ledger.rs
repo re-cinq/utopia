@@ -132,8 +132,8 @@ async fn the_ontology_is_the_only_judge() -> anyhow::Result<()> {
         let quiet = fact(&pool, f.kb, f.a, f.owns, f.b).await?;
         let r = reasoning::run(&pool, f.kb).await?;
         assert_eq!(r.edges, 1);
-        assert_eq!(r.predicates_with_axioms, 1, "mentions 一位都没声明,不该进来");
-        assert_eq!(r.found, 0, "一条单向的 owns 不构成任何矛盾");
+        assert_eq!(r.predicates_with_axioms, 1, "no mentions are declared, so it must not be included");
+        assert_eq!(r.found, 0, "a one-way owns relation constitutes no contradiction");
 
         // ---- 2. Axioms only count when declared
         // B owns A — together with the one above, forms an asymmetry violation
@@ -162,13 +162,13 @@ async fn the_ontology_is_the_only_judge() -> anyhow::Result<()> {
         .fetch_one(&pool)
         .await?;
         assert_eq!(l, loop_fact);
-        assert_eq!(l, rr, "一条事实跟自己矛盾,不需要第二条");
+        assert_eq!(l, rr, "a fact that contradicts itself needs no second fact");
 
         // ---- 3. A rerun does not store it again
         let again = reasoning::run(&pool, f.kb).await?;
         assert_eq!(again.found, 2);
-        assert_eq!(again.inserted, 0, "同一处矛盾第二次跑不该再插一行");
-        assert_eq!(again.cleared, 0, "也不该把上一轮的清掉");
+        assert_eq!(again.inserted, 0, "a second run over the same contradiction must not insert another row");
+        assert_eq!(again.cleared, 0, "nor clear the previous round's");
 
         // ---- 4. A row a person has judged is not wiped by a rerun
         sqlx::query(
@@ -179,14 +179,14 @@ async fn the_ontology_is_the_only_judge() -> anyhow::Result<()> {
         .execute(&pool)
         .await?;
         let after = reasoning::run(&pool, f.kb).await?;
-        assert_eq!(after.inserted, 0, "已经有人表态的那一行不该被重新插一条");
+        assert_eq!(after.inserted, 0, "a row someone already took a stance on must not be inserted again");
         let resolved: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM axiom_violations WHERE kb_id = $1 AND status = 'resolved'",
         )
         .bind(f.kb)
         .fetch_one(&pool)
         .await?;
-        assert_eq!(resolved, 1, "人的决定必须活过重跑");
+        assert_eq!(resolved, 1, "a person's decision must survive a re-run");
 
         // ---- 5. Once a fact is retracted, the stale open row must be cleared
         sqlx::query("UPDATE facts SET invalidated_at = now() WHERE id = $1")
@@ -194,7 +194,7 @@ async fn the_ontology_is_the_only_judge() -> anyhow::Result<()> {
             .execute(&pool)
             .await?;
         let swept = reasoning::run(&pool, f.kb).await?;
-        assert_eq!(swept.cleared, 1, "被推翻的事实不该还挂着一条违规");
+        assert_eq!(swept.cleared, 1, "an overturned fact must not still carry a violation");
         assert!(
             !open_kinds(&pool, f.kb).await?.contains(&"self_loop".to_string()),
             "撤掉那条事实之后自反违规就不成立了"
@@ -212,7 +212,7 @@ async fn the_ontology_is_the_only_judge() -> anyhow::Result<()> {
         .execute(&pool)
         .await?;
         let attrs = reasoning::run(&pool, f.kb).await?;
-        assert_eq!(attrs.edges, 4, "字面值宾语的那条不该被取成边");
+        assert_eq!(attrs.edges, 4, "the one with a literal-value object must not be taken as an edge");
 
         // ---- 7. A store with no ontology package: the conclusion is "no criterion", not "no contradiction"
         sqlx::query("UPDATE relation_types SET is_asymmetric = FALSE, is_irreflexive = FALSE WHERE kb_id = $1")

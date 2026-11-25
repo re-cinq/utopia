@@ -75,8 +75,14 @@ async fn a_token_is_the_person_but_not_all_of_them() -> anyhow::Result<()> {
     let run = async {
         // ---- 1. Issue one; the plaintext is available only this once
         let (view, plain) = tokens::issue(&pool, f.user, "我的笔记本", "read", None, None).await?;
-        assert!(plain.starts_with("utp_pat_"), "前缀要认得出是哪一种令牌");
-        assert_eq!(view.scope, "read", "**缺省只读**：要写得显式勾");
+        assert!(
+            plain.starts_with("utp_pat_"),
+            "the prefix must identify which kind of token it is"
+        );
+        assert_eq!(
+            view.scope, "read",
+            "**read-only by default**: write access must be explicitly ticked"
+        );
         assert!(view.revoked_at.is_none());
 
         let stored: String =
@@ -84,7 +90,7 @@ async fn a_token_is_the_person_but_not_all_of_them() -> anyhow::Result<()> {
                 .bind(view.id)
                 .fetch_one(&pool)
                 .await?;
-        assert_ne!(stored, plain, "库里存的必须是哈希");
+        assert_ne!(stored, plain, "the database must store a hash");
         assert!(
             !stored.contains(&plain[8..24]),
             "**明文的任何一段都不该出现在库里**——拿到整张表也复原不出来"
@@ -92,14 +98,20 @@ async fn a_token_is_the_person_but_not_all_of_them() -> anyhow::Result<()> {
 
         // ---- 2. Recognized on return, and last_used_at written along the way
         let auth = tokens::authenticate(&pool, &plain).await?;
-        assert_eq!(auth.user_id, f.user, "令牌以发它的人的身份行事");
-        assert!(!auth.can_write(), "read 的令牌不能写");
+        assert_eq!(
+            auth.user_id, f.user,
+            "a token acts as the identity of the person who issued it"
+        );
+        assert!(!auth.can_write(), "a read token must not be able to write");
         let used: Option<chrono::DateTime<Utc>> =
             sqlx::query_scalar("SELECT last_used_at FROM personal_tokens WHERE id = $1")
                 .bind(view.id)
                 .fetch_one(&pool)
                 .await?;
-        assert!(used.is_some(), "**撤之前人要答得出「这把还在用吗」**");
+        assert!(
+            used.is_some(),
+            "**before revoking, the person must be able to answer 'is this key still in use?'**"
+        );
 
         // ---- 3. Forged ones, or ones with the wrong prefix, are never recognized
         assert!(
@@ -119,12 +131,15 @@ async fn a_token_is_the_person_but_not_all_of_them() -> anyhow::Result<()> {
         let (_, scoped) =
             tokens::issue(&pool, f.user, "只给 A 库", "write", Some(&[f.kb_a]), None).await?;
         let auth = tokens::authenticate(&pool, &scoped).await?;
-        assert!(auth.covers(f.kb_a), "授权过的库够得着");
+        assert!(
+            auth.covers(f.kb_a),
+            "the library that was granted access can reach it"
+        );
         assert!(
             !auth.covers(f.kb_b),
             "**限定到一个库的令牌够不着另一个**——哪怕这个人两个库都能进"
         );
-        assert!(auth.can_write(), "write 的令牌能写");
+        assert!(auth.can_write(), "a write token can write");
         // The unrestricted one still covers everything
         assert!(tokens::authenticate(&pool, &plain).await?.covers(f.kb_b));
 
@@ -139,7 +154,10 @@ async fn a_token_is_the_person_but_not_all_of_them() -> anyhow::Result<()> {
                 .bind(view.id)
                 .fetch_one(&pool)
                 .await?;
-        assert_eq!(still_there, 1, "打戳不删行：这把钥匙存在过要查得到");
+        assert_eq!(
+            still_there, 1,
+            "stamping does not delete the row: this key existed and must stay queryable"
+        );
         assert!(
             tokens::revoke(&pool, f.user, view.id).await.is_err(),
             "撤两次的第二次该说没有这一行可撤"
@@ -162,7 +180,11 @@ async fn a_token_is_the_person_but_not_all_of_them() -> anyhow::Result<()> {
 
         // ---- 7. The list shows both the revoked and the expired
         let all = tokens::list(&pool, f.user).await?;
-        assert_eq!(all.len(), 3, "撤销过的也要列——撤过这件事本身要看得见");
+        assert_eq!(
+            all.len(),
+            3,
+            "revoked ones must be listed too; the revocation itself must be visible"
+        );
         assert!(
             all.iter()
                 .any(|t| t.id == view.id && t.revoked_at.is_some()),

@@ -77,7 +77,11 @@ async fn a_written_definition_is_confirmed_and_signed() -> anyhow::Result<()> {
         let confirmed = utopia_store::mappings::confirmed(&pool, kb, 100).await?;
         assert_eq!(confirmed.len(), 1);
         assert_eq!(confirmed[0].id, id);
-        assert_eq!(confirmed[0].written_by, Some(user), "人写的记谁写的");
+        assert_eq!(
+            confirmed[0].written_by,
+            Some(user),
+            "hand-written records who wrote it"
+        );
         assert!(
             utopia_store::mappings::proposed(&pool, kb, 100, 0)
                 .await?

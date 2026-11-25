@@ -89,7 +89,12 @@ pub fn bytes(pack: &Pack) -> AppResult<Vec<u8>> {
     let mut out = Vec::new();
     flate2::read::GzDecoder::new(pack.gz)
         .read_to_end(&mut out)
-        .map_err(|e| AppError::Other(anyhow::anyhow!("本体包 {} 解压失败：{e}", pack.id)))?;
+        .map_err(|e| {
+            AppError::Other(anyhow::anyhow!(
+                "ontology pack {} failed to extract: {e}",
+                pack.id
+            ))
+        })?;
     Ok(out)
 }
 
@@ -103,7 +108,12 @@ mod tests {
     fn every_pack_decompresses() {
         for p in PACKS {
             let b = bytes(p).unwrap_or_else(|e| panic!("{}: {e}", p.id));
-            assert!(b.len() > 10_000, "{} 解出来只有 {} 字节", p.id, b.len());
+            assert!(
+                b.len() > 10_000,
+                "{} extracted to only {} bytes",
+                p.id,
+                b.len()
+            );
         }
     }
 
@@ -126,6 +136,6 @@ mod tests {
         ids.sort_unstable();
         let n = ids.len();
         ids.dedup();
-        assert_eq!(ids.len(), n, "包 id 有重复");
+        assert_eq!(ids.len(), n, "pack id is duplicated");
     }
 }

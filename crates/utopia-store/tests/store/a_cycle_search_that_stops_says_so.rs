@@ -151,7 +151,10 @@ async fn a_cycle_search_that_stops_says_so_and_keeps_what_it_did_not_reach() -> 
             }
         }
         let r = reasoning::run(&pool, f.kb).await?;
-        assert_eq!(r.cycles_capped, 1, "part_of 的环没搜完，要说出来");
+        assert_eq!(
+            r.cycles_capped, 1,
+            "part_of cycle search did not finish, must say so"
+        );
         let open = open_cycles(&pool, &f, f.part_of).await?;
         assert!(
             open.contains(&small[0]),

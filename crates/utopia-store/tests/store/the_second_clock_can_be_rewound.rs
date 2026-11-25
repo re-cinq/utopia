@@ -193,7 +193,10 @@ async fn the_recording_axis_rewinds_on_every_graph_read() -> anyhow::Result<()> 
         vec![f.correction],
         "现在只该有修正行那条边"
     );
-    assert_eq!(total_edges, 1, "边总数跟着画布数，不是历史全量");
+    assert_eq!(
+        total_edges, 1,
+        "the edge total follows the canvas count, not the full history"
+    );
     let degree = |nodes: &[utopia_core::models::GraphNode], id: Uuid| {
         nodes.iter().find(|n| n.id == id).map(|n| n.degree)
     };
@@ -208,7 +211,11 @@ async fn the_recording_axis_rewinds_on_every_graph_read() -> anyhow::Result<()> 
         "03-10 该看见当时持有的断言与派生"
     );
     assert_eq!(total_edges, 2);
-    assert_eq!(degree(&nodes, f.zhang), Some(1), "度数按当时的边数");
+    assert_eq!(
+        degree(&nodes, f.zhang),
+        Some(1),
+        "degree follows the edge count at that time"
+    );
     assert!(
         edges
             .iter()
@@ -223,7 +230,10 @@ async fn the_recording_axis_rewinds_on_every_graph_read() -> anyhow::Result<()> 
 
     // 4. Earlier than everything: the graph is empty, rather than "degrading to now"
     let (_, edges, _, total_edges) = overview(Some("2026-02-01T00:00:00Z")).await?;
-    assert!(edges.is_empty(), "02-01 我们还什么都没记下");
+    assert!(
+        edges.is_empty(),
+        "on 02-01 we had not recorded anything yet"
+    );
     assert_eq!(total_edges, 0);
 
     // 5. Spreading the neighborhood also finds neighbors by the edges as they were then
@@ -253,14 +263,23 @@ async fn the_recording_axis_rewinds_on_every_graph_read() -> anyhow::Result<()> 
     let now = facts(None).await?;
     assert_eq!(now.len(), 1);
     assert_eq!(now[0].id, f.correction);
-    assert!(now[0].corrected, "修正行认得出自己改写了谁");
+    assert!(
+        now[0].corrected,
+        "a correction row can tell whom it rewrote"
+    );
 
     let march = facts(Some("2026-03-10T00:00:00Z")).await?;
     assert_eq!(march.len(), 1);
-    assert_eq!(march[0].id, f.retracted, "03-10 面板该给出当时那条");
+    assert_eq!(
+        march[0].id, f.retracted,
+        "on 03-10 the panel should show the one from that time"
+    );
 
     let before = facts(Some("2026-02-01T00:00:00Z")).await?;
-    assert!(before.is_empty(), "记下之前不该有事实");
+    assert!(
+        before.is_empty(),
+        "there should be no facts before recording"
+    );
 
     // #351: within the same second, record first and then correct. Going back a full second from the correction moment would skip the old record,
     // while the correction moment itself is already the new record; the tooltip's "previous microsecond" must be able to read back the old fact
@@ -323,6 +342,6 @@ async fn the_recording_axis_rewinds_on_every_graph_read() -> anyhow::Result<()> 
     .bind(f.kb)
     .execute(&pool)
     .await?;
-    assert_eq!(gone.rows_affected(), 1, "一次性 org 没删掉");
+    assert_eq!(gone.rows_affected(), 1, "one-off org was not deleted");
     Ok(())
 }

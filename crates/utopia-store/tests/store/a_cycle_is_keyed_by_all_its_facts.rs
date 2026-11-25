@@ -160,7 +160,10 @@ async fn two_cycles_sharing_their_ends_are_two_rows() -> anyhow::Result<()> {
         // ---- 1. Two cycles, two rows; stable on re-run
         let first = reasoning::run(&pool, f.kb).await?;
         assert_eq!(first.found, 2);
-        assert_eq!(first.inserted, 2, "两个环各插一行，不是一行被另一行覆盖");
+        assert_eq!(
+            first.inserted, 2,
+            "each of two cycles inserts a row, not one row overwriting the other"
+        );
         let rows = cycle_rows(&pool, &f).await?;
         let paths: Vec<Vec<Uuid>> = rows.iter().map(|r| r.1.clone()).collect();
         assert_eq!(paths, vec![via_c.clone(), via_d.clone()]);
@@ -180,7 +183,10 @@ async fn two_cycles_sharing_their_ends_are_two_rows() -> anyhow::Result<()> {
         reasoning::decide(&pool, f.kb, id_c, "accepted", f.user).await?;
         reasoning::decide(&pool, f.kb, id_d, "axiom_relaxed", f.user).await?;
         let r = reasoning::run(&pool, f.kb).await?;
-        assert_eq!(r.reopened, 1, "放宽公理的那个环还在，重开它——只重开它");
+        assert_eq!(
+            r.reopened, 1,
+            "the cycle that relaxes the axiom still exists, reopen it, and only it"
+        );
         let rows = cycle_rows(&pool, &f).await?;
         assert_eq!(rows.len(), 2);
         assert_eq!(

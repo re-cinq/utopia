@@ -1,6 +1,6 @@
 //! Probe the projection result against a real public ontology. Usage: cargo run -p utopia-ingest --example owl_probe -- <file>
 fn main() -> anyhow::Result<()> {
-    let path = std::env::args().nth(1).expect("需要文件路径");
+    let path = std::env::args().nth(1).expect("needs a file path");
     let bytes = std::fs::read(&path)?;
     let fmt = utopia_ingest::ontology_rdf::RdfFormat::detect(&path, &bytes);
     let p = utopia_ingest::ontology_rdf::project(&bytes, fmt)?;

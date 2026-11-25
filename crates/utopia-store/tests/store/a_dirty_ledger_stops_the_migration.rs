@@ -37,7 +37,7 @@ async fn migration_70(pool: &PgPool) -> Result<(), sqlx::Error> {
     let m = migrator
         .iter()
         .find(|m| m.version == 70)
-        .expect("0070 必须在迁移集里");
+        .expect("0070 must be in the migration set");
     let mut conn = pool.acquire().await?;
     let mut tx = conn.begin().await?;
     let r = sqlx::raw_sql(&m.sql).execute(&mut *tx).await;
@@ -169,13 +169,13 @@ async fn a_clean_ledger_takes_the_invariant() -> anyhow::Result<()> {
         return Ok(());
     };
     let r = migration_70(&pool).await;
-    assert!(r.is_ok(), "干净的 0069 库必须装得上 0070: {r:?}");
+    assert!(r.is_ok(), "a clean 0069 database must accept 0070: {r:?}");
     let n: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_trigger WHERE tgname = 'fact_evidence_same_kb'",
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(n, 1, "触发器要真的装上");
+    assert_eq!(n, 1, "the trigger must really be installed");
     pool.close().await;
     drop_scratch(&name).await;
     Ok(())
@@ -189,7 +189,7 @@ async fn a_dirty_ledger_stops_the_migration_atomically() -> anyhow::Result<()> {
     seed_dirty(&pool).await?;
     let r = migration_70(&pool).await;
     let msg = format!("{r:?}");
-    assert!(r.is_err(), "脏库上跑 0070 必须中止");
+    assert!(r.is_err(), "running 0070 on a dirty database must abort");
     assert!(
         msg.contains("cross-KB references already present") || msg.contains("evidence.chunk"),
         "中止要报出坏在哪条边: {msg}"
@@ -198,7 +198,10 @@ async fn a_dirty_ledger_stops_the_migration_atomically() -> anyhow::Result<()> {
         sqlx::query_scalar("SELECT COUNT(*) FROM pg_trigger WHERE tgname LIKE '%same_kb%'")
             .fetch_one(&pool)
             .await?;
-    assert_eq!(n, 0, "中止的迁移不许留下半个不变量");
+    assert_eq!(
+        n, 0,
+        "an aborted migration must not leave half an invariant behind"
+    );
     pool.close().await;
     drop_scratch(&name).await;
     Ok(())

@@ -786,16 +786,22 @@ async fn an_unreadable_reply_is_asked_again_a_bounded_number_of_times() -> anyho
     .await?;
     let count = f.requests().len();
     f.cleanup().await?;
-    assert_eq!(count, 4, "两轮各问两票");
-    assert_eq!(bindings, 0, "读不出的回复不写任何判定");
+    assert_eq!(count, 4, "each of two rounds asks two votes");
+    assert_eq!(bindings, 0, "unreadable replies write no verdict");
     assert_eq!(
         reasks,
         vec![("queued".to_string(), Some(1))],
         "第一轮之后自己排一份 reask=1"
     );
-    assert_eq!(after, 0, "排够次数就不再排");
-    assert_eq!(phrases_queued_early, 0, "还要再问时短语对齐不排");
-    assert_eq!(phrases_queued_late, 1, "最后一轮排短语对齐");
+    assert_eq!(after, 0, "once the count is reached, stop queuing");
+    assert_eq!(
+        phrases_queued_early, 0,
+        "phrase alignment is not queued while more questions remain"
+    );
+    assert_eq!(
+        phrases_queued_late, 1,
+        "phrase alignment is queued in the last round"
+    );
     Ok(())
 }
 

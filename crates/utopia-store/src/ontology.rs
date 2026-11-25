@@ -2244,7 +2244,7 @@ mod name_shape_tests {
     #[test]
     fn already_right_is_untouched() {
         for s in ["owns", "acceptedAnswer", "worksFor", "3DModel"] {
-            assert_eq!(lower_camel(s), s, "{s} 不该被动");
+            assert_eq!(lower_camel(s), s, "{s} should not be passive");
         }
     }
 
@@ -2252,7 +2252,11 @@ mod name_shape_tests {
     fn idempotent() {
         for s in ["access to", "ApplicableCertificate", "productID", "owns"] {
             let once = lower_camel(s);
-            assert_eq!(lower_camel(&once), once, "{s} 归一两次结果要一样");
+            assert_eq!(
+                lower_camel(&once),
+                once,
+                "{s} normalizing twice must give the same result"
+            );
         }
     }
 }

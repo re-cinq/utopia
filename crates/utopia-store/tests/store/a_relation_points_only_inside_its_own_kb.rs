@@ -111,7 +111,7 @@ async fn a_relation_points_only_inside_its_own_kb() -> anyhow::Result<()> {
                 .bind("leaks")
                 .fetch_one(&pool)
                 .await?;
-        assert_eq!(leaked, 0, "被拒的那次不该留下半行");
+        assert_eq!(leaked, 0, "a rejected attempt must not leave a half row");
 
         // ---- 2. Cross-KB pointing: should be rejected on update too
         let err = utopia_store::ontology::update_relation_type(
@@ -173,7 +173,7 @@ async fn a_relation_points_only_inside_its_own_kb() -> anyhow::Result<()> {
         )
         .await?;
         let views = utopia_store::ontology::relation_type_views(&pool, kb_a).await?;
-        let find = |id: Uuid| views.iter().find(|v| v.id == id).expect("落库");
+        let find = |id: Uuid| views.iter().find(|v| v.id == id).expect("stored");
         assert_eq!(
             find(works_at).inverse_of,
             Some(employs),
