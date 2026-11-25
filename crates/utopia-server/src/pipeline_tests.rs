@@ -1,25 +1,25 @@
-//! #513：摄入的嵌入几批并发在飞，配对一条不乱。
+//! #513: ingest embedding batches run concurrently in flight; pairing for each chunk stays correct.
 //!
-//! 并发不许碰的是「哪条向量落在哪个分块上」：错位落库之后看不出来，正文还在，向量是别人的。
-//! 所以这里的测试问的是配对与完整，不是快慢。嵌入端点用 wiremock 假扮，每条正文的向量
-//! 由正文本身算出来，读回来就能验；顺带记下每个请求的到达时刻和批大小。
+//! Concurrency must not touch "which vector lands on which chunk": a misaligned write is not visible afterwards -- the text is still there, but the vector belongs to someone else.
+//! So the tests here check pairing and completeness, not speed. The embedding endpoint is faked with wiremock; each text's vector
+//! is computed from the text itself, so it can be verified on read-back; each request's arrival time and batch size are also recorded.
 //!
-//! 1. **每个分块拿到自己正文的向量。** 40 条、三批、四路并发，批次乱序完成，读回来逐条对。
-//!    附带：末尾不足一批的余数照样送，空文档一个请求都不发。
-//! 2. **数量对不上整批放弃**：少回一条，那一批一条都不写。
-//! 3. **上限守得住**：十二批、每批延时 400ms，同一时刻在飞的从不超过 EMBED_JOBS，
-//!    总耗时明显短于串行。
-//! 4. **一批失败文档不悬着**：走完整的 process_document，第二批回 500，文档落在 failed
-//!    并带原因，不是停在 embedding。
-//! 5. **就绪之前全部嵌完**：process_document 走通后没有一条向量为空。
-//! 6. **记忆一句一句嵌**（#1187）：memory_ingest 嵌完自己的分块；一句嵌不了，别的照常。
-//! 7. **正文夹 NUL 不毁整篇**（#611）：Postgres 的 TEXT 不收 0x00，从前一个字节就让整篇
-//!    落在 failed。现在走完整的 process_document 到 ready，库里没有一个分块带 NUL。
+//! 1. **Each chunk gets the vector of its own text.** 40 items, three batches, four-way concurrency; batches finish out of order, and read-back is checked one by one.
+//!    Also: the remainder that is less than a full batch at the end is still sent; empty documents send no request at all.
+//! 2. **A count mismatch abandons the whole batch**: one vector short, and none of that batch is written.
+//! 3. **The ceiling holds**: twelve batches, 400ms delay per batch; never more than EMBED_JOBS in flight at once,
+//!    and total time is clearly shorter than serial.
+//! 4. **A document with a failed batch does not hang**: go through the full process_document; the second batch returns 500, and the document lands in failed
+//!    with the reason, not left at embedding.
+//! 5. **Everything is embedded before ready**: after process_document completes, no vector is empty.
+//! 6. **Memory is embedded sentence by sentence** (#1187): memory_ingest embeds its own chunks; a sentence that cannot be embedded does not stop the others.
+//! 7. **A NUL in the body does not destroy the whole document** (#611): Postgres TEXT does not accept 0x00; previously one byte put the whole document in
+//!    failed. Now it goes through the full process_document to ready, and no chunk in the database carries a NUL.
 //!
-//! 8. **扫描件等版面识别服务读**（0040 第二刀）：配上服务重新排队，交一次、挂回去问、按页切块。
-//! 9. **录音等会标说话人的转写模型读**（第三刀）：说话人进正文、时刻进锚点；分不出说话人的降级。
+//! 8. **Scanned documents are read by a layout-recognition service** (0040 second cut): once the service is configured, the file is re-queued, submitted once, polled, and chunked per page.
+//! 9. **Recordings are read by a transcription model that labels speakers** (third cut): speakers go into the body, timestamps go into anchors; when speakers cannot be told apart, it degrades.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` the test is skipped rather than failed. It sets up and tears down its own database, never touching an existing one.
 
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,7 +31,7 @@ use wiremock::{
     matchers::method, matchers::path, Mock, MockServer, Request, Respond, ResponseTemplate,
 };
 
-/// 正文 → 向量：长度、首字符、字节和取模、常数 1。四维就够分辨每一条
+/// Body -> vector: length, first character, byte sum modulo, constant 1. Four dimensions are enough to tell each one apart
 fn vector_of(text: &str) -> Vec<f32> {
     vec![
         text.chars().count() as f32,
@@ -41,8 +41,8 @@ fn vector_of(text: &str) -> Vec<f32> {
     ]
 }
 
-/// 假嵌入端点。`short_by` 每批少回几条；`fail_request` 第几个请求回 500；`delay` 每个响应压多久。
-/// 可克隆：一份挂进 wiremock，一份留在夹具里读到达记录
+/// Fake embedding endpoint. `short_by` returns that many fewer vectors per batch; `fail_request` makes the Nth request return 500; `delay` how long each response is held.
+/// Cloneable: one copy is mounted into wiremock, one is kept in the fixture to read the arrival records
 #[derive(Clone)]
 struct FakeEmbed {
     arrivals: Arc<Mutex<Vec<(Instant, usize)>>>,
@@ -157,7 +157,7 @@ async fn fixture(fake: FakeEmbed) -> anyhow::Result<Option<Fx>> {
 }
 
 impl Fx {
-    /// 一篇只有分块、没有向量的文档；正文各不相同，配对错了就对不上
+    /// A document with only chunks and no vectors; the bodies all differ, so a wrong pairing would not match
     async fn document_with_chunks(&self, n: usize) -> anyhow::Result<Uuid> {
         let doc = Uuid::now_v7();
         sqlx::query(
@@ -181,7 +181,7 @@ impl Fx {
         Ok(doc)
     }
 
-    /// 一篇真文档：正文进 blob 存储，行是 pending，等 process_document 来解析分块
+    /// A real document: the body goes to blob storage, the row is pending, waiting for process_document to parse it into chunks
     async fn document_to_process(&self, paragraphs: usize) -> anyhow::Result<Uuid> {
         let text: String = (0..paragraphs)
             .map(|i| format!("Paragraph {i}. {}\n\n", format!("word{i} ").repeat(140)))
@@ -189,12 +189,12 @@ impl Fx {
         self.document_with_text(&text).await
     }
 
-    /// 同上，正文由调用方给
+    /// Same as above, but the body is supplied by the caller
     async fn document_with_text(&self, text: &str) -> anyhow::Result<Uuid> {
         self.document_with_bytes("long.md", text.as_bytes()).await
     }
 
-    /// 任意字节、任意文件名：图片、录音、二进制都从这里进
+    /// Arbitrary bytes, arbitrary file names: images, recordings, and binaries all come in here
     async fn document_with_bytes(&self, filename: &str, bytes: &[u8]) -> anyhow::Result<Uuid> {
         use sha2::{Digest, Sha256};
         let sha: String = Sha256::digest(bytes)
@@ -236,7 +236,7 @@ impl Fx {
         super::embed_pending(&self.state, &settings, &client, &input).await
     }
 
-    /// (正文, 向量) 按 seq；向量为空就是没嵌
+    /// (body, vector) by seq; an empty vector means not embedded
     async fn stored(&self, doc: Uuid) -> anyhow::Result<Vec<(String, Option<Vec<f32>>)>> {
         Ok(sqlx::query_as(
             "SELECT text, embedding::real[] FROM chunks WHERE document_id = $1 ORDER BY seq",
@@ -316,7 +316,7 @@ async fn the_embedding_gate_is_never_held_beyond_its_ceiling() -> anyhow::Result
     assert_eq!(f.embed(doc).await?, batches * super::EMBED_BATCH);
     let elapsed = started.elapsed();
 
-    // 在飞数 = 到达时刻落在同一个响应延时窗口里的请求数（窗口略短于延时，吃掉抖动）
+    // In-flight count = number of requests whose arrival falls in the same response-delay window (window slightly shorter than the delay, absorbing jitter)
     let arrivals = f.fake.arrivals();
     let window = delay - Duration::from_millis(20);
     let peak = arrivals
@@ -335,10 +335,10 @@ async fn the_embedding_gate_is_never_held_beyond_its_ceiling() -> anyhow::Result
         super::EMBED_JOBS
     );
     assert!(peak >= 2, "batches actually overlap; peak was {peak}");
-    // 总耗时只用来兜底「闸门把批次完全串行化了」，真正守上限和重叠的是上面两条。
-    // 延时要盖过数据库写入的固定开销：150ms 在两核、proot PostgreSQL 上跑到 1.51s，
-    // 峰值和重叠都正常，却超过了 1.35s 门槛。400ms 让网络等待主导耗时；仍用串行
-    // 的四分之三作上限（3.6s 对 4.8s），真正串行的回归仍会失败。
+    // Total time is only a backstop for "the gate fully serialized the batches"; what really guards the ceiling and the overlap are the two checks above.
+    // The delay must outweigh the fixed cost of database writes: 150ms ran to 1.51s on a two-core proot PostgreSQL,
+    // where peaks and overlap were normal, yet it exceeded the 1.35s threshold. 400ms lets network wait dominate; still using three-quarters
+    // of serial as the ceiling (3.6s vs 4.8s), so a real serial regression still fails.
     let serial = delay * batches as u32;
     assert!(
         elapsed < serial * 3 / 4,
@@ -362,8 +362,8 @@ async fn a_large_statements_payload_is_searchable_without_embedding() -> anyhow:
         .mount(&f.server)
         .await;
 
-    // 保持在 push 路由 64 KiB 上限以内，同时超过常见 embedding 模型的输入上限。
-    // 完整契约必须能进入确定性抽取，不能先被 embedding 拦住（#1375）。
+    // Stay within the push route's 64 KiB cap, while exceeding the input limit of common embedding models.
+    // The full contract must be able to enter deterministic extraction, not be blocked first by embedding (#1375).
     let payload = serde_json::json!({
         "external_id": "large-observation",
         "e": [["cup-7", "cup", true], ["kitchen table", "table", true]],
@@ -433,7 +433,7 @@ async fn a_failed_batch_does_not_strand_the_document() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// #1215：第一批嵌入必须等测试放行；新版请求立即完成，不靠延时猜并发顺序。
+/// #1215: the first batch of embeddings must wait for the test to release it; a new-version request completes immediately, without guessing concurrency order from delays.
 async fn pause_embedding(
     f: &Fx,
     doc: Uuid,
@@ -473,7 +473,7 @@ async fn pause_embedding(
                         .iter()
                         .map(|input| {
                             let mut vector = vector_of(input.as_str().expect("input is text"));
-                            // 同 SHA 的新版本可能复用 chunk ID，旧向量仍必须丢弃。
+                            // A new version with the same SHA may reuse chunk IDs, and the old vectors must still be discarded.
                             if is_old {
                                 vector[0] += 10_000.0;
                             }
@@ -570,7 +570,7 @@ async fn late_embedding_preserves_newer_revision(
     let new_text = "The NEW budget is 200.";
     replace_document_text(&f, doc, new_text).await?;
     if restore_original {
-        // B 尚未解析，恢复 A 时会认领旧任务正在嵌入的同一批 chunk ID。
+        // B has not been parsed yet; when A is restored it claims the same batch of chunk IDs the old task is embedding.
         replace_document_text(&f, doc, &original_text).await?;
     }
     super::process_document(&f.state, doc).await?;
@@ -596,7 +596,7 @@ async fn late_embedding_preserves_newer_revision(
         assert_ne!(newer.chunk_count, old_chunks.len() as i32);
     }
 
-    // 新版抽取也已完成，旧任务不能再把它改成 queued 或另排一次抽取。
+    // The new extraction has also completed, so the old task must not change it back to queued or queue extraction again.
     utopia_store::documents::set_graph_status(&f.pool, doc, "done").await?;
     sqlx::query("UPDATE jobs SET status = 'done' WHERE payload->>'document_id' = $1")
         .bind(doc.to_string())
@@ -673,7 +673,7 @@ async fn an_embedding_failure_does_not_hide_a_database_write_error() -> anyhow::
     resume.notify_one();
     let result = tokio::time::timeout(Duration::from_secs(10), processing).await??;
     server.abort();
-    // 重新连接只为拆夹具，处理器持有的旧连接池仍然关闭。
+    // Reconnecting is only to tear down the fixture; the old pool the handler holds is still closed.
     f.pool = sqlx::PgPool::connect(&url).await?;
     f.cleanup().await?;
     let error = result.expect_err("failure status could not be persisted");
@@ -687,13 +687,13 @@ async fn an_embedding_failure_does_not_hide_a_database_write_error() -> anyhow::
     Ok(())
 }
 
-/// #611：一个 NUL 从前让整篇文档失败——坏的只是几个字节，丢的是整篇
+/// #611: a single NUL previously failed the whole document -- only a few bytes were bad, but the whole document was lost
 #[tokio::test]
 async fn a_nul_byte_does_not_fail_the_whole_document() -> anyhow::Result<()> {
     let Some(f) = fixture(FakeEmbed::new(Duration::from_millis(5))).await? else {
         return Ok(());
     };
-    // PDF 文本层里夹带 NUL 的样子：落在词中间、段落之间、一连好几个
+    // The shape a NUL takes in PDF text layers: in the middle of a word, between paragraphs, several in a row
     let text = "Revenue grew\0 twelve percent.\n\n\0\0Margins held at thirty\0-one.\n";
     let doc = f.document_with_text(text).await?;
     super::process_document(&f.state, doc).await?;
@@ -714,8 +714,8 @@ async fn a_nul_byte_does_not_fail_the_whole_document() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// 0040：图片、扫描件、录音的字要靠模型读。没配那种模型时**降级**：文件留着、文档停在
-/// failed 并记下缺哪一种、报一条库级告警；不重试，也不再解出一堆乱码去分块、嵌入、抽取
+/// 0040: the text of images, scans, and recordings must be read by a model. When that kind of model is not configured, **degrade**: the file is kept, the document stops at
+/// failed with a record of which kind is missing, and one database-level alert is raised; no retry, and no more garbage is decoded to chunk, embed, or extract
 #[tokio::test]
 async fn a_file_that_needs_a_reader_waits_and_says_so() -> anyhow::Result<()> {
     let Some(f) = fixture(FakeEmbed::new(Duration::from_millis(5))).await? else {
@@ -750,7 +750,7 @@ async fn a_file_that_needs_a_reader_waits_and_says_so() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// 解析器到达安全上限时，文档照旧可用，但消息中心必须明说只读了一部分。
+/// When the parser hits its safety ceiling, the document remains usable, but the message center must say plainly that only part was read.
 #[tokio::test]
 async fn a_truncated_csv_keeps_the_document_ready_and_reports_the_omitted_records(
 ) -> anyhow::Result<()> {
@@ -787,8 +787,8 @@ async fn a_truncated_csv_keeps_the_document_ready_and_reports_the_omitted_record
     f.cleanup().await
 }
 
-/// 假的 `mineru-api`：交一次拿到 `t-n`；问状态前 `processing_polls` 次说还在读，之后说读完；
-/// `fail` 时说读失败。记下交了几次、每次带了什么
+/// A fake `mineru-api`: submission returns `t-n`; before polling, `processing_polls` times it says still reading, then says done;
+/// on `fail` it says reading failed. Records how many times it was submitted and what each carried
 #[derive(Clone, Default)]
 struct FakeMineru {
     submissions: Arc<Mutex<Vec<String>>>,
@@ -862,8 +862,8 @@ async fn reader_task(f: &Fx, doc: Uuid) -> anyhow::Result<Option<serde_json::Val
     Ok(utopia_store::documents::reader_task(&f.pool, doc).await?)
 }
 
-/// 0040 第二刀：没配服务时停下的扫描件，配上服务就重新排队；交一次、问到读完、按页切块，
-/// 每块记着读它的服务版本、页码和框。等的时候不烧重试预算，也不重交
+/// 0040 second cut: a scan that stopped when no service was configured is re-queued once a service is configured; submit once, poll until read, chunk by page,
+/// each chunk recording the service version that read it, the page, and the box. Waiting does not burn the retry budget, and does not resubmit
 #[tokio::test]
 async fn a_scan_waits_for_the_layout_service_and_keeps_its_page() -> anyhow::Result<()> {
     let Some(f) = fixture(FakeEmbed::new(Duration::from_millis(5))).await? else {
@@ -901,7 +901,7 @@ async fn a_scan_waits_for_the_layout_service_and_keeps_its_page() -> anyhow::Res
     .await?;
     assert!(queued >= 1);
 
-    // 交上去：挂回队列等，文档还在 parsing
+    // Submit: back on the queue to wait; the document is still parsing
     let err = super::process_document(&f.state, doc)
         .await
         .expect_err("submitted");
@@ -914,13 +914,13 @@ async fn a_scan_waits_for_the_layout_service_and_keeps_its_page() -> anyhow::Res
     let task = reader_task(&f, doc).await?.expect("the task is remembered");
     assert_eq!(task["task_id"], "t-1");
 
-    // 问一次：还在读
+    // Poll once: still reading
     let err = super::process_document(&f.state, doc)
         .await
         .expect_err("processing");
     assert!(utopia_core::is_deferred(&err).is_some());
 
-    // 再问：读完了
+    // Poll again: done reading
     super::process_document(&f.state, doc).await?;
     let row = utopia_store::documents::get(&f.pool, doc).await?;
     assert_eq!(row.status, "ready", "{:?}", row.error);
@@ -963,8 +963,8 @@ async fn a_scan_waits_for_the_layout_service_and_keeps_its_page() -> anyhow::Res
     f.cleanup().await
 }
 
-/// 方舟那一路（0065）：图片整张送给视觉模型，一次读完；一页限流了在本轮里退避重试，不烧
-/// 文档的重试预算；换成方舟之后 MinerU 那套任务号一个都不记
+/// The Ark path (0065): the whole image is sent to the vision model in one go; a rate-limited page backs off and retries within this round, not burning
+/// the document's retry budget; with Ark, none of MinerU's task-number bookkeeping is recorded
 #[tokio::test]
 async fn a_scan_is_read_by_the_vision_model_in_one_pass() -> anyhow::Result<()> {
     let Some(f) = fixture(FakeEmbed::new(Duration::from_millis(5))).await? else {
@@ -984,7 +984,7 @@ async fn a_scan_is_read_by_the_vision_model_in_one_pass() -> anyhow::Result<()> 
                 body["messages"][1]["content"][1]["image_url"]["url"].as_str().unwrap_or_default().chars().take(22).collect::<String>()
             ));
             if calls.len() == 1 {
-                // 第一次限流：本轮里退避后再来，不是文档失败
+                // First rate limit: back off and come back within this round; not a document failure
                 return ResponseTemplate::new(429);
             }
             ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -1008,7 +1008,7 @@ async fn a_scan_is_read_by_the_vision_model_in_one_pass() -> anyhow::Result<()> 
         0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, b'I', b'H',
     ];
     let doc = f.document_with_bytes("contract-scan.png", &png).await?;
-    // 退避在测试构建里是毫秒级（`ark_ocr::BACKOFF`）
+    // Backoff is in milliseconds in test builds (`ark_ocr::BACKOFF`)
     super::process_document(&f.state, doc).await?;
     let row = utopia_store::documents::get(&f.pool, doc).await?;
     assert_eq!(row.status, "ready", "{:?}", row.error);
@@ -1040,7 +1040,7 @@ async fn a_scan_is_read_by_the_vision_model_in_one_pass() -> anyhow::Result<()> 
     f.cleanup().await
 }
 
-/// 服务说读失败：文档带着服务给的原因落在 failed，任务号清掉，这次失败走普通重试（下一次重交）
+/// The service says reading failed: the document lands in failed with the reason the service gave, the task number is cleared, and this failure takes the ordinary retry (the next resubmission)
 #[tokio::test]
 async fn a_failed_read_is_retried_from_a_fresh_submission() -> anyhow::Result<()> {
     let Some(f) = fixture(FakeEmbed::new(Duration::from_millis(5))).await? else {
@@ -1084,7 +1084,7 @@ async fn a_failed_read_is_retried_from_a_fresh_submission() -> anyhow::Result<()
     f.cleanup().await
 }
 
-/// 假的转写端点：`labels` 时每句带说话人，否则只有时间。记下收到的表单
+/// Fake transcription endpoint: with `labels`, each sentence carries a speaker, otherwise only timestamps. Records the form received
 #[derive(Clone, Default)]
 struct FakeTranscriber {
     labels: bool,
@@ -1232,7 +1232,7 @@ async fn a_late_reader_preserves_a_newer_processed_revision() -> anyhow::Result<
     tx.commit().await?;
     assert_eq!(updated.id, doc);
     super::process_document(&f.state, doc).await?;
-    // 新版本任务已经完成；旧读取若覆盖其分块，不会再有后续重试修复。
+    // The new version's task has completed; if an old read overwrites its chunks, no later retry will repair it.
     let job: i64 = sqlx::query_scalar(
         "SELECT id FROM jobs WHERE kind = 'process_document' AND payload->>'document_id' = $1",
     )
@@ -1294,7 +1294,7 @@ async fn a_late_reader_does_not_repopulate_a_deleted_document() -> anyhow::Resul
     Ok(())
 }
 
-/// 0040 第三刀：录音交给会标说话人的转写模型。说话人写进正文，每块记着起止时刻和说话人
+/// 0040 third cut: a recording is handed to a transcription model that labels speakers. Speakers go into the body, and each chunk records its start and end times and speaker
 #[tokio::test]
 async fn a_recording_is_read_with_who_said_what() -> anyhow::Result<()> {
     let Some(f) = fixture(FakeEmbed::new(Duration::from_millis(5))).await? else {
@@ -1335,8 +1335,8 @@ async fn a_recording_is_read_with_who_said_what() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// 分不出说话人的转写：跟没配一样降级（决定 5）——不进库、告警说原因、不重试；换一个会标
-/// 说话人的模型存下，录音重新排队读成
+/// A transcription that cannot tell speakers apart: degrades the same as when nothing is configured (decision 5) -- not stored, an alert says why, no retry;
+/// once a model that labels speakers is stored, the recording is re-queued and read into
 #[tokio::test]
 async fn a_transcript_that_cannot_say_who_spoke_waits_for_one_that_can() -> anyhow::Result<()> {
     let Some(f) = fixture(FakeEmbed::new(Duration::from_millis(5))).await? else {
@@ -1380,7 +1380,7 @@ async fn a_transcript_that_cannot_say_who_spoke_waits_for_one_that_can() -> anyh
     f.cleanup().await
 }
 
-/// 读不了的格式（老式 .doc、压缩包）：一次失败、不重试，也不进库成乱码；它不缺模型，不报那条告警
+/// A format that cannot be read (old .doc, archives): one failure, no retry, and not stored as garbage; it is not a missing model, so that alert is not raised
 #[tokio::test]
 async fn a_binary_file_fails_once_instead_of_becoming_text() -> anyhow::Result<()> {
     let Some(f) = fixture(FakeEmbed::new(Duration::from_millis(5))).await? else {
@@ -1458,8 +1458,8 @@ async fn a_memory_episode_gets_the_vector_of_its_own_text() -> anyhow::Result<()
     f.cleanup().await
 }
 
-/// #1187：从前日志里所有没向量的块一起嵌、一处出错整个任务失败，一句嵌不了的记忆从此
-/// 挡在每一句新记忆前面。现在那一句留着没有向量，别的照常，任务照常走完
+/// #1187: previously every chunk without a vector was embedded together, and one error failed the whole task, so a memory that could not be embedded
+/// blocked every new memory after it. Now that sentence is left without a vector, the others proceed, and the task finishes as usual
 #[tokio::test]
 async fn a_memory_that_cannot_be_embedded_does_not_hold_back_the_others() -> anyhow::Result<()> {
     let mut fake = FakeEmbed::new(Duration::ZERO);

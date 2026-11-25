@@ -1,41 +1,41 @@
-//! GitHub 工单来源：一张工单 = 一篇文档，正文里带**它的状态变更史**。
+//! GitHub issue source: one ticket = one document, whose body carries **its status-change history**.
 //!
-//! ## 为什么不是只抓当前状态
+//! ## Why not capture only the current state
 //!
-//! 工单最有价值的部分不是"它现在是 closed"，而是"它 8 月 18 日开出、8 月 20 日
-//! 关掉、中间被指派给谁、标签怎么变的"。只抓当前状态，这条时间线要靠一次次同步
-//! 慢慢攒出来——第一次同步只能看见此刻，之前发生的全丢了。
+//! The most valuable part of a ticket is not "it is closed now" but "it was opened on Aug 18, closed on Aug 20,
+//! with who it was assigned to in between and how its labels changed". Capturing only the current state, this timeline would have to be built up slowly over repeated syncs
+//! -- the first sync can only see the present moment, and everything that happened before is lost.
 //!
-//! 与我们给维基百科历史快照做的是同一个判断：**别取现在，取变化**。区别是
-//! GitHub 直接把变化给了你，不用像维基那样从修订列表里采样。
+//! It is the same judgment we made for the Wikipedia history snapshots: **take the changes, not the present**. The difference is that
+//! GitHub hands you the changes directly, with no need to sample them from a revision list as Wikipedia requires.
 //!
-//! ## 工单列表增量筛选，评论与事件逐工单读取
+//! ## Incremental ticket-list filtering; comments and events read per ticket
 //!
-//! 第一版想让三样都走仓库级端点、一次分页取全，避免 200 张工单 401 次请求
-//! （未认证时 GitHub 每小时只给 60 次）。**拿真实数据一跑就发现事件那一路是错的**：
+//! The first version tried to have all three go through repository-level endpoints, paginated in full, to avoid 401 requests for 200 tickets
+//! (unauthenticated, GitHub gives only 60 requests an hour). **Running it on real data showed the events path was wrong**:
 //!
-//! - `issues/comments` 支持 `since`，但只给改动过的评论。文档是整篇替换，
-//!   因而只改标题也会把所有旧评论从当前文档删掉；新增评论则只留下新增的部分。
-//! - `issues/events` **不支持 `since`**，只能从最新往回翻。而 GitHub 的模型里
-//!   PR 也产生 issue 事件——实测本仓库工单事件埋在第 5 页，换一个 PR 活跃的仓库
-//!   就会被推到翻页上限之外。**于是"状态变更史"悄悄变成空的，而它正是这个来源
-//!   存在的理由。**
+//! - `issues/comments` supports `since`, but returns only comments that changed. The document is replaced as a whole,
+//!   so changing only the title would delete all the old comments from the current document; newly added comments would leave only the new part.
+//! - `issues/events` **does not support `since`**; it can only be paged backwards from the newest. And in GitHub's model
+//!   PRs also produce issue events -- measured here, the events for tickets sit on page 5; in a repo where PRs are busy,
+//!   they would be pushed past the paging limit. **So the "status-change history" silently comes back empty,
+//!   which is the very reason this source exists.**
 //!
-//! 所以评论与事件都逐工单取，不带 `since`。只对筛选后本轮要写入的工单请求，
-//! 避免全仓库的无关评论消耗分页预算。请求数增加的代价是真的，但 N 只是
-//! **本轮要写入的工单数**：之后有工单列表的 `since` 兜着，通常是个位数。
+//! So comments and events are both fetched per ticket, without `since`. Only tickets this round will write after filtering are requested,
+//! so comments from the whole repo that are irrelevant do not use up the paging budget. The extra requests are a real cost, but N is only
+//! **the number of tickets this round will write**: the `since` on the ticket list covers it afterwards, usually single digits.
 //!
-//! 三次拉取因此是：
+//! The three fetches are therefore:
 //!
-//! - `GET /repos/{repo}/issues?state=all&since=` —— 工单本体（分页）
-//! - `GET /repos/{repo}/issues/{n}/comments`    —— 每张工单的评论（分页）
-//! - `GET /repos/{repo}/issues/{n}/events`       —— 每张工单一次
+//! - `GET /repos/{repo}/issues?state=all&since=` -- the tickets themselves (paginated)
+//! - `GET /repos/{repo}/issues/{n}/comments`    -- comments on each ticket (paginated)
+//! - `GET /repos/{repo}/issues/{n}/events`       -- once per ticket
 //!
-//! ## 关于 PR
+//! ## About PRs
 //!
-//! GitHub 的数据模型里 PR 也是 issue，`/issues` 端点会把它们一起返回，靠
-//! `pull_request` 字段区分。默认排除：问"工单系统"要的是工单。但留了开关——
-//! 有些仓库（包括本仓库）的决策记录实际写在 PR 描述里。
+//! In GitHub's data model PRs are also issues, and the `/issues` endpoint returns them together, told apart by
+//! the `pull_request` field. They are excluded by default: a ticket system wants tickets. But a switch is provided --
+//! some repos (including this one) actually write their decision records in PR descriptions.
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use crate::ticket::stamp;
 
-/// 列表预算可在完整时间组边界延长；单张工单的详情不受此预算限制。
+/// The list budget can be extended at a complete time-group boundary; a single ticket's detail is not limited by this budget.
 const MAX_LISTING_PAGES: u32 = 10;
 const PER_PAGE: u32 = 100;
 const MAX_RATE_LIMIT_RETRIES: u32 = 3;
@@ -64,7 +64,7 @@ pub struct Issue {
     #[serde(default)]
     pub assignees: Vec<Actor>,
     pub user: Option<Actor>,
-    /// 存在即说明这条其实是 PR（GitHub 用同一张表存两者）
+    /// Presence means this is actually a PR (GitHub stores both in one table)
     #[serde(default)]
     pub pull_request: Option<serde_json::Value>,
 }
@@ -81,7 +81,7 @@ pub struct Actor {
 
 #[derive(Debug, Deserialize)]
 pub struct Comment {
-    /// 评论挂在哪张工单上：只有 URL 里有号，得从 `.../issues/18` 末段解析
+    /// Which ticket a comment is on: only the URL has the number, so parse it from the last segment of `.../issues/18`
     pub issue_url: String,
     pub user: Option<Actor>,
     pub created_at: DateTime<Utc>,
@@ -97,22 +97,22 @@ pub struct Event {
     pub assignee: Option<Actor>,
 }
 
-/// 评论的 `issue_url` 末段就是工单号。
+/// The last segment of a comment's `issue_url` is the ticket number.
 ///
-/// 解析失败返回 None 而不是 panic：GitHub 换了 URL 形状时，代价该是
-/// "这条评论没归到工单上"，不是整次同步炸掉。
+/// Parse failure returns None rather than panicking: if GitHub changes the URL shape, the cost should be
+/// "this comment was not attached to a ticket", not the whole sync blowing up.
 fn issue_number_from_url(url: &str) -> Option<i64> {
     url.rsplit('/').next()?.parse().ok()
 }
 
-/// 把一张工单连同它的评论与事件排成一篇文档（[`crate::ticket::render`]）。
+/// Arrange a ticket together with its comments and events into one document ([`crate::ticket::render`]).
 ///
-/// **纯函数，不联网**——取回与组织分开，于是组织这一半测得动。
-/// 三次分页的拼装逻辑（谁归谁、按什么排序）恰恰是最容易出错的部分。
+/// **A pure function, no network** -- fetching is separated from organizing, so the organizing half can be tested.
+/// The assembly logic of the three paginated fetches (who belongs to whom, sorted how) is exactly the part most prone to error.
 pub fn render(issue: &Issue, comments: &[&Comment], events: &[&Event]) -> String {
-    // 抬头写成带日期的陈述句，而不是键值对：抽取器读的是句子。
-    // "opened by X on 2026-08-18T16:18:27Z" 能抽出带 valid_from 的事实，
-    // "created_at: 2026-08-18" 则要它自己去猜这是什么意思
+    // The heading is written as a dated declarative sentence, not as key-value pairs: the extractor reads sentences.
+    // "opened by X on 2026-08-18T16:18:27Z" can extract a fact with valid_from, whereas
+    // "created_at: 2026-08-18" makes it guess what that means
     let mut sentences = Vec::new();
     if let Some(u) = &issue.user {
         sentences.push(format!(
@@ -133,8 +133,8 @@ pub fn render(issue: &Issue, comments: &[&Comment], events: &[&Event]) -> String
         let names: Vec<&str> = issue.assignees.iter().map(|a| a.login.as_str()).collect();
         sentences.push(format!("Assigned to {}.", names.join(", ")));
     }
-    // **状态变更史是这个来源存在的理由。** 每一行都带日期，
-    // 于是账本拿到的是"何时变成什么"，而不是一个静止的当前值
+    // **The status-change history is the reason this source exists.** Every line carries a date,
+    // so the ledger gets "what became what, and when", not a static current value
     let history = events
         .iter()
         .map(|e| {
@@ -168,7 +168,7 @@ pub fn render(issue: &Issue, comments: &[&Comment], events: &[&Event]) -> String
     })
 }
 
-/// 只保留这张工单的评论，按时间升序；响应里归不到它的评论不能混进正文。
+/// Keep only this ticket's comments, sorted by time ascending; comments that cannot be attributed to it in the response must not be mixed into the body.
 pub fn comments_for_issue<'a>(issue: &Issue, comments: &'a [Comment]) -> Vec<&'a Comment> {
     let mut comments: Vec<_> = comments
         .iter()
@@ -178,15 +178,15 @@ pub fn comments_for_issue<'a>(issue: &Issue, comments: &'a [Comment]) -> Vec<&'a
     comments
 }
 
-/// 事件按时间升序。逐工单端点返回的**看起来**是升序，但顺序不是契约，
-/// 而这里排错了的后果是历史倒着讲。
+/// Events sorted by time ascending. The per-ticket endpoint returns something that **looks** ascending, but the order is not a contract,
+/// and getting it wrong here means the history is told backwards.
 pub fn sort_events(mut events: Vec<Event>) -> Vec<Event> {
     events.sort_by_key(|e| e.created_at);
     events
 }
 
-/// 发一个带令牌的 GET 并判状态。github_issues 与 github_repo 共用这一条，
-/// 免得限流提示在两个来源里各写一份、慢慢漂移。
+/// Sends a GET with a token and checks the status. github_issues and github_repo share this one path,
+/// so the rate-limit hint is not written twice across two sources and drifts apart over time.
 pub(crate) async fn get_checked(
     http: &reqwest::Client,
     url: reqwest::Url,
@@ -213,7 +213,7 @@ pub(crate) async fn get_checked(
         ) && retries < MAX_RATE_LIMIT_RETRIES
         {
             if let Some(delay) = rate_limit_delay(resp.headers(), Utc::now()) {
-                // 等待留在当前请求内，否则超大时间组会在每次重试时重新耗尽前缀的配额。
+                // Waiting stays inside the current request; otherwise, for very large time groups, every retry would exhaust the prefix's budget again.
                 let delay = delay.max(Duration::from_secs(1 << retries));
                 retries += 1;
                 tracing::info!(
@@ -226,8 +226,8 @@ pub(crate) async fn get_checked(
                 continue;
             }
         }
-        // 限流说清楚是限流：未认证时每小时 60 次，一个中等仓库一次同步就能吃光。
-        // 报成通用 HTTP 错会让人去查网络，而正确的动作是配一个令牌
+        // Name the rate limit clearly as a rate limit: unauthenticated it is 60 an hour, and one sync of a mid-sized repo can eat all of it.
+        // Reporting it as a generic HTTP error would send people to check the network, when the right action is to configure a token
         let remaining = resp
             .headers()
             .get("x-ratelimit-remaining")
@@ -276,7 +276,7 @@ fn rate_limit_delay(headers: &reqwest::header::HeaderMap, now: DateTime<Utc>) ->
                 .unwrap_or_default(),
         )
     })?;
-    // 长等待不能占住 worker；拒绝本次重试，而不是早于服务端允许的时间重发。
+    // A long wait must not hold a worker; refuse this retry rather than resend before the server's allowed time.
     (delay <= MAX_RATE_LIMIT_WAIT).then_some(delay)
 }
 
@@ -285,7 +285,7 @@ pub struct IssueWindow {
     pub checkpoint: Option<DateTime<Utc>>,
 }
 
-/// offset 分页不是快照；复读同一前缀，变化时让调用者保留旧 checkpoint 后重试。
+/// Offset paging is not a snapshot; re-read the same prefix, and if it changed, have the caller keep the old checkpoint and retry.
 pub async fn fetch_window(
     http: &reqwest::Client,
     base: &str,
@@ -367,7 +367,7 @@ async fn fetch_window_pass(
             if stop_after.is_some_and(|boundary| updated > boundary) {
                 return Ok((window, positions));
             }
-            // 已消费条目和排除的 PR 也能移动页边界，必须参加复读核对。
+            // Consumed entries and excluded PRs can also move the page boundary, so they must take part in the re-read check.
             anyhow::ensure!(
                 positions.insert(issue.number, updated).is_none(),
                 "GitHub issue repeated during pagination; retry the previous checkpoint"
@@ -396,7 +396,7 @@ async fn fetch_window_pass(
     }
 }
 
-/// 详情必须读到末页，不能用截断的评论或事件覆盖已有完整正文。
+/// Details must be read to the last page; a truncated comment or event list must not overwrite an existing complete body.
 pub async fn fetch_all<T: for<'de> Deserialize<'de>>(
     http: &reqwest::Client,
     base: &str,
@@ -406,8 +406,8 @@ pub async fn fetch_all<T: for<'de> Deserialize<'de>>(
     let mut out = Vec::new();
     let mut page = 1;
     loop {
-        // 自己拼 query：这套 reqwest 特性组合里没有 RequestBuilder::query，
-        // 而 sync_custom 本来也是这么拼的
+        // Build the query string myself: this reqwest feature combination has no RequestBuilder::query,
+        // and sync_custom already builds it this way
         let mut url = reqwest::Url::parse(base)?;
         {
             let mut q = url.query_pairs_mut();
@@ -537,7 +537,7 @@ mod tests {
             let requests = server.received_requests().await.unwrap();
             assert_eq!(requests.len(), 2);
             for request in &requests {
-                // wiremock 为 origin-form URI 补 localhost；实际目标主机保留在 Host 头中。
+                // wiremock adds localhost to origin-form URIs; the real target host is kept in the Host header.
                 assert_eq!(request.url.path(), url.path());
                 assert_eq!(request.url.query(), url.query());
                 assert_eq!(
@@ -631,7 +631,7 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let group_time = "2026-01-02T00:00:00Z";
         let later_time = "2026-01-03T00:00:00Z";
-        // PR 多时先耗尽十页预算；全是工单时先耗尽 200 条预算。
+        // When there are many PRs, exhaust the ten-page budget first; when all are tickets, exhaust the 200-entry budget first.
         for issue_interval in [1, 100] {
             server.reset().await;
             let mut rows: Vec<_> = (1..=1001)
@@ -667,7 +667,7 @@ mod tests {
             );
             assert_eq!(first.checkpoint, Some(group_time.parse().unwrap()));
 
-            // 模拟端点仍返回 inclusive 下界；十页旧记录不应耗尽新一轮的任一预算。
+            // The mock endpoint still returns an inclusive lower bound; ten pages of old records must not exhaust either budget of the new round.
             let next = fetch_window(&http, &server.uri(), first.checkpoint, 200, false, None)
                 .await
                 .unwrap();
@@ -792,13 +792,13 @@ mod tests {
             issue_number_from_url("https://api.github.com/repos/a/b/issues/18"),
             Some(18)
         );
-        // 形状变了就归不上，但不该炸
+        // If the shape changed, it cannot be attributed, but that should not blow up
         assert_eq!(issue_number_from_url("https://example.com/"), None);
         assert_eq!(issue_number_from_url("nonsense"), None);
     }
 
-    /// **状态变更史必须进正文。** 这是这个来源与"抓一个网页"的全部区别：
-    /// 少了它，一张工单在账本里只是一个静止的当前值。
+    /// **The status-change history must go into the body.** This is the whole difference between this source and "scraping a web page":
+    /// without it, a ticket in the ledger is just a static current value.
     #[test]
     fn the_history_lands_in_the_document_with_dates() {
         let i = issue(serde_json::json!({
@@ -828,7 +828,7 @@ mod tests {
         assert!(out.contains("Closed on 2026-08-20T22:31:47Z."), "{out}");
         assert!(out.contains("Labelled bug."), "{out}");
         assert!(out.contains("Assigned to WaylandYang."), "{out}");
-        // 事件行带日期与执行者，labeled 还要带上是哪个标签
+        // Event lines carry a date and the actor; labeled also carries which label
         assert!(
             out.contains("- 2026-08-19T01:00:00Z — labeled by WaylandYang (bug)"),
             "{out}"
@@ -839,8 +839,8 @@ mod tests {
         );
     }
 
-    /// 正文里的时刻抽取器读得回来，而且是 second 精度：一件 UTC 23:59:59 发生的事，
-    /// 起点就是那一秒，不是那天的零点（#691）
+    /// The timestamps in the body are readable by the extractor, at second precision: an event at UTC 23:59:59 has a start
+    /// at that second, not midnight of that day (#691)
     #[test]
     fn a_time_in_the_document_reads_back_to_the_second() {
         let i = issue(serde_json::json!({
@@ -862,8 +862,8 @@ mod tests {
         assert_eq!(at, i.created_at);
     }
 
-    /// 评论仍按工单号验证，且按时间升序。
-    /// 归错了的后果很隐蔽：另一张工单的讨论出现在这张的正文里。
+    /// Comments are still verified by ticket number, and sorted by time ascending.
+    /// The consequence of misattribution is subtle: another ticket's discussion appears in this ticket's body.
     #[test]
     fn comments_belong_to_the_issue_and_are_chronological() {
         let issues = [
@@ -883,7 +883,7 @@ mod tests {
              "user": {"login": "x"}, "created_at": "2026-01-05T00:00:00Z", "body": "第二条"},
             {"issue_url": "https://api.github.com/repos/a/b/issues/2",
              "user": {"login": "y"}, "created_at": "2026-01-03T00:00:00Z", "body": "第一条"},
-            // 不在本次工单集合里：该被丢掉，而不是挂到别人身上
+            // Not in this batch's ticket set: it must be dropped, not attached to someone else
             {"issue_url": "https://api.github.com/repos/a/b/issues/99",
              "user": {"login": "z"}, "created_at": "2026-01-04T00:00:00Z", "body": "别人的"},
             {"issue_url": "nonsense",
@@ -895,12 +895,12 @@ mod tests {
 
         let two_comments = comments_for_issue(&issues[1], &comments);
         assert_eq!(two_comments.len(), 2, "其他工单和无法归属的评论不该混进来");
-        // 升序：先"第一条"（01-03）后"第二条"（01-05）
+        // Ascending: first "the first one" (01-03), then "the second one" (01-05)
         assert_eq!(two_comments[0].body.as_deref(), Some("第一条"));
     }
 
-    /// 逐工单端点返回的事件里**没有 issue 字段**（上下文已经在 URL 里），
-    /// 所以那个字段必须是可选的——第一版按仓库级响应写成必填，换端点后会解不出来。
+    /// The events returned by the per-ticket endpoint have **no issue field** (the context is already in the URL),
+    /// so that field must be optional -- the first version was written as required from the repo-level response, and after switching endpoints it could not be decoded.
     #[test]
     fn per_issue_events_parse_without_an_issue_field() {
         let evs: Vec<Event> = serde_json::from_value(serde_json::json!([
@@ -910,12 +910,12 @@ mod tests {
         ]))
         .unwrap();
         let sorted = sort_events(evs);
-        // 端点的顺序不是契约，排序自己做
+        // The endpoint's order is not a contract; sort it ourselves
         assert_eq!(sorted[0].event, "labeled");
         assert_eq!(sorted[1].event, "closed");
     }
 
-    /// PR 在 GitHub 的模型里也是 issue，靠这个字段认出来。
+    /// A PR is also an issue in GitHub's model, and this field identifies it.
     #[test]
     fn a_pull_request_is_recognisable_among_the_issues() {
         let pr = issue(serde_json::json!({
@@ -933,15 +933,15 @@ mod tests {
         assert!(plain.pull_request.is_none());
     }
 
-    /// **拿真实响应钉住字段形状。**
+    /// **Pin the field shapes with real responses.**
     ///
-    /// 手写的 JSON 只能证明"我以为的形状"解得出来。GitHub 一条 issue 有上百个字段，
-    /// 我们只声明了十个；哪个字段其实叫别的名、哪个在某些情况下是 null，
-    /// 只有真数据说得清。夹具取自 deeplethe/utopia，字段裁到我们声明的那些
-    /// （裁剪本身也顺带证明了未声明的字段不会让 serde 失败）。
+    /// A hand-written JSON can only prove that "the shape I imagined" decodes. A GitHub issue has over a hundred fields,
+    /// and we declare only ten; which field is actually named something else, and which is null in some cases,
+    /// only real data can say. The fixture comes from deeplethe/utopia, with fields trimmed to the ones we declare
+    /// (the trimming itself also shows that undeclared fields do not make serde fail).
     ///
-    /// 尤其钉住一件事：**逐工单事件端点不返回 `issue` 字段**。第一版按仓库级
-    /// 响应写成必填，换端点后会整片解不出来。
+    /// In particular pin one thing: **the per-ticket events endpoint does not return an `issue` field**. The first version was written as required from the repo-level
+    /// response, and after switching endpoints a whole batch failed to decode.
     #[test]
     fn the_real_github_shapes_still_parse() {
         #[derive(serde::Deserialize)]
@@ -954,13 +954,13 @@ mod tests {
         let f: Fixture = serde_json::from_str(raw).expect("真实响应该解得出来");
 
         assert!(!f.issues.is_empty(), "夹具是空的，这条测试就什么都没验");
-        // 全是 PR 的话，PR 过滤那条路就没被这份夹具覆盖到
+        // If all are PRs, the PR-filter path is not covered by this fixture
         assert!(
             f.issues.iter().all(|i| i.pull_request.is_none()),
             "夹具应当只含真工单"
         );
 
-        // 每张工单都排得出一篇非空文档，且抬头那句带真实日期
+        // Every ticket yields a non-empty document, and the heading sentence carries a real date
         for issue in &f.issues {
             let cs = comments_for_issue(issue, &f.comments);
             let events = sort_events(
@@ -983,8 +983,8 @@ mod tests {
             );
         }
 
-        // 这份夹具里每张工单都被关掉过，所以历史一节必须出现——
-        // 它是这个来源存在的理由，空了就等于退回"抓一个网页"
+        // Every ticket in this fixture was closed at some point, so the history section must appear --
+        // it is the reason this source exists; if it is empty, it is back to just "scraping a web page"
         let first = &f.issues[0];
         let cs = comments_for_issue(first, &f.comments);
         let events = sort_events(
@@ -1000,7 +1000,7 @@ mod tests {
         assert!(doc.contains("— closed by"), "关闭事件没写进历史：{doc}");
     }
 
-    /// 空评论不该在正文里留下一个只有标题的空节。
+    /// An empty comment should not leave an empty section with only a heading in the body.
     #[test]
     fn an_empty_comment_leaves_no_stub() {
         let i = issue(serde_json::json!({

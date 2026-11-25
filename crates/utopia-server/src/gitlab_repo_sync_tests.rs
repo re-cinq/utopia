@@ -1,5 +1,5 @@
-//! 用录下的真实 GitLab 响应跑项目文件同步（#1327）：树翻页、大小先 `HEAD` 再取、同一 blob
-//! 只收一处、没变不再取、树没翻完时不判「不在来源中」。
+//! Runs project file sync against recorded real GitLab responses (#1327): tree pagination, size fetched with `HEAD` before the body, the same blob
+//! is collected at one place only, unchanged files are not fetched again, and an unfinished tree is not judged "not in the source".
 use super::sync_gitlab_repo_with_client;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -9,8 +9,8 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 const PROJECT: &str = "/projects/QuintinBotes%2Futopia-gitlab-fixture/repository";
 const README: &str = "README.md";
 
-/// 阶段 0：录下的树分两页给。阶段 1：去掉 README.md，每一页都说还有下一页，翻到上限也翻不完。
-/// 阶段 2：去掉 README.md，一页给完
+/// Stage 0: the recorded tree is served in two pages. Stage 1: README.md is removed, and every page says there is a next page, so paging never finishes even at the cap.
+/// Stage 2: README.md is removed, and the whole tree is served in one page
 fn tree_page(fixture: &Value, stage: u8, uri: &str, page: Option<&str>) -> ResponseTemplate {
     let mut entries = fixture["tree"].as_array().unwrap().clone();
     if stage > 0 {
@@ -44,7 +44,7 @@ async fn a_gitlab_project_sync_takes_each_changed_file_once() -> anyhow::Result<
         Uuid::now_v7(),
     );
     let result = async {
-        // 3000 字节的上限把 3368 字节的 big.md 挡在外面
+        // The 3000-byte cap keeps out big.md, which is 3368 bytes
         sqlx::raw_sql(&format!(
             r#"INSERT INTO organizations(id,name) VALUES('{org}','gitlab-test');
                INSERT INTO workspaces(id,org_id,name) VALUES('{ws}','{org}','gitlab-test');
@@ -126,12 +126,12 @@ async fn a_gitlab_project_sync_takes_each_changed_file_once() -> anyhow::Result<
         ] {
             anyhow::ensure!(doc(path).await?.is_none(), "{path} 不该收");
         }
-        // 第二次提交的日期，毫秒截掉
+        // The date of the second commit, milliseconds truncated
         let time = doc("docs/copy-of-guide.md").await?.and_then(|d| d.doc_time);
         anyhow::ensure!(time == Some("2026-10-05T14:30:00Z".parse()?), "{time:?}");
         let sent = requests().await;
         let heads: Vec<_> = sent.iter().filter(|r| r.method == wiremock::http::Method::HEAD).collect();
-        // README、copy-of-guide、deep.mdx、big.md；空文件按 SHA 挡掉，不问
+        // README, copy-of-guide, deep.mdx and big.md; empty files are blocked by SHA without asking
         anyhow::ensure!(heads.len() == 4, "只有路径过了筛选的才问大小：{}", heads.len());
         let blobs = sent.iter().filter(|r| r.url.path().ends_with("/raw")).count();
         anyhow::ensure!(blobs == 3, "超限与空文件不该下载：取了 {blobs} 个");
@@ -147,7 +147,7 @@ async fn a_gitlab_project_sync_takes_each_changed_file_once() -> anyhow::Result<
             .filter(|r| !r.url.path().ends_with("/tree"))
             .map(|r| (r.method.to_string(), r.url.path().to_string()))
             .collect();
-        // 没变的一个都不再取；超限的 big.md 不落库，每轮再问一次大小，但不下载
+        // None of the unchanged ones is fetched again; big.md, which is over the limit, is not stored, and its size is asked again each round but it is not downloaded
         anyhow::ensure!(
             second.total() == 0
                 && again.len() == 1

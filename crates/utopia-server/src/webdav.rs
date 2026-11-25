@@ -1,43 +1,43 @@
-//! WebDAV 来源：Nextcloud、ownCloud、坚果云、群晖、Apache mod_dav、
-//! rclone serve webdav，以及一切说这套协议的网盘。
+//! WebDAV source: Nextcloud, ownCloud, Jianguoyun, Synology, Apache mod_dav,
+//! rclone serve webdav, and any cloud drive that speaks this protocol.
 //!
-//! 按 [0013](../../docs/decisions/0013-a-source-should-hand-over-its-history.md)
-//! 的四条判据，它跟对象存储是同一档：有 `getlastmodified`、身份是路径、
-//! 企业里确实有一堆文档住在网盘上；而「会不会自我推翻」只能靠两次同步的
-//! 差异看出来——WebDAV 的版本控制扩展（RFC 3253）几乎没有服务端实现。
+//! Judged by the four criteria of [0013](../../docs/decisions/0013-a-source-should-hand-over-its-history.md),
+//! it is in the same class as object storage: it has `getlastmodified`, identity is the path,
+//! and plenty of enterprise documents really do live on network drives. But "whether it overturns itself" can only be seen from the difference between two syncs;
+//! WebDAV's version-control extension (RFC 3253) is almost never implemented on servers.
 //!
-//! **不引 WebDAV 客户端库。** 这套协议要的东西很窄：一个 `PROPFIND` 拿列表、
-//! 一个 `GET` 取内容，响应是 XML。`reqwest` 与 `quick-xml` 都已经在树里，
-//! 加起来零新增依赖；而现有的 dav 客户端 crate 要么裹着自己的 HTTP 栈，
-//! 要么把整套 RFC 4918（锁、属性写、版本）都拖进来，而那些我们一条都不用。
+//! **No WebDAV client library.** The protocol needs very little: one `PROPFIND` for the listing,
+//! one `GET` for content, and the responses are XML. `reqwest` and `quick-xml` are already in the tree, so
+//! the total is zero new dependencies; existing dav client crates either wrap their own HTTP stack,
+//! or pull in all of RFC 4918 (locks, property writes, versions), none of which we use.
 
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
-/// 一次同步最多摄入多少个文件。理由与对象存储那边相同：网盘也能装下
-/// 十万个文件，而摄入不可逆。
+/// Maximum number of files ingested in one sync. The reasoning is the same as for object storage: a drive can hold
+/// a hundred thousand files, and ingestion is irreversible.
 const MAX_FILES_PER_SYNC: usize = 2_000;
 
-/// 单个文件的大小上限。
+/// Size cap for a single file.
 const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
-/// 目录递归的层数上限。**不是怕深，是怕环**：有些服务端会把符号链接
-/// 或共享目录暴露成可以自己指向自己的路径，`Depth: infinity` 在那种目录上
-/// 永远回不来。逐层走并且封顶，比信任服务端安全。
+/// Cap on directory recursion depth. **Not about depth, about cycles**: some servers expose symbolic links
+/// or shared directories as paths that can point back to themselves, and `Depth: infinity` on such a directory
+/// never returns. Walking level by level with a cap is safer than trusting the server.
 const MAX_DEPTH: usize = 8;
 
-/// 一个远端文件。
+/// One remote file.
 pub struct RemoteFile {
-    /// `webdav://host/path`——`ingest_item` 的 external_key 约定是 URI 形态
+    /// `webdav://host/path`: the `ingest_item` external_key convention is a URI shape
     pub external_key: String,
     pub filename: String,
     pub bytes: Vec<u8>,
     pub last_modified: Option<DateTime<Utc>>,
 }
 
-/// `PROPFIND` 回来的一条。
+/// One entry returned by `PROPFIND`.
 #[derive(Debug, PartialEq)]
 struct Entry {
     /// XML references are decoded, but URL percent escapes remain intact.
@@ -47,15 +47,15 @@ struct Entry {
     modified: Option<DateTime<Utc>>,
 }
 
-/// 解析 `multistatus` 响应。
+/// Parses a `multistatus` response.
 ///
-/// **只认本地名，不认前缀。** 服务端可能用 `D:`、`d:`、`ns0:`，也可能干脆
-/// 不加前缀——RFC 允许任意前缀绑到 `DAV:` 命名空间上。按 `d:response` 这样
-/// 硬匹配的解析器，换一台服务端就一条都读不出来，而症状是「同步成功，
-/// 零个文件」。
+/// **Matches the local name only, not the prefix.** A server may use `D:`, `d:`, `ns0:`, or no prefix at all:
+/// the RFC allows any prefix to be bound to the `DAV:` namespace. A parser that hard-matches `d:response`
+/// reads nothing at all from a different server, and the symptom is "sync succeeded,
+/// zero files".
 ///
-/// **目录判据是 `<collection/>` 存在，不是 href 以 `/` 结尾。** 后者是约定
-/// 不是规范，而 rclone 与 Nextcloud 在这一点上就不一致。
+/// **The directory test is whether `<collection/>` is present, not whether the href ends in `/`.** The latter is a convention,
+/// not the spec, and rclone and Nextcloud disagree on exactly this point.
 fn parse_multistatus(xml: &str) -> anyhow::Result<Vec<Entry>> {
     let mut r = Reader::from_str(xml);
 
@@ -89,8 +89,8 @@ fn parse_multistatus(xml: &str) -> anyhow::Result<Vec<Entry>> {
                     }
                 }
             }
-            // `<collection/>` 通常是自闭合标签，走 Empty 而不是 Start——
-            // 少了这一条，所有目录都会被当成文件去 GET
+            // `<collection/>` is usually a self-closing tag, so it arrives as Empty rather than Start:
+            // without this case, every directory would be GET as a file
             Ok(Event::Empty(e)) => {
                 if local_name(e.name().into_inner()) == "collection" {
                     if let Some(c) = cur.as_mut() {
@@ -113,8 +113,8 @@ fn parse_multistatus(xml: &str) -> anyhow::Result<Vec<Entry>> {
                 ) =>
             {
                 let reference = format!("&{};", e.into_inner());
-                // 认不出的实体只影响它自己那一条：照原样留着。整张 PROPFIND 因为一个
-                // `&nbsp;` 就报错的话，一个目录里所有文件都同步不了
+                // An unrecognised entity only affects its own entry: keep it as is. If the whole PROPFIND errored
+                // on one `&nbsp;`, no file in a directory could sync
                 match quick_xml::escape::unescape(&reference) {
                     Ok(v) => text.push_str(&v),
                     Err(_) => text.push_str(&reference),
@@ -122,18 +122,18 @@ fn parse_multistatus(xml: &str) -> anyhow::Result<Vec<Entry>> {
             }
             Ok(Event::End(e)) => {
                 let name = local_name(e.name().into_inner());
-                // **空的不回写**：Nextcloud / SabreDAV 一条 response 常带两块 propstat，
-                // 200 那块给值、404 那块把没找到的属性再列一遍。成对写法
-                // （`<getcontentlength></getcontentlength>`）会开一次 field 再关一次，
-                // 照写就把好值盖成空——而 `fetch` 跳过长度为 0 的条目，文件照样掉出同步，
-                // 正是这一刀要修的症状换了个门
+                // **Empty values are not written back**: a Nextcloud / SabreDAV response often carries two propstat blocks:
+                // the 200 block gives the value, and the 404 block lists the unfound properties again. The paired form
+                // (`<getcontentlength></getcontentlength>`) opens a field and closes it again,
+                // so writing it as is would overwrite a good value with empty. `fetch` skips zero-length entries, so the file still drops out of sync,
+                // the very symptom this cut is meant to fix, in a different guise
                 if name == field && !text.trim().is_empty() {
                     if let Some(c) = cur.as_mut() {
                         match field.as_str() {
                             "href" => c.href = text.trim().to_string(),
                             "getcontentlength" => c.len = text.trim().parse().unwrap_or(0),
                             "getlastmodified" => {
-                                // RFC 1123，`Wed, 02 Sep 2026 15:04:05 GMT`
+                                // RFC 1123, `Wed, 02 Sep 2026 15:04:05 GMT`
                                 c.modified = DateTime::parse_from_rfc2822(text.trim())
                                     .ok()
                                     .map(|d| d.with_timezone(&Utc));
@@ -159,18 +159,18 @@ fn parse_multistatus(xml: &str) -> anyhow::Result<Vec<Entry>> {
     Ok(out)
 }
 
-/// 取标签的本地名，丢掉命名空间前缀并转小写。
+/// Gets the local name of a tag, dropping the namespace prefix and lowercasing it.
 ///
-/// 规范说元素名区分大小写，但实测有服务端写 `getLastModified`。
-/// 前缀也自己切：`D:`、`d:`、`ns0:` 都合法，RFC 允许任意前缀绑到 `DAV:`。
+/// The spec says element names are case-sensitive, but in practice some servers write `getLastModified`.
+/// The prefix is split off too: `D:`, `d:`, and `ns0:` are all valid, since the RFC allows any prefix bound to `DAV:`.
 fn local_name(raw: &str) -> String {
     raw.rsplit(':').next().unwrap_or(raw).to_ascii_lowercase()
 }
 
-/// href 里的百分号转义。
+/// Percent-escapes in hrefs.
 ///
-/// 自己解而不是引 `percent-encoding`：这里只需要解码，而解码是十来行。
-/// 非法序列原样留下，不猜；解码只用于既有文档身份与文件名。
+/// Decode it ourselves rather than pulling in `percent-encoding`: only decoding is needed here, and decoding is ten-odd lines.
+/// Invalid sequences are left as is, without guessing; decoding is used only for existing document identity and file names.
 fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -190,11 +190,11 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// 逐层走目录，取回所有文件。
+/// Walks directories level by level, fetching all files.
 ///
-/// **不用 `Depth: infinity`。** 规范允许服务端拒绝它（`403 Propfind-Finite-Depth`），
-/// 而 Nextcloud 与 Apache mod_dav 默认就是拒绝的；能接受它的服务端在大目录上
-/// 又会一次性吐出几十兆 XML。逐层加封顶，两头的问题都没有。
+/// **No `Depth: infinity`.** The spec lets a server refuse it (`403 Propfind-Finite-Depth`),
+/// and Nextcloud and Apache mod_dav refuse it by default; a server that accepts it would
+/// dump tens of MB of XML in one go on a large directory. Capping each level avoids both problems.
 pub async fn fetch(
     http: &reqwest::Client,
     base: &str,
@@ -240,7 +240,7 @@ pub async fn fetch(
             // bytes into URL syntax, and %2523 would fetch a file named with '#'.
             let path = document_path(&e.href, &base);
             let request_path = normalize(&strip_base(&e.href, &base));
-            // 服务端会把被查询的目录自己也列进来，跳过它否则会无限打转
+            // The server lists the queried directory itself as well; skip it, or the walk would spin forever
             if path == dir || request_path == request_dir {
                 continue;
             }
@@ -256,7 +256,7 @@ pub async fn fetch(
                 break;
             }
 
-            // 一个文件取不回来不该带走整次同步——与对象存储那边同一个判断
+            // A file that cannot be fetched should not take the whole sync down with it: the same judgment as on the object storage side
             let mut g = http.get(format!("{base}{request_path}"));
             if let Some((u, p)) = auth {
                 g = g.basic_auth(u, Some(p));
@@ -295,7 +295,7 @@ pub async fn fetch(
     Ok((out, truncated))
 }
 
-/// 路径统一成 `/a/b` 的形状：前有斜杠、后无斜杠（根除外）。
+/// Normalises paths to the shape `/a/b`: a leading slash, no trailing slash (except the root).
 fn normalize(p: &str) -> String {
     let t = p.trim();
     let t = t.strip_suffix('/').unwrap_or(t);
@@ -329,7 +329,7 @@ fn document_path(href: &str, base: &str) -> String {
     normalize(&strip_base(&decoded, base))
 }
 
-/// href 可能是绝对 URL 也可能只是路径——两种都合法，服务端各写各的。
+/// An href may be an absolute URL or just a path; both are valid, and each server writes its own.
 fn strip_base(href: &str, base: &str) -> String {
     if let Some(rest) = href
         .strip_prefix(base)
@@ -359,8 +359,8 @@ fn strip_base(href: &str, base: &str) -> String {
 mod tests {
     use super::*;
 
-    /// 同一个属性被声明两次：200 那块给值，404 那块把没找到的再列一遍。
-    /// 空的那次不许盖掉好值——盖掉之后长度是 0，`fetch` 会把这个文件跳过去
+    /// The same property declared twice: the 200 block gives the value, and the 404 block lists the unfound one again.
+    /// The empty occurrence must not overwrite the good value: after overwriting, the length is 0, and `fetch` would skip the file
     #[test]
     fn an_empty_redeclaration_does_not_clobber_a_property() {
         let paired = r#"<multistatus xmlns="DAV:"><response>
@@ -374,7 +374,7 @@ mod tests {
             </response></multistatus>"#;
         for xml in [
             paired.to_string(),
-            // 自闭合的那种写法走 Event::Empty，本来就不开 field；两种都要过
+            // The self-closing form goes through Event::Empty and does not open a field anyway; both forms must pass
             paired
                 .replace(
                     "<getcontentlength></getcontentlength>",
@@ -389,7 +389,7 @@ mod tests {
         }
     }
 
-    /// 认不出的实体只影响它自己那一条，不掀掉整张列表
+    /// An unrecognised entity only affects its own entry, without bringing down the whole listing
     #[test]
     fn an_unknown_entity_does_not_abort_the_listing() {
         let xml = r#"<multistatus xmlns="DAV:">
@@ -628,8 +628,8 @@ mod tests {
         }
     }
 
-    /// **命名空间前缀是任意的。** 同一份响应换个前缀必须解出同样的东西，
-    /// 否则换一台服务端就「同步成功，零个文件」——最难查的那种失败。
+    /// **Namespace prefixes are arbitrary.** The same response under a different prefix must yield the same result,
+    /// or switching to another server gives "sync succeeded, zero files": the hardest kind of failure to diagnose.
     #[test]
     fn any_namespace_prefix_parses_the_same() {
         let with_d = r#"<?xml version="1.0"?>
@@ -641,7 +641,7 @@ mod tests {
     <D:resourcetype/>
   </D:prop></D:propstat>
 </D:response></D:multistatus>"#;
-        // 前缀换掉，命名空间声明本身不受影响（`xmlns:D="DAV:"` 里没有 `D:` 这个子串）
+        // The prefix is swapped; the namespace declaration itself is unaffected (`xmlns:D="DAV:"` does not contain the substring `D:`)
         let with_ns0 = with_d.replace("D:", "ns0:");
         let a = parse_multistatus(with_d).unwrap();
         let b = parse_multistatus(&with_ns0).unwrap();
@@ -656,8 +656,8 @@ mod tests {
         );
     }
 
-    /// **目录判据是 `<collection/>`，而它通常是自闭合标签。**
-    /// 只处理 `Event::Start` 的解析器会把每个目录都当成文件去 GET。
+    /// **The directory test is `<collection/>`, and it is usually a self-closing tag.**
+    /// A parser that handles only `Event::Start` would GET every directory as a file.
     #[test]
     fn a_self_closing_collection_is_still_a_directory() {
         let xml = r#"<multistatus xmlns="DAV:"><response>
@@ -668,18 +668,18 @@ mod tests {
         assert!(e[0].is_dir, "自闭合的 collection 没被认出来");
     }
 
-    /// href 是百分号转义过的，中文路径直接拼 URL 会 404。
+    /// hrefs are percent-escaped: a URL built by concatenating a path with Chinese characters would 404.
     #[test]
     fn a_percent_encoded_href_is_decoded() {
         assert_eq!(
             percent_decode("/docs/%E4%B8%AD%E6%96%87.txt"),
             "/docs/中文.txt"
         );
-        // 非法序列原样留着，不猜
+        // Invalid sequences are left as is, without guessing
         assert_eq!(percent_decode("/a%ZZb"), "/a%ZZb");
     }
 
-    /// 路径统一：前有斜杠、后无斜杠。两端不一致会让同一个目录被走两遍。
+    /// Normalise paths: a leading slash, no trailing slash. Inconsistent ends would make the same directory walked twice.
     #[test]
     fn paths_normalise_to_one_shape() {
         for (raw, want) in [
@@ -708,10 +708,10 @@ mod tests {
         }
     }
 
-    /// 真连一个 WebDAV 服务端。没有 `UTOPIA_DAV_TEST_URL` 就跳过。
+    /// Connects to a real WebDAV server. Skipped without `UTOPIA_DAV_TEST_URL`.
     ///
-    /// 用 rclone 起一个最省事，它和 Nextcloud 在 href 形态上不一样，
-    /// 正好能验解析不挑服务端：
+    /// Using rclone to start one is the least effort, and its href shape differs from Nextcloud's,
+    /// which is exactly what checks that parsing does not depend on the server:
     /// ```text
     /// mkdir -p /tmp/dav/docs && echo hello > /tmp/dav/docs/a.txt
     /// rclone serve webdav /tmp/dav --addr 127.0.0.1:18081 --user u --pass p
@@ -741,7 +741,7 @@ mod tests {
             a.external_key
         );
         assert!(a.last_modified.is_some());
-        // 目录本身不该混进来
+        // The directory itself should not be mixed in
         assert!(files.iter().all(|f| !f.filename.is_empty()));
         Ok(())
     }

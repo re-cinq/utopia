@@ -1,5 +1,5 @@
-//! 认证：argon2 密码哈希 + JWT（HttpOnly Cookie，同时接受 Bearer）。
-//! Cookie 本身是会话 cookie，过期由 JWT 的 exp 控制（7 天）。
+//! Authentication: argon2 password hashing + JWT (HttpOnly cookie, Bearer also accepted).
+//! The cookie itself is a session cookie; expiry is controlled by the JWT's exp (7 days).
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -35,8 +35,8 @@ pub fn hash_password(password: &str) -> Result<String, AppError> {
 }
 
 pub fn verify_password(password: &str, hash: &str) -> bool {
-    // 单点登录开的账号存的是 `!`，解析不了。照样跑一遍 argon2（对着 dummy），
-    // 否则响应快得多，能据此分辨出哪些账号只走 SSO
+    // An account created through single sign-on stores `!`, which cannot be parsed. Still run argon2 (against a dummy),
+    // otherwise the response is much faster, which would let someone tell which accounts only use SSO
     let Ok(parsed) = PasswordHash::new(hash) else {
         let dummy = PasswordHash::new(dummy_password_hash()).expect("the dummy parses");
         let _ = Argon2::default().verify_password(password.as_bytes(), &dummy);
@@ -47,11 +47,11 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
         .is_ok()
 }
 
-/// 「邮箱不存在」分支用的常量时间伙伴：一个用真实参数算出来的 argon2 哈希，明文是随机
-/// 字节、算完即弃。要点只有一个——它必须能被 `PasswordHash::new` 解析并带着与
-/// `hash_password` 相同的参数，这样那条分支和「邮箱存在、密码错」走的是同一段计算。
-/// 它不匹配任何口令；结果本来就被丢弃。从 `hash_password` 派生而不是硬编码，是为了
-/// 参数永不漂移：`Argon2::default()` 一变，这里跟着变，没有测试会静静过时。
+/// The constant-time partner for the "email does not exist" branch: an argon2 hash computed with real parameters, whose plaintext is random
+/// bytes, computed and then thrown away. The key point is just one thing: it must be parseable by `PasswordHash::new` and carry the
+/// same parameters as `hash_password`, so that branch and "email exists, wrong password" go through the same computation.
+/// It matches no password; the result is discarded anyway. It is derived from `hash_password` rather than hard-coded, so that
+/// the parameters never drift: if `Argon2::default()` changes, this changes with it, and no test silently goes stale.
 pub fn dummy_password_hash() -> &'static str {
     static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     HASH.get_or_init(|| {
@@ -67,8 +67,8 @@ pub fn issue_token(state: &AppState, user_id: Uuid) -> Result<String, AppError> 
     issue_session(state, user_id).map(|(token, _)| token)
 }
 
-/// 签发会话并给出它的过期时刻：要把过期时间告诉调用方的地方用这个，
-/// 免得在别处再按 TTL 算一遍、和 JWT 里的 `exp` 对不上
+/// Issue a session and give its expiry moment: where the caller needs the expiry time, use this,
+/// so it is not recomputed from the TTL elsewhere and mismatched with the `exp` in the JWT
 pub fn issue_session(
     state: &AppState,
     user_id: Uuid,
@@ -87,24 +87,24 @@ pub fn issue_session(
     Ok((token, expires_at))
 }
 
-/// 外层是否在跑 TLS。反代都会带 `X-Forwarded-Proto`；没有这个头（本地直连、
-/// 开发环境）就当明文，Secure 不打，登录照常工作。
+/// Whether the outer layer runs TLS. Reverse proxies always send `X-Forwarded-Proto`; without this header (direct local connection,
+/// development) it is treated as plaintext: Secure is not set, and login still works.
 ///
-/// 不需要「信任的代理」名单：伪造这个头只会让攻击者自己的 cookie 变成 Secure，
-/// 更严格而不是更宽松，没有攻击价值。`UTOPIA_COOKIE_SECURE=true` 可强制打开，
-/// 给那些不发这个头的代理兜底。
+/// No "trusted proxy" list is needed: forging this header only makes the attacker's own cookie Secure,
+/// which is stricter rather than looser and has no attack value. `UTOPIA_COOKIE_SECURE=true` can force it on,
+/// as a fallback for proxies that do not send this header.
 pub fn behind_tls(headers: &axum::http::HeaderMap, forced: bool) -> bool {
     forced
         || headers
             .get("x-forwarded-proto")
             .and_then(|v| v.to_str().ok())
-            // 经过多层代理时这个头是逗号分隔的链，最左边是最初那一跳
+            // Behind several layers of proxies this header is a comma-separated chain, and the leftmost is the very first hop
             .and_then(|v| v.split(',').next())
             .is_some_and(|p| p.trim().eq_ignore_ascii_case("https"))
 }
 
-/// 会话 cookie。`secure` 由 [`behind_tls`] 判定——HTTPS 下打上 Secure，
-/// 浏览器就不会再把它经明文链路发出去。
+/// The session cookie. `secure` is decided by [`behind_tls`]: under HTTPS it gets Secure,
+/// so the browser will not send it again over a plaintext link.
 pub fn auth_cookie(token: String, secure: bool) -> Cookie<'static> {
     Cookie::build((COOKIE_NAME, token))
         .path("/")
@@ -114,10 +114,10 @@ pub fn auth_cookie(token: String, secure: bool) -> Cookie<'static> {
         .build()
 }
 
-/// 注销用的删除指令。**属性必须和签发时一致**：浏览器按 name + domain + path
-/// 匹配才认得出要删哪一条，只给名字的话 path 会退化成当前请求路径
-/// （`/api/v1/auth`），和签发时的 `/` 对不上——cookie 留在浏览器里，人以为
-/// 自己登出了。
+/// Delete directive for logout. **The attributes must match those used at issue time**: the browser matches name + domain + path
+/// to recognise which cookie to delete; with only the name, path degrades to the current request path
+/// (`/api/v1/auth`), which does not match the `/` used at issue time, so the cookie stays in the browser and the person thinks
+/// they have logged out.
 pub fn clear_auth_cookie(secure: bool) -> Cookie<'static> {
     Cookie::build((COOKIE_NAME, ""))
         .path("/")
@@ -137,7 +137,7 @@ pub(crate) fn decode_user_id(state: &AppState, token: &str) -> Result<Uuid, AppE
     Ok(data.claims.sub)
 }
 
-/// 请求带来的凭据：Cookie `utopia_token` 优先，其次 `Authorization: Bearer`。
+/// Credentials carried by the request: the Cookie `utopia_token` takes precedence, then `Authorization: Bearer`.
 fn presented_credential(parts: &Parts) -> Result<String, AppError> {
     CookieJar::from_headers(&parts.headers)
         .get(COOKIE_NAME)
@@ -153,7 +153,7 @@ fn presented_credential(parts: &Parts) -> Result<String, AppError> {
         .ok_or(AppError::Unauthorized)
 }
 
-/// 已登录用户提取器：Cookie `utopia_token` 或 `Authorization: Bearer`。
+/// Logged-in user extractor: Cookie `utopia_token` or `Authorization: Bearer`.
 pub struct AuthUser(pub User);
 
 impl FromRequestParts<AppState> for AuthUser {
@@ -172,25 +172,25 @@ impl FromRequestParts<AppState> for AuthUser {
     }
 }
 
-/// 会话或个人令牌，二者都落到同一个 `User` 上（0014 决定 6，#1243）。
+/// A session or a personal token; both land on the same `User` (0014 decision 6, #1243).
 ///
-/// **不替换 `AuthUser`。** `AuthUser` 把每个 Bearer 都当 JWT 解，令牌在那几百条
-/// 路由上一律是 401——那是有意的：哪条路由准令牌进来，要在 0014 里说出理由。
-/// 用这个提取器的只有文档原件（0052）、「把一个库搭起来」那几条和读图那几条：搜实体、
-/// 实体详情、认知历史、事实证据、图总览、邻域、本体、某类的实例、文档的抽取结果、
-/// 整库导出（决定 7）。
+/// **Does not replace `AuthUser`.** `AuthUser` decodes every Bearer as a JWT, so a token is a 401 on all those hundreds of
+/// routes. That is deliberate: which route accepts tokens has to be justified in 0014.
+/// The only users of this extractor are document originals (0052), the "set a library up" routes and the graph-reading routes: entity search,
+/// entity detail, cognitive history, fact evidence, graph overview, neighbourhood, ontology, the instances of a class, a document's extraction result,
+/// and the whole-library export (decision 7).
 ///
-/// 按推送时的 `external_id` 读回一篇文档（#1276）也是文档原件，开给令牌的理由写在决定 7。
-/// 分块检索（#1271）同样按决定 7 开给令牌。
+/// Reading a document back by its `external_id` as pushed (#1276) is also a document original; the reason for opening it to tokens is in decision 7.
+/// Chunk search (#1271) is likewise opened to tokens under decision 7.
 ///
-/// 来源关上自己不再陈述的事实（`close-unconfirmed`，fork 的 RC-004）：推陈述的客户端
-/// 只有令牌。
+/// Closing facts a source no longer states (`close-unconfirmed`, the fork's RC-004): the client that pushes statements
+/// has only the token.
 ///
-/// 令牌只收窄：`pat` 在的时候，路由先问 [`Self::require_write`] 或
-/// [`Self::reaches`]，角色照旧由 `require_kb` 与工作区角色判。
+/// A token only narrows: when `pat` is present, the route first asks [`Self::require_write`] or
+/// [`Self::reaches`]; the role is still judged by `require_kb` and the workspace role.
 pub struct SessionOrToken {
     pub user: User,
-    /// None = 网页会话，不收窄任何东西
+    /// None = web session, narrows nothing
     pub pat: Option<utopia_store::tokens::Authenticated>,
 }
 
@@ -202,7 +202,7 @@ impl FromRequestParts<AppState> for SessionOrToken {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let raw = presented_credential(parts)?;
-        // 过期与撤销在 `authenticate` 的 SQL 里判；停用的人 `find_user_by_id` 挡住
+        // Expiry and revocation are checked in the `authenticate` SQL; a deactivated person is blocked by `find_user_by_id`
         let (user_id, pat) = if raw.starts_with(utopia_store::tokens::PREFIX) {
             let pat = utopia_store::tokens::authenticate(&state.pool, raw.trim()).await?;
             (pat.user_id, Some(pat))
@@ -217,20 +217,20 @@ impl FromRequestParts<AppState> for SessionOrToken {
 }
 
 impl SessionOrToken {
-    /// 代人行事的那枚令牌；会话是 None。审计行靠它分得出是哪一枚（0014 决定 6）
+    /// The token acting on someone's behalf; for a session it is None. The audit row tells which token it was by this (0014 decision 6)
     pub fn token_id(&self) -> Option<Uuid> {
         self.pat.as_ref().map(|pat| pat.token_id)
     }
 
-    /// 令牌有没有把这个库排除掉。会话什么都不排除；这不是权限，权限归角色
+    /// Whether the token excludes this library. A session excludes nothing; this is not permission, which belongs to the role
     pub fn reaches(&self, kb_id: Uuid) -> bool {
         self.pat.as_ref().is_none_or(|pat| pat.covers(kb_id))
     }
 
-    /// 令牌准不准往这个库里写。`None` 是一个还不存在的库：限定过 `kb_ids` 的令牌
-    /// 列表里不可能有它，所以建库只给不限库的令牌。
+    /// Whether the token may write to this library. `None` is a library that does not exist yet: a token restricted by `kb_ids`
+    /// cannot have it in its list, so only tokens not restricted to libraries may create one.
     ///
-    /// 两种拒绝各带 code：它们都是「换一枚令牌就行」，与角色不够的 403 不是一回事
+    /// Each of the two refusals carries its own code: both mean "use a different token", which is not the same as a 403 for an insufficient role
     pub fn require_write(&self, kb_id: Option<Uuid>) -> Result<(), AppError> {
         let Some(pat) = &self.pat else {
             return Ok(());
@@ -255,11 +255,11 @@ impl SessionOrToken {
     }
 }
 
-/// 生成一条 JWT 签名密钥：32 字节 CSPRNG，hex 编码成 64 个字符。
+/// Generate a JWT signing key: 32 bytes from a CSPRNG, hex-encoded to 64 characters.
 ///
-/// 长度取 32 字节是因为 HS256 的 HMAC 块就是 32 字节——再长会被先哈希一遍，
-/// 并不增加强度。hex 而非 base64：这个值会出现在日志、环境变量和运维的复制粘贴里，
-/// 不带 +/= 省去一整类转义问题。
+/// The length is 32 bytes because the HMAC block of HS256 is 32 bytes: anything longer is hashed first,
+/// adding no strength. Hex rather than base64: this value appears in logs, environment variables and ops copy-paste,
+/// and without `+/=` a whole class of escaping problems is avoided.
 pub fn generate_jwt_secret() -> String {
     use argon2::password_hash::rand_core::RngCore;
     let mut buf = [0u8; 32];
@@ -278,9 +278,9 @@ mod tests {
         }
     }
 
-    /// JWT 校验的护栏：默认配置必须认自家签发的 HS256，且拒绝换密钥与过期。
-    /// 加于 jsonwebtoken 9 → 10 升级时（CVE-2026-25537：<10.3.0 的类型混淆可绕过授权）——
-    /// 库的默认校验语义是编译器看不见的那部分，回归靠这里兜。
+    /// Guard rails for JWT validation: the default config must accept HS256 issued by ourselves, and reject key swaps and expiry.
+    /// Added during the jsonwebtoken 9 → 10 upgrade (CVE-2026-25537: type confusion below 10.3.0 can bypass authorisation):
+    /// the library's default validation semantics are the part the compiler cannot see, and regressions are caught here.
     #[test]
     fn default_validation_accepts_own_token_and_rejects_the_rest() {
         let secret = b"test-secret-not-a-real-key";
@@ -335,30 +335,30 @@ mod tests {
         h
     }
 
-    /// Secure 的判定必须只在确认走了 TLS 时为真：判错成 true，明文部署的用户
-    /// 登录后浏览器直接丢掉 cookie，症状是「点了登录又回到登录页」，且不报错。
+    /// Secure must be true only when TLS is confirmed in use: if it is judged true wrongly, users of a plaintext deployment
+    /// find the browser drops the cookie right after login, the symptom being "click login and land back on the login page", with no error reported.
     #[test]
     fn secure_only_when_tls_is_actually_in_front() {
-        // 没有代理：本地直连、cargo run —— 不能打 Secure，否则 HTTP 下登不上
+        // No proxy: direct local connection, cargo run. Secure must not be set, or login fails over HTTP
         assert!(!behind_tls(&headers_with(None), false));
         assert!(!behind_tls(&headers_with(Some("http")), false));
 
         assert!(behind_tls(&headers_with(Some("https")), false));
-        // 头的大小写由代理决定，不能假设
+        // The header's case is decided by the proxy and must not be assumed
         assert!(behind_tls(&headers_with(Some("HTTPS")), false));
 
-        // 多层代理时这个头是逗号分隔的链，最左边是最初那一跳——
-        // 取错一端会把「用户走 HTTPS 到边缘、边缘走 HTTP 回源」判成明文
+        // Behind several layers of proxies this header is a comma-separated chain, and the leftmost is the very first hop:
+        // picking the wrong end would judge "user goes HTTPS to the edge, edge goes HTTP to origin" as plaintext
         assert!(behind_tls(&headers_with(Some("https, http")), false));
         assert!(!behind_tls(&headers_with(Some("http, https")), false));
 
-        // 配置强制打开：给不发这个头的代理兜底
+        // Forced on by configuration: a fallback for proxies that do not send this header
         assert!(behind_tls(&headers_with(None), true));
     }
 
-    /// 「邮箱不存在」分支用的 dummy 哈希：唯一要紧的属性是它和真实哈希用同一套参数，
-    /// 这样两条分支跑的是同一段 argon2 计算。明文是什么无关紧要——`verify_password`
-    /// 解析成功后就完整跑一遍，匹配与否都花同样的时间
+    /// The dummy hash for the "email does not exist" branch: the only thing that matters is that it uses the same parameters as a real hash,
+    /// so both branches run the same argon2 computation. What the plaintext is does not matter: `verify_password`
+    /// runs in full once parsing succeeds, and matching or not takes the same time
     #[test]
     fn the_dummy_hash_costs_the_same_as_a_real_one() {
         let dummy = PasswordHash::new(dummy_password_hash()).expect("the dummy parses");

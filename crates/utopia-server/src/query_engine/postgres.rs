@@ -1,5 +1,5 @@
-//! Postgres 族（顺带覆盖 Greenplum / Timescale 等 PG 兼容系）。线协议直连，
-//! 是四个引擎里唯一有会话可设只读的那个。
+//! Postgres family (also covers Greenplum / Timescale and other PG-compatible systems). Direct wire-protocol connection,
+//! the only one of the four engines that can set a read-only session.
 
 use super::{QueryEngine, QueryResult, SchemaColumn, ROW_CAP, STATEMENT_TIMEOUT_SECS};
 use sqlx::postgres::PgPoolOptions;
@@ -50,7 +50,7 @@ impl QueryEngine for PostgresEngine {
         )
         .fetch_all(&pool)
         .await?;
-        // 键是锦上添花：读不出来就照从前那样只给列，不让整次取 schema 失败（#502）
+        // Keys are a nice-to-have: if they cannot be read, fall back to columns only as before, and do not fail the whole schema fetch (#502)
         let keys = match keys(&pool).await {
             Ok(k) => k,
             Err(e) => {
@@ -82,7 +82,7 @@ impl QueryEngine for PostgresEngine {
 
     async fn execute(&self, sql: &str) -> anyhow::Result<QueryResult> {
         let pool = self.pool().await?;
-        // 纵深防御第 3 层：会话级只读 + 超时（parser 漏网也写不进去、跑不死库）
+        // Defense in depth layer 3: session-level read-only + timeout (even if the parser slips, nothing can be written or run the database to death)
         sqlx::query("SET default_transaction_read_only = on")
             .execute(&pool)
             .await?;
@@ -91,7 +91,7 @@ impl QueryEngine for PostgresEngine {
         ))
         .execute(&pool)
         .await?;
-        // 第 2 层：外包 LIMIT；row_to_json 让 PG 全权处理类型→JSON（文本键序保留列序）
+        // Layer 2: outer LIMIT; row_to_json lets PG handle the type -> JSON conversion entirely (text key order preserves column order)
         let wrapped = format!(
             "SELECT row_to_json(_q)::text AS _j FROM ( {sql} ) AS _q LIMIT {}",
             ROW_CAP + 1
@@ -111,27 +111,27 @@ impl QueryEngine for PostgresEngine {
 
 type ColumnKey = (String, String, String);
 
-/// 一个库里的单列主键与单列外键，按 (schema, table, column) 查
+/// Single-column primary keys and single-column foreign keys in a database, looked up by (schema, table, column)
 #[derive(Default)]
 struct Keys {
     primary: std::collections::HashSet<ColumnKey>,
-    /// 外键列 → 它指向的 `schema.table`
+    /// Foreign key column -> the `schema.table` it points to
     foreign: std::collections::HashMap<ColumnKey, String>,
 }
 
-/// 从 `pg_constraint` 读键，**不走 `information_schema`**。三个原因，都实测过：
+/// Keys are read from `pg_constraint`, **not from `information_schema`**. Three reasons, each measured:
 ///
-/// - `information_schema.table_constraints` / `key_column_usage` 只给表的属主或有
-///   SELECT 以外权限的角色看。BI 连接通常只有 SELECT，于是一个键都读不到，也不报错；
-///   `pg_catalog` 对所有角色可见。
-/// - `information_schema` 的约束视图按约束名连接，千张表时要几秒到几分钟；这里
-///   是按 oid 连接，毫秒级。取 schema 在挂载请求里就会跑，不能挂住。
-/// - 约束名只在一张表内唯一。两张表各有一个叫 `fk_ref` 的外键，按 schema + 约束名
-///   连接会把目标串到别的表上；`conrelid` / `confrelid` 是这条约束自己的表。
+/// - `information_schema.table_constraints` / `key_column_usage` only show to a table's owner, or to roles with
+///   privileges beyond SELECT. BI connections usually have only SELECT, so no key can be read, and no error is raised;
+///   `pg_catalog` is visible to all roles.
+/// - The constraint views in `information_schema` join by constraint name; with a thousand tables that takes seconds to minutes, whereas here
+///   the join is by oid, at millisecond speed. Schema fetching runs on the mount request and must not hang.
+/// - Constraint names are unique only within one table. Two tables each with a foreign key named `fk_ref` -- joining by schema + constraint name
+///   would attach the target to another table; `conrelid` / `confrelid` are this constraint's own table.
 ///
-/// 只认**单列**的键：组合主键、组合外键的成员不标。探索提示词拿 PK 当「一行是什么」
-/// 的 ID、拿 FK 当关联路径，把组合键的一列单独标出来是误导。一列同时在两个单列外键里
-/// （少见）取排序在前的那个，结果稳定
+/// Only **single-column** keys are recognized: members of composite primary keys and composite foreign keys are not marked. The exploration prompt uses a PK as "what a row is"
+/// as the ID, and an FK as the relationship path; marking one column of a composite key on its own would be misleading. A column in two single-column foreign keys at once
+/// (rare) takes the one that sorts first, so the result is stable
 async fn keys(pool: &sqlx::PgPool) -> anyhow::Result<Keys> {
     let rows: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
         "SELECT n.nspname, c.relname, a.attname, k.contype::text,
@@ -172,8 +172,8 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
 
-    /// 每个测试自己的 schema，名字带随机后缀：并行跑不撞，也不碰库里已有的表。
-    /// 测完 `DROP SCHEMA ... CASCADE`
+    /// Each test's own schema, with a random suffix in its name: parallel runs do not collide, and existing tables in the database are not touched.
+    /// After the test, `DROP SCHEMA ... CASCADE`
     struct Fx {
         url: String,
         pool: sqlx::PgPool,
@@ -236,7 +236,7 @@ mod tests {
             .unwrap_or_else(|| panic!("{schema}.{table}.{column}"))
     }
 
-    /// 单列主键标出来；组合主键、组合外键的成员都不标
+    /// Single-column primary keys are marked; members of composite primary keys and composite foreign keys are not
     #[tokio::test]
     async fn a_single_column_key_is_marked_and_a_composite_one_is_not() {
         let Some(fx) = Fx::new(1).await else { return };
@@ -276,8 +276,8 @@ mod tests {
         fx.cleanup().await;
     }
 
-    /// 外键带上它指向的表：自引用、跨 schema，以及两张表上**同名**的约束各指各的。
-    /// 约束名只在一张表内唯一，按名字连接会把目标串到别处
+    /// A foreign key carries the table it points to: self-referencing, cross-schema, and a **same-named** constraint on two tables each point to their own.
+    /// Constraint names are unique only within one table; joining by name would attach the target elsewhere
     #[tokio::test]
     async fn a_foreign_key_points_at_its_own_target() {
         let Some(fx) = Fx::new(2).await else { return };
@@ -314,8 +314,8 @@ mod tests {
         fx.cleanup().await;
     }
 
-    /// 只有 SELECT 权限的连接照样读得到键。`information_schema` 的约束视图对这种
-    /// 角色是空的——BI 连接大多就是这种角色。建不了角色（库用户没有 CREATEROLE）就跳过
+    /// A connection with only SELECT privilege still reads keys. The constraint views in `information_schema` are empty for such a role --
+    /// most BI connections are exactly that kind of role. If a role cannot be created (the database user lacks CREATEROLE), skip it
     #[tokio::test]
     async fn a_read_only_login_still_sees_the_keys() {
         let Some(fx) = Fx::new(1).await else { return };

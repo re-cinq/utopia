@@ -1,7 +1,7 @@
-//! 业务规则的增删改查（0021 / #277）。
+//! Create, read, update and delete for business rules (0021 / #277).
 //!
-//! **写规则要 Editor**：它是本体的一部分——一条规则改一次，全库的结论跟着变，
-//! 与改一条公理同一个量级。
+//! **Writing a rule needs Editor**: a rule is part of the ontology -- changing one rule changes the conclusions across the whole database,
+//! on the same order of magnitude as changing one axiom.
 
 use axum::extract::{Path, State};
 use axum::Json;
@@ -30,7 +30,7 @@ pub struct RuleReq {
     pub conclude_predicate_id: Option<Uuid>,
     #[serde(default)]
     pub conclude_value: Option<serde_json::Value>,
-    /// 算出来的结论那棵树（0032）：`conclusion = "computed"` 时给
+    /// The tree of computed conclusions (0032): given when `conclusion = "computed"`
     #[serde(default)]
     pub conclude_expr: Option<serde_json::Value>,
     #[serde(default)]
@@ -46,10 +46,10 @@ pub struct RulePatch {
     pub description: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
-    /// 给了就整组替换；不给就不动条件
+    /// If given, the whole group is replaced; if not, the conditions are left alone
     #[serde(default)]
     pub conditions: Option<Vec<ConditionInput>>,
-    /// 结论也整组替换：三格互相定义，只改一格会留下半截状态
+    /// The conclusion is also replaced as a whole group: the three slots define each other, and changing only one would leave a half-state
     #[serde(default)]
     pub conclusion: Option<String>,
     #[serde(default)]
@@ -186,7 +186,7 @@ pub async fn delete(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 一条规则此刻标了谁。界面上那个数字点开就是这份列表。
+/// Who a rule is tagged with right now. Clicking the number in the UI opens this list.
 pub async fn matches(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -201,7 +201,7 @@ pub async fn matches(
     Ok(Json(json!({ "matches": rows, "total": total })))
 }
 
-/// 一条规则的定义史（0060）：每一版说了什么、从什么时候到什么时候、此刻凭它成立几条
+/// A rule's definition history (0060): what each version said, from when to when, and how many facts it currently supports
 pub async fn versions(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -220,10 +220,10 @@ pub struct MatchQuery {
     pub per: Option<i64>,
 }
 
-/// 现在就跑一遍，把这条规则的结论算出来。
+/// Run it now, computing this rule's conclusions.
 ///
-/// **不等下一个物化周期**：写规则的人想立刻看见它推出了什么，而周期默认一小时。
-/// 走的是同一个 `materialize`——预览与正式是同一条路，不另写一份会漂移的逻辑。
+/// **Do not wait for the next materialization cycle**: the person writing the rule wants to see right away what it infers, and the cycle defaults to an hour.
+/// It goes through the same `materialize` -- preview and the real run are the same path, with no separate logic that would drift.
 pub async fn run_now(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -238,8 +238,8 @@ pub async fn run_now(
         "capped": report.rule_capped,
         "inserted": report.inserted,
         "invalidated": report.invalidated,
-        // 链跑了几轮，以及有没有跑满上限就停（0030）。**跑满得说出来**——
-        // 没接上的那一环与「不满足」在结果里长得一模一样
+        // How many rounds the chain ran, and whether it stopped at the cap (0030). **Hitting the cap must be stated** --
+        // an unconnected link and "not satisfied" look exactly the same in the result
         "rounds": report.rule_rounds,
         "rounds_capped": report.rule_rounds_capped,
     })))

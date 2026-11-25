@@ -1,8 +1,8 @@
-//! 来源同步任务：url（网页抓取）/ rss（订阅，pubDate → doc_time）/
-//! github_issues / gitlab_issues / jira_issues（工单，更新时刻 → doc_time，正文里带状态变更史）/
-//! s3（对象存储，LastModified → doc_time）。
-//! 全部走 sha256 去重（重复内容静默跳过），新文档进标准摄入管道（process_document）。
-//! folder 是纯容器（上传入内），api 是推送型——两者无拉取语义。
+//! Source sync task: url (web fetch) / rss (feed, pubDate → doc_time) /
+//! github_issues / gitlab_issues / jira_issues (tickets, update instant → doc_time, the body carries the status-change history) /
+//! s3 (object storage, LastModified → doc_time).
+//! Everything goes through sha256 de-duplication (duplicate content is skipped silently); new documents enter the standard ingestion pipeline (process_document).
+//! folder is a pure container (uploads go into it) and api is push-type: neither has pull semantics.
 
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
@@ -20,22 +20,22 @@ mod source_checkpoint_tests;
 #[path = "timestamp_checkpoint_tests.rs"]
 mod timestamp_checkpoint_tests;
 
-/// 单次同步的新文档上限（防超长 feed/URL 列表拖垮任务）
+/// Cap on new documents per sync (stops an overlong feed or URL list from dragging down the task)
 const MAX_NEW_PER_SYNC: usize = 200;
 const MAX_FEED_BYTES: usize = 4 * 1024 * 1024;
 const RSS_MAX_INFLIGHT: i64 = 25;
 const RSS_HYDRATION_ATTEMPTS: i32 = 5;
 
-/// 抓取用的 User-Agent。reqwest 默认一个都不发，而维基百科明确拒绝匿名请求
-/// （403），Cloudflare 前置的站点也普遍如此——URL 与 RSS 两类来源因此对一大批
-/// 真实网站直接失效。自报家门也是爬虫礼节：站方能认出我们、能联系到我们。
+/// User-Agent for fetches. reqwest sends none by default, and Wikipedia explicitly refuses anonymous requests
+/// (403), as do Cloudflare-fronted sites generally, which is why the URL and RSS source types broke for a large number of
+/// real websites. Identifying ourselves is also crawler etiquette: site operators can recognise us and reach us.
 pub(crate) const UA: &str = concat!(
     "Utopia/",
     env!("CARGO_PKG_VERSION"),
     " (+https://utopia.bi; self-hosted knowledge platform)"
 );
 
-/// 单次同步的产出统计（Moved/Unchanged 不计）。
+/// Output stats of one sync (Moved/Unchanged are not counted).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SyncStats {
     pub created: usize,
@@ -43,13 +43,13 @@ pub struct SyncStats {
     pub discovered: usize,
     pub queued_for_content: usize,
     pub content_terminal: usize,
-    /// 这一轮因为触顶而没走完，`since` 不能前进（#1212 / ADR 0072 的 Custom）
+    /// This round did not finish because it hit the cap, so `since` must not advance (#1212 / ADR 0072's Custom)
     ///
-    /// 上一条成功那一轮的 `started_at` 是下一次的下界；本轮要是记 `ok`，下界就跨过了
-    /// 这批还没读到的条目，之后每一轮都够不着它们。这里标出来，`sync_source` 据此把
-    /// 游标留在原处，本轮的 created / updated 照旧记进审计。
+    /// The `started_at` of the last successful round is the lower bound for the next; if this round were recorded as `ok`, the lower bound would jump past
+    /// the entries in this batch that have not been read, and every later round could never reach them. Mark it here, so `sync_source` keeps
+    /// the cursor where it is; this round's created / updated are still recorded in the audit as usual.
     pub incomplete: bool,
-    /// 这一轮读到的位置（GitHub / Jira 的更新时刻，ADR 0072）
+    /// The position this round reached (GitHub / Jira update instant, ADR 0072)
     pub checkpoint: Option<DateTime<Utc>>,
 }
 
@@ -77,8 +77,8 @@ impl SyncStats {
     }
 }
 
-/// 工单来源：进度是 `sources.sync_checkpoint` 里的时刻，与本轮的成功一起提交（0072）。
-/// 三处要问这一句，写成一处，加第四个工单来源时不会漏掉其中一处
+/// Ticket sources: progress is the instant in `sources.sync_checkpoint`, committed together with this round's success (0072).
+/// This question is asked in three places, written in one place so that adding a fourth ticket source cannot miss one of them
 fn reads_by_timestamp(kind: SourceKind) -> bool {
     matches!(
         kind,
@@ -89,33 +89,33 @@ fn reads_by_timestamp(kind: SourceKind) -> bool {
 pub async fn sync_source(state: &AppState, source_id: Uuid) -> anyhow::Result<SyncStats> {
     let source = utopia_store::sources::get(&state.pool, source_id).await?;
     let kind = SourceKind::parse(&source.kind);
-    // #1212 / ADR 0072：下界取自**这个来源自己的游标**。
+    // #1212 / ADR 0072: the lower bound comes from **this source's own cursor**.
     //
-    // - 工单来源（GitHub / Jira）：游标是消费到的更新时刻，且那一刻的整组都读完了。
-    // - custom：游标是**这一轮整条响应走完时**推进到的时刻（见下面 `round_started_at`）。
+    // - Ticket sources (GitHub / Jira): the cursor is the update instant consumed, and the whole group at that instant has been read.
+    // - custom: the cursor is the instant **the whole response of this round finished**, advanced to (see `round_started_at` below).
     //
-    // **游标是源自己的一列，不是从跑次推出来的。** 早先的下界取自「上一条 `ok` 跑次的
-    // `started_at`」——那说的是「上一轮什么时候开始」，不是「上一轮读到哪」；一轮没读完
-    // 的时候，两者不是一回事，而下界一旦越过没读到的条目，之后每一轮都够不着它们。
+    // **The cursor is a column of the source itself, not inferred from the run.** The earlier lower bound came from the `started_at` of the last `ok` run,
+    // `started_at`: that says when the previous round started, not how far it read; when a round did not finish,
+    // the two are not the same thing, and once the lower bound passes unread entries, every later round can never reach them.
     //
-    // 游标存在源上，于是它能被**一次性清空**（ADR 0072 的 Recovery 一节）：老来源的
-    // 游标是 NULL，它们从头再来一遍，靠文档、版本与处理任务的去重，未变的内容不会
-    // 变成新版本。
+    // The cursor is stored on the source, so it can be **cleared in one go** (ADR 0072's Recovery section): old sources' cursors are NULL, so they start over,
+    // and deduplication of documents, versions and processing tasks means unchanged content does not
+    // become a new version.
     let since = match kind {
         Some(kind) if kind == SourceKind::Custom || reads_by_timestamp(kind) => {
             utopia_store::sources::sync_checkpoint(&state.pool, source_id).await?
         }
         _ => None,
     };
-    // **这一轮开始的时刻。** custom 的游标推进到这里，而不是推进到「现在」：
-    // 运行期间到达的改动必须留在下一轮的窗口里（ADR 0072 的 Custom 一节
-    // 「preserving the existing protection for changes during the run」）。
+    // **The instant this round started.** The custom cursor advances to here, not to "now":
+    // changes arriving during the run must stay in the next round's window (ADR 0072's Custom section,
+    // "preserving the existing protection for changes during the run").
     let round_started_at = Utc::now();
     utopia_store::sources::mark_running(&state.pool, source_id).await?;
     let run_id = utopia_store::sources::start_run(&state.pool, source_id).await?;
     state.emit_source(source.kb_id);
 
-    // 按枚举穷举：加一种来源就得在这里决定它怎么同步，编译器不放过漏掉的那一支
+    // Exhaustive by enum: adding a source kind forces a decision here about how it syncs; the compiler will not let a missed branch slip through
     let outcome = match kind {
         Some(SourceKind::Url) => sync_urls(state, &source).await,
         Some(SourceKind::Rss) => sync_rss(state, &source).await,
@@ -131,7 +131,7 @@ pub async fn sync_source(state: &AppState, source_id: Uuid) -> anyhow::Result<Sy
         Some(SourceKind::Webdav) => sync_webdav(state, &source).await,
         Some(SourceKind::Notion) => sync_notion(state, &source).await,
         Some(SourceKind::GoogleDrive) => sync_google_drive(state, &source).await,
-        // 被动容器：folder / api / memory / upload 没有拉取语义
+        // Passive containers: folder / api / memory / upload have no pull semantics
         Some(
             SourceKind::Folder
             | SourceKind::Api
@@ -142,10 +142,10 @@ pub async fn sync_source(state: &AppState, source_id: Uuid) -> anyhow::Result<Sy
         None => Err(anyhow::anyhow!("unknown source kind `{}`", source.kind)),
     };
 
-    // 没走完这一轮：游标留在原处，但这一轮已经做成的部分照旧记进审计
-    // （ADR 0072 的「Keep the committed counts visible for incomplete runs」）。
-    // run 写 `failed` 而不是 `ok`：游标只在这一轮整条响应都走完时才前进，
-    // 所以这一轮没走完，下一轮就从原处接着读。
+    // The round did not finish: the cursor stays where it is, but the parts this round did complete are still recorded in the audit
+    // (ADR 0072's "Keep the committed counts visible for incomplete runs").
+    // The run is written as `failed` rather than `ok`: the cursor advances only once the whole response for this round has been walked,
+    // so when a round is unfinished, the next round resumes reading from where it stopped.
     if let Ok(stats) = &outcome {
         if stats.incomplete {
             let err = format!(
@@ -181,9 +181,9 @@ pub async fn sync_source(state: &AppState, source_id: Uuid) -> anyhow::Result<Sy
         }
     }
     let outcome = match outcome {
-        // custom：这一轮把**整条响应**都走完了，游标推进到**这一轮开始的时刻**。
-        // 不是推进到现在——运行期间到达的改动还在下一轮的窗口里，它们还没被走过。
-        // 触顶那一轮（`incomplete`）走不到这里：游标留在原处，下一轮从那儿接着读。
+        // custom: this round walked the **whole response**, so the cursor advances to **the instant this round started**.
+        // Not advanced to now: changes that arrived during the run are still in the next round's window, because they have not been walked yet.
+        // The round that hit the cap (`incomplete`) never gets here: the cursor stays where it is, and the next round resumes from there.
         Ok(stats) if matches!(kind, Some(SourceKind::Custom)) => {
             utopia_store::sources::finish_timestamp_sync(
                 &state.pool,
@@ -265,23 +265,23 @@ pub async fn sync_source(state: &AppState, source_id: Uuid) -> anyhow::Result<Sy
     }
 }
 
-/// 三路判定的结果。
+/// Result of the three-way decision.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum IngestAction {
     Created,
     Updated,
     Moved,
     Unchanged,
-    /// 墓碑：标记"不在来源中"（不删除文档，删不删由用户在 UI 决定）
+    /// Tombstone: marks "not in source" (does not delete the document; whether to delete is the user's decision in the UI)
     Tombstoned,
-    /// 库里已有一篇同内容的文档（`documents_kb_sha_idx`）：这次什么也没建、没改，指向那一篇
+    /// The library already has a document with this same content (`documents_kb_sha_idx`): nothing is created or changed this time; points at that one
     Duplicate(Uuid),
 }
 
-/// 身份从哪来。`Path`：来源按位置认文档，同内容出现在新位置就是移动/改名，历史跟着走；
-/// `Declared`：调用方亲口给了 ID，身份就是它，绝不把另一个活着的 ID 的文档改成它；
-/// 只有已被墓碑标记的那篇可以接手（改名）。`StableId`：来源的 ID 不随移动或改名改变，
-/// 所以新 ID 不能凭文件名或内容接手另一篇，即使旧文件暂时不在同步范围里。
+/// Where identity comes from. `Path`: the source identifies documents by position, and the same content appearing at a new position is a move or rename, with history following it;
+/// `Declared`: the caller gave the ID explicitly, and identity is that ID; never turn another live ID's document into it;
+/// only the one already marked by a tombstone can be taken over (rename). `StableId`: the source's ID does not change with moves or renames,
+/// so a new ID cannot take over another document by file name or content, even if the old file is temporarily out of the sync scope.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Identity {
     Path,
@@ -305,8 +305,8 @@ fn sha_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// 普通上传语义的推送（KB 级 /ingest → Uploads）：无来源、无身份键，
-/// 不做三路判定——KB 内已有同内容时视为无操作，其余一律新建。
+/// Push with ordinary upload semantics (KB-level /ingest → Uploads): no source, no identity key,
+/// no three-way decision: if the same content already exists in the KB it is treated as a no-op; everything else is created new.
 pub async fn ingest_upload(
     state: &AppState,
     kb_id: Uuid,
@@ -394,7 +394,7 @@ pub async fn ingest_item_with_outcome(
     }
     let sha256 = sha_hex(bytes);
 
-    // 主判定：逻辑身份；兜底：迁移前的历史文档（无 key）按文件名认领并补键
+    // Primary decision: logical identity; fallback: pre-migration historical documents (no key) are claimed by file name, and the key is backfilled
     let mut existing =
         utopia_store::documents::find_by_external_key(&state.pool, source_id, external_key).await?;
     if existing.is_none() && identity != Identity::StableId {
@@ -404,7 +404,7 @@ pub async fn ingest_item_with_outcome(
         {
             utopia_store::documents::adopt_external_key(&state.pool, legacy.id, external_key)
                 .await?;
-            // 认领时把旧内容记为版本 1（此前没有版本记录）
+            // When claiming, record the old content as version 1 (there were no version records before)
             utopia_store::documents::record_version(
                 &state.pool,
                 legacy.id,
@@ -417,8 +417,8 @@ pub async fn ingest_item_with_outcome(
     }
 
     if let Some(doc) = existing {
-        // 衰减扫描淘汰的文档，同样的内容再推一遍不恢复它（RC-003）：否则每一轮重推都把它
-        // 救回来、下一次扫描又删。内容变了就是新信息，照常恢复
+        // A document pruned by the decay sweep: pushing the same content again does not restore it (RC-003); otherwise every round's re-push would
+        // bring it back and the next sweep would delete it again. Changed content is new information and is restored as usual
         if doc.deleted_at.is_some()
             && doc.sha256 == sha256
             && utopia_store::decay::was_evicted(&state.pool, doc.id).await?
@@ -427,7 +427,7 @@ pub async fn ingest_item_with_outcome(
                 action: IngestAction::Unchanged,
             });
         }
-        // 新内容已被库里另一篇占着：先答重复，免得下面恢复回收站、重建索引之后才发现
+        // The new content is already held by another document in the library: answer duplicate first, so we do not find out only after restoring from the trash and rebuilding the index
         if doc.sha256 != sha256 {
             if let Some(holder) =
                 utopia_store::documents::find_by_kb_sha(&state.pool, kb_id, &sha256).await?
@@ -466,7 +466,7 @@ pub async fn ingest_item_with_outcome(
                 action: IngestAction::Unchanged,
             });
         }
-        // 变更：原地替换，旧版本入 document_versions，并与处理任务一起提交
+        // Change: replaced in place, the old version goes into document_versions, committed together with the processing task
         write_blob(state, &sha256, bytes).await?;
         match utopia_store::documents::replace_content_and_enqueue_processing(
             &state.pool,
@@ -491,8 +491,8 @@ pub async fn ingest_item_with_outcome(
         });
     }
 
-    // 同内容出现在新路径：识别为移动/改名，不重跑管道。声明的 ID 只接手已被墓碑标记的那篇
-    // （先墓碑旧 ID、再推新 ID = 改名），活着的绝不改走
+    // Same content at a new path: recognised as a move/rename, and the pipeline is not re-run. A declared ID takes over only the one already marked by a tombstone
+    // (tombstone the old ID first, then push the new ID = rename); a live one is never moved
     let moved = match identity {
         Identity::StableId => None,
         Identity::Path | Identity::Declared => {
@@ -530,7 +530,7 @@ pub async fn ingest_item_with_outcome(
                 action: IngestAction::Created,
             })
         }
-        // KB 内已有同内容：不伪造新的身份，如实说重复了谁
+        // Same content already in the KB: do not fabricate a new identity; say honestly which document it duplicates
         Err(utopia_core::AppError::Conflict(_)) => duplicate_of(state, kb_id, &sha256).await,
         Err(e) => Err(e.into()),
     }
@@ -568,7 +568,7 @@ async fn sync_urls(state: &AppState, source: &Source) -> anyhow::Result<SyncStat
     for url in urls.iter().take(MAX_NEW_PER_SYNC) {
         match fetch_page(url).await {
             Ok((filename, mime, bytes)) => {
-                // 逻辑身份 = URL 本身：页面内容变了就原地替换（历史进版本表）
+                // Logical identity = the URL itself: when page content changes, replace in place (history goes into the versions table)
                 let action = ingest_item(
                     state,
                     source.kb_id,
@@ -588,21 +588,21 @@ async fn sync_urls(state: &AppState, source: &Source) -> anyhow::Result<SyncStat
             }
         }
     }
-    // 部分失败：有产出则视为成功（错误进日志），全军覆没才报错
+    // Partial failure: if anything was produced, count it as success (errors go to the log); report an error only if everything failed
     if stats.total() == 0 {
         if let Some(err) = last_err {
             anyhow::bail!("{err}");
         }
     }
-    // 配置列表即全集：不在列表里的文档标"不在来源中"（抓取失败不算——它仍被配置着）
+    // The configured list is the whole set: documents not on the list are marked "not in source" (a fetch failure does not count, since it is still configured)
     utopia_store::documents::reconcile_missing(&state.pool, source.id, &urls)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     Ok(stats)
 }
 
-/// 抓一个页面。地址是这个库的人自己填的，所以内网放行（`Reach::Operator`），
-/// 但重定向不许把请求带进内网，响应体有上限（#330）。
+/// Fetch one page. The address was entered by this library's operator, so the intranet is allowed (`Reach::Operator`),
+/// but redirects may not carry the request into the intranet, and the response body is capped (#330).
 async fn fetch_page(url: &str) -> anyhow::Result<(String, String, Vec<u8>)> {
     let page = crate::http_fetch::get(
         url,
@@ -615,8 +615,8 @@ async fn fetch_page(url: &str) -> anyhow::Result<(String, String, Vec<u8>)> {
     } else {
         page.mime
     };
-    // 身份仍然是**配置里那个 URL**（同一个页面换了地址不该变成新文档），
-    // 但落到别处这件事值得留一行
+    // The identity is still **the URL in the config** (the same page under a new address should not become a new document),
+    // but landing somewhere else is worth a line
     if page.final_url.as_str() != url {
         tracing::debug!(from = url, to = %page.final_url, "页面跟着重定向落在别处");
     }
@@ -914,21 +914,21 @@ async fn sync_rss(state: &AppState, source: &Source) -> anyhow::Result<SyncStats
     Ok(stats)
 }
 
-/// GitHub 工单：一张工单一篇文档，正文里带它的状态变更史。
+/// GitHub ticket: one ticket is one document, and its body carries its status-change history.
 ///
-/// 工单列表按 `since` 增量筛选，评论与事件逐工单读取，不带增量窗口。
-/// 文档每次整篇替换：评论也按 `since` 过滤会把未改动的旧讨论删掉。
-/// 详见 [`crate::github_issues`]。
+/// The ticket list is filtered incrementally by `since`; comments and events are read per ticket, without an incremental window.
+/// Each document is replaced in full every time: filtering comments by `since` too would delete old discussion that had not changed.
+/// See [`crate::github_issues`] for details.
 ///
-/// `doc_time` 取 `updated_at` 而不是 `created_at`：每次同步捕获的是"此刻这张
-/// 工单是什么样"，认知时间该说这个状态是何时成立的。新增一条评论会改
-/// `updated_at`，于是内容变了、记一个新版本、`doc_time` 也跟着走。
+/// `doc_time` takes `updated_at` rather than `created_at`: each sync captures "what this ticket looks like at this moment",
+/// so the cognitive time should say when this state held. Adding a comment changes
+/// `updated_at`, so the content changes, a new version is recorded, and `doc_time` follows it.
 async fn sync_github_issues(
     state: &AppState,
     source: &Source,
     since: Option<DateTime<Utc>>,
 ) -> anyhow::Result<SyncStats> {
-    // api.github.com 是固定的公网主机，所以按内容级的严格度收（`Reach::Content`）
+    // api.github.com is a fixed public host, so it is held to content-level strictness (`Reach::Content`)
     let http = crate::http_fetch::client_for(
         &reqwest::Url::parse("https://api.github.com/")?,
         crate::http_fetch::Reach::Content,
@@ -938,7 +938,7 @@ async fn sync_github_issues(
     sync_github_issues_with_client(state, source, since, &http, "https://api.github.com").await
 }
 
-// HTTP 接缝让回归测试走同一条同步与落库路径，生产仍固定访问 GitHub 公网 API。
+// The HTTP seam lets regression tests run the same sync and persist path; production still always hits the public GitHub API.
 async fn sync_github_issues_with_client(
     state: &AppState,
     source: &Source,
@@ -960,8 +960,8 @@ async fn sync_github_issues_with_client(
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    // PR 在 GitHub 的模型里也是 issue。默认排除——问"工单系统"要的是工单；
-    // 但有些仓库的决策记录实际写在 PR 描述里，所以留了开关
+    // PRs are issues in GitHub's model too. Excluded by default: a ticket-system query wants tickets; but some repositories
+    // actually record decisions in PR descriptions, so a switch is provided
     let include_prs = source.config["include_pull_requests"]
         .as_bool()
         .unwrap_or(false);
@@ -982,8 +982,8 @@ async fn sync_github_issues_with_client(
         ..SyncStats::default()
     };
     for issue in &window.issues {
-        // 只重建本轮选中的工单，但每张要读完整评论历史。仓库级评论即使
-        // 去掉 since，也可能被无关工单和 PR 的评论挤出分页上限。
+        // Only the tickets selected this round are rebuilt, but each one needs its full comment history read. Even if repository-level comments
+        // drop `since`, unrelated tickets' and PRs' comments can push them out of the page cap.
         let comments = crate::github_issues::fetch_all::<crate::github_issues::Comment>(
             http,
             &format!("{base}/issues/{}/comments", issue.number),
@@ -992,8 +992,8 @@ async fn sync_github_issues_with_client(
         )
         .await?;
         let cs = crate::github_issues::comments_for_issue(issue, &comments);
-        // 逐工单取事件。N 只是本轮要写入的工单数——首次同步等于总数，
-        // 之后有 since 兜着通常是个位数
+        // Events are fetched per ticket. N is only the number of tickets to write this round: on a first sync it equals the total,
+        // afterwards, with `since` as the backstop, it is usually a single digit
         let events = crate::github_issues::sort_events(
             crate::github_issues::fetch_all(
                 http,
@@ -1005,7 +1005,7 @@ async fn sync_github_issues_with_client(
         );
         let es: Vec<&crate::github_issues::Event> = events.iter().collect();
         let body = crate::github_issues::render(issue, &cs, &es);
-        // 逻辑身份带上仓库：同一个知识库里接两个仓库时，#18 不会互相覆盖
+        // The logical identity includes the repository: when two repos are attached to one knowledge base, #18 does not overwrite the other
         let key = format!("github:{repo}#{}", issue.number);
         let filename = format!("{}-{}.md", issue.number, slugify(&issue.title));
         let action = ingest_item(
@@ -1024,10 +1024,10 @@ async fn sync_github_issues_with_client(
     Ok(stats)
 }
 
-/// GitHub 仓库文件：一次递归取默认分支的整棵树，一条路径一篇文档。
-/// 树里的 blob SHA 就判得出「没变」，变了的才逐条取提交日期与原文。
+/// GitHub repository files: one recursive fetch of the whole tree of the default branch, one document per path.
+/// The blob SHA in the tree alone tells "unchanged"; only changed ones have their commit date and content fetched one by one.
 async fn sync_github_repo(state: &AppState, source: &Source) -> anyhow::Result<SyncStats> {
-    // 与 github_issues 同一个口径：固定的公网主机按内容级严格度收
+    // Same convention as github_issues: the fixed public host is held to content-level strictness
     let url = reqwest::Url::parse("https://api.github.com/")?;
     let http = crate::http_fetch::client_for(
         &url,
@@ -1038,7 +1038,7 @@ async fn sync_github_repo(state: &AppState, source: &Source) -> anyhow::Result<S
     sync_github_repo_with_client(state, source, &http, "https://api.github.com").await
 }
 
-// HTTP 接缝让回归测试走同一条同步与落库路径，生产仍固定访问 GitHub 公网 API。
+// The HTTP seam lets regression tests run the same sync and persist path; production still always hits the public GitHub API.
 async fn sync_github_repo_with_client(
     state: &AppState,
     source: &Source,
@@ -1072,8 +1072,8 @@ async fn sync_github_repo_with_client(
         .collect();
     let mut stats = SyncStats::default();
     for (entry, key) in chosen.iter().zip(&keys) {
-        // 没变的整条跳过：已落库的字节算出同一个 git SHA，就不必再花两次请求
-        // 回收站里的文档要走入库流程，即使上游内容没变也要恢复。
+        // Unchanged entries are skipped entirely: if the stored bytes give the same git SHA, there is no need to spend two requests
+        // A document in the trash must go through the ingestion flow, so it is restored even if the upstream content has not changed.
         let old =
             utopia_store::documents::find_by_external_key(&state.pool, source.id, key).await?;
         let unchanged = match old {
@@ -1087,7 +1087,7 @@ async fn sync_github_repo_with_client(
         if unchanged {
             continue;
         }
-        // 文档日期取最后一次动过这条路径的提交，只在新出现或变了时问
+        // The document date is taken from the last commit that touched this path; it is asked only when the file is new or has changed
         let mut cu = reqwest::Url::parse(&format!("{base}/commits"))?;
         cu.query_pairs_mut()
             .append_pair("path", &entry.path)
@@ -1115,7 +1115,7 @@ async fn sync_github_repo_with_client(
         stats.absorb(action);
     }
     if truncated {
-        // 树不全就不判「谁消失了」——缺席可能只是还没列到
+        // Do not decide "who disappeared" when the tree is incomplete: absence may just mean it has not been listed yet
         tracing::warn!(%repo, "GitHub 文件树被截断，本轮只摄入列出的文件，不做不在来源中对账");
     } else {
         utopia_store::documents::reconcile_missing(&state.pool, source.id, &keys)
@@ -1125,8 +1125,8 @@ async fn sync_github_repo_with_client(
     Ok(stats)
 }
 
-/// GitLab 项目文件（gitlab.com，#1327）：与 [`sync_github_repo`] 同一个形状，一条路径一篇文档，
-/// 按 blob SHA 判「没变」。树要翻页；新出现或变了的文件多一次 `HEAD`，先拿到大小再决定取不取。
+/// GitLab project files (gitlab.com, #1327): same shape as [`sync_github_repo`], one document per path,
+/// "unchanged" is judged by blob SHA. The tree is paged; a new or changed file costs one extra `HEAD` to get its size before deciding whether to fetch it.
 async fn sync_gitlab_repo(state: &AppState, source: &Source) -> anyhow::Result<SyncStats> {
     let url = reqwest::Url::parse("https://gitlab.com/")?;
     let http = crate::http_fetch::client_for(
@@ -1138,7 +1138,7 @@ async fn sync_gitlab_repo(state: &AppState, source: &Source) -> anyhow::Result<S
     sync_gitlab_repo_with_client(state, source, &http, "https://gitlab.com/api/v4").await
 }
 
-/// 带令牌发一个请求并判状态。GitLab 限流回 429，说清楚是限流，正确的动作是等或配令牌
+/// Send one request with the token and judge the status. GitLab rate limits return 429; say clearly that it is rate limiting, where the right action is to wait or configure a token
 pub(crate) async fn gitlab_checked(
     http: &reqwest::Client,
     method: reqwest::Method,
@@ -1160,7 +1160,7 @@ pub(crate) async fn gitlab_checked(
     Ok(resp)
 }
 
-/// `config.project`：gitlab_repo 与 gitlab_issues 认的是同一种项目路径
+/// `config.project`: gitlab_repo and gitlab_issues accept the same kind of project path
 fn gitlab_project(source: &Source) -> anyhow::Result<&str> {
     let project = source.config["project"]
         .as_str()
@@ -1172,7 +1172,7 @@ fn gitlab_project(source: &Source) -> anyhow::Result<&str> {
                 source.kind
             )
         })?;
-    // 子组可以有好几层，但每一段都得有字
+    // Subgroups can be several levels deep, but every segment must have text
     if project.split('/').count() < 2 || project.split('/').any(str::is_empty) {
         anyhow::bail!(
             "config.project should look like group/name or group/subgroup/name, got {project:?}"
@@ -1181,9 +1181,9 @@ fn gitlab_project(source: &Source) -> anyhow::Result<&str> {
     Ok(project)
 }
 
-/// GitLab 工单与合并请求（gitlab.com，#1327）：一张一篇文档，正文里带状态、标签、里程碑的
-/// 变更史。列表按更新时刻增量筛选，备注与事件逐工单读到末页，与 [`sync_github_issues`]
-/// 同一个形状。详见 [`crate::gitlab_issues`]。
+/// GitLab tickets and merge requests (gitlab.com, #1327): one ticket is one document, and its body carries the history of
+/// changes to status, labels and milestones. The list is filtered incrementally by update instant; notes and events are read per ticket to the last page, in the same
+/// shape as [`sync_github_issues`]. See [`crate::gitlab_issues`] for details.
 async fn sync_gitlab_issues(
     state: &AppState,
     source: &Source,
@@ -1198,7 +1198,7 @@ async fn sync_gitlab_issues(
     sync_gitlab_issues_with_client(state, source, since, &http, "https://gitlab.com/api/v4").await
 }
 
-// HTTP 接缝让回归测试走同一条同步与落库路径，生产固定访问 gitlab.com 的 API。
+// The HTTP seam lets regression tests run the same sync and persist path; production always hits the gitlab.com API.
 async fn sync_gitlab_issues_with_client(
     state: &AppState,
     source: &Source,
@@ -1209,8 +1209,8 @@ async fn sync_gitlab_issues_with_client(
     use crate::gitlab_issues as gl;
     use chrono::SubsecRound as _;
     let project = gitlab_project(source)?;
-    // 备注与事件没有令牌就是 401，公开项目也一样。先说清楚，不去发那个注定失败的请求，
-    // 也不退而求其次只收没有历史的正文：历史是这个来源存在的理由
+    // Notes and events without a token return 401, public projects too. Say this plainly rather than sending a request that is bound to fail,
+    // nor fall back to ingesting only the body with no history: the history is the reason this source exists
     let auth = source.config["auth_header"]
         .as_str()
         .map(str::trim)
@@ -1221,7 +1221,7 @@ async fn sync_gitlab_issues_with_client(
                  ticket's notes and events without a token, even on a public project"
             )
         })?;
-    // 合并请求默认不收，与 GitHub 的 include_pull_requests 同一个理由
+    // Merge requests are not collected by default, for the same reason as GitHub's include_pull_requests
     let kinds: &[gl::Kind] = if source.config["include_merge_requests"]
         .as_bool()
         .unwrap_or(false)
@@ -1231,7 +1231,7 @@ async fn sync_gitlab_issues_with_client(
         &[gl::Kind::Issue]
     };
     let mut base = reqwest::Url::parse(api_base)?;
-    // 项目路径是一段：其中的 `/` 得成 `%2F`
+    // The project path is one segment: its `/` must become `%2F`
     base.path_segments_mut()
         .map_err(|_| anyhow::anyhow!("API base cannot take a path"))?
         .pop_if_empty()
@@ -1245,7 +1245,7 @@ async fn sync_gitlab_issues_with_client(
     for (kind, item) in &window.tickets {
         let details = gl::fetch_details(http, &base, *kind, item.iid, Some(auth)).await?;
         let body = gl::render(*kind, item, &details);
-        // 工单与合并请求的 iid 各自从 1 数起，身份和文件名都得分得开
+        // The iids of tickets and of merge requests each count from 1, so identity and file names must be kept apart
         let key = format!("gitlab:{project}{}{}", kind.sigil(), item.iid);
         let prefix = match kind {
             gl::Kind::Issue => "",
@@ -1260,7 +1260,7 @@ async fn sync_gitlab_issues_with_client(
             &filename,
             "text/markdown",
             body.as_bytes(),
-            // GitLab 的时刻带毫秒，落库前截到秒（0013 决定 6、7）
+            // GitLab's instants carry milliseconds; truncate to seconds before storing (0013 decisions 6 and 7)
             Some(item.updated_at.trunc_subsecs(0)),
         )
         .await?;
@@ -1269,7 +1269,7 @@ async fn sync_gitlab_issues_with_client(
     Ok(stats)
 }
 
-// HTTP 接缝让回归测试走同一条同步与落库路径，生产固定访问 gitlab.com 的 API。
+// The HTTP seam lets regression tests run the same sync and persist path; production always hits the gitlab.com API.
 async fn sync_gitlab_repo_with_client(
     state: &AppState,
     source: &Source,
@@ -1284,7 +1284,7 @@ async fn sync_gitlab_repo_with_client(
         .filter(|s| !s.is_empty());
     let filter = gr::FileFilter::from_config(&source.config)?;
     let base = reqwest::Url::parse(api_base)?;
-    // 每一段各自编码：项目路径里的 `/` 与文件路径里的 `/` 都得成 `%2F`
+    // Each segment is encoded separately: the `/` in the project path and the `/` in the file path must both become `%2F`
     let at = |segments: &[&str]| -> anyhow::Result<reqwest::Url> {
         let mut u = base.clone();
         u.path_segments_mut()
@@ -1324,8 +1324,8 @@ async fn sync_gitlab_repo_with_client(
         .collect();
     let mut stats = SyncStats::default();
     for (entry, key) in chosen.iter().zip(&keys) {
-        // 没变的整条跳过：树里没有大小，但已落库的字节算出同一个 git SHA 就够了
-        // 回收站里的文档要走入库流程，即使上游内容没变也要恢复。
+        // Unchanged entries are skipped entirely: the tree has no sizes, but the stored bytes giving the same git SHA is enough
+        // A document in the trash must go through the ingestion flow, so it is restored even if the upstream content has not changed.
         let old =
             utopia_store::documents::find_by_external_key(&state.pool, source.id, key).await?;
         let unchanged = match old {
@@ -1339,8 +1339,8 @@ async fn sync_gitlab_repo_with_client(
         if unchanged {
             continue;
         }
-        // 先问大小，大小上限得在下载之前判。超限的文件不落库，于是每一轮都会为它再问一次：
-        // 一次 HEAD，不下载正文。真撞上限流时，再把挡掉的 blob SHA 记下来
+        // Ask the size first; the size limit must be checked before downloading. A file over the limit is not stored, so every round asks about it again:
+        // one HEAD, without downloading the body. When rate limiting is actually hit, record the blocked blob SHAs too
         let mut fu = at(&["files", &entry.path])?;
         fu.query_pairs_mut().append_pair("ref", "HEAD");
         let head = gitlab_checked(http, reqwest::Method::HEAD, fu, auth).await?;
@@ -1356,7 +1356,7 @@ async fn sync_gitlab_repo_with_client(
         if !filter.size_ok(size) {
             continue;
         }
-        // 文档日期取最后一次动过这条路径的提交，只在新出现或变了时问
+        // The document date is taken from the last commit that touched this path; it is asked only when the file is new or has changed
         let mut cu = at(&["commits"])?;
         cu.query_pairs_mut()
             .append_pair("path", &entry.path)
@@ -1400,14 +1400,14 @@ async fn sync_gitlab_repo_with_client(
     Ok(stats)
 }
 
-/// Jira 工单：一张工单一篇文档，正文里带**字段级**的变更史。
+/// Jira tickets: one ticket is one document, and its body carries the **field-level** change history.
 ///
-/// 比 GitHub 那条路省：`search?expand=changelog` 一次调用就带回工单本体、
-/// 完整变更史与评论，**没有 N+1**。增量靠 JQL 的 `updated >= …` 表达，
-/// 因为 Jira 没有 `since` 参数。详见 [`crate::jira_issues`]。
+/// Cheaper than the GitHub path: one `search?expand=changelog` call returns the ticket itself,
+/// the full change history and the comments, **with no N+1**. Incrementality is expressed through JQL's `updated >= …`,
+/// because Jira has no `since` parameter. See [`crate::jira_issues`] for details.
 ///
-/// `doc_time` 取 `updated`，与 github_issues 同一口径：每次同步捕获的是
-/// "此刻这张工单是什么样"，认知时间该说这个状态何时成立。
+/// `doc_time` takes `updated`, the same convention as github_issues: each sync captures
+/// "what this ticket looks like at this moment", and the cognitive time should say when this state held.
 async fn sync_jira_issues(
     state: &AppState,
     source: &Source,
@@ -1423,8 +1423,8 @@ async fn sync_jira_issues(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("jira_issues source is missing config.project"))?;
-    // 项目 key 直接拼进 JQL，所以不能是任意字符串。Jira 的 key 本身就限定
-    // 字母数字加下划线——挡住它顺带挡住了 JQL 注入
+    // The project key is concatenated straight into the JQL, so it cannot be an arbitrary string. Jira keys are already restricted
+    // to alphanumerics plus underscores: blocking that also blocks JQL injection
     if !project.chars().all(|c| c.is_alphanumeric() || c == '_') {
         anyhow::bail!("config.project should be a Jira project key, got {project:?}");
     }
@@ -1457,7 +1457,7 @@ async fn sync_jira_issues(
     };
     for issue in &window.issues {
         let body = crate::jira_issues::render(issue);
-        // 逻辑身份带上站点：一个知识库接两个 Jira 时，PROJ-1 不会互相覆盖
+        // The logical identity includes the site: when one knowledge base has two Jiras attached, PROJ-1 does not overwrite the other
         let host = reqwest::Url::parse(base_url)
             .ok()
             .and_then(|u| u.host_str().map(str::to_string))
@@ -1484,7 +1484,7 @@ async fn sync_jira_issues(
     Ok(stats)
 }
 
-/// 标题 → 文件名安全的片段。与 RSS 那条路同一个口径（非字母数字换成 -，截断）。
+/// Title → filename-safe fragment. Same convention as the RSS path (non-alphanumerics become -, then truncated).
 fn slugify(title: &str) -> String {
     let s: String = title
         .chars()
@@ -1494,11 +1494,11 @@ fn slugify(title: &str) -> String {
     s.trim_matches('-').to_string()
 }
 
-/// 自定义拉取器 —— Utopia Ingest Interface：
-/// `GET {endpoint}?since=<上次成功同步开始时间 RFC3339>`（首次同步不带 since；可配 Authorization 头），
-/// 响应 `{"items":[{"id":"稳定唯一ID","title":"文档名","content":"正文(纯文本/Markdown/HTML)",
-///                  "doc_time":"RFC3339 可选","mime":"text/markdown 可选"}]}`。
-/// id → external_key（custom:{id}），三路判定生效：同 id 同内容跳过、新内容原地更新。
+/// Custom fetcher: Utopia Ingest Interface:
+/// `GET {endpoint}?since=<start time of the last successful sync, RFC3339>` (the first sync has no since; an Authorization header may be configured),
+/// response `{"items":[{"id":"stable unique ID","title":"document name","content":"body (plain text/Markdown/HTML)",
+///                  "doc_time":"RFC3339, optional","mime":"text/markdown, optional"}]}`.
+/// id → external_key (custom:{id}); the three-way decision applies: same id with same content is skipped, new content is updated in place.
 async fn sync_custom(
     state: &AppState,
     source: &Source,
@@ -1514,8 +1514,8 @@ async fn sync_custom(
         url.query_pairs_mut().append_pair("since", &t.to_rfc3339());
     }
 
-    // 端点是操作者自己填的，内网与回环都是正当目标；代理的取舍（回环走代理
-    // 只会 502）和地址校验一起收进 `client_for`（#330）
+    // The endpoint was entered by the operator, so the intranet and loopback are both legitimate targets; the proxy trade-off (loopback through a proxy
+    // only yields 502) is folded together with address validation into `client_for` (#330)
     let http = crate::http_fetch::client_for(
         &url,
         crate::http_fetch::Reach::Operator,
@@ -1538,20 +1538,20 @@ async fn sync_custom(
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("Response is missing the items[] array"))?;
 
-    // `discovered` 记响应里的条数，不是跑进来的条数——否则日志与警告会读成 `(0 > 200)`
+    // `discovered` records the count in the response, not the count run in: otherwise the log and warnings would read as `(0 > 200)`
     let mut stats = SyncStats {
         discovered: items.len(),
         ..Default::default()
     };
     let mut seen_keys: Vec<String> = Vec::new();
-    // **走完整个响应，只把有变的条目记在预算上**（ADR 0072 的 Custom 一节）。
-    // `take(MAX_NEW_PER_SYNC)` 是 ADR 明写在 Rejected 里的那条：它取走的永远是同样的
-    // 前 200 条，重试一万次也够不到第 201 条。这里每条都先问 `ingest_item`，只有
-    // `Created` / `Updated` 才计入 `changed`；`Unchanged` / `Moved` / `Duplicate`
-    // 让预算不被消耗，于是重试能把没变的前缀让过去、走到剩下的那几条。
+    // **Walk the whole response, and charge only the changed entries to the budget** (ADR 0072's Custom section).
+    // `take(MAX_NEW_PER_SYNC)` is what the ADR explicitly lists under Rejected: it always takes the same
+    // first 200 entries, and a retry ten thousand times would never reach the 201st. Here every entry is first checked with `ingest_item`, and only
+    // `Created` / `Updated` count towards `changed`; `Unchanged` / `Moved` / `Duplicate`
+    // do not spend the budget, so a retry can get past the unchanged prefix and reach the rest.
     let mut changed = 0usize;
     for item in items.iter() {
-        // 预算满了就不再往下走——剩下的留在下一轮，且本轮 `incomplete` 让游标留在原处
+        // Once the budget is full, do not walk further: the rest stays for the next round, and this round's `incomplete` leaves the cursor where it is
         if changed >= MAX_NEW_PER_SYNC {
             stats.incomplete = true;
             tracing::warn!(
@@ -1600,9 +1600,9 @@ async fn sync_custom(
         stats.absorb(action);
         seen_keys.push(key);
     }
-    // 增量响应（?since=）里缺席≠删除，不做全集对账；但：
-    // 1) 再次出现的条目摘掉 missing 标记（失而复得）
-    // 2) 显式墓碑 deleted[] 才标"不在来源中"——删不删文档由用户在 UI 决定
+    // In an incremental response (?since=), absence is not deletion, so no full-set reconciliation is done; but:
+    // 1) an entry that reappears has its missing marker removed (lost and found again)
+    // 2) only an explicit tombstone in deleted[] marks "not in source"; whether to delete the document is the user's decision in the UI
     if !seen_keys.is_empty() {
         utopia_store::documents::clear_missing_keys(&state.pool, source.id, &seen_keys)
             .await
@@ -1626,16 +1626,16 @@ async fn sync_custom(
     Ok(stats)
 }
 
-/// 对象存储同步：列前缀下的对象，逐个摄入。
+/// Object storage sync: list the objects under the prefix and ingest them one by one.
 ///
-/// `external_key` 用 `s3://bucket/key`，跟 `file:///` 与页面 URL 同一个约定：
-/// 出处自描述。换了前缀但内容没变时，`ingest_item` 会认成「搬家」而不是新增，
-/// 不会重跑一遍抽取。
+/// `external_key` uses `s3://bucket/key`, the same convention as `file:///` and page URLs:
+/// the provenance describes itself. If the prefix changes but the content does not, `ingest_item` recognises it as a "move" rather than a new addition,
+/// and the extraction is not run again.
 ///
-/// **`doc_time` 取 `LastModified`，而它是写入时刻不是文档自身的时间。**
-/// 一份 2019 年的合同今天传上去，时间线上会落在今天。对象存储没有更好的
-/// 来源——除非文件名或正文里带日期，而那是抽取器的活。这一条与 `url` 源
-/// 同病：`0013` 的第一条判据在这里只满足一半。
+/// **`doc_time` takes `LastModified`, and that is the write moment, not the document's own time.**
+/// A 2019 contract uploaded today would land on today's date in the timeline. Object storage has no better
+/// source, unless the file name or body carries a date, and that is the extractor's job. This one has the same problem as the `url` source:
+/// the first criterion of `0013` is only half met here.
 async fn sync_object_storage(state: &AppState, source: &Source) -> anyhow::Result<SyncStats> {
     let bucket = source.config["bucket"]
         .as_str()
@@ -1651,8 +1651,8 @@ async fn sync_object_storage(state: &AppState, source: &Source) -> anyhow::Resul
     let (objects, truncated) =
         crate::object_storage::fetch(&source.kind, store.as_ref(), bucket, prefix).await?;
 
-    // 到顶不是错误，但必须说出来——否则「同步成功」下面藏着没进来的东西，
-    // 而那正是 0005 说的失败无声
+    // Hitting the cap is not an error, but it must be said: otherwise "sync succeeded" would hide things that did not come in,
+    // which is exactly the silent failure 0005 describes
     if truncated {
         tracing::warn!(
             %bucket, prefix = prefix.unwrap_or(""),
@@ -1662,10 +1662,10 @@ async fn sync_object_storage(state: &AppState, source: &Source) -> anyhow::Resul
 
     let mut stats = SyncStats::default();
     for obj in objects {
-        // **不猜 mime。** `utopia_ingest::parse` 先看魔数、再看扩展名，
-        // 注释写着「扩展名可能撒谎」——在这里按文件名猜一个，只是多一个
-        // 会撒谎的来源，而且要为此多一个依赖。`octet-stream` 是诚实的：
-        // 我们拿到的就是一串字节，没看过里面是什么。
+        // **Do not guess the mime.** `utopia_ingest::parse` checks the magic number first, then the extension;
+        // its comment says "the extension may lie". Guessing from the file name here would only add one more
+        // source that can lie, and would need an extra dependency for it. `octet-stream` is honest:
+        // we just have a run of bytes and have not looked at what is inside.
         let action = ingest_item(
             state,
             source.kb_id,
@@ -1682,10 +1682,10 @@ async fn sync_object_storage(state: &AppState, source: &Source) -> anyhow::Resul
     Ok(stats)
 }
 
-/// WebDAV 同步：逐层走目录，把文件摄进来。
+/// WebDAV sync: walk directories level by level and ingest the files.
 ///
-/// `external_key` 用 `webdav://host/path`——同一台网盘换了挂载点仍是同一份
-/// 文件，而不同网盘上的同名路径是两份。
+/// `external_key` uses `webdav://host/path`: the same file under a new mount point is still the same file,
+/// while same-named paths on different drives are two different files.
 async fn sync_webdav(state: &AppState, source: &Source) -> anyhow::Result<SyncStats> {
     let base = source.config["base_url"]
         .as_str()
@@ -1713,7 +1713,7 @@ async fn sync_webdav(state: &AppState, source: &Source) -> anyhow::Result<SyncSt
 
     let mut stats = SyncStats::default();
     for f in files {
-        // 不猜 mime，理由同对象存储：解析先看魔数
+        // Do not guess the mime, for the same reason as object storage: parsing checks the magic number first
         let action = ingest_item(
             state,
             source.kb_id,
@@ -1730,11 +1730,11 @@ async fn sync_webdav(state: &AppState, source: &Source) -> anyhow::Result<SyncSt
     Ok(stats)
 }
 
-/// Notion 同步：把 integration 能看见的页面摄进来。
+/// Notion sync: ingest the pages the integration can see.
 ///
-/// `doc_time` 取 `last_edited_time`——**这是页面自己的编辑时刻**，比对象存储
-/// 那边的写入时刻实在：一份 2019 年的合同今天传进 S3 会落在今天，而 Notion
-/// 页面的编辑时刻就是它内容变化的时刻。
+/// `doc_time` takes `last_edited_time`: **this is the page's own edit moment**, more honest than the object storage
+/// write moment: a 2019 contract uploaded to S3 today lands on today's date, whereas a Notion
+/// page's edit moment is exactly when its content changed.
 async fn sync_notion(state: &AppState, source: &Source) -> anyhow::Result<SyncStats> {
     let token = source.config["token"]
         .as_str()
@@ -1766,8 +1766,8 @@ async fn sync_notion(state: &AppState, source: &Source) -> anyhow::Result<SyncSt
         .await?;
         stats.absorb(action);
     }
-    // 读得出来的页已经进库了；读不出来的那几页让这一轮记成失败并点名，
-    // 不然它们停在旧版本上没有人知道
+    // Pages that could be read are already in the library; the pages that could not be read make this round record failure and name them,
+    // or else they would sit on an old version with nobody knowing
     if !unread.is_empty() {
         anyhow::bail!(
             "{} Notion page(s) synced; {} could not be read and keep their stored content: {}",
@@ -1784,16 +1784,16 @@ async fn sync_notion(state: &AppState, source: &Source) -> anyhow::Result<SyncSt
     Ok(stats)
 }
 
-/// Google Drive 同步：走遍选中的文件夹，把读得出来的文件摄进来（0074）。
+/// Google Drive sync: walk the selected folders and ingest the files that can be read (0074).
 ///
-/// `doc_time` 取 `modifiedTime`，理由同 Notion：那是内容最后一次改动的时刻。
-/// 标记没变、文档还在的文件连下载都省了，见 `google_drive` 的模块注释。
+/// `doc_time` takes `modifiedTime`, same reasoning as Notion: it is the moment the content was last changed.
+/// Files already marked unchanged with the document still present are not even downloaded; see the module comment in `google_drive`.
 ///
-/// **对账只在遍历完整时做**：列表到了上限、或有选中的文件夹打不开时，没看见的东西
-/// 不等于没了，只把这一轮看见的摘掉 missing 标记。下载到了上限不影响对账：列表是全的。
+/// **Reconciliation is done only when the traversal is complete**: when the listing hits the cap, or a selected folder cannot be opened, what was not seen
+/// is not the same as gone; only the missing marker is removed from what this round saw. Hitting the cap on downloads does not affect reconciliation: the listing is complete.
 ///
-/// 没走完的这一轮（列表到顶、下载到顶、有打不开或读不出的）都报失败并说明缘由，
-/// 不报成功——「同步成功」下面不能藏着没进来的东西
+/// A round that does not finish (listing hit the cap, downloads hit the cap, or something could not be opened or read) reports failure and gives the reason,
+/// rather than success: nothing may be hidden under "sync succeeded"
 async fn sync_google_drive(state: &AppState, source: &Source) -> anyhow::Result<SyncStats> {
     use crate::google_drive;
 
@@ -1806,8 +1806,8 @@ async fn sync_google_drive(state: &AppState, source: &Source) -> anyhow::Result<
                 "google_drive source is not connected: connect a Google account in its settings"
             )
         })?;
-    // 读的是连上的那个人的 Drive：他离开了这个库、被降成只读、或账号停用了，
-    // 这份授权就不再替库读东西，等库里的人重连
+    // It reads with the Drive of the person who connected it: if they left the library, were demoted to read-only, or their account was deactivated,
+    // this authorisation no longer reads on the library's behalf, so the people in the library must reconnect
     let connector = match google_drive::connected_by(&source.config) {
         Some(id) => utopia_store::accounts::find_user_by_id(&state.pool, id).await?,
         None => None,
@@ -1875,7 +1875,7 @@ pub(crate) async fn sync_google_drive_with_client(
             continue;
         }
         downloads += 1;
-        // 读不出来的文件跳过，库里已有的原样留着，其余照常同步——同 Notion
+        // Files that cannot be read are skipped and what the library already has stays as it is; the rest syncs as usual, as with Notion
         let content = match drive.content(f).await {
             Ok(c) => c,
             Err(error) => {
@@ -1961,7 +1961,7 @@ pub(crate) async fn sync_google_drive_with_client(
     Ok(stats)
 }
 
-/// 标题无扩展名时按 mime 补一个，接入解析矩阵的分派。
+/// If a title has no extension, add one from the mime, so it enters the parse matrix's dispatch.
 fn ensure_extension(title: &str, mime: &str) -> String {
     let has_ext = title
         .rsplit('.')

@@ -1,18 +1,18 @@
-//! 对话循环交给 rig 的 runner（#546）。
+//! Hands the conversation loop over to rig's runner (#546).
 //!
-//! 从前 `chat.rs` 里手写着一个 1,100 行的循环，每个策略问题都落成它里面的又一个
-//! 分支；#509（模型说「我去查」然后就结束了一轮）的守卫（#543）是启发式上再叠
-//! 启发式——实测追问四次，模型四次都答 DONE。这里把循环换成 rig 的：工具是
-//! `DynamicTool`，策略是钩子，终止是**结构性的**——
+//! The old `chat.rs` had a hand-written 1,100-line loop in which every policy question became yet another
+//! branch; the guard for #509 (the model says "let me look it up" and then the turn just ends) (#543) was heuristics stacked on
+//! heuristics: in practice it asked four times and the model answered DONE all four times. Here the loop is replaced with rig's: tools are
+//! `DynamicTool`s, policy is hooks, and termination is **structural**:
 //!
-//! **一轮对话在调过至少一个工具之前不能结束。** 首个请求带 `tool_choice: required`，
-//! 直到某个工具跑过为止；`no_evidence_needed` 是给「你好」「说短一点」这类不需要
-//! 库的问题准备的那个工具。于是「请稍等，我将调用工具」不再是一个可能的终态：
-//! 模型要么真的调了，要么明说这题不用查。
+//! **A turn cannot end before at least one tool has been called.** The first request carries `tool_choice: required`,
+//! until some tool has run. `no_evidence_needed` is the tool for questions that need no
+//! library, such as "hello" or "say it shorter". So "please wait, I will call a tool" is no longer a possible final state:
+//! the model either really calls one, or says plainly that the question needs no lookup.
 //!
-//! 端点不认 `required`（400 时 `RigModel` 去掉它重发；或者干脆无视）的那一层，
-//! 由 `on_model_turn_finished` 兜一次：首轮只有文字、一个工具没跑，退回去要求它调；
-//! 再不调就认了——那是端点的事，日志里能看见。
+//! The fallback for endpoints that do not accept `required` (on a 400 `RigModel` drops it and resends; or they simply ignore it)
+//! is one retry in `on_model_turn_finished`: if the first turn is only text and no tool has run, send it back to call one;
+//! if it still does not call one, accept that. It is the endpoint's doing, and it is visible in the logs.
 
 use super::tools::{self, ToolCtx, ToolSink};
 use crate::state::AppState;
@@ -30,8 +30,8 @@ use std::sync::{Arc, Mutex};
 use utopia_core::models::DataSourceView;
 use uuid::Uuid;
 
-/// 「这题不用查」的那个工具。它存在是为了让首轮的 `required` 有一个诚实的出口：
-/// 不是每个问题都关于库里的数据，而强迫模型对「你好」跑一次检索是另一种错
+/// The tool for "this question needs no lookup". It exists so the `required` on the first turn has an honest exit:
+/// not every question is about data in the library, and forcing a retrieval for "hello" is another kind of error
 pub const NO_EVIDENCE_TOOL: &str = "no_evidence_needed";
 
 const NO_EVIDENCE_DESCRIPTION: &str = "Declare that this question does not need the knowledge \
@@ -40,31 +40,31 @@ const NO_EVIDENCE_DESCRIPTION: &str = "Declare that this question does not need 
     dates or data; for those, call the tool that gathers the evidence. After calling it, answer \
     directly.";
 
-/// 端点无视了 `required`、首轮只有文字时退回去的那句话。**没有 DONE 出口**：
-/// 不查的正当理由只有一个，就是调 `no_evidence_needed`
+/// The message sent when an endpoint ignored `required` and the first turn was text only. **There is no DONE exit**:
+/// there is exactly one legitimate reason not to look anything up, which is calling `no_evidence_needed`
 const MUST_CALL: &str = "(system) Every turn starts with a tool call. Call the tool that gathers \
     the evidence for this question, or call no_evidence_needed if the question is not about the \
     knowledge base at all. Do not describe a plan.";
 
-/// 模型回了一个**空回复**（没有正文、也没调工具）时重问的那句（#631）。
+/// The message re-asked when the model returns an **empty reply** (no body, no tool call) (#631).
 ///
-/// 空回复不是一个结论，只是没说话。从前它直接变成一帧 `error`：台子上 48 轮里出过
-/// 2 次，都在工具已经跑完之后——用户看见三四步查证，接着一句「Model returned an
-/// empty answer」，查到的东西全白费。重问一次，第二次还空才报错：只给一次，所以一个
-/// 始终不说话的端点不会让循环空转。
+/// An empty reply is not a conclusion, just silence. It used to become an `error` frame straight away: on the bench it happened 2 times in 48 turns, both after the tools had already finished.
+/// The user saw three or four steps of research and then a single "Model returned an
+/// empty answer" message, and everything found was wasted. It now re-asks once and only errors if the second attempt is also empty: only once, so an
+/// endpoint that never speaks cannot make the loop spin.
 ///
-/// 措辞两头都留门：工具跑过的，就着查到的答；一步没查的（首轮就回空），缺证据
-/// 就去调工具。
+/// The wording leaves room on both sides: if tools have run, answer from what was found; if no step was taken (the reply was empty on the first turn),
+/// evidence is missing, so go and call a tool.
 pub(crate) const EMPTY_REPLY_RETRY: &str = "(system) Your previous reply was empty. Reply to \
     the user now: answer from the evidence gathered above, or call a tool if you still need \
     evidence.";
 
-/// 模型把工具调用写进了正文时退回去的那句（#937）。
+/// The message sent back when the model wrote the tool call into the body text (#937).
 ///
-/// 端点偶尔不走协议里的 `tool_calls`，而是把调用的标记原样写成正文：DeepSeek 的
-/// `<｜tool▁call▁begin｜>function…`（台子上对话那一路 35 题里错了 2 题），或者 DSML。
-/// 什么都没执行，那段也不是答案。退回时保留那一回合，模型看得见自己想调什么；
-/// 只给一次，再写一次就以 [`CONTROL_TEXT`] 报错
+/// Sometimes an endpoint does not use the protocol's `tool_calls` and instead writes the call marker verbatim as body text: DeepSeek's
+/// `<｜tool▁call▁begin｜>function…` (in the bench's chat path, 2 of 35 questions went wrong), or DSML.
+/// Nothing was executed, and that text is not an answer. On retry the turn is kept so the model can see what it tried to call;
+/// only once: if it writes it again, error out with [`CONTROL_TEXT`]
 pub(crate) const MARKUP_RETRY: &str = "(system) Your previous reply wrote a tool call out as \
     text, so nothing ran. Make the call as a tool call, or answer the user in plain text.";
 
@@ -211,10 +211,10 @@ pub(crate) fn finalization_error(
     tool_call_text(text, question).then_some(CONTROL_TEXT)
 }
 
-/// 一场对话里工具共用的东西：库、权限、引用清单，以及给界面的轨迹。
+/// What the tools share within one conversation: the library, permissions, the citation list, and the trail shown to the UI.
 ///
-/// rig 并发跑同一轮的多个工具，而引用编号是有状态的（`[3]` 取决于之前引过几个），
-/// 所以 `sink` 是一把异步锁，一个工具跑完另一个再进
+/// rig runs several tools of the same turn concurrently, and citation numbers are stateful (`[3]` depends on how many were cited before),
+/// so `sink` is an async lock: one tool finishes before the next one enters.
 pub struct Shared {
     pub state: AppState,
     pub kb_id: Uuid,
@@ -222,24 +222,24 @@ pub struct Shared {
     pub mounted_sources: Vec<DataSourceView>,
     pub can_write: bool,
     pub actor: Uuid,
-    /// 工具清单（与 MCP 共用的那一份），`check_call` 的判据从这里取
+    /// The tool list (the same one shared with MCP); the `check_call` criteria come from here
     pub schema: Value,
-    /// 日志里写模型名，好按模型统计
+    /// Model name written into logs, so calls can be counted per model
     pub model: String,
-    /// 这一轮用户问的那句话。工具拿它给同名实体排序：「张伟的雇主」和「张伟的论文」
-    /// 该落到不同的张伟上（dev 上的手写循环早就传了；MCP 那边没有这句话，传 None）
+    /// The question the user asked this turn. Tools use it to rank same-named entities: "Zhang Wei's employer" and "Zhang Wei's papers"
+    /// should resolve to different Zhang Weis (the hand-written loop on dev already passed this; the MCP path has no such question, so it passes None)
     pub question: String,
     pub sink: tokio::sync::Mutex<ToolSink>,
-    /// 工具跑完留给界面的一步，按 rig 的 internal_call_id 取；
-    /// `check_call` 拒掉的调用也在这里留一步
+    /// The step left for the UI once a tool has run, looked up by rig's internal_call_id;
+    /// calls rejected by `check_call` also leave a step here
     steps: Mutex<HashMap<String, (Value, bool)>>,
-    /// 任何工具（含 `no_evidence_needed`）跑过一次：`required` 的闸门就过了
+    /// Once any tool (including `no_evidence_needed`) has run, the `required` gate is passed
     gate_passed: AtomicBool,
-    /// 端点无视 `required` 时的退回只给一次
+    /// The fallback when the endpoint ignores `required` happens only once
     nudged: AtomicBool,
-    /// 空回复的重问也只给一次（见 `EMPTY_REPLY_RETRY`）
+    /// The retry for an empty reply also happens only once (see `EMPTY_REPLY_RETRY`)
     asked_again: AtomicBool,
-    /// 把工具调用写成正文的退回也只给一次（见 `MARKUP_RETRY`）
+    /// The retry for tool calls written as body text also happens only once (see `MARKUP_RETRY`)
     markup_retried: AtomicBool,
     /// Set before the final request so the route can withhold unvalidated text.
     finalizing: AtomicBool,
@@ -297,7 +297,7 @@ impl Shared {
             .insert(internal_call_id.to_string(), (step, is_error));
     }
 
-    /// 取走这次调用留给界面的那一步（没有 = 未知工具，或不留痕的闸门工具）
+    /// Take the step left for the UI by this call (None = unknown tool, or a gate tool that leaves no trace)
     pub fn take_step(&self, internal_call_id: &str) -> Option<(Value, bool)> {
         self.steps
             .lock()
@@ -313,19 +313,19 @@ impl Shared {
             mounted_sources: &self.mounted_sources,
             can_write: self.can_write,
             actor: Some(self.actor),
-            // 网页端对话不经令牌：说话的就是这个人本人
+            // The web chat does not go through a token: the speaker is the person themselves
             via_token: None,
             question: Some(&self.question),
         }
     }
 }
 
-/// 工具跑完留在 rig 工具上下文里的那一步，`on_tool_result` 从那里取
+/// The step left in the rig tool context after a tool has run; `on_tool_result` reads it from there
 #[derive(Clone)]
 struct Step(Value, bool);
 
-/// 工具清单变成 rig 的动态工具：名字、描述、参数 schema 都来自 `tools_schema`，
-/// 执行还是 `tools::dispatch`。**清单是唯一的真相**，这里不抄第二份
+/// The tool list becomes rig's dynamic tools: name, description and parameter schema all come from `tools_schema`,
+/// execution is still `tools::dispatch`. **The list is the single source of truth**; no second copy is kept here
 pub fn dynamic_tools(shared: &Arc<Shared>) -> Vec<DynamicTool> {
     let mut out = Vec::new();
     for t in shared.schema.as_array().into_iter().flatten() {
@@ -344,8 +344,8 @@ pub fn dynamic_tools(shared: &Arc<Shared>) -> Vec<DynamicTool> {
                 let name = tool_name.clone();
                 Box::pin(async move {
                     let tool_ctx = shared.tool_ctx();
-                    // dispatch 现在回一个结构体（#601 给 MCP 加了 structuredContent 与
-                    // is_error）。网页端对话只要正文与界面那一步，与 dev 上手写循环取的一样
+                    // dispatch now returns a struct (#601 added structuredContent and
+                    // is_error for MCP). The web chat only needs the body and the UI step, the same as the hand-written loop on dev.
                     let tools::ToolResult {
                         text: result,
                         step,
@@ -394,12 +394,12 @@ pub fn dynamic_tools(shared: &Arc<Shared>) -> Vec<DynamicTool> {
     out
 }
 
-/// 循环的策略，作为 rig 的钩子。
+/// The loop's policy, as rig hooks.
 #[derive(Clone)]
 pub struct Policy {
     pub shared: Arc<Shared>,
     pub cancellation: crate::live::Cancellation,
-    /// 下一次逻辑调用在访问模型服务前交接，不再执行工具。
+    /// The next logical call is handed over before the model service is accessed; tools are no longer executed.
     pub max_rounds: usize,
 }
 
@@ -416,12 +416,12 @@ impl AgentHook for Policy {
         let action = if self.cancellation.is_cancelled() {
             CompletionCallAction::Stop("Stopped by the user".into())
         } else if turn > self.max_rounds {
-            // Rig 0.42 在选择模型或访问服务前执行此钩子。
-            // 路由只在 PromptCancelled 时读取本轮标记。
+            // Rig 0.42 runs this hook before choosing the model or accessing the service.
+            // The router only reads this turn's marker on PromptCancelled.
             self.shared.answer_requested.store(true, Ordering::Relaxed);
             CompletionCallAction::Stop("Evidence gathering complete".into())
         } else if !self.shared.gate_passed.load(Ordering::Relaxed) {
-            // 一个工具都还没跑：这一轮必须调一个
+            // no tool has run yet: this turn must call one
             CompletionCallAction::Patch(RequestPatch::new().tool_choice(ToolChoice::Required))
         } else {
             CompletionCallAction::Continue
@@ -438,7 +438,7 @@ impl AgentHook for Policy {
             .content
             .iter()
             .any(|c| matches!(c, AssistantContent::ToolCall(_)));
-        // 只有推理、或者正文全是空白，对用户来说都是没说话
+        // Only reasoning, or a body that is entirely whitespace: to the user, that is not speaking
         let has_text = event
             .content
             .iter()
@@ -458,8 +458,8 @@ impl AgentHook for Policy {
         let shared = self.shared.clone();
         let max_rounds = self.max_rounds;
         async move {
-            // 空回复重问一次；再空就放它结束，`chat` 那边以「Model returned an empty
-            // answer」收尾。**不再叠加下面那次退回**：一个始终不说话的端点只多问一次
+            // Re-ask once for an empty reply; if it is still empty, let it end, and `chat` finishes with "Model returned an empty
+            // answer". **The retry below is not stacked on top**: an endpoint that never speaks gets only one extra ask
             if !has_tool_call && !has_text {
                 if !shared.asked_again.swap(true, Ordering::Relaxed) {
                     tracing::warn!(model = shared.model, turn, "模型回了空，重问一次");
@@ -469,9 +469,9 @@ impl AgentHook for Policy {
                 }
                 return ModelTurnAction::Continue;
             }
-            // 工具调用写成了正文：什么都没执行，这一回合也不是答案（#937）。哪一轮都
-            // 一样，不只是首轮。退回一次；再这样就放它结束，`chat` 那边扣着没发的
-            // 标记，以 `CONTROL_TEXT` 收尾，不存
+            // Tool call written into the body: nothing was executed, and this turn is not an answer either (#937). The same applies to every turn,
+            // not just the first. Retry once; if it happens again, let it end, and `chat` holds back the unsent
+            // marker and finishes with `CONTROL_TEXT`, without storing it
             if written_call {
                 if !shared.markup_retried.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
@@ -491,7 +491,7 @@ impl AgentHook for Policy {
             if has_tool_call || shared.gate_passed.load(Ordering::Relaxed) || turn > max_rounds {
                 return ModelTurnAction::Continue;
             }
-            // 只有文字、闸门没过：端点无视了 `required`。退回去一次
+            // Text only, gate not passed: the endpoint ignored `required`. Send it back once
             if !shared.nudged.swap(true, Ordering::Relaxed) {
                 tracing::warn!(
                     model = shared.model,
@@ -530,8 +530,8 @@ impl AgentHook for Policy {
         _ctx: &HookContext,
         event: ToolCallEvent<'_>,
     ) -> impl std::future::Future<Output = ToolCallAction> + Send {
-        // **说不清自己要做什么的调用不执行。** 把话回给模型，让它重来；
-        // 界面上照样显示成一次没做成的调用
+        // **A call whose intent cannot be understood is not executed.** Tell the model and let it redo it;
+        // the UI still shows it as a call that was not carried out
         let action = if self.cancellation.is_cancelled() {
             ToolCallAction::Stop("Stopped by the user".into())
         } else if self.shared.finalizing() {
@@ -561,11 +561,11 @@ impl AgentHook for Policy {
     }
 }
 
-/// 落库的历史（OpenAI 协议的 JSON）变回 rig 的消息。
+/// Turn the stored history (OpenAI protocol JSON) back into rig messages.
 ///
-/// 最后那一轮的工具往返放在它的结论之前——顺序就是真实顺序，模型读起来
-/// 是「我问了、我查了、我答了」。tool 消息的工具名在协议里没有，从前面那条
-/// 带 tool_calls 的 assistant 消息里按 id 找回来
+/// The tool round-trip of the last turn goes before its conclusion, so the order is the real one and the model reads it as
+/// "I asked, I looked, I answered". The protocol has no tool name on tool messages; it is recovered from the earlier
+/// assistant message with tool_calls by id
 #[cfg(test)]
 pub fn history_messages(turns: &[(String, String)], last_tool_exchange: &[Value]) -> Vec<Message> {
     history_messages_with_reasoning(turns, last_tool_exchange, &[])
@@ -644,9 +644,9 @@ fn exchange_messages(exchange: &[Value]) -> Vec<Message> {
     out
 }
 
-/// 前几轮已经认下的实体，连 id 一起交回去（作为本轮的上下文文档，见 `rig_model::wire`
-/// 里它落在哪、以什么角色）。少了它，模型只看得见上一轮的最终答案文字，不知道
-/// 自己拿到过哪些 id，于是从名字重搜一遍；同名歧义时两轮可能落到不同的实体上
+/// Entities already accepted in earlier turns are handed back along with their ids (as context documents for this turn; see `rig_model::wire`
+/// for where it lands and in what role). Without it the model sees only the previous turn's final answer text and not
+/// which ids it was given, so it searches again by name; with same-name ambiguity the two turns may land on different entities
 pub fn known_entities_block(entities: &[Value], limit: usize) -> Option<String> {
     if entities.is_empty() {
         return None;
@@ -698,8 +698,8 @@ mod tests {
         assert!(finalization_error(after_example, false, "What happened?").is_some());
     }
 
-    /// DeepSeek 的原生标记也是写成正文的工具调用（#937）：两种竖线、叙述之后的行首都认；
-    /// 行内提及、引用、围栏里的示例、明确要原样示例的问题都不算
+    /// DeepSeek's native markers are also tool calls written as body text (#937): both kinds of pipe are recognised, and so are line starts after narration;
+    /// inline mentions, citations, examples inside fences, and questions that explicitly ask for verbatim examples do not count
     #[test]
     fn deepseek_markup_is_a_tool_call_written_as_text() {
         let call =
@@ -734,11 +734,11 @@ mod tests {
         );
     }
 
-    /// 流式外发按行：可能长成标记的那一行扣着，成了标记就连同这一回合剩下的都扣着；
-    /// 其余照常外发，已经发出去一半的那一行不再判断
+    /// Streamed output goes out line by line: a line that might turn into a marker is held back; once it is a marker, it and the rest of the turn are held back too;
+    /// everything else goes out as usual, and a line already half sent is no longer judged
     #[test]
     fn a_line_is_held_while_it_may_become_a_tool_call() {
-        // (本回合正文, 已发出的字节数, 应当发到哪里为止, 之后是否整回合扣住)
+        // (turn body, bytes already sent, where to send up to, whether the whole turn is held back from then on)
         for (text, from, out, held) in [
             ("Let me search.\n<｜to", 0, "Let me search.\n", false),
             (
@@ -769,7 +769,7 @@ mod tests {
         assert_eq!(publishable("Held.\nStill held.", 0, &mut holding), 0);
     }
 
-    /// 上一轮的工具往返插在它的结论之前，tool 消息找回自己的工具名
+    /// The tool round-trip of the previous turn is inserted before its conclusion; the tool message gets its own tool name back
     #[test]
     fn the_last_exchange_sits_before_its_conclusion() {
         let turns = vec![

@@ -1,25 +1,25 @@
-//! 模型把工具调用写成了正文（#937）。
+//! The model wrote a tool call into the body text (#937).
 //!
-//! 端点偶尔不走协议里的 `tool_calls`，而是把调用的标记原样写进 `delta.content`：
-//! DeepSeek 的 `<｜tool▁calls▁begin｜>…`，或者 DSML。什么都没执行，那段也不是答案。
-//! 从前只有预算用完后的收尾那一轮会查它；普通回合里它照常流给用户、存成答案、
-//! 以 `done` 收尾。这里钉的是现在的样子：
+//! The endpoint occasionally does not use the protocol's `tool_calls`; it writes the call markers verbatim into `delta.content`:
+//! DeepSeek's `<｜tool▁calls▁begin｜>…`, or DSML. Nothing was executed, and that text is not an answer.
+//! Previously only the wrap-up turn after the budget ran out checked it; on an ordinary turn it was streamed to the user as usual, stored as the answer,
+//! and finished with `done`. This pins down the current behaviour:
 //!
-//! 1. 标记不外发：流里、存下的答案里、回放给下一轮的工具往返里都没有；
-//! 2. 只有文字的那一回合退回一次（`MARKUP_RETRY`），模型接着调工具或作答；
-//! 3. 再写一次就以 error 收尾，什么都不存；
-//! 4. 叙述照常流出，只扣可能是标记的那几行。只是以 `<` 开头的正文、围栏里的示例，
-//!    分辨出来之后原样放行，也不会被退回。
+//! 1. Markers are not sent out: they are absent from the stream, the stored answer, and the tool round-trip replayed to the next turn;
+//! 2. A text-only turn is retried once (`MARKUP_RETRY`), and the model goes on to call a tool or answer;
+//! 3. If it writes markup again, it finishes with an error and stores nothing;
+//! 4. Narration still streams out, holding back only the lines that might be markers. Body text that merely starts with `<`, and examples inside fences,
+//!    once told apart, are let through as they are and are not sent back for a retry.
 use super::*;
 
-/// DeepSeek 的原生写法：一次工具调用被原样写成了正文
+/// DeepSeek's native form: one tool call written verbatim as body text
 const CALL: &str = "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>search_chunks\n\
                     ```json\n{\"query\":\"Acme revenue\"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>";
 const ANSWER: &str = "Acme's revenue rose 5% last quarter.";
 const TOOL: Reply = Reply::Tool("find_entities", r#"{"name":"Acme"}"#);
 const QUESTION: &str = "What was Acme's revenue last quarter?";
 
-/// 流给用户的全部正文，按帧拼起来
+/// All the body text streamed to the user, concatenated frame by frame
 fn streamed(sse: &str) -> String {
     sse.split("\n\n")
         .filter_map(|frame| frame.strip_prefix("event: delta\ndata: "))
@@ -32,7 +32,7 @@ fn streamed(sse: &str) -> String {
         .collect()
 }
 
-/// 有几次请求以退回的那句话结尾
+/// How many requests ended with the retry sentence
 fn sent_back(f: &Fx) -> usize {
     f.requests()
         .iter()
@@ -40,7 +40,7 @@ fn sent_back(f: &Fx) -> usize {
         .count()
 }
 
-/// 存下的这一轮工具往返，下一轮回放给模型的就是它
+/// The stored tool round-trip of this turn; the next turn replays it to the model
 async fn stored_exchange(f: &Fx) -> anyhow::Result<serde_json::Value> {
     Ok(sqlx::query_scalar(
         "SELECT m.tool_exchange FROM conversation_messages m
@@ -78,7 +78,7 @@ async fn a_call_written_as_text_after_a_tool_is_sent_back_once() -> anyhow::Resu
     assert_eq!(requests.len(), 3, "tool, markup, then one retry");
     assert_eq!(last_message(&requests[2]), agent::MARKUP_RETRY);
     assert_eq!(sent_back(&f), 1);
-    // 退回时保留那一回合：模型看得见自己写了什么
+    // Keep the turn when retrying: the model can see what it wrote
     let messages = requests[2]["messages"].as_array().expect("messages");
     assert_eq!(messages[messages.len() - 2]["role"], "assistant");
     assert_eq!(messages[messages.len() - 2]["content"], CALL);
@@ -206,7 +206,7 @@ async fn markup_beside_a_real_call_is_dropped_and_not_replayed() -> anyhow::Resu
         "the real call ran; nothing is sent back"
     );
     assert_eq!(sent_back(&f), 0);
-    // 这一步落在叙述之后、答案之前，不在扣掉的标记之后
+    // This step falls after the narration and before the answer, not after the held-back marker
     let step: serde_json::Value = sse
         .split("\n\n")
         .find_map(|frame| frame.strip_prefix("event: step\ndata: "))

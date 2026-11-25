@@ -1,6 +1,6 @@
-//! Agentic 对话：模型自主调用工具（文档检索 / 实体查找 / 时态事实）收集证据后作答。
-//! 事件序列：step*（行动轨迹）| sources（引用清单，随检索增量更新）| delta*（增量文本）→ done | error。
-//! 模型不支持 tool-calling 时自动降级为一次性 RAG 注入。
+//! Agentic chat: the model calls tools on its own (document search / entity lookup / temporal facts), gathers evidence, then answers.
+//! Event sequence: step* (action trace) | sources (citation list, updated incrementally as retrieval runs) | delta* (incremental text) → done | error.
+//! When the model does not support tool calling, it automatically falls back to a one-shot RAG injection.
 
 #[path = "chat_finalization.rs"]
 mod finalization;
@@ -37,16 +37,16 @@ use crate::error::ApiResult;
 use crate::retrieval;
 use crate::state::AppState;
 
-/// 回放几个已认下的实体。上限是因为长会话会攒出几十个，全贴回去就把
-/// 省下来的上下文又花掉了；按首次出现排序，早认下的通常是这场对话的主角。
+/// Replays a few already-recognized entities. The cap exists because long conversations pile up dozens, and pasting them all back would spend
+/// the context saved elsewhere; sorted by first appearance, since the ones recognized early are usually the protagonists of the conversation.
 const KNOWN_ENTITY_LIMIT: usize = 20;
 
 const MAX_HISTORY: usize = 20;
 const MAX_ROUNDS: usize = 6;
 
-/// 一次没答成的生成（0004）：`code` 给界面去 `err.*` 表里查措辞，英文原句留给日志、
-/// MCP 和不做本地化的客户端。**服务端不出显示文本**——`error` 帧与请求被拒用的是
-/// 同一个信封 `{error, code}`，前端用同一个函数读
+/// A generation that failed to produce an answer (0004): `code` lets the UI look up the wording in the `err.*` table, while the English sentence is kept for logs,
+/// MCP and clients that do not localize. **The server does not send display text**: the `error` frame and a rejected request use
+/// the same envelope `{error, code}`, which the frontend reads with one function
 struct Failure {
     code: &'static str,
     message: String,
@@ -60,14 +60,14 @@ impl Failure {
         }
     }
 
-    /// 模型那一侧的失败，按 `utopia_llm` 的错误类型给 code；认不出的算作答失败
+    /// Failures on the model side, mapped to a code by the error type from `utopia_llm`; anything unrecognized counts as an answer failure
     fn model(err: &anyhow::Error, message: impl Into<String>) -> Self {
         Self::new(model_failure_code(err).unwrap_or("answer_failed"), message)
     }
 }
 
-/// 模型端点的失败换成稳定的 code。类型是 `utopia_llm` 早就分好的：欠费、限流、
-/// 暂时不可用、请求没送到或断在半路、其余的拒绝。这里只是把它们说给界面听
+/// Turns failures of the model endpoint into stable codes. The types were already sorted out by `utopia_llm`: billing, rate limits,
+/// temporarily unavailable, request not delivered or cut off midway, and other refusals. Here they are only told to the UI
 fn model_failure_code(err: &anyhow::Error) -> Option<&'static str> {
     if utopia_llm::out_of_credit(err).is_some() {
         Some("model_out_of_credit")
@@ -88,9 +88,9 @@ fn model_failure_code(err: &anyhow::Error) -> Option<&'static str> {
     }
 }
 
-/// 收尾关口（`agent::finalization_error`）拦下候选答案时说的那几句，换成 code。
-/// 这几句以文本的形式穿过 `chat_finalization` 的边界，所以按原文认；测试直接拿
-/// `finalization_error` 的输出来对，改了措辞会在那里失败，而不是悄悄丢掉 code
+/// The few sentences the finalization gate (`agent::finalization_error`) uses when it rejects a candidate answer are mapped to codes here.
+/// Those sentences cross the `chat_finalization` boundary as text, so they are matched by their original wording; tests take
+/// the output of `finalization_error` directly, so changing the wording fails there, rather than quietly dropping the code
 fn unpublishable_code(message: &str) -> Option<&'static str> {
     if message.contains("tool-control text") {
         Some("answer_tool_text")
@@ -107,32 +107,32 @@ fn unpublishable_code(message: &str) -> Option<&'static str> {
     }
 }
 
-/// `remember` 曾整个停用过一段（见 `docs/decisions/0015`）：它那时会把一句话直接
-/// 变成图上一条活边，实测里「记住 Acme 把总部搬到了深圳」落成的是一条**空谓词、
-/// 0.9 置信**的边，而助手宣称的和图里得到的不是一回事。
+/// `remember` was once disabled for a period (see `docs/decisions/0015`): it turned a sentence directly into
+/// a live edge in the graph; in practice "remember that Acme moved HQ to Shenzhen" became an edge with an **empty predicate and
+/// 0.9 confidence**, and what the assistant claimed was not what the graph held.
 ///
-/// 现在抽取侧接上了 `pending_facts`：记忆抽出的事实先等人点头，再进账本。
-/// 这个开关留着，是为了下次再发现「工具会悄悄改图」时有地方立刻拉闸——
-/// 宁可没有这个工具，也不要一个会悄悄改图的工具。
+/// Now the extraction side is wired to `pending_facts`: facts extracted from memory wait for a person's nod before entering the ledger.
+/// This switch is kept so that, the next time a tool is found to change the graph silently, there is a place to pull it immediately:
+/// better to have no such tool than one that silently changes the graph.
 pub(super) const REMEMBER_ENABLED: bool = true;
 
 #[derive(Deserialize)]
 pub struct ChatReq {
-    /// 缺省 = 新建会话（SSE 首个 `conversation` 事件回传 id）
+    /// Default = new conversation (the first `conversation` SSE event returns the id)
     #[serde(default)]
     pub conversation_id: Option<Uuid>,
-    /// 新问题的正文。重答时不读它：问的是库里存着的那一句
+    /// The body of the new question. On a retry it is not read: what is asked is the sentence already stored in the KB
     pub message: String,
-    /// 重答这场对话最后那个还没有回答的问题（#936）：不再存一遍，就地回答它
+    /// Retries the last still-unanswered question in this conversation (#936): not stored again, it is answered in place
     #[serde(default)]
     pub retry_message_id: Option<Uuid>,
 }
 
-/// 已占住会话后检查重试资格，避免检查与登记之间另一轮已经写入回答。
-/// 只接受本会话最后一条未回答的用户消息；拒绝时不改历史，也不调用模型。
+/// Once the conversation is occupied, retry eligibility is checked, to keep another round from writing an answer between the check and the registration
+/// Accepts only this conversation's last unanswered user message; on rejection, neither the history nor the model is touched
 ///
-/// 为什么要有重答（#936）：从前想再问一次只能重发，同一个问题就在历史里存了两遍，
-/// 没有回答的那一遍还会在之后每一问里作为「没回答的一轮」回放给模型
+/// Why retries exist (#936): before, asking again meant resending, which stored the same question twice in the history,
+/// and the copy with no answer was still replayed to the model as an "unanswered turn" in every later question
 async fn retry_question(
     state: &AppState,
     conversation_id: Uuid,
@@ -158,8 +158,8 @@ async fn retry_question(
     Ok(target.content)
 }
 
-/// 工具清单。**MCP 也用这一份**（`mcp.rs`）：名字、描述、参数 schema 抄成
-/// 两套迟早分叉，而它们是与 `tools.rs` 执行侧的契约
+/// The tool list. **MCP uses this same one** (`mcp.rs`): names, descriptions and parameter schemas copied into
+/// two sets would sooner or later diverge, and they are the contract with the `tools.rs` execution side
 pub(super) fn tools_schema(can_write: bool, data_source_names: &[String]) -> serde_json::Value {
     let mut tools = base_tools();
     if !data_source_names.is_empty() {
@@ -234,29 +234,29 @@ pub(super) fn tools_schema(can_write: bool, data_source_names: &[String]) -> ser
     tools
 }
 
-/// 执行之前先看这次调用说清楚了没有。
+/// Before executing, check whether the call stated itself clearly.
 ///
-/// **两种「没说清」以前都会安静地变成一次正常调用。**
+/// **Both kinds of "not stated clearly" used to quietly become a normal call.**
 ///
-/// 一是参数解析不出来。模型的输出撞上 token 上限时，`arguments` 会在半路断掉，
-/// 那串 JSON 不完整。从前这里是 `unwrap_or_else(|_| json!({}))`——空对象，
-/// 接着 `search_chunks` 里 `args["query"].as_str().unwrap_or(&query)` 回落到
-/// **用户那句原话**，于是一次被截断的调用变成「拿用户的原问题去检索」，
-/// 而轨迹上显示的是一条完全正常的 `search · 6 sources`。
+/// One: the arguments do not parse. When the model's output hits the token limit, `arguments` is cut off midway,
+/// and the JSON string is incomplete. Before, this was `unwrap_or_else(|_| json!({}))`, an empty object,
+/// and then `args["query"].as_str().unwrap_or(&query)` in `search_chunks` fell back to
+/// **the user's original sentence**, so a truncated call became "search using the user's original question",
+/// while the trace showed an entirely normal `search · 6 sources`.
 ///
-/// 二是必填参数干脆没给。同一个回落，同一个结果。
+/// Two: a required parameter was simply not given. The same fallback, the same result.
 ///
-/// 两种都不该猜。**回落产出的是一个看起来没问题的错误答案**，那比报错坏得多——
-/// 报错模型会重试，猜出来的答案没有人会去核。
+/// Neither should be guessed. **A fallback produces a wrong answer that looks fine**, which is far worse than an error:
+/// an error makes the model retry, while a guessed answer is one no one will check.
 ///
-/// 判据直接取自工具表里的 `required`：加一个必填参数，这里自动跟上，
-/// 不必记得来改第二处。
+/// The criterion is taken directly from the `required` in the tool table: add a required parameter and this follows automatically,
+/// with no need to remember to change a second place.
 pub(super) fn check_call(
     tools: &serde_json::Value,
     name: &str,
     raw_args: &str,
 ) -> Result<serde_json::Value, (String, serde_json::Value)> {
-    // 界面按字段说（#942）：哪个参数、没给还是给错了；整个解析不出来的没有 `param`
+    // The UI speaks by field (#942): which parameter, and whether it was missing or malformed; a body that does not parse at all has no `param`
     let step = |detail: &str| super::tools::Step::new("tool", name, detail);
     let refuse = |step: super::tools::Step, message: String| (message, step.json());
     let Ok(args) = serde_json::from_str::<serde_json::Value>(raw_args) else {
@@ -276,8 +276,8 @@ pub(super) fn check_call(
         .map(|t| &t["function"]);
     let required = function.and_then(|f| f["parameters"]["required"].as_array());
     for key in required.into_iter().flatten().filter_map(|k| k.as_str()) {
-        // 空串与 null 都算没给：`{"query": ""}` 检索出来的东西与问题无关，
-        // 而它同样会显示成一条正常的轨迹
+        // Empty string and null both count as not given: `{"query": ""}` retrieves things unrelated to the question,
+        // and it too would show as a normal trace
         let missing = match args.get(key) {
             None | Some(serde_json::Value::Null) => true,
             Some(serde_json::Value::String(s)) => s.trim().is_empty(),
@@ -292,9 +292,9 @@ pub(super) fn check_call(
                 ),
             ));
         }
-        // 判据同样取自工具表：schema 里写了 `format: uuid` 的参数，格式也在这一关挡。
-        // 编出来的 id 到了工具里只能回「本库没有这篇文档」，模型会把它读成
-        // 「库里真的没有」而放弃——那是又一个看起来没问题的错误答案
+        // The criterion is also taken from the tool table: parameters declared with `format: uuid` in the schema are also checked at this gate.
+        // An invented id reaching the tool can only answer "no such document in this KB", and the model would read that as
+        // "really absent from the KB" and give up, which is yet another wrong answer that looks fine
         let is_uuid =
             function.is_some_and(|f| f["parameters"]["properties"][key]["format"] == "uuid");
         if is_uuid
@@ -332,11 +332,11 @@ const MEMORY_PROMPT: &str = "\
     confirmation before entering the graph; never say a fact is already in the graph. \
     Never invent memories, and never call it for small talk.";
 
-/// 工具的 JSON schema——**给模型看的那一份**。
+/// The tools' JSON schema: **the copy the model sees**.
 ///
-/// 留在 `chat.rs` 而不是 `tools.rs`：它是提示词的一部分，随对话策略走；
-/// `tools.rs` 只管拿到参数之后干什么（见那个模块顶上的说明）。
-/// MCP 也读它，所以对同模块开放——两边描述同一批工具，各写一份必然分叉。
+/// It stays in `chat.rs` rather than `tools.rs`: it is part of the prompt and follows the conversation policy;
+/// `tools.rs` decides only what to do once the arguments are in hand (see the note at the top of that module).
+/// MCP reads it too, so it is open to the same module: two copies describing the same tools would inevitably diverge.
 pub(super) fn base_tools() -> serde_json::Value {
     json!([
         {
@@ -685,16 +685,16 @@ pub async fn chat(
     Json(req): Json<ChatReq>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     let kb = utopia_store::access::require_kb(&state.pool, &user, kb_id, Role::Viewer).await?;
-    // 写工具跟人走：editor 及以上的对话才带 remember，viewer 纯只读
-    // 挂载的数据源决定 query_data 是否入列（问数是读，viewer 亦可用）
+    // Write tools follow the person: only conversations at editor level and above get remember; viewers are strictly read-only
+    // Mounted data sources decide whether query_data is in the list (data questions are reads, so viewers may use them too)
     let mounted_sources = utopia_store::datasources::mounted(&state.pool, kb_id).await?;
-    // 语义层：人确认过的 指标/维度 → 数据资产 映射，直接进 system prompt——
-    // 问数优先用确认口径，而不是每次从 schema 猜。
+    // Semantic layer: metric/dimension -> data asset mappings that a person has confirmed go straight into the system prompt,
+    // so data questions prefer confirmed definitions rather than guessing from the schema each time.
     //
-    // 从前这里按 `confidence >= 0.75` 捞事实,而那个阈值是拿浮点数编码一个
-    // 二值状态(提议 0.6 / 确认 1.0)。现在读 `status = confirmed`(0011)
-    // 口径在下面按问题挑（`mapping_index::relevant`）——从前这里 `confirmed(kb, 30)`
-    // 按字典序取前三十条，一百条口径的库有七十条永远进不了提示词（#574）
+    // Before, this pulled facts by `confidence >= 0.75`, but that threshold encoded a binary state with a float
+    // (proposed 0.6 / confirmed 1.0). Now it reads `status = confirmed` (0011).
+    // Definitions are picked below by question (`mapping_index::relevant`); before, `confirmed(kb, 30)` took
+    // the first thirty in lexicographic order, so in a KB with a hundred definitions seventy never reached the prompt (#574)
     let can_write = utopia_store::access::kb_role(&state.pool, &user, &kb)
         .await?
         .is_some_and(|r| r >= Role::Editor);
@@ -726,10 +726,10 @@ pub async fn chat(
         }
         None => utopia_store::conversations::create(&state.pool, kb_id, user.id, &query).await?,
     };
-    // 会话持久化：用户消息即刻落库，上下文由服务端从库里拼——前端只送新消息。
-    // 重答的那一问已经在库里，就地回答它，不再存一遍
-    // 新问题和重试共用入口：先占住会话，再查重试资格或存问题。
-    // 准备失败时 Drop 自动释放；被拒的新问题不会混入历史。
+    // Session persistence: the user's message is stored at once, and the context is assembled server-side from the DB; the frontend sends only the new message
+    // The question being retried is already in the DB: answer it in place, without storing it again
+    // New questions and retries share one entry point: first occupy the conversation, then check retry eligibility or store the question
+    // If preparation fails, Drop releases it automatically; a rejected new question does not slip into the history
     let handle = state.live.begin(conversation_id).await?;
     let generation_id = handle.generation_id();
     let cancellation = handle.cancellation();
@@ -759,22 +759,22 @@ pub async fn chat(
         MAX_HISTORY as i64,
     )
     .await?;
-    // 这一问已经落库，所以它在历史里；runner 又把它当 prompt 发一次。两份都发，
-    // 每个请求里就有两条一样的 user，已认下的实体那条 system 也夹到了两份中间
-    // （#548 起如此）。按落库 id 剔除，不按文本：同一会话里并发的另一问可能排在
-    // 它后面。收尾那一步用同一个位置把当前问题从背景里剔出去
+    // This question is already stored, so it is in the history; the runner also sends it once as the prompt. Both are sent,
+    // so each request has two identical user messages, and the entity system message is also wedged between the two copies
+    // (since #548). Remove by stored id, not by text: another concurrent question in the same conversation may be queued after it.
+    // The wrap-up step uses the same position to remove the current question from the background
     let current = history
         .turn_ids
         .iter()
         .position(|id| *id == user_message_id);
     let workspace_id = kb.workspace_id;
-    // 数据描述（探索从 schema 写的）与约定（人写的）跟着进 system prompt。
-    // **每次都在，不靠检索碰运气**：约定写成一页文档只靠检索也到过 14/18，
-    // 但那是因为这批问题都在问指标才每题命中（#520）
+    // Data description (written by exploration from the schema) and conventions (written by people) go into the system prompt too.
+    // **Always present, not left to luck in retrieval**: a conventions page relying on retrieval alone reached 14/18, but only because
+    // these questions were all about metrics, so each hit its page (#520)
     let data_description = kb.data_description.clone().filter(|s| !s.trim().is_empty());
     let data_conventions = kb.data_conventions.clone().filter(|s| !s.trim().is_empty());
 
-    // 注册表在生成器之前取出来：下面那个 `async_stream!` 会把 `state` 整个搬走
+    // The registry is taken out before the generator: the `async_stream!` below moves `state` away entirely
     let live = state.live.clone();
     let save_pool = state.pool.clone();
     let previous_answer = history
@@ -786,33 +786,33 @@ pub async fn chat(
         .unwrap_or_default();
     let previous_sources = history.last_sources.clone();
 
-    // 生成过程不挂在这条连接上。
+    // Generation is not tied to this connection.
     //
-    // **切走一次就丢一个回答**，而且丢得比看上去彻底：整段生成住在下面这个
-    // 生成器里，助手消息只在走完时落库；浏览器一导航，axum 丢掉响应体、
-    // 生成器 future 被丢弃，于是 LLM 调用当场取消，那句 `append_message`
-    // 永远不执行。实测掐断连接时已经收到 1219 字节的正文，二十秒后库里
-    // 只剩用户那一行——**那个回答不是存在但没显示，是根本没被生成完**。
+    // **Switching away once loses an answer**, and loses it more thoroughly than it looks: the whole generation lives inside the generator below,
+    // and the assistant message is stored only when it finishes; when the browser navigates away, axum drops the response body and
+    // the generator future is dropped, so the LLM call is cancelled on the spot, and the `append_message` never runs. Measured: when the connection was cut,
+    // 1219 bytes of body had already arrived, but twenty seconds later the DB held
+    // only the user's row. **That answer was not hidden, it was never finished generating.**
     //
-    // 所以把生成器交给一个独立任务去驱动，这条连接降级成一个订阅者。
-    // 任务不随连接消失，答案照常写完、照常落库，人回来就在。
+    // So the generator is handed to a separate task to drive, and this connection is downgraded to one subscriber.
+    // The task does not disappear with the connection: the answer is written in full and stored as usual, and is there when the person comes back.
     //
-    // 代价说清楚：**没人看的时候仍然在花钱**。这是有意的——丢答案比多跑一轮贵，
-    // 而 `MAX_ROUNDS` 已经给了上限。send 失败（接收端没了）不中断，那正是要点。
+    // The cost, stated plainly: **it keeps spending money when no one is watching**. This is deliberate: losing an answer costs more than one extra round,
+    // and `MAX_ROUNDS` already caps it. A failed send (the receiver is gone) does not stop it, and that is the point.
     let producer = async_stream::stream! {
-        // 依赖模型的准备工作之前先发送身份，早到的 Stop 也能指向本轮。
-        // 会话 id 先行下发（新会话由此告知前端）；这一问存下的 id 一起下发：
-        // 答到一半失败了，界面凭它重答（#936）
+        // Send the identity before the preparatory work that depends on the model, so an early Stop can still point at this round
+        // The conversation id goes out first (a new conversation is announced to the frontend this way); the id stored for this question goes out with it:
+        // if an answer fails midway, the UI retries with it (#936)
         yield ProducerEvent::Progress(Frame::new("conversation", json!({
             "id": conversation_id, "message_id": user_message_id, "generation_id": generation_id,
         }).to_string()));
-        // 语义层：跟这个问题有关的那几条确认口径进 system prompt——问数优先用确认口径，
-        // 而不是每次从 schema 猜。按问题挑而不是全塞：二十七条的上界 17/18 是在
-        // 三十条的上限之下量的，一百条口径靠字典序截断就不成立了（#574）。
-        // 挑口径要调嵌入模型，所以放在生成器里：Stop 丢掉生成器，这个请求跟着取消（0063）。
-        // 代价是它失败得晚了：从前是什么都没写的 500，现在问题已经存下，失败是一帧 error
-        // 这一轮的嵌入缓存从挑口径起就在：问题在这里嵌一次，随后检索分块、按名字查实体
-        // 都拿同一个向量（#971 的后续）。下面建好 sink 就把它交过去
+        // Semantic layer: the confirmed definitions related to this question go into the system prompt; data questions prefer confirmed definitions
+        // rather than guessing from the schema each time. Pick by question rather than stuffing them all: the 17/18 upper bound for twenty-seven entries was measured
+        // under the thirty-entry cap, and it does not hold for a hundred definitions truncated by lexicographic order (#574)
+        // Picking definitions calls the embedding model, so it is placed inside the generator: Stop drops the generator, and this request is cancelled with it (0063)
+        // The cost is that it fails later: before, this was a 500 that wrote nothing; now the question is already stored, and the failure is an error frame
+        // This round's embedding cache exists from the moment definitions are picked: the question is embedded once here, and then chunk retrieval and entity lookup by name
+        // all use the same vector (follow-up to #971). The sink is built below, and the cache is handed over to it
         let mut embeddings = crate::llm_util::EmbedCache::default();
         let mappings = if mounted_sources.is_empty() {
             Vec::new()
@@ -843,8 +843,8 @@ pub async fn chat(
                  first, then query. State units and the time range you used in the answer.",
                 ds_names.join(", ")
             ));
-            // 描述说的是 schema 里有的（粒度、单位、码值、时间轴），约定说的是 schema 里
-            // 没有的（哪些行算数、哪列才是那个数）。后者是问数从 2/18 到 14/18 的那一半
+            // Descriptions state what the schema has (granularity, units, code values, the time axis); conventions state what the schema does not have
+            // (which rows count, which column is the number). The latter is the half that took data questions from 2/18 to 14/18
             if let Some(d) = &data_description {
                 system_prompt.push_str(&format!(
                     "\nAbout the data (written from the schema; states only what the schema says):\n{d}"
@@ -860,9 +860,9 @@ pub async fn chat(
                 system_prompt.push_str(
                     "\nSemantic layer (confirmed definitions — use these instead of guessing from schema):",
                 );
-                // 从前这里直接把整份 JSON 打进去。现在字段是列，只挑问数用得上的
-                // 那几样铺开——`sql` 与 `expr` 是「怎么算」，`unit` 是答里必须带的
-                // 量纲，`summary` 是给模型的一句人话
+                // Before, this dumped the whole JSON in. Now the fields are columns, and only the ones data questions need are spread out:
+                // `sql` and `expr` are "how it is computed", `unit` is the
+                // unit the answer must carry, and `summary` is a plain sentence for the model
                 for m in &mappings {
                     let how = m
                         .sql
@@ -888,8 +888,8 @@ pub async fn chat(
             }
         }
 
-        // 循环是 rig 的（#546）：工具、策略钩子、历史、实体清单都交给它；
-        // 这里只把它的事件翻成前端认得的帧，并在结束时落库
+        // The loop belongs to rig (#546): tools, policy hooks, history, and the entity list are all handed to it;
+        // here we only translate its events into frames the frontend recognizes, and store to the DB at the end
         let shared = agent::Shared::new(
             state.clone(),
             kb_id,
@@ -926,7 +926,7 @@ pub async fn chat(
         );
         let rig_agent = AgentBuilder::new(RigModel::with_context(client.clone(), context.clone()))
             .preamble(&system_prompt)
-            // 工具轮 + 最后那一轮作答；第 MAX_ROUNDS+1 次请求由钩子在 I/O 前交给纯作答阶段
+            // Tool rounds + the final answering round; the (MAX_ROUNDS+1)th request is handed by the hook to the pure answering phase before any I/O
             .default_max_turns(MAX_ROUNDS + 1)
             .add_hook(policy)
             .tool_server_handle(tool_server)
@@ -936,8 +936,8 @@ pub async fn chat(
             .history(agent::history_messages_with_reasoning(
                 &prior, &history.last_tool_exchange, &prior_reasoning,
             ));
-        // 贴在历史之后、当前问题之前——位置就是服从性，跟抽取里 known_block
-        // 紧挨正文是同一条理由（角色与位置由 `rig_model::wire` 定）
+        // Placed after the history and before the current question: the position is the obedience, for the same reason as known_block in extraction
+        // Placed right next to the body, for the same reason (role and position are set by `rig_model::wire`)
         if let Some(block) = agent::known_entities_block(&history.entities, KNOWN_ENTITY_LIMIT) {
             runner = runner.document(Document {
                 id: "known_entities".into(),
@@ -947,16 +947,16 @@ pub async fn chat(
         }
         let mut run = runner.stream().await;
 
-        // 落库累积：assistant 全文与行动轨迹（历史回放用）
+        // Accumulates for storage: the assistant's full text and the action trace (for history replay)
         let mut answer_acc = String::new();
         let mut steps_acc: Vec<serde_json::Value> = Vec::new();
-        // 这一轮的工具往返，按协议原样留一份落库：下一轮回放它，模型才知道自己做过什么
+        // This round's tool round trip, kept as the protocol has it and stored: the next round replays it, so the model knows what it has done
         let mut exchange_acc: Vec<serde_json::Value> = Vec::new();
-        // 当前模型回合里说的话与发出的调用；回合的结果一到，攒成一条 assistant 消息
+        // What the model said in this turn and the calls it sent; once the turn's results arrive, they are gathered into one assistant message
         let mut turn_text = String::new();
         let mut turn_reasoning: Option<String> = None;
         let mut turn_calls: Vec<serde_json::Value> = Vec::new();
-        // 这一回合的正文发出去了多少；后面的扣着，因为那可能是写成正文的工具调用（#937）
+        // How much of this turn's body has been sent; the rest is held back, since it may be a tool call written as body text (#937)
         let mut turn_published = 0usize;
         let mut turn_holding = false;
         let mut finished = false;
@@ -1013,8 +1013,8 @@ pub async fn chat(
                     internal_call_id,
                 })) => {
                     if !turn_calls.is_empty() {
-                        // 这一回合真的调了工具。扣着的是标记就丢掉，也不回放给模型；
-                        // 不是（例如围栏里的示例）就补发，赶在这一步之前，`at` 才对得上
+                        // This turn really called tools. If held back and the marker is dropped, it is also not replayed to the model;
+                        // if not (e.g. an example inside a fence), it is sent after, before this step, so `at` lines up
                         if turn_published < turn_text.len() {
                             if agent::tool_call_text(&turn_text, &query) {
                                 turn_text.truncate(turn_published);
@@ -1024,7 +1024,7 @@ pub async fn chat(
                                 yield ProducerEvent::Progress(delta_event(&rest));
                             }
                         }
-                        // 工具轮带了叙述文本：与后续轮次的正文之间补一个段落分隔
+                        // The tool round carried narration text: a paragraph break is inserted before the body of the following round
                         if !turn_text.is_empty() {
                             answer_acc.push_str("\n\n");
                             yield ProducerEvent::Progress(delta_event("\n\n"));
@@ -1047,7 +1047,7 @@ pub async fn chat(
                         turn_holding = false;
                     }
                     let text = rig_model::tool_result_text(&tool_result.content);
-                    // 闸门工具不留轨迹：「你好」下面挂一条「声明不用查」是噪音
+                    // Gate tools leave no trace: an entry "claims no lookup needed" under "hello" is noise
                     let mut is_error = None;
                     let mut published_step = None;
                     if tool_result.name != agent::NO_EVIDENCE_TOOL {
@@ -1055,17 +1055,17 @@ pub async fn chat(
                             Some((step, failed)) => { is_error = Some(failed); step }
                             None => super::tools::Step::new("tool", tool_result.name.as_str(), "unknown").status("not_found").json(),
                         };
-                        // **这一步发生在正文的哪个位置。**
+                        // **Where in the body this step happened.**
                         //
-                        // 模型是边说边调的：说一句、查一下、再说一句。SSE 上 `delta` 与
-                        // `step` 本来就是交替发出去的，顺序不用额外记；而**历史回放没有
-                        // 那条时间线**——落库的只有拼好的整段正文和一个扁平的 steps 数组，
-                        // 于是重新打开一场对话，所有调用都堆在正文最前面，读起来像是
-                        // 先查了七次再一口气说完。记下偏移，回放才能把话再断开。
+                        // The model speaks and calls in turns: say a sentence, look something up, say another. On SSE, `delta` and
+                        // `step` are already sent alternately, so the order need not be recorded separately; but **history replay does not have
+                        // that timeline**: what is stored is only the assembled body as a whole and a flat steps array,
+                        // so reopening a conversation stacks all the calls at the very front of the body, reading as if
+                        // it had looked up seven things and then said everything at once. Recording the offsets lets replay break the text up again.
                         //
-                        // 单位是 **UTF-16 码元**，因为切分发生在浏览器里，而 JS 的
-                        // `String.prototype.length` 数的就是它。用字节数或 `chars()`
-                        // 在中文和 emoji 上都会切歪
+                        // The unit is **UTF-16 code units**, because the split happens in the browser, and JS's
+                        // `String.prototype.length` counts exactly those. Byte counts or `chars()`
+                        // would cut in the wrong place on Chinese text and emoji
                         if let Some(obj) = step.as_object_mut() {
                             obj.insert("at".into(), json!(answer_acc.encode_utf16().count()));
                         }
@@ -1088,8 +1088,8 @@ pub async fn chat(
                     let mut recorded = tool_result_message(tool_result.call.as_str(), &text);
                     if let Some(failed) = is_error { recorded["is_error"] = json!(failed); }
                     exchange_acc.push(recorded);
-                    // 先保留已完成工具的历史，再把步骤发给可能立即按 Stop 的客户端。
-                    // 保存停止的答案时，生成驱动会移除尚未完成的并行调用。
+                    // Keep the history of completed tools first, then send the steps to a client that may press Stop right away.
+                    // When saving a stopped answer, the generation driver removes parallel calls that have not finished.
                     let resolved = shared.sink.lock().await.resolved.clone();
                     yield ProducerEvent::Context {
                         resolved,
@@ -1103,8 +1103,8 @@ pub async fn chat(
                         yield ProducerEvent::Progress(Frame::new("sources", serde_json::to_string(&sources).unwrap_or_else(|_| "[]".into())));
                     }
                 }
-                // 钩子把这一回合退了回去。已经流给用户的话收不回来，接下来的正文
-                // 另起一段；还扣着的（写成正文的工具调用）随这一回合丢掉
+                // A hook pushed this turn back. Text already streamed to the user cannot be taken back, so the following body
+                // starts a new paragraph; anything still held back (tool calls written as body text) is dropped together with the turn
                 Ok(MultiTurnStreamItem::ModelTurnRetried { .. }) => {
                     if turn_published > 0 {
                         answer_acc.push_str("\n\n");
@@ -1125,9 +1125,9 @@ pub async fn chat(
                         answer_requested = true;
                         break;
                     }
-                    // **只有「端点拒绝了带工具的请求」才降级**为一次性 RAG。从前首轮
-                    // 的任何错误都走这条路：一次到 SiliconFlow 的网络抖动被记成
-                    // 「tool-calling 不可用」，然后 RAG 死在同一个抖动上
+                    // **Only "the endpoint rejected a request with tools" degrades** to one-shot RAG. Before, any error in the first
+                    // went down this path: a network blip to SiliconFlow was recorded as
+                    // "tool-calling unavailable", and then RAG died on the same blip
                     if rejected && answer_acc.is_empty() && steps_acc.is_empty() {
                         tracing::warn!(error = %failure.message, "端点拒绝工具调用，降级为一次性 RAG");
                         let mut legacy = std::pin::pin!(legacy_rag(
@@ -1191,8 +1191,8 @@ pub async fn chat(
             }
             answer_acc.push_str(&turn_text);
         } else {
-            // 纯文字的最后一回合还扣着东西。是写成正文的工具调用，钩子已经退回过
-            // 一次，这是第二次：报错，不存（#937）。不是（例如围栏里的示例），补发
+            // The final plain-text round still holds something back. It is a tool call written as body text, and a hook has already pushed back
+            // once; this is the second, so error out and do not store (#937). If not (e.g. an example inside a fence), send it
             if turn_published < turn_text.len() {
                 if agent::tool_call_text(&turn_text, &query) {
                     yield ProducerEvent::Outcome(Err(Failure::new("answer_tool_text", agent::CONTROL_TEXT)));
@@ -1211,8 +1211,8 @@ pub async fn chat(
             let sink = shared.sink.lock().await;
             (sink.sources.clone(), sink.resolved.clone())
         };
-        // 一个工具都没查的一轮（翻译、说短一点）照抄的是上一条回答的 [n]。沿用那些号
-        // 在上一条里的来源，角标才点得开（#943）；查过东西的一轮只认自己查到的
+        // A round with no lookups (translate, shorten it) copies the [n] of the previous answer. Keep those numbers
+        // with their sources from the previous answer, so the superscripts can be opened (#943); a round that looked things up accepts only what it found itself
         if !shared.finalizing() && steps_acc.is_empty() && sources.is_empty() {
             let previous = history
                 .turns
@@ -1237,8 +1237,8 @@ pub async fn chat(
         }));
     };
 
-    // 生成登记在案，然后**这条连接也只是去「接上」它**——与刷新之后
-    // 那条重连走的是同一段代码。两条路分开写的话，迟早只有一条是对的
+    // The generation is registered, then **this connection too only goes to "attach" to it** — the same code path as the reconnect after
+    // a refresh. If the two paths were written separately, sooner or later only one of them would be right
     handle.start().await;
     let attached = live.attach(conversation_id).await;
     tokio::spawn(generation::run(
@@ -1253,8 +1253,8 @@ pub async fn chat(
     Ok(sse_from(attached))
 }
 
-/// rig 的错误变成一次失败（code 与英文原句），外加「是不是端点拒绝了工具调用」。
-/// 我们自己的错误链（限流、欠费、被拒）从 `rig_model` 里取回来，文本与从前一样
+/// Turns an rig error into a failure (code and English sentence), plus "did the endpoint reject tool calls".
+/// Our own error chain (rate limits, billing, rejections) is recovered from `rig_model`; the text is the same as before
 fn describe(err: &StreamingError) -> (Failure, bool) {
     fn completion(ce: &CompletionError) -> (Failure, bool) {
         match rig_model::llm_failure(ce) {
@@ -1286,8 +1286,8 @@ fn terminal_reasoning(reasoning: Option<String>) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// 降级路径：端点不支持工具调用时的一次性 RAG 注入。
-/// 检索一次、把来源塞进系统提示、流式作答、落库
+/// Degraded path: one-shot RAG injection when the endpoint does not support tool calls.
+/// Retrieves once, puts the sources into the system prompt, answers with streaming, and stores
 fn legacy_rag(
     state: AppState,
     kb_id: Uuid,
@@ -1297,7 +1297,7 @@ fn legacy_rag(
     client: utopia_llm::LlmClient,
 ) -> impl Stream<Item = ProducerEvent> {
     async_stream::stream! {
-        // 兜底这一路一轮只走一次，问题自己嵌：它没有这一轮的 sink（#971 的缓存在那上面）
+        // This fallback path runs only once per round, and the question embeds itself: it has no sink for this round (the #971 cache lives on that)
         let chunks = match retrieval::hybrid(&state, kb_id, workspace_id, &query, 8, None, None).await {
             Ok(chunks) => chunks,
             Err(error) => {
@@ -1358,10 +1358,10 @@ fn legacy_rag(
     }
 }
 
-/// 把一次「接上」变成 SSE：先补一份快照，再照常收增量。
+/// Turns one "attach" into SSE: first sends a snapshot, then carries on with the increments as usual.
 ///
-/// `None` = 这个会话没有在跑的生成。回一条 `idle` 而不是 404——**客户端
-/// 每次打开会话都会问一次**，而「没有在跑」是最常见的答案，不是错误
+/// `None` = this conversation has no generation running. Replies with `idle` rather than 404: **a client
+/// asks every time it opens a conversation**, and "nothing running" is the most common answer, not an error
 fn sse_from(
     attached: Option<(
         crate::live::Snapshot,
@@ -1389,8 +1389,8 @@ fn sse_from(
                     yield to_event(&error_event("stream_ended", "Answer stream ended unexpectedly"));
                     return;
                 }
-                // 这个客户端读得太慢，被广播缓冲甩下了。**说出来**——
-                // 静默继续会让它少掉中间一段而毫不知情
+                // This client read too slowly and was dropped by the broadcast buffer. **Say so**:
+                // carrying on silently would leave it missing a middle stretch without knowing
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     yield to_event(&error_event(
                         "stream_lagged",
@@ -1408,14 +1408,14 @@ fn to_event(frame: &Frame) -> Result<Event, Infallible> {
     Ok(Event::default().event(frame.event).data(&frame.data))
 }
 
-/// 接上一次正在跑的生成（刷新页面之后走这里）。
+/// Reattach to a generation that is running (this path is used after a page refresh).
 pub async fn reattach(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     Path((kb_id, conversation_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     utopia_store::access::require_kb(&state.pool, &user, kb_id, Role::Viewer).await?;
-    // **归属要查。** 会话 id 是可以猜的，而这条流会把别人的回答一字不差地念出来
+    // **Ownership must be checked.** Conversation ids can be guessed, and this stream would read another person's answer back word for word
     utopia_store::conversations::require_owned(&state.pool, kb_id, user.id, conversation_id)
         .await?;
     Ok(sse_from(state.live.attach(conversation_id).await))
@@ -1426,7 +1426,7 @@ pub struct StopReq {
     pub generation_id: Uuid,
 }
 
-/// 只通知生成的持有者，由它保存部分答案并发送终态。
+/// Notifies only the generation's holder, which saves the partial answer and sends the terminal state.
 pub async fn stop(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -1440,8 +1440,8 @@ pub async fn stop(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 生成器产出的是 `Frame`，不是 `axum` 的 `Event`。
-/// **广播与快照都要读回事件的内容**，而 `Event` 读不回来（见 `live`）
+/// The generator yields `Frame`, not `axum`'s `Event`.
+/// **Both the broadcast and the snapshot must read the event's content back**, and `Event` cannot be read back (see `live`)
 fn delta_event(text: &str) -> Frame {
     Frame::new(
         "delta",
@@ -1449,7 +1449,7 @@ fn delta_event(text: &str) -> Frame {
     )
 }
 
-/// 与请求被拒同一个信封：`error` 是英文原句，`code` 给界面查措辞（0004）
+/// Same envelope as a rejected request: `error` is the English sentence, `code` lets the UI look up the wording (0004)
 fn error_event(code: &str, message: &str) -> Frame {
     Frame::new(
         "error",
@@ -1457,8 +1457,8 @@ fn error_event(code: &str, message: &str) -> Frame {
     )
 }
 
-/// 正文里的引用号，与界面画角标的 `citeRe` 同一个形状：`[1]`、`[1][2]`、`[1, 2]`、
-/// `[1，2]`——方括号里只有数字与分隔符，分隔符两边可以有空白，0 不是号
+/// Citation numbers in the body, in the same shape the UI's `citeRe` uses to draw superscripts: `[1]`, `[1][2]`, `[1, 2]`, and the same with a full-width comma
+/// inside the brackets only digits and separators appear, whitespace is allowed on either side of a separator, and 0 is not a number
 fn cited_numbers(text: &str) -> BTreeSet<u64> {
     let mut out = BTreeSet::new();
     for (at, _) in text.match_indices('[') {
@@ -1493,9 +1493,9 @@ fn cited_numbers(text: &str) -> BTreeSet<u64> {
     out
 }
 
-/// 不查东西的一轮沿用上一条回答的来源（#943）。只在这一轮引用的号**全都**在上一条
-/// 回答里引用过时才给，取上一条存下的来源里被引用到的那几条，号不变；否则一条不给——
-/// 不去猜这些号原本属于哪一轮
+/// A round with no lookups carries over the sources of the previous answer (#943). Only given when **every** number cited in this round
+/// was cited in the previous answer: then it takes the cited ones from the sources stored with the previous answer, numbers unchanged; otherwise none are given,
+/// and it does not guess which round those numbers originally belonged to
 fn carried_sources(
     answer: &str,
     previous_answer: &str,
@@ -1522,7 +1522,7 @@ fn source_json(n: usize, c: &ChunkView) -> serde_json::Value {
     })
 }
 
-/// 降级路径的系统提示（tool-calling 不可用时的一次性注入）。
+/// System prompt for the degraded path (one-shot injection when tool calling is unavailable).
 fn legacy_system_prompt(chunks: &[ChunkView]) -> String {
     if chunks.is_empty() {
         return "You are an enterprise knowledge base assistant. No relevant sources were \
@@ -1562,12 +1562,12 @@ fn truncate(text: &str, max_chars: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 会话管理（列表 / 回放 / 删除）
+// Conversation management (list / replay / delete)
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize)]
 pub struct ConversationsQuery {
-    /// 搜标题与消息正文两处：人记得住的往往是问过的那句话，不是标题
+    /// Searches two places, the title and the message body: people tend to remember the sentence they asked, not the title
     #[serde(default)]
     pub q: Option<String>,
     #[serde(default)]
@@ -1602,10 +1602,10 @@ pub struct RenameConversationReq {
     pub title: String,
 }
 
-/// 改会话标题。
+/// Rename a conversation.
 ///
-/// **标题本来是从第一句话自动取的**，而一段对话跑偏是常态——改名让人能按
-/// 自己记得的方式找回它。
+/// **Titles are automatically taken from the first sentence**, and a conversation drifting off course is normal; renaming lets people
+/// find it again in the way they remember it.
 pub async fn rename_conversation(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -1618,7 +1618,7 @@ pub async fn rename_conversation(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 历史回放：消息含落库的行动轨迹（steps）与引用（sources）。
+/// History replay: messages include the stored action trace (steps) and citations (sources).
 pub async fn conversation_detail(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -1696,11 +1696,11 @@ mod tests {
         );
     }
 
-    /// 参数在半路断掉——模型撞上 token 上限时就长这样。
+    /// Arguments cut off midway: this is what it looks like when the model hits its token limit.
     ///
-    /// **从前这里回落成空对象，然后 `search_chunks` 拿用户那句原话去检索。**
-    /// 得到的是一条看起来完全正常的 `search · 6 sources`，和一个基于错误输入
-    /// 的答案。没人会去核一个看起来正常的答案，所以这一条必须是拒绝
+    /// **Before, this fell back to an empty object, and then `search_chunks` searched with the user's sentence.**
+    /// The result was a `search · 6 sources` that looked entirely normal, and an answer based on the wrong input.
+    /// No one checks an answer that looks normal, so this case must be a refusal
     #[test]
     fn arguments_cut_off_mid_json_do_not_become_a_search() {
         let tools = tools_schema(false, &[]);
@@ -1715,8 +1715,8 @@ mod tests {
         );
     }
 
-    /// 空串与缺字段是同一件事：`{"query": ""}` 检索回来的东西与问题无关，
-    /// 而它同样会显示成一条正常轨迹
+    /// An empty string and a missing field are the same thing: `{"query": ""}` retrieves things unrelated to the question,
+    /// and it too would show as a normal trace
     #[test]
     fn an_empty_required_argument_counts_as_missing() {
         let tools = tools_schema(false, &[]);
@@ -1733,8 +1733,8 @@ mod tests {
         }
     }
 
-    /// 拒绝的那一步也按字段说（#942）：哪个参数、没给还是给错了。参数名是数据，
-    /// 界面照写；整个解析不出来的没有 `param`。存下的英文 detail 一个字不改
+    /// The refused step is also reported by field (#942): which parameter, and whether it was missing or malformed. The parameter name is data,
+    /// and the UI writes it as-is; a body that does not parse at all has no `param`. The stored English detail is not changed by a single character
     #[test]
     fn a_refused_call_names_its_parameter_for_the_interface() {
         let tools = tools_schema(false, &[]);
@@ -1757,9 +1757,9 @@ mod tests {
         assert_eq!(cut["detail"], "bad arguments");
     }
 
-    /// **判据取自工具表本身。** 这条守的是「加了必填参数却忘了改校验」——
-    /// query_data 只在挂了数据源时才出现在表里，它的两个必填参数
-    /// 从没在别处被单独写过一遍
+    /// **The criterion is taken from the tool table itself.** This guards against "a required parameter was added but the validation was forgotten" —
+    /// query_data appears in the table only when a data source is mounted, and its two required parameters
+    /// have never been written out separately anywhere else
     #[test]
     fn the_schema_is_the_only_place_required_is_written_down() {
         let tools = tools_schema(false, &["warehouse".into()]);
@@ -1774,10 +1774,10 @@ mod tests {
         .expect("两个都给了就该放行");
     }
 
-    /// 合规的调用原样通过，**可选参数一个不少**。
+    /// A compliant call passes through unchanged, **with not one optional parameter dropped**.
     ///
-    /// 这一关只判「说清了没有」，不做过滤——把 args 重新组装一遍的话，
-    /// 加一个可选参数就得记得来这里加一次，而忘记的后果是它安静地失效
+    /// This gate only judges whether the call "stated itself clearly", and does no filtering: if the args were reassembled,
+    /// adding an optional parameter would mean remembering to add it here as well, and forgetting it would silently disable it
     #[test]
     fn a_well_formed_call_passes_through_untouched() {
         let tools = tools_schema(false, &[]);
@@ -1790,8 +1790,8 @@ mod tests {
         assert_eq!(args["at"], "2026-03-15", "可选参数不能在这一关被吃掉");
     }
 
-    /// 全文只能按 id 读，而 id 是模型从检索结果里抄来的——抄错、抄漏
-    /// 都得在这里停住
+    /// Full text can only be read by id, and the id is something the model copied from the retrieval results: a wrong copy or a missed one
+    /// must be stopped here
     #[test]
     fn get_document_without_an_id_does_not_run() {
         let tools = tools_schema(false, &[]);
@@ -1799,8 +1799,8 @@ mod tests {
         assert_eq!(err.1["detail"], "missing document_id");
     }
 
-    /// 不是 uuid 的 id 到了工具里只能回「本库没有这篇文档」——模型会把它读成
-    /// 「库里真的没有」而收手，于是一次抄错的 id 变成一个否定的答案
+    /// A non-uuid id reaching the tool can only answer "no such document in this KB" — the model would read that as
+    /// "really absent from the KB" and stop, so a mistyped id becomes a negative answer
     #[test]
     fn a_document_id_that_is_not_a_uuid_does_not_run() {
         let tools = tools_schema(false, &[]);
@@ -1821,9 +1821,9 @@ mod tests {
         .expect("真的 uuid 就该放行");
     }
 
-    /// `changes` 早就在自己那一支里拒绝缺失的 `since`——**它是唯一做对的一个**。
-    /// 这条钉住两件事：新的统一关卡与它一致，而它自己那道对日期格式的检查
-    /// （`2026-13-45` 这种）仍然要留着，因为 check_call 只看有没有、不看对不对
+    /// `changes` already refused a missing `since` in its own branch — **it is the only one that got it right**.
+    /// This pins two things: the new unified gate agrees with it, and its own check on the date format
+    /// (such as `2026-13-45`) must still stay, because check_call only checks presence, not correctness
     #[test]
     fn the_one_tool_that_already_refused_still_refuses() {
         let tools = tools_schema(false, &[]);
@@ -1832,10 +1832,10 @@ mod tests {
             .expect("格式错的日期不归这一关管，交给 changes_window");
     }
 
-    /// 描述是写给模型读的，每一轮都在请求里，MCP 客户端的工具列表也照样印：
-    /// 不许有连着的空格。从前 `list_rules`、`rule_matches`、`changes` 的描述在
-    /// 折行处各夹着二十几个空格——`\` 折行被合成了一行，下一行的缩进留在了字符串里。
-    /// 查的是对话与 MCP 看到的全部：带上 `remember` 与 `query_data`
+    /// Descriptions are written for the model to read; they are sent with every round, and MCP clients print the tool list too:
+    /// there must be no trailing spaces. Before, the descriptions of `list_rules`, `rule_matches` and `changes` each had
+    /// twenty-odd spaces at the line-wrap points: the `\` wrap was joined into one line, and the next line's indentation stayed in the string.
+    /// This covers everything the conversation and MCP see: including `remember` and `query_data`
     #[test]
     fn every_tool_description_is_written_with_single_spaces() {
         fn spaced(v: &serde_json::Value, at: &str, found: &mut Vec<String>) {

@@ -1,9 +1,9 @@
-//! Charter 语料：与前端 Docs 页同一批 markdown（单一事实来源，随二进制升级）。
-//! 新增文章 = 前端 Docs.tsx 清单加一行 + 这里 ARTICLES 加一行。
+//! Charter corpus: the same batch of markdown as the frontend Docs page (single source of truth, upgraded with the binary).
+//! Adding an article = one line in the frontend Docs.tsx list + one line in ARTICLES here.
 
 use utopia_search::{DocsIndex, DocsSection};
 
-/// (slug, 标题, 正文)。slug 必须与前端 DOCS 清单一致（引用链接 /docs/{slug} 才对得上）。
+/// (slug, title, body). The slug must match the frontend DOCS list (so that reference links /docs/{slug} line up).
 const ARTICLES: &[(&str, &str, &str)] = &[
     (
         "ingest",
@@ -17,13 +17,13 @@ const ARTICLES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// 启动时建索引；语料是编译期常量，失败即程序错误，响亮地死。
+/// The index is built at startup; the corpus is a compile-time constant, so a failure is a program error: die loudly.
 pub fn build_index() -> DocsIndex {
     DocsIndex::build(&sections()).expect("Charter 文档索引构建失败")
 }
 
-/// 按 h2 切节：一节一条索引记录，命中返回具体小节而不是整篇。
-/// h2 之前的引言归入"标题节"（anchor 为空，链接落到文章顶部）。
+/// Splits by h2 sections: one index record per section, and a hit returns the specific section rather than the whole article.
+/// Intro text before the first h2 goes into the "title section" (anchor is empty, so the link lands at the top of the article).
 fn sections() -> Vec<DocsSection> {
     let mut out = Vec::new();
     for (slug, title, body) in ARTICLES {
@@ -46,7 +46,7 @@ fn sections() -> Vec<DocsSection> {
         for line in body.lines() {
             if let Some(h) = line.strip_prefix("## ") {
                 flush(&heading, &anchor, &mut buf);
-                // 与前端 tocOf 同法清洗：去掉行内 code/强调符号
+                // Clean up the same way as the frontend tocOf: remove inline code and emphasis markers
                 heading = h.replace(['`', '*'], "").trim().to_string();
                 anchor = slugify(&heading);
             } else if !line.starts_with("# ") {
@@ -58,8 +58,8 @@ fn sections() -> Vec<DocsSection> {
     out
 }
 
-/// 与前端 Docs.tsx 的 slugify 逐字对齐（锚点跳转依赖两边一致）：
-/// 小写后，[a-z0-9一-龥] 之外的连续串折成单个 '-'，再去掉首尾 '-'。
+/// Matches the frontend Docs.tsx slugify character for character (anchor jumps depend on both sides agreeing):
+/// lowercase, then runs of characters outside [a-z0-9一-龥] fold into a single '-', and leading and trailing '-' are removed.
 fn slugify(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut dash = false;
@@ -102,18 +102,18 @@ mod tests {
         let secs = sections();
         assert!(secs.len() >= 4, "ingest.md 应切出引言 + 3 个以上小节");
         assert!(secs.iter().any(|s| s.anchor == "shared-semantics"));
-        // 引言节：anchor 空，heading 用文章标题
+        // Intro section: empty anchor, heading uses the article title
         assert!(secs
             .iter()
             .any(|s| s.anchor.is_empty() && s.heading == "Ingest interfaces"));
     }
 
-    /// 每一份语料文件都得进 `ARTICLES`，否则 chat 的 search_docs 工具找不到它——
-    /// 这一行是把 `web/src/docs/*.md` 当事实来源核对一遍，防「前端能看、chat 搜不到」
-    /// 的漂移（之前 `mcp.md` 就落过这一摔）。
+    /// Every corpus file must be in `ARTICLES`, or chat's search_docs tool cannot find it.
+    /// This line checks `web/src/docs/*.md` against the source of truth, to prevent drift where "the frontend shows it but chat cannot find it"
+    /// (`mcp.md` already fell into this once).
     ///
-    /// **不要**写「ARTICLES 里有几个就检查几个」：那样加文件时反而不报错；这里的
-    /// 不变式是「文件 → 索引」单向覆盖，文件多出来就算 bug。
+    /// **Do not** write "check as many as there are in ARTICLES": that would make adding files stop raising errors. The
+    /// invariant here is a one-way "file → index" cover, and a file that is extra is a bug.
     #[test]
     fn every_corpus_md_file_is_indexed() {
         let docs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/src/docs");
@@ -135,7 +135,7 @@ mod tests {
             .iter()
             .map(|(slug, _, _)| format!("{slug}.md"))
             .collect();
-        // indexed 也得排序好让两条 assert 一对一
+        // indexed must also be sorted so the two asserts pair up one to one
         let mut indexed_sorted = indexed.clone();
         indexed_sorted.sort();
 

@@ -1,15 +1,15 @@
-//! 读字的服务（0040）：扫描件和图片交给版面识别服务 MinerU（`mineru-api`），录音交给会标
-//! 说话人的转写模型。
+//! Reading service (0040): scanned documents and images go to the layout-recognition service MinerU (`mineru-api`); recordings go to a
+//! transcription model that labels speakers.
 //!
-//! 识别一份几百页的扫描件要几分钟到几十分钟。处理任务不在这里干等：第一次来交文件、把
-//! 远端任务号记在文档上（`documents.reader_task`），挂 `Deferred` 回队列；之后每次来问
-//! 一声，没好再挂回去，好了取回版面交给分块。`Deferred` 不烧重试预算，进程重启也从记下
-//! 的任务号接着问，不重交。
+//! Recognizing a scanned document of several hundred pages takes minutes to tens of minutes. The processing task does not wait here: the first time, the file is submitted, and
+//! the remote task id is recorded on the document (`documents.reader_task`), and the task is parked as `Deferred` back on the queue. Each later visit
+//! asks once; if not ready it is parked again, and when ready the layout is fetched and handed to chunking. `Deferred` does not burn the retry budget, and after a process restart it resumes asking
+//! with the recorded task id instead of resubmitting.
 //!
-//! 接口：`POST /tasks`（multipart，`files` + 选项）交任务，`GET /tasks/{id}` 问状态
-//! （pending / processing / completed / failed），`GET /tasks/{id}/result` 取结果——
-//! `results` 按文件名去掉扩展名为键，`content_list` 是一段 JSON **字符串**。`mineru-api`
-//! 本身不认证；部署在它前面挂了反向代理的，密钥按 Bearer 带上。
+//! Interface: `POST /tasks` (multipart, `files` + options) submits a task, `GET /tasks/{id}` asks for status
+//! (pending / processing / completed / failed), `GET /tasks/{id}/result` fetches the result:
+//! `results` is keyed by file name with the extension stripped, and `content_list` is a JSON **string**. `mineru-api`
+//! does not authenticate itself; where a reverse proxy sits in front of it, the key is sent as a Bearer token.
 
 use std::time::Duration;
 
@@ -23,18 +23,18 @@ use crate::state::AppState;
 
 pub mod ark_ocr;
 
-/// 多久问一次。一页扫描件在 GPU 上一两秒，十秒问一次，几十页的文件问几次就好
+/// How often to ask. One page of a scan takes a second or two on a GPU; asking every ten seconds is enough, and a file of tens of pages needs only a few asks
 const POLL: Duration = Duration::from_secs(10);
 
-/// 交上去的任务最多等多久。服务把任务吞了、却一直报 processing 的时候，文档不能永远停在
-/// parsing：六小时够一份上千页的扫描件在 CPU 上读完
+/// How long a submitted task may wait at most. When the service swallows a task yet keeps reporting processing, the document must not stay in
+/// parsing forever: six hours is enough for a thousand-page scan to finish on a CPU
 const PATIENCE_HOURS: i64 = 6;
 
-/// 传文件、取结果的超时。共用客户端的 20 秒是给探针和小请求的，一份几十兆的扫描件传不完
+/// Timeout for uploading files and fetching results. The shared client's 20 seconds is for probes and small requests; a scan of several tens of MB cannot finish uploading in that time
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// 工作区配的读字服务：MinerU（下面这一整套交任务再问的流程），或方舟的视觉模型
-/// （`ark_ocr`，一次读完，0065）。两条路出来的是同一个 `Reading`
+/// The reading service configured for the workspace: MinerU (the whole submit-then-ask flow below), or Ark's vision model
+/// (`ark_ocr`, reads in one go, 0065). Both paths produce the same `Reading`
 pub struct Ocr<'a> {
     base: &'a str,
     key: Option<&'a str>,
@@ -53,7 +53,7 @@ impl<'a> Ocr<'a> {
             base,
             key,
             backend: s.ocr_backend.as_deref().filter(|b| !b.is_empty()),
-            // ocr_ready 已经保证方舟这一路有模型和密钥
+            // ocr_ready has already guaranteed that the Ark path has a model and a key
             ark: (s.ocr_provider == "ark").then(|| {
                 ark_ocr::ArkOcr::new(
                     base,
@@ -77,7 +77,7 @@ impl<'a> Ocr<'a> {
         }
     }
 
-    /// 连通性测试：服务活着就回它报的版本
+    /// Connectivity test: if the service is alive, return the version it reports
     pub async fn health(&self) -> anyhow::Result<Value> {
         if let Some(ark) = &self.ark {
             return ark.health().await;
@@ -96,7 +96,7 @@ impl<'a> Ocr<'a> {
         Ok(json!({ "version": format!("MinerU {}", jstr(&v["version"])).trim().to_string() }))
     }
 
-    /// 读这份文件。没读完返回挂着 `Deferred` 的错误，调用方原样往上抛
+    /// Reads this file. If reading does not finish, return the error carrying `Deferred`, and the caller propagates it up unchanged
     pub async fn read(
         &self,
         state: &AppState,
@@ -112,7 +112,7 @@ impl<'a> Ocr<'a> {
             t["reader"] == "ocr" && t["sha256"] == doc.sha256.as_str() && t["service"] == self.base
         });
         let Some(task) = current else {
-            // 没交过；或者交的是旧版本的文件、交给的是换掉之前的服务——作废重交
+            // Never submitted; or the file was submitted in an older version, or to the service before it was replaced: void it and resubmit
             if stored.is_some() {
                 utopia_store::documents::clear_reader_task(pool, doc.id).await?;
             }
@@ -138,7 +138,7 @@ impl<'a> Ocr<'a> {
             .await
             .context("the OCR service is unreachable")?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            // 服务重启过、或者结果过了保留期：任务没了，下一轮重交
+            // The service restarted, or the result passed its retention period: the task is gone, so resubmit on the next round
             utopia_store::documents::clear_reader_task(pool, doc.id).await?;
             return Err(anyhow!("the OCR service no longer knows the task")
                 .context(Deferred::new(Duration::from_secs(1))));
@@ -151,7 +151,7 @@ impl<'a> Ocr<'a> {
         match status["status"].as_str() {
             Some("completed") => {}
             Some("failed") => {
-                // 清掉任务号，普通重试会重交一次：显存不够、服务过载这类失败，下一次未必还失败
+                // Clear the task id, so an ordinary retry resubmits once: failures like insufficient GPU memory or an overloaded service may not fail again next time
                 utopia_store::documents::clear_reader_task(pool, doc.id).await?;
                 return Err(anyhow!(
                     "The OCR service could not read this file: {}",
@@ -190,7 +190,7 @@ impl<'a> Ocr<'a> {
             .context("the OCR service could not return the result")?
             .json()
             .await?;
-        // 一次只交一份文件，结果里就一项；键是服务规整过的文件名，不去猜它的规则
+        // Only one file is submitted at a time, so the result has one item; the key is the file name as the service normalized it, and its rules are not guessed
         let entry = result["results"]
             .as_object()
             .and_then(|m| m.values().next())
@@ -243,11 +243,11 @@ impl<'a> Ocr<'a> {
     }
 }
 
-/// 转写一段录音最多等多久。OpenAI 一次收 25MB，大约是一小时的压缩音频；本地服务读一小时
-/// 录音在 CPU 上要十几分钟
+/// How long at most to wait to transcribe one recording. OpenAI takes 25MB at once, roughly an hour of compressed audio; a local service reading one hour
+/// of recording takes tens of minutes on a CPU
 const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(1800);
 
-/// 工作区配的转写模型：OpenAI 的 `/audio/transcriptions`，要 `diarized_json`
+/// The transcription model configured for the workspace: OpenAI's `/audio/transcriptions`, which needs `diarized_json`
 pub struct Transcriber<'a> {
     base: &'a str,
     key: Option<&'a str>,
@@ -277,7 +277,7 @@ impl<'a> Transcriber<'a> {
             .part("file", part)
             .text("model", self.model.to_string())
             .text("response_format", "diarized_json")
-            // 超过 30 秒的录音，diarize 模型要求给切分策略
+            // For recordings over 30 seconds, the diarize model requires a chunking strategy
             .text("chunking_strategy", "auto");
         let mut req = client
             .post(format!("{}/audio/transcriptions", self.base))
@@ -303,8 +303,8 @@ impl<'a> Transcriber<'a> {
             .context("The transcription model returned something that is not JSON")
     }
 
-    /// 读这段录音。一次请求读完——没有可以接着问的远端任务；分不出说话人的结果在
-    /// `transcript::reading` 里拒收（`NoSpeakers`）
+    /// Reads this recording. One request reads it all: there is no remote task to ask again; results that cannot tell speakers apart
+    /// are rejected in `transcript::reading` (`NoSpeakers`)
     pub async fn read(&self, doc: &Document, bytes: Vec<u8>) -> anyhow::Result<Reading> {
         let response = self
             .transcribe(&doc.filename, bytes, TRANSCRIBE_TIMEOUT)
@@ -312,8 +312,8 @@ impl<'a> Transcriber<'a> {
         utopia_ingest::transcript::reading(&response, self.model)
     }
 
-    /// 连通性测试：送一秒静音。端点和模型认这个请求就算通——静音里没有说话人可标，
-    /// 标不标得出要等第一段真录音
+    /// Connectivity test: sends one second of silence. The endpoint and model accept it as ok; silence has no speakers to label,
+    /// so whether labeling works can only be known once a first real recording arrives
     pub async fn check(&self) -> anyhow::Result<()> {
         self.transcribe("silence.wav", silent_wav(), Duration::from_secs(60))
             .await
@@ -321,7 +321,7 @@ impl<'a> Transcriber<'a> {
     }
 }
 
-/// 一秒 16kHz 单声道静音的 WAV
+/// A WAV of one second of 16kHz mono silence
 fn silent_wav() -> Vec<u8> {
     let (rate, samples): (u32, u32) = (16_000, 16_000);
     let data_len = samples * 2;

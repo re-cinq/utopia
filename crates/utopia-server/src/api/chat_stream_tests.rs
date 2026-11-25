@@ -49,8 +49,8 @@ async fn reattachment_preserves_terminal_frames_on_both_sides_of_emit() {
         handle.emit(delta_event("partial")).await;
         let before = sse_from(registry.attach(id).await);
         handle.emit(Frame::new(event, data.into())).await;
-        // 释放把手会关闭旧实现中的迟到接收端，
-        // 即使丢失终态，这个反例也能结束而不必等超时。
+        // Releasing the handle closes the late receiver of the old implementation,
+        // so even if the terminal state is lost, this counterexample ends without waiting for a timeout.
         let after = sse_from(registry.attach(id).await);
         drop(handle);
         for response in [before, after] {

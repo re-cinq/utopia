@@ -1,28 +1,28 @@
-//! GitLab 工单来源（gitlab.com，#1327）：一张工单或一个合并请求 = 一篇文档，正文里带它的
-//! 状态变更史。排版是三个工单来源共用的 [`crate::ticket`]（0013 决定 7），这里只管把 GitLab
-//! 的数据装进去、以及怎么取。同步在 `ingest_sources`。
+//! GitLab issue source (gitlab.com, #1327): one issue or one merge request = one document, with its
+//! status-change history in the body. The layout is [`crate::ticket`], shared by all three ticket sources (0013 decision 7); this file only covers putting GitLab's
+//! data in and how to fetch it. Sync runs in `ingest_sources`.
 //!
-//! 取法落在 GitHub 那个形状里：列表按更新时刻增量筛选，评论与事件逐工单读到末页。
+//! Fetching follows the GitHub shape: the list is filtered incrementally by update time, and comments and events are read to the last page per issue.
 //!
 //! - `GET /projects/:id/issues?state=all&order_by=updated_at&sort=asc&updated_after=`
-//! - `GET /projects/:id/merge_requests?…`（同样的参数，`include_merge_requests` 打开才读）
-//! - 每张工单：`notes`、`resource_state_events`、`resource_label_events`、
+//! - `GET /projects/:id/merge_requests?…` (same parameters; read only when `include_merge_requests` is on)
+//! - for each issue: `notes`, `resource_state_events`, `resource_label_events`,
 //!   `resource_milestone_events`
 //!
-//! 与 GitHub 不同的三处：
+//! Three differences from GitHub:
 //!
-//! - **工单与合并请求是两张列表，却只有一个 checkpoint。** 所以 checkpoint 只能走到两张
-//!   列表都读完的那个时刻，见 [`fetch_window`]。
-//! - **变更史取 resource events，不取系统备注。** GitLab 把状态、标签、里程碑的变化记成
-//!   结构化事件，同时又写一条给人看的系统备注；两样都读，每次变化就在历史里出现两遍。
-//! - **备注与事件没有令牌就是 401**，公开项目也一样（2026-10-22 与 2026-11-14 在
-//!   gitlab.com 上核对过）。所以这个来源要令牌，没有就直说，不去发那个注定失败的请求。
+//! - **Issues and merge requests are two lists, but there is only one checkpoint.** So the checkpoint can only advance to the moment
+//!   both lists have been read through; see [`fetch_window`].
+//! - **History comes from resource events, not system notes.** GitLab records changes to state, labels and milestones as
+//!   structured events, and also writes a system note for people to read; reading both would show every change twice in the history.
+//! - **Notes and events without a token return 401**, even for public projects (checked on gitlab.com on 2026-10-22 and 2026-11-14).
+//!   So this source requires a token; without one it says so, rather than sending requests that are bound to fail.
 //!
-//! - **机密工单不收。** 令牌够权限时，列表也会给出 `confidential` 的工单，公开项目里也有；
-//!   收进来就成了库里每个读者都能看的文档。所以列表照读（checkpoint 与复读核对不变），
-//!   机密的那几张不写、也不去读它的评论与事件。
+//! - **Confidential issues are not collected.** With a token of enough permission, the list also returns `confidential` issues, including in public projects;
+//!   collecting them would make a document every reader in the library can see. So the list is still read (checkpoint and re-read checks unchanged),
+//!   but those few are not written, and their notes and events are not read either.
 //!
-//! 自建 GitLab 没有验证过。
+//! Self-hosted GitLab has not been verified.
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -30,9 +30,9 @@ use std::collections::BTreeMap;
 
 use crate::ticket::stamp;
 
-/// 列表预算可在完整时间组边界延长；单张工单的详情不受此预算限制。与 GitHub 同一口径（0072）
+/// The list budget may be extended at a complete time-group boundary; a single issue's details are not limited by this budget. Same basis as GitHub (0072)
 const MAX_LISTING_PAGES: u32 = 10;
-/// GitLab 每页至多 100 条
+/// GitLab returns at most 100 entries per page
 const PER_PAGE: u32 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +42,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// API 路径里的那一段
+    /// The segment in the API path
     pub fn path(self) -> &'static str {
         match self {
             Self::Issue => "issues",
@@ -50,8 +50,8 @@ impl Kind {
         }
     }
 
-    /// GitLab 自己的写法：`#12` 是工单，`!7` 是合并请求。两者的 iid 各自从 1 数起，
-    /// 所以抬头和逻辑身份都得带上它
+    /// GitLab's own notation: `#12` is an issue, `!7` is a merge request. Each one's iid counts from 1 separately,
+    /// so the header and the logical identity both must carry the prefix
     pub fn sigil(self) -> char {
         match self {
             Self::Issue => '#',
@@ -60,7 +60,7 @@ impl Kind {
     }
 }
 
-/// 列表里的一行。工单与合并请求读的是同一组字段，合并请求多一个 `merged_at`
+/// A row in the list. Issues and merge requests read the same set of fields; a merge request adds one `merged_at`
 #[derive(Debug, Deserialize)]
 pub struct Item {
     pub iid: i64,
@@ -77,7 +77,7 @@ pub struct Item {
     #[serde(default)]
     pub assignees: Vec<User>,
     pub author: Option<User>,
-    /// 只有工单有；合并请求没有这个字段，读作 false
+    /// Only issues have this; merge requests do not have this field, and it is read as false
     #[serde(default)]
     pub confidential: bool,
 }
@@ -89,7 +89,7 @@ pub struct User {
 
 #[derive(Debug, Deserialize)]
 pub struct Note {
-    /// GitLab 自己写的那种（「closed」「added ~bug label」）；它们说的事 resource events 已经说了
+    /// Of the kind GitLab writes itself ("closed", "added ~bug label"); what they say is already said by the resource events
     #[serde(default)]
     pub system: bool,
     pub author: Option<User>,
@@ -111,8 +111,8 @@ pub struct Named {
     pub name: String,
 }
 
-/// 标签事件与里程碑事件同一个形状：谁、何时、`add` 还是 `remove`、哪一个。
-/// 标签或里程碑事后被删掉时那一项是 null
+/// Label and milestone events share one shape: who, when, `add` or `remove`, and which one.
+/// When a label or milestone is deleted later, that item is null
 #[derive(Debug, Deserialize)]
 pub struct ChangeEvent {
     pub user: Option<User>,
@@ -122,7 +122,7 @@ pub struct ChangeEvent {
     pub what: Option<Named>,
 }
 
-/// 一张工单的四样详情，字段名就是端点名
+/// The four detail pieces of one issue; the field names are the endpoint names
 #[derive(Debug, Default, Deserialize)]
 pub struct Details {
     pub notes: Vec<Note>,
@@ -131,11 +131,11 @@ pub struct Details {
     pub resource_milestone_events: Vec<ChangeEvent>,
 }
 
-/// 把一张工单连同它的详情排成一篇文档。纯函数，不联网。
+/// Lays out one issue and its details as a document. A pure function; no network calls.
 ///
-/// 句子的顺序跟 GitHub 一样（开出、状态、关闭、标签、指派），合并请求在「Closed on」旁边
-/// 多一句「Merged on」。事件的说法也用 GitHub 的那几个词（labeled / unlabeled /
-/// milestoned / demilestoned），同一件事在两个来源里读起来是同一句话
+/// The sentence order is the same as GitHub's (opened, status, closed, labels, assignees); merge requests add a "Merged on" sentence next to "Closed on".
+/// Events use the same words as GitHub's (labeled / unlabeled /
+/// milestoned / demilestoned), so the same thing reads as the same sentence in both sources
 pub fn render(kind: Kind, item: &Item, details: &Details) -> String {
     fn who(u: &Option<User>) -> &str {
         u.as_ref().map(|u| u.username.as_str()).unwrap_or("?")
@@ -194,7 +194,7 @@ pub fn render(kind: Kind, item: &Item, details: &Details) -> String {
         )
         .collect();
 
-    // 端点给的顺序不是契约，自己排
+    // The endpoint's order is not a contract, so sort it ourselves
     let mut notes: Vec<&Note> = details.notes.iter().filter(|n| !n.system).collect();
     notes.sort_by_key(|n| n.created_at);
     let comments = notes
@@ -215,7 +215,7 @@ pub fn render(kind: Kind, item: &Item, details: &Details) -> String {
     })
 }
 
-/// `…/projects/:id` 后面接上几段。项目路径里的 `/` 已经在 `project` 那一段里编成 `%2F`
+/// Appends a few segments after `…/projects/:id`. The `/` in the project path is already encoded as `%2F` in the `project` segment
 fn at(project: &reqwest::Url, segments: &[&str]) -> anyhow::Result<reqwest::Url> {
     let mut url = project.clone();
     url.path_segments_mut()
@@ -224,7 +224,7 @@ fn at(project: &reqwest::Url, segments: &[&str]) -> anyhow::Result<reqwest::Url>
     Ok(url)
 }
 
-/// 读到末页。详情不能用截断的备注或事件覆盖已有的完整正文（0072）
+/// Read to the last page. Details must not overwrite a complete body that already exists with truncated notes or events (0072)
 async fn fetch_all<T: for<'de> Deserialize<'de>>(
     http: &reqwest::Client,
     base: &reqwest::Url,
@@ -275,22 +275,22 @@ pub struct Window {
 
 struct Pass {
     items: Vec<Item>,
-    /// 这一遍列到的每一行（含跳过的旧行），复读时拿来核对有没有挪动
+    /// Every row this pass lists (including skipped old rows); re-reading uses them to check whether anything moved
     positions: BTreeMap<i64, DateTime<Utc>>,
     checkpoint: Option<DateTime<Utc>>,
-    /// 停在预算上，后面还有没读的时间组
+    /// Stopped at the budget, with time groups still unread after it
     more: bool,
 }
 
-/// 选出本轮要写的工单，以及读完之后 checkpoint 该落在哪。
+/// Chooses the issues to write this round, and where the checkpoint should land after reading.
 ///
-/// 每张列表各自按 0072 读：升序、跳过 checkpoint 及之前的、预算用完也把当前时间组读完。
-/// **两张列表共用一个 checkpoint**，所以它只能落在两张都读完的时刻：有列表停在预算上，
-/// 就取其中最早的那个停点，另一张列表里更晚的工单本轮不写，留给下一轮；都读到了头，
-/// 才取最晚的那一个。不这样，停在预算上的那张列表里没读到的工单会被另一张的时刻越过去，
-/// 之后的增量再也读不到它。
+/// Each list is read per 0072: ascending, skipping those at or before the checkpoint, and reading the current time group to its end even when the budget runs out.
+/// **The two lists share one checkpoint**, so it can only land at a moment both have been read through: if a list stopped at the budget,
+/// take the earliest such stop point; issues later in the other list are not written this round and are left for the next round. Only when both are read to the end
+/// is the latest one taken. Otherwise issues not read from the list that stopped at the budget would be jumped over by the other list's moment, and later
+/// incremental reads would never see them.
 ///
-/// 然后每张列表复读到这个边界，核对分页期间有没有工单挪了位置（0072 的 2026-10-23 修订）
+/// Then each list is re-read up to this boundary, to check whether any issue moved position during paging (the 2026-10-23 revision of 0072)
 pub async fn fetch_window(
     http: &reqwest::Client,
     project: &reqwest::Url,
@@ -299,7 +299,7 @@ pub async fn fetch_window(
     item_limit: usize,
     auth: Option<&str>,
 ) -> anyhow::Result<Window> {
-    // 预算是整轮的，两张列表各分一半；不分的话打开合并请求就是一轮读两倍的工单
+    // The budget is for the whole round, split in half between the two lists; without splitting, turning on merge requests would read twice as many issues per round
     let item_limit = item_limit.div_ceil(kinds.len().max(1));
     let mut passes = Vec::new();
     for kind in kinds {
@@ -341,7 +341,7 @@ pub async fn fetch_window(
     })
 }
 
-/// 一张列表读一遍。`through` 给了就是复读：不看预算，读到那个时刻为止
+/// Reads one list. If `through` is given, this is a re-read: the budget is ignored, and it reads up to that moment
 async fn fetch_pass(
     http: &reqwest::Client,
     list: &reqwest::Url,
@@ -395,7 +395,7 @@ async fn fetch_pass(
                 pass.positions.insert(item.iid, updated).is_none(),
                 "GitLab ticket repeated during pagination; retry the previous checkpoint"
             );
-            // `updated_after` 含边界（2026-11-14 在 gitlab.com 上核对过），读过的会再回来一次
+            // `updated_after` includes the boundary (checked on gitlab.com on 2026-11-14), so items already read come back once more
             if since.is_some_and(|checkpoint| updated <= checkpoint) {
                 continue;
             }
@@ -443,7 +443,7 @@ mod tests {
         assert!(text.starts_with(
             "# #1 A test\n\nOpened by quintinraptorbotes on 2026-10-22T13:50:23Z.\nCurrently opened.\nLabelled bug.\n"
         ));
-        // 毫秒截到秒，事件按时刻排，三种事件混在一条时间线上
+        // Milliseconds truncated to seconds; events sorted by moment, three kinds of event on one timeline
         let history: Vec<&str> = text
             .split("## History\n\n")
             .nth(1)
@@ -500,7 +500,7 @@ mod tests {
         })
     }
 
-    /// 两张列表各给一组行，按 `page` 切页
+    /// The two lists each give a set of rows, paged by `page`
     async fn server(issues: Vec<Value>, merge_requests: Vec<Value>) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -555,8 +555,8 @@ mod tests {
     #[tokio::test]
     async fn a_list_that_stops_at_its_budget_holds_the_checkpoint_back_for_both_lists(
     ) -> anyhow::Result<()> {
-        // 整轮预算四条，每张列表两条。工单在 01:00 那一组用完预算，02:00 的留给下一轮。
-        // 合并请求只有两条，读到了头，但 03:00 那条在工单的停点之后
+        // The round budget is four entries, two per list. Issues use up the budget in the 01:00 group, and the 02:00 ones are left for the next round.
+        // The merge requests have only two entries, read to the end, but the 03:00 entry is after the issue's stop point
         let server = server(
             vec![
                 row(1, "2026-01-02T01:00:00Z"),
@@ -576,7 +576,7 @@ mod tests {
             Some("2026-01-02T01:00:00Z".parse().unwrap())
         );
 
-        // 下一轮从那个停点起：读过的三条回来了也不再写，剩下的两条都读到，checkpoint 走到最晚的
+        // The next round starts from that stop point: the three already-read entries that come back are not written again, and both remaining entries are read; the checkpoint goes to the latest
         let second = window(&server, Some("2026-01-02T01:00:00Z"), 200).await?;
         assert_eq!(listed(&second), ["#3", "!2"]);
         assert_eq!(
@@ -584,7 +584,7 @@ mod tests {
             Some("2026-01-02T03:00:00Z".parse().unwrap())
         );
 
-        // 没有新东西：checkpoint 留在原地，不走到墙上的钟
+        // Nothing new: the checkpoint stays where it is, and does not advance to the wall clock
         let third = window(&server, Some("2026-01-02T03:00:00Z"), 200).await?;
         assert!(third.tickets.is_empty());
         assert_eq!(third.checkpoint, second.checkpoint);
@@ -609,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_ticket_that_moves_between_the_two_readings_fails_the_window() -> anyhow::Result<()> {
-        // 第一遍读到 #1 在 01:00；复读时它已经被改到 01:00 之后，边界以内少了一行
+        // The first pass read #1 at 01:00; on re-read it has already been changed to after 01:00, so one row inside the boundary is missing
         let server = MockServer::start().await;
         let calls = std::sync::atomic::AtomicUsize::new(0);
         Mock::given(method("GET"))

@@ -1,14 +1,14 @@
-//! 来源的增量游标在 API 里看得见（ADR 0072）。
+//! A source's incremental cursor is visible through the API (ADR 0072).
 //!
-//! **说的是「读到哪」，不是「这一轮什么时候跑」。** 一轮读不完是常事——同一个更新
-//! 时刻上可能挂着一千条工单——游标记的是「消费到了哪个更新时刻，且那一刻的整组都
-//! 读完了」。没有它，界面上只看得见「同步成功」，看不见这一轮停在了哪里；要排
-//! 「这一轮到底覆盖了多少」，只能去翻日志。
+//! **It says "how far has been read", not "when this round ran".** Not finishing a round is common: the same update
+//! instant may have a thousand tickets hanging on it; the cursor records "the update instant consumed up to, and the whole group at that instant
+//! has been read". Without it, the screen shows only "sync succeeded" and not where this round stopped; to work out
+//! "how much this round actually covered" you could only check the logs.
 //!
-//! 用不到的来源那一格是 NULL，而不是 0 也不是别的时刻：没有游标与「游标在零点」
-//! 是两回事，前者是「还没读到哪」，后者是「读到 1970 年」。
+//! For sources that do not use it, the cell is NULL, not 0 and not some other instant: having no cursor and "the cursor is at midnight"
+//! are different things: the former means "not read up to any point yet", the latter means "read up to 1970".
 //!
-//! 连库的测试，没有 `UTOPIA_DATABASE_URL` 就跳过（同 documents_routes_tests）。
+//! Tests that use the database are skipped when there is no `UTOPIA_DATABASE_URL` (same as documents_routes_tests).
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -17,10 +17,10 @@ use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-/// 游标落在这一刻：秒精度，正是工单更新时刻的粒度。
+/// The cursor sits at this moment: second precision, exactly the granularity of ticket update times.
 ///
-/// **响应里写的是 `Z` 结尾的那一种**（chrono 对 `DateTime<Utc>` 的写法），
-/// 不是 `+00:00`——断言照着实际发出去的形式写，变了就是变了。
+/// **The response writes the form that ends in `Z`** (how chrono writes `DateTime<Utc>`),
+/// not `+00:00`: the assertion is written in the form actually sent, so a change is a change.
 const CHECKPOINT: &str = "2026-01-02T00:00:00Z";
 
 fn checkpoint() -> chrono::DateTime<chrono::Utc> {
@@ -32,9 +32,9 @@ fn checkpoint() -> chrono::DateTime<chrono::Utc> {
 struct Fixture {
     app: axum::Router,
     kb: Uuid,
-    /// 工单来源：有游标
+    /// Ticket source: has a cursor
     ticket: Uuid,
-    /// 订阅来源：没有游标
+    /// Subscription source: no cursor
     feed: Uuid,
     token: String,
     _dir: tempfile::TempDir,
@@ -70,7 +70,7 @@ impl Fixture {
         ))
         .execute(&pool)
         .await?;
-        // 工单来源读到了那一刻；订阅来源不按时刻分组，没有这一格
+        // The ticket source has read up to that instant; the subscription source is not grouped by instant, so it has no such cell
         sqlx::query("UPDATE sources SET sync_checkpoint = $2 WHERE id = $1")
             .bind(ticket)
             .bind(checkpoint())
@@ -123,7 +123,7 @@ impl Fixture {
     }
 }
 
-/// **列表里有这一格。** 工单来源带着游标，用不到游标的来源是 NULL。
+/// **The list has this cell.** A ticket source carries the cursor; a source that does not use a cursor is NULL.
 #[tokio::test]
 async fn the_source_list_carries_the_checkpoint() -> anyhow::Result<()> {
     let Some(fx) = Fixture::new().await? else {
@@ -143,19 +143,19 @@ async fn the_source_list_carries_the_checkpoint() -> anyhow::Result<()> {
         .find(|s| s["id"] == fx.feed.to_string())
         .expect("订阅来源在列表里");
 
-    // **时刻本身要给出来**，不是"有几个"：那一格说的是读到哪
+    // **The instant itself must be given**, not a count: that cell says how far has been read
     assert_eq!(
         ticket["sync_checkpoint"],
         json!(CHECKPOINT),
         "工单来源的游标要原样给出"
     );
-    // 用不到的来源是 NULL——没有游标与"游标在零点"是两回事
+    // A source that does not use it is NULL: having no cursor and "the cursor at midnight" are two different things
     assert_eq!(
         feed["sync_checkpoint"],
         Value::Null,
         "用不到游标的来源不该编一个时刻出来"
     );
-    // 游标与"这一轮什么时候跑"是两件事，两个都在
+    // The cursor and "when this round ran" are two separate things, and both are present
     assert!(
         ticket["last_sync_at"].is_null(),
         "还没同步过就没有这一轮的时刻"
@@ -163,8 +163,8 @@ async fn the_source_list_carries_the_checkpoint() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// **改一个来源，回来的那一格也带着游标。** 列表与详情说的是同一件事，
-/// 不能一处有一处没有。
+/// **Change one source, and the cell that comes back also carries the cursor.** The list and the detail say the same thing,
+/// so one place cannot have it while another does not.
 #[tokio::test]
 async fn a_source_update_carries_the_checkpoint_too() -> anyhow::Result<()> {
     let Some(fx) = Fixture::new().await? else {

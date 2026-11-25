@@ -1,15 +1,15 @@
-//! 重答（#936）：没有回答的最后一问，就地再答一次。
+//! Retry an answer (#936): the last question with no answer is answered again in place.
 //!
-//! 从前答到一半失败，问题留在库里没有回答；想再问只能重发，同一个问题就在历史里存了
-//! 两遍，没回答的那一遍还会在之后每一问里作为「没回答的一轮」回放给模型。重答带着
-//! 那一问存下的 id 来：不再存一遍，答案落在它后面。
+//! Before, when an answer failed midway the question stayed in the store with no answer; to ask again you had to resend it, so the same question was stored
+//! twice, and the unanswered copy was replayed to the model as an "unanswered turn" in every later question. A retry carries the
+//! id that the question was stored under: nothing is stored again, and the answer lands after it.
 use super::*;
 use axum::response::IntoResponse;
 
 const TOOL: Reply = Reply::Tool("find_entities", r#"{"name":"Acme"}"#);
 const QUESTION: &str = "What changed at Acme?";
 
-/// 一次请求的结果：SSE 全文，或者被拒时的状态码与 `{error, code}`
+/// Result of one request: the full SSE text, or on rejection the status code and `{error, code}`
 enum Outcome {
     Streamed(String),
     Refused(u16, serde_json::Value),
@@ -44,7 +44,7 @@ async fn post(f: &Fx, body: serde_json::Value) -> anyhow::Result<Outcome> {
     }
 }
 
-/// 这场对话存下的消息：(id, 角色, 正文)，按时间序
+/// Messages stored for this conversation: (id, role, body), in time order
 async fn stored(f: &Fx, conversation_id: Uuid) -> anyhow::Result<Vec<(Uuid, String, String)>> {
     Ok(sqlx::query_as(
         "SELECT id, role, content FROM conversation_messages
@@ -64,7 +64,7 @@ async fn only_conversation(f: &Fx) -> anyhow::Result<Uuid> {
     )
 }
 
-/// 直接往库里放一条消息：失败之后、接着问之后那些状态，不必每次都让模型演一遍
+/// Put a message straight into the store: the states after a failure and a follow-up question do not each need the model to play them out
 async fn append(f: &Fx, conversation_id: Uuid, role: &str, content: &str) -> anyhow::Result<Uuid> {
     Ok(utopia_store::conversations::append_message(
         &f.pool,
@@ -84,7 +84,7 @@ fn retry(conversation_id: Uuid, question_id: Uuid) -> serde_json::Value {
     })
 }
 
-/// 答到一半失败的那一问，就地再答一次：库里还是一问一答，模型也只看见它一次
+/// Answer again in place the question whose answer failed midway: the store still holds one question and one answer, and the model sees it only once
 #[tokio::test]
 async fn a_question_whose_answer_failed_is_answered_in_place() -> anyhow::Result<()> {
     let Some(f) = fixture(Scripted::new(vec![
@@ -111,12 +111,12 @@ async fn a_question_whose_answer_failed_is_answered_in_place() -> anyhow::Result
         panic!("the retry was refused");
     };
     assert!(sse.contains("event: done"), "{sse}");
-    // `conversation` 那一帧带着这一问存下的 id：界面凭它重答
+    // The `conversation` frame carries the id stored for this question: the UI uses it to retry
     assert!(
         sse.contains(&format!("\"message_id\":\"{question_id}\"")),
         "{sse}"
     );
-    // 还是那一问，后面跟着答案；问题没有存第二遍
+    // It is still the same question, followed by the answer; the question was not stored a second time
     let after = stored(&f, conversation_id).await?;
     assert_eq!(after.len(), 2, "{after:?}");
     assert_eq!(
@@ -127,7 +127,7 @@ async fn a_question_whose_answer_failed_is_answered_in_place() -> anyhow::Result
         (after[1].1.as_str(), after[1].2.as_str()),
         ("assistant", "Retried answer.")
     );
-    // 重答的第一次模型请求里，这个问题只出现一次
+    // In the first model request of the retry, this question appears only once
     let request = &f.requests()[asked_before];
     let asked = request["messages"]
         .as_array()
@@ -141,7 +141,7 @@ async fn a_question_whose_answer_failed_is_answered_in_place() -> anyhow::Result
     f.cleanup().await
 }
 
-/// 答过的问题不再答：409，模型不被请求，库里不多一条
+/// A question already answered is not answered again: 409, the model is not called, the store gains no extra row
 #[tokio::test]
 async fn an_answered_question_is_not_answered_again() -> anyhow::Result<()> {
     let Some(f) = fixture(Scripted::new(vec![TOOL, Reply::Text("First answer.")])).await? else {
@@ -170,7 +170,7 @@ async fn an_answered_question_is_not_answered_again() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// 后面有人接着问了，这一问也不再原地重答：答案会落在后来那些轮之后
+/// If someone asked a follow-up, this question is not retried in place either: the answer would land after the later turns
 #[tokio::test]
 async fn a_question_the_conversation_went_on_from_is_not_answered_again() -> anyhow::Result<()> {
     let Some(f) = fixture(Scripted::new(vec![])).await? else {
@@ -194,7 +194,7 @@ async fn a_question_the_conversation_went_on_from_is_not_answered_again() -> any
     f.cleanup().await
 }
 
-/// 这场对话里正有一个回答在写：409；它结束之后，同一个请求就能答
+/// An answer is already being written in this conversation: 409; once it ends, the same request can be answered
 #[tokio::test]
 async fn a_question_is_not_answered_twice_at_once() -> anyhow::Result<()> {
     let Some(f) = fixture(Scripted::new(vec![TOOL, Reply::Text("Retried answer.")])).await? else {
@@ -227,7 +227,7 @@ async fn a_question_is_not_answered_twice_at_once() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// 重答点名的必须是这场对话里的一个问题
+/// The retry must name a question in this conversation
 #[tokio::test]
 async fn a_retry_names_a_question_of_this_conversation() -> anyhow::Result<()> {
     let Some(f) = fixture(Scripted::new(vec![])).await? else {
@@ -268,7 +268,7 @@ async fn a_retry_names_a_question_of_this_conversation() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// 每一问都把它存下的 id 交给界面：答到一半失败时，界面凭它重答
+/// Each question hands its stored id to the UI: when an answer fails midway, the UI retries with it
 #[tokio::test]
 async fn every_question_tells_the_interface_its_stored_id() -> anyhow::Result<()> {
     let Some(f) = fixture(Scripted::new(vec![TOOL, Reply::Text("An answer.")])).await? else {
@@ -284,7 +284,7 @@ async fn every_question_tells_the_interface_its_stored_id() -> anyhow::Result<()
     f.cleanup().await
 }
 
-/// 重试资格尚未读完时，另一标签页不能订阅这次随后会被拒绝的占位。
+/// While retry eligibility is still being read, another tab must not subscribe to this placeholder, which will be rejected later.
 #[tokio::test]
 async fn a_rejected_retry_does_not_publish_a_stream_to_another_tab() -> anyhow::Result<()> {
     let _held = HELD_DB_LOCKS.lock().await;
@@ -308,7 +308,7 @@ async fn a_rejected_retry_does_not_publish_a_stream_to_another_tab() -> anyhow::
         append(&f, id, "assistant", "Already answered.").await?;
         let before = stored(&f, id).await?;
 
-        // 只在资格查询上制造等待；它之前的权限检查读其他表，begin 已经占位。
+        // Only delay the eligibility query; the permission check before it reads other tables, and begin has already taken the slot.
         let mut lock = f.pool.begin().await?;
         sqlx::query("LOCK TABLE conversation_messages IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *lock)
@@ -343,7 +343,7 @@ async fn a_rejected_retry_does_not_publish_a_stream_to_another_tab() -> anyhow::
             _ = &mut pending => anyhow::bail!("retry must wait for its qualification query"),
             result = waiting => result?,
         }
-        // 直接进入重接的订阅边界，避免单次 poll 只停在 HTTP 权限查询上。
+        // Go straight to the resubscribe boundary, so a single poll does not stop only at the HTTP permission query.
         let other_tab = f.state.live.attach(id);
         tokio::pin!(other_tab);
         anyhow::ensure!(futures_util::poll!(&mut other_tab).is_pending());

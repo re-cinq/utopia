@@ -1,6 +1,6 @@
-//! Google Drive 的遍历、导出与授权。响应的形状照 Drive v3 与 Google 令牌端点的文档写，
-//! **没有对一个真实的 Drive 跑过**（0013 决定 4 要求说出来）：真连的那条在最下面，
-//! 给了令牌才跑。
+//! Google Drive traversal, export and authorization. Response shapes follow the Drive v3 and Google token endpoint docs,
+//! **not run against a real Drive** (0013 decision 4 requires saying so): the real-connection test is at the bottom,
+//! and runs only when a token is given.
 use super::*;
 use serde_json::json;
 use wiremock::matchers::{body_string_contains, header, method, path, query_param};
@@ -8,7 +8,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn drive(server: &MockServer) -> Drive {
     Drive {
-        // 本地 mock 不走开发机的系统代理
+        // The local mock does not go through the developer machine's system proxy
         http: reqwest::Client::builder().no_proxy().build().unwrap(),
         token: std::sync::Mutex::new("ya29.test".into()),
         renewal: None,
@@ -186,7 +186,7 @@ async fn a_drive_copy_keeps_the_original_files_document_identity() -> anyhow::Re
     result
 }
 
-/// Google 签的 ID token 一小时后过期；没写 `exp` 的按刚签发算
+/// Google-signed ID tokens expire after an hour; one without `exp` counts from its issue time
 fn id_token(mut claims: serde_json::Value) -> String {
     if claims.get("exp").is_none() {
         claims["exp"] = json!(Utc::now().timestamp() + 3600);
@@ -198,8 +198,8 @@ fn id_token(mut claims: serde_json::Value) -> String {
     )
 }
 
-/// 子文件夹往下走；Google 表单这类没有正文的格式与超大文件跳过；
-/// 两个选中的文件夹互相嵌套时同一个文件只收一次
+/// Descend into subfolders; formats without a body, such as Google Forms, and oversized files are skipped;
+/// when two selected folders nest in each other, the same file is collected only once
 #[tokio::test]
 async fn a_walk_descends_skips_what_cannot_be_read_and_counts_each_file_once() -> anyhow::Result<()>
 {
@@ -228,7 +228,7 @@ async fn a_walk_descends_skips_what_cannot_be_read_and_counts_each_file_once() -
     )
     .await;
 
-    // `sub` 也被单独选中：它的文件不该出现两次
+    // `sub` is also selected on its own: its files must not appear twice
     let listing = drive(&server)
         .walk(&["top".to_string(), "sub".to_string()])
         .await?;
@@ -253,7 +253,7 @@ async fn a_walk_descends_skips_what_cannot_be_read_and_counts_each_file_once() -
     Ok(())
 }
 
-/// Drive 回来的 id 要拼进查询与地址：不合字符表的文件夹不进、文件不收
+/// Ids returned by Drive go into queries and addresses: folders with characters outside the allowed set are dropped, and files are not collected
 #[tokio::test]
 async fn ids_from_drive_outside_the_id_alphabet_are_skipped() -> anyhow::Result<()> {
     let server = MockServer::start().await;
@@ -277,9 +277,9 @@ async fn ids_from_drive_outside_the_id_alphabet_are_skipped() -> anyhow::Result<
     Ok(())
 }
 
-/// 别人组织的会议：文件夹里只有快捷方式，纪要住在组织者的 Drive 里。
-/// 指向文件的按目标收（目标自己的标记与时间），指向文件夹的往里走；
-/// 同一个目标既被直接选到、又经快捷方式到达，只收一次
+/// Meetings from another organization: the folder holds only shortcuts, and the minutes live in the organizer's Drive.
+/// A shortcut to a file is collected by its target (the target's own marker and time); a shortcut to a folder is walked into;
+/// the same target reached both by being selected directly and through a shortcut is collected only once
 #[tokio::test]
 async fn a_shortcut_brings_in_what_it_points_to() -> anyhow::Result<()> {
     let server = MockServer::start().await;
@@ -334,7 +334,7 @@ async fn a_shortcut_brings_in_what_it_points_to() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 快捷方式指向的文件没共享给这个人：点名，不当作「没东西」
+/// A file a shortcut points to is not shared with this person: name it, do not treat it as "nothing there"
 #[tokio::test]
 async fn a_shortcut_to_a_file_the_person_cannot_open_is_named() -> anyhow::Result<()> {
     let server = MockServer::start().await;
@@ -365,7 +365,7 @@ async fn a_shortcut_to_a_file_the_person_cannot_open_is_named() -> anyhow::Resul
     Ok(())
 }
 
-/// 选中的文件夹打不开（删了、或不再共享）不是错误，但要点名——同步据此不对账
+/// A selected folder that cannot be opened (deleted, or no longer shared) is not an error, but it must be named: sync reconciles against this
 #[tokio::test]
 async fn an_unreachable_folder_is_named_not_fatal() -> anyhow::Result<()> {
     let server = MockServer::start().await;
@@ -387,7 +387,7 @@ async fn an_unreachable_folder_is_named_not_fatal() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 进了回收站的文件夹不进去，也不算打不开：里面的东西对这个人已经不算数了
+/// A folder in the trash is not entered, and it does not count as unopenable: its contents no longer count for this person
 #[tokio::test]
 async fn a_trashed_folder_is_not_walked() -> anyhow::Result<()> {
     let server = MockServer::start().await;
@@ -395,7 +395,7 @@ async fn a_trashed_folder_is_not_walked() -> anyhow::Result<()> {
     let listing = drive(&server).walk(&["binned".to_string()]).await?;
     assert!(listing.files.is_empty());
     assert!(listing.unreachable.is_empty());
-    // 没有任何 files.list 请求
+    // No files.list request at all
     let lists = server
         .received_requests()
         .await
@@ -407,7 +407,7 @@ async fn a_trashed_folder_is_not_walked() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 列表翻页：`nextPageToken` 一直跟到没有为止
+/// Listing pagination: follow `nextPageToken` until there is none
 #[tokio::test]
 async fn a_listing_follows_page_tokens() -> anyhow::Result<()> {
     let server = MockServer::start().await;
@@ -439,7 +439,7 @@ async fn a_listing_follows_page_tokens() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Google 文档走 export 换成 DOCX，文件名补扩展名；别的原样下载，不猜 mime
+/// Google Docs are exported as DOCX with the extension added to the file name; others are downloaded as is, with no mime type guessing
 #[tokio::test]
 async fn google_formats_are_exported_and_files_are_downloaded() -> anyhow::Result<()> {
     let server = MockServer::start().await;
@@ -487,8 +487,8 @@ async fn google_formats_are_exported_and_files_are_downloaded() -> anyhow::Resul
     Ok(())
 }
 
-/// 导出超过 10 MB 时 Google 回 403 带 `exportSizeLimitExceeded`；错误里要留着这个原因，
-/// 同步把它报给人看
+/// When an export exceeds 10 MB, Google returns 403 with `exportSizeLimitExceeded`; keep that reason in the error,
+/// so sync reports it to the person
 #[tokio::test]
 async fn an_export_refusal_keeps_googles_reason() {
     let server = MockServer::start().await;
@@ -516,7 +516,7 @@ async fn an_export_refusal_keeps_googles_reason() {
     assert!(msg.contains("too large"), "{msg}");
 }
 
-/// 文件夹浏览器：「与我共享」用 sharedWithMe 查询，别的按父文件夹查，只要文件夹
+/// Folder browser: "shared with me" uses a sharedWithMe query, others are queried by parent folder, as long as the folder is visible to the person
 #[tokio::test]
 async fn the_folder_browser_lists_only_folders() -> anyhow::Result<()> {
     let server = MockServer::start().await;
@@ -567,12 +567,12 @@ async fn the_folder_browser_lists_only_folders() -> anyhow::Result<()> {
     );
     let roots: Vec<String> = d.roots().await?.into_iter().map(|r| r.id).collect();
     assert_eq!(roots, ["root", SHARED_WITH_ME, "0AAdrive"]);
-    // 拼进 q 的 id 不收引号
+    // Ids spliced into q are not quoted
     assert!(d.child_folders("x' or '1'='1").await.is_err());
     Ok(())
 }
 
-/// 换令牌：要刷新令牌、要 Drive 那一项权限；邮箱从 ID token 里拿
+/// Token exchange: needs a refresh token and the Drive permission; the email comes from the ID token
 #[tokio::test]
 async fn a_code_exchange_needs_a_refresh_token_and_the_drive_scope() -> anyhow::Result<()> {
     let token_ok = json!({
@@ -625,7 +625,7 @@ async fn a_code_exchange_needs_a_refresh_token_and_the_drive_scope() -> anyhow::
     Ok(())
 }
 
-/// 撤了授权或刷新令牌过期：说「去重连」，而不是一句 400
+/// Authorization revoked or refresh token expired: say "reconnect", rather than a bare 400
 #[tokio::test]
 async fn a_revoked_grant_says_reconnect() {
     let server = MockServer::start().await;
@@ -643,7 +643,7 @@ async fn a_revoked_grant_says_reconnect() {
     assert!(e.to_string().contains("reconnect"), "{e}");
 }
 
-/// 一轮同步超过一小时，访问令牌就过期了：401 换一枚新的再试，不把文件报成「读不出来」
+/// A sync round longer than an hour expires the access token: on 401, fetch a new one and retry, rather than reporting files as "unreadable"
 #[tokio::test]
 async fn an_expired_access_token_is_renewed_once_mid_sync() -> anyhow::Result<()> {
     let server = MockServer::start().await;
@@ -691,7 +691,7 @@ async fn an_expired_access_token_is_renewed_once_mid_sync() -> anyhow::Result<()
     Ok(())
 }
 
-/// ID token：签给别的 client 的、别的 issuer 的不收；没验证过的邮箱不显示
+/// ID token: tokens issued to another client or from another issuer are rejected; an unverified email is not shown
 #[test]
 fn an_id_token_must_be_googles_and_ours() {
     let ours = cfg().client_id;
@@ -722,7 +722,7 @@ fn an_id_token_must_be_googles_and_ours() {
     assert!(id_token_email(&expired, &ours).is_err());
 }
 
-/// 配置里的文件夹：对象或字符串都认，id 不合字符表的丢掉
+/// Folders in config: both objects and strings are accepted; ids with characters outside the allowed set are dropped
 #[test]
 fn selected_folders_keep_only_valid_ids() {
     let cfg = json!({"folders": [
@@ -732,11 +732,11 @@ fn selected_folders_keep_only_valid_ids() {
     assert!(selected_folders(&json!({})).is_empty());
 }
 
-/// 真连一个 Google Drive。给了令牌才跑，CI 上永远跳过。
+/// Connects to a real Google Drive. Runs only when a token is given; always skipped on CI.
 ///
 /// ```text
-/// # 在 Google Cloud 建一个 OAuth 客户端（Web 应用），在 Utopia 里连接一个 google_drive 来源，
-/// # 然后用那个客户端和一枚刷新令牌：
+/// # Create an OAuth client (Web application) in Google Cloud, connect a google_drive source in Utopia,
+/// # then use that client and a refresh token:
 /// UTOPIA_GOOGLE_DRIVE_CLIENT_ID=… UTOPIA_GOOGLE_DRIVE_CLIENT_SECRET=… \
 /// UTOPIA_GOOGLE_DRIVE_REDIRECT_URI=… UTOPIA_GOOGLE_DRIVE_TEST_REFRESH_TOKEN=1//… \
 /// UTOPIA_GOOGLE_DRIVE_TEST_FOLDER=<folder id> cargo test -p utopia-server google_drive

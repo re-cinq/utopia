@@ -1,11 +1,11 @@
-//! 图谱抽取任务的入口，以及开放写入路径（`extraction_open`）共用的那几块。
+//! The entry point for graph extraction tasks, plus the parts shared with the open write path (`extraction_open`).
 //!
-//! 抽取只写开放图谱（0044 决定 2）：每篇文档——记忆日志也在内——都从这里进
-//! `run_open`，提示词里没有本体，也没有带本体的第二条路。这里留下的是那条路借用的东西：
-//! 限流退避的 chat 调用、来源给置信度设的上限、片段核对、丢弃信号、未抽完的判据、
-//! 名字到实体的消解（句柄、同名审核对）。
-//! 与摄入管道分离（两段式可用）：索引完成即可搜可问，抽取慢慢跑。
-//! 消解灰区只入审核队列并触发独立的攒批裁决任务——LLM 裁决永不阻塞本任务。
+//! Extraction writes only to the open graph (0044 decision 2): every document, memory logs included, enters here via
+//! `run_open`; the prompt has no ontology, and there is no second path that carries one. What is left here is what that path borrows:
+//! rate-limited backoff for chat calls, the ceiling the source puts on confidence, snippet verification, the discard signal, the not-fully-extracted criterion,
+//! and name-to-entity resolution (handles, same-name review pairs).
+//! It is separate from the ingestion pipeline (two stages are available): once indexing completes, the document can be searched and asked about, while extraction runs slowly.
+//! Ambiguous resolution cases only go into the review queue and trigger a separate batching adjudication task; LLM adjudication never blocks this task.
 
 use crate::llm_util;
 use crate::state::AppState;
@@ -15,16 +15,16 @@ use std::time::Duration;
 use utopia_core::models::Proposer;
 use uuid::Uuid;
 
-/// 限流最多退避重试几次。**只对 429 生效**：密钥错了重试一万次还是错。
+/// The maximum number of rate-limit backoff retries. **Only applies to 429**: a wrong key still fails after ten thousand retries.
 const RATE_LIMIT_TRIES: u32 = 5;
-/// 单次退避的上限。总等待因此封顶在两分钟出头，一个配额永远打满的账号
-/// 会干脆地失败，而不是把 worker 槽占死。
+/// Upper bound on a single backoff. The total wait is thus capped at just over two minutes, so an account whose quota is always full
+/// fails outright rather than tying up the worker slot.
 const RATE_LIMIT_CAP: Duration = Duration::from_secs(60);
 
-/// 退避的抖动。**不引 `rand`**：这里只要「别让 N 个分块同时醒来」，纳秒时钟
-/// 就够散，而多一个依赖要跟着走供应链。
+/// Backoff jitter. **No `rand` crate**: all we need is "don't wake N chunks at the same moment", and a nanosecond clock
+/// is enough to scatter them, while one more dependency would drag in its supply chain.
 ///
-/// 取半区间（base/2 到 base）而不是全区间：退避仍然单调增长，只是错开。
+/// Takes half the interval (base/2 to base) rather than the full interval: backoff still grows monotonically, just staggered.
 fn jitter(base: Duration) -> Duration {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -34,18 +34,18 @@ fn jitter(base: Duration) -> Duration {
     base / 2 + Duration::from_millis(if half == 0 { 0 } else { nanos % half })
 }
 
-/// 抽取的 chat 调用，**限流会退避重试**。温度由调用方定（开放抽取要 0，见 `extraction_open`）。
+/// Chat call for extraction, **backed off and retried on rate limits**. The caller sets the temperature (open extraction uses 0, see `extraction_open`).
 ///
-/// 限流与其他失败的区别是它会自己好，所以从前那句「跳过该分块」用在它身上
-/// 就是把一分钟的等待换成永久的数据缺口——实测一次 1884 块的灌入里
-/// 55/60 篇文档整篇失败，而端点一直是好的。
+/// The difference between rate limits and other failures is that they recover on their own, so the old phrase "skip the chunk" applied to them
+/// turns a minute of waiting into a permanent data gap: measured, in one ingest of 1884 chunks,
+/// 55 of 60 documents failed entirely, while the endpoint was healthy the whole time.
 ///
-/// 两处容易写错：
+/// Two easy mistakes:
 ///
-/// - **退避期间不能占着许可。** 许可只包住真正的调用，睡觉之前就还回去，
-///   否则一个在等的分块会挡住本来可以通过的另一个。
-/// - **`Retry-After` 多数厂商不发**，所以它只是「有则更准」，判据是错误类型
-///   本身；没有它就走指数退避。
+/// - **Do not hold the permit while backing off.** The permit covers only the real call and is returned before sleeping,
+///   otherwise one waiting chunk would block another that could have gone through.
+/// - **Most vendors don't send `Retry-After`**, so it is only "more accurate when present"; the criterion is the error type
+///   itself; without it, exponential backoff applies.
 pub(crate) async fn chat_retrying_rate_limits_at(
     state: &AppState,
     settings: &utopia_core::models::LlmSettings,
@@ -55,12 +55,12 @@ pub(crate) async fn chat_retrying_rate_limits_at(
 ) -> anyhow::Result<utopia_llm::Reply> {
     let mut backoff = Duration::from_secs(2);
     for attempt in 1..=RATE_LIMIT_TRIES {
-        // 许可只包住调用本身，出了这个块就还回去。
+        // The permit covers only the call itself; it is returned as soon as the chunk leaves.
         //
-        // **走流式**：这条路上的提示词都长（抽取一整块、对齐一批签名），开着推理时
-        // 模型先想几分钟再开口，而非流式下那几分钟在传输层看来是彻底的沉默，读超时
-        // 会把正常的调用判死（实测一块正文首字节 227 秒，偶尔越过 300 秒）。流式下
-        // 思考过程就是字节，超时于是只杀真正卡住的请求。返回值仍是整段
+        // **Streams**: the prompts on this path are long (extracting a whole chunk, aligning a batch of signatures); with reasoning on,
+        // the model thinks for minutes before speaking, and without streaming those minutes look like total silence to the transport layer, so the read timeout
+        // would kill a healthy call (measured: a chunk's first byte at 227 seconds, occasionally past 300 seconds). With streaming,
+        // the reasoning itself is bytes, so the timeout only kills genuinely stuck requests. The return value is still the whole text
         let outcome = {
             let _permit = llm_util::acquire_chat(state, settings).await;
             client.chat_at_streaming(messages, temperature).await
@@ -69,7 +69,7 @@ pub(crate) async fn chat_retrying_rate_limits_at(
             Ok(reply) => return Ok(reply),
             Err(e) => e,
         };
-        // 会自己好的那几类（限流、端点不可用、请求没送到）退避重试，其余照原样抛出去
+        // The classes that recover on their own (rate limits, endpoint unavailable, request not delivered) back off and retry; everything else is thrown up as is
         let Some((what, retry_after)) = utopia_llm::transient(&err) else {
             return Err(err);
         };
@@ -90,13 +90,13 @@ pub(crate) async fn chat_retrying_rate_limits_at(
     unreachable!("循环内必定 return")
 }
 
-/// 模型看图描述出来的事实，置信度压到这里（0040 决定 4）：低于审核的低置信阈值，于是
-/// 它在待审里露面。**「不许它单独关掉一段正确的旧值」这一条不再靠这个数字**：0045 第 3 刀
-/// 之后时态引擎读的是出处与起点的来历，看图描述出来的行照旧不关、记一条矛盾交给人
-/// （柱状图读错一个数是常事，而库里没有一行会说这次关闭靠的是一张图）
+/// Facts the model derives from a chart description get their confidence pushed down to here (0040 decision 4): below the review's low-confidence threshold, so
+/// they surface in the pending review. **"Never let it alone close a correct old value" is no longer enforced by this number**: after 0045 cut 3
+/// the temporal engine reads the origin and start of a fact, so rows derived from a chart description still do not close, and a contradiction is logged for a person
+/// (misreading one value in a bar chart is common, and no row in the store will say that this closing relied on a chart)
 const DESCRIBED_CEILING: f32 = utopia_store::review::LOW_CONFIDENCE_BELOW - 0.05;
 
-/// 这块文字的来源给事实置信度设的上限
+/// The cap this source of text puts on fact confidence
 pub(crate) fn origin_ceiling(origin: &str, confidence: f32) -> f32 {
     if origin == "described" {
         confidence.min(DESCRIBED_CEILING)
@@ -105,7 +105,7 @@ pub(crate) fn origin_ceiling(origin: &str, confidence: f32) -> f32 {
     }
 }
 
-/// 片段在不在引文里：大小写、空白都不论
+/// Whether a snippet is in the quote: case and whitespace do not matter
 pub(crate) fn span_in_quote(span: &str, quote: &str) -> bool {
     let norm = |s: &str| {
         s.split_whitespace()
@@ -117,8 +117,8 @@ pub(crate) fn span_in_quote(span: &str, quote: &str) -> bool {
     !s.is_empty() && q.contains(&s)
 }
 
-/// 记一条丢弃信号。抽取器有七处 `continue`，每一处都是"事实抽出来了、被挡掉、
-/// 什么都不说"。信号写失败绝不能带垮整篇文档的抽取，所以这里吞掉错误。
+/// Records a discard signal. The extractor has seven `continue`s, and each one is "a fact was extracted, got blocked,
+/// and says nothing". A failure to write the signal must never take down extraction of a whole document, so the error is swallowed here.
 pub(crate) async fn drop_signal(
     state: &AppState,
     kb_id: Uuid,
@@ -138,20 +138,20 @@ pub(crate) async fn drop_signal(
     .await;
 }
 
-/// 这一轮抽完了没有——没抽完就给出**要写进 graph_error 的那句话**。
+/// Whether this round has finished extracting: if not, gives **the sentence to write into graph_error**.
 ///
-/// 判据是「全抽完」而不是某个比例：任何比例都是拍的，而这里本来就有一个不需要拍的
-/// 判据——每一块都成了才叫抽完。
+/// The criterion is "everything extracted", not some ratio: any ratio is arbitrary, while here there is a criterion that needs no arbitrary choice:
+/// finished means every chunk succeeded.
 ///
-/// `attempted` 是**本轮取到的分块数**，不是文档总块数：重试只取
-/// `extracted_at IS NULL` 的块，所以第二轮的分母天然更小。措辞里说「本轮」，
-/// 别让读的人以为文档只有那么几块。
+/// `attempted` is **the number of chunks taken this round**, not the document's total chunk count: a retry takes only
+/// chunks with `extracted_at IS NULL`, so the second round's denominator is naturally smaller. The wording says "this round",
+/// so readers don't think the document has only that many chunks.
 pub(crate) fn incomplete_reason(unextracted: &[(i32, String)], attempted: usize) -> Option<String> {
     if unextracted.is_empty() {
         return None;
     }
-    // 只举前三个：原因往往同一个（供应商不通就是所有块都不通），
-    // 全列出来只是把同一句话抄二十遍
+    // Only the first three are named: the cause is often the same (if the vendor is unreachable, every chunk fails);
+    // listing them all would just copy the same sentence twenty times
     let sample: Vec<String> = unextracted
         .iter()
         .take(3)
@@ -171,9 +171,9 @@ pub(crate) fn incomplete_reason(unextracted: &[(i32, String)], attempted: usize)
     ))
 }
 
-/// `proposer`：这篇文档若是记忆日志，抽出的事实等人点头，据此记下「谁说的」
-/// ——人，以及经 MCP 时那个 agent（0014 的令牌）。批量摄入的文档传默认值：
-/// 那条路不经待确认队列，这两位都用不上
+/// `proposer`: if this document is a memory log, the extracted facts wait for a person's nod, and the record notes who said it:
+/// the person, and, via MCP, the agent (the token of 0014). Documents in a bulk ingest pass the default: that path does not go through the pending-confirmation queue, so neither of those is used
+/// The reason is stored with the status: an error that only goes to the log is no error at all
 pub async fn extract_document(
     state: &AppState,
     document_id: Uuid,
@@ -182,7 +182,7 @@ pub async fn extract_document(
     match run(state, document_id, proposer).await {
         Ok(()) => Ok(()),
         Err(e) => {
-            // 原因随状态落库：只进日志的错误等于没有错误
+            // The reason is stored with the status: an error that only goes to the log is no error at all
             let _ = utopia_store::documents::set_graph_failed(
                 &state.pool,
                 document_id,
@@ -226,8 +226,8 @@ async fn resolve_uncached(
             .await?
         }
     };
-    // 疑似重复对（画像灰区 / 类型漂移 / 同名并列）入审核队列。多数走批量裁决器，
-    // 同名并列（`ReviewStage::Human`）分不出谁是谁，只能等人裁——它自己带着 stage。
+    // Suspected duplicate pairs (profile grey zone / type drift / same-name tie) enter the review queue. Most go to the batch adjudicator;
+    // same-name ties (`ReviewStage::Human`) cannot tell who is who, so only a person can decide; they carry their own stage.
     for review in &r.reviews {
         utopia_store::resolution::create_review(
             pool,
@@ -239,7 +239,7 @@ async fn resolve_uncached(
             review.stage,
         )
         .await?;
-        // 只有批量可裁的才触发裁决任务；纯人工审核对不该唤醒裁决器
+        // Only pairs the batch can adjudicate trigger the adjudication task; pure human-review pairs should not wake the adjudicator
         if review.stage == utopia_store::resolution::ReviewStage::Adjudicating {
             *needs_adjudication = true;
         }
@@ -345,17 +345,17 @@ pub(crate) async fn resolve_handle(
     Ok(id)
 }
 
-/// 每篇文档都走开放图谱（0044 决定 2）：只写文档自己的话，本体不进提示词。
-/// 记忆日志同样从这里进，只是它的陈述先进待确认表等人点头（0015），点头时才落成开放陈述
+/// Every document goes through the open graph (0044 decision 2): it writes only the document's own words, and the ontology does not enter the prompt.
+/// Memory logs also enter here; only their statements first go to the pending-confirmation table to wait for a person's nod (0015), and become open statements only when approved
 async fn run(state: &AppState, document_id: Uuid, proposer: Proposer) -> anyhow::Result<()> {
     let doc = utopia_store::documents::get(&state.pool, document_id).await?;
-    // 排队之后被删了（#268）：墓碑不抽——抽出来的事实会活在一个已删除的出处上
+    // Deleted after being queued (#268): tombstones are not extracted, since the extracted facts would live on a deleted source
     if doc.deleted_at.is_some() {
         tracing::info!(document = %document_id, "skipping a deleted document");
         return Ok(());
     }
     let kb = utopia_store::kbs::get(&state.pool, doc.kb_id).await?;
-    // 推送来的陈述（0054）：块就是契约，抽取按契约解析、不问模型，没配对话模型也照抽
+    // Pushed statements (0054): the chunk is the contract, extraction resolves against the contract and does not ask the model, so it runs even without a chat model configured
     let source = match doc.source_id {
         Some(id) => Some(utopia_store::sources::get(&state.pool, id).await?),
         None => None,
@@ -364,7 +364,7 @@ async fn run(state: &AppState, document_id: Uuid, proposer: Proposer) -> anyhow:
     let identity = source
         .as_ref()
         .is_some_and(utopia_core::models::Source::names_are_identities);
-    // settings 有就传：推送路径不问对话模型，但名字向量的嵌入模型（#877）仍从它来
+    // Pass settings if present: the push path does not ask the chat model, but the name-vector embedding model (#877) still comes from it
     let settings = utopia_store::settings::get(&state.pool, kb.workspace_id).await?;
     let client = if pushed {
         None
@@ -378,7 +378,7 @@ async fn run(state: &AppState, document_id: Uuid, proposer: Proposer) -> anyhow:
         )
     };
 
-    // 所有权凭证：重抽会自增 epoch，任务据此察觉自己已被接管（见 `run_open` 的分块循环）
+    // Ownership token: re-extraction bumps the epoch, and the task detects it has been taken over (see the chunk loop in `run_open`)
     let my_epoch = utopia_store::documents::extract_epoch(&state.pool, document_id).await?;
     utopia_store::documents::set_graph_status(&state.pool, document_id, "extracting").await?;
     state.emit_document(doc.kb_id, document_id);
@@ -396,8 +396,8 @@ async fn run(state: &AppState, document_id: Uuid, proposer: Proposer) -> anyhow:
         identity,
     )
     .await;
-    // epoch 检查之后的多条写入之间仍可能发生重建；被接管的旧任务不应重试或报失败。
-    // 只有明确读到新 epoch 才丢弃错误，查询失败则保留原始错误。
+    // Between multiple writes after the epoch check, a rebuild can still happen; an old task that has been taken over should not retry or report failure.
+    // Only drop the error when a new epoch is explicitly read; if the query itself fails, keep the original error.
     if result.is_err()
         && utopia_store::documents::extract_epoch(&state.pool, document_id)
             .await
@@ -444,8 +444,8 @@ mod tests {
         assert!(!span_in_quote("", "anything"));
     }
 
-    /// 这条判据存在的理由：一次网络抖动让六篇文档 60 块里只抽成 12 块，
-    /// 六篇**全部显示"抽取完成"**，八成的内容没进图，界面上没有任何东西说出来。
+    /// The reason this criterion exists: a network blip left only 12 of 60 chunks of six documents extracted,
+    /// and all six **showed "extraction complete"**, with 80% of the content never reaching the graph, and nothing on screen said so.
     #[test]
     fn a_document_with_a_skipped_chunk_is_not_complete() {
         assert_eq!(incomplete_reason(&[], 23), None, "全抽完才算完成");
@@ -455,8 +455,8 @@ mod tests {
         assert!(msg.contains("#7"), "得指得出是哪一块：{msg}");
     }
 
-    /// 原因往往是同一个（供应商不通就是所有块都不通），举三个够了，
-    /// 但**剩下多少必须说**——否则读的人会以为只坏了三块。
+    /// The cause is often the same (if the vendor is unreachable, every chunk fails); naming three is enough,
+    /// but **how many remain must be said**, or the reader would think only three chunks were broken.
     #[test]
     fn many_failures_are_summarised_without_hiding_the_count() {
         let many: Vec<(i32, String)> = (1..=20).map(|i| (i, "request failed".into())).collect();
@@ -466,8 +466,8 @@ mod tests {
         assert_eq!(msg.matches("request failed").count(), 3, "只举三个");
     }
 
-    /// 重试时 `chunks_for_extraction` 只取还没抽的块，所以分母是**本轮**的数，
-    /// 不是文档总块数。措辞里说清楚，别让人以为文档只有这么几块。
+    /// On retry, `chunks_for_extraction` takes only the chunks not yet extracted, so the denominator is **this round's** count,
+    /// not the document's total chunk count. The wording must make that clear, so people don't think the document has only that many chunks.
     #[test]
     fn the_denominator_is_this_rounds_chunks_not_the_document() {
         let msg = incomplete_reason(&[(2, "x".into())], 3).unwrap();
@@ -554,7 +554,7 @@ mod tests {
                 "namesakes must not wake the LLM worker"
             );
 
-            // 同一回复里两个句柄各绑各的实体：事实跟着句柄走，不跟着名字走
+            // Two handles in the same reply each bind their own entity: facts follow the handle, not the name
             let refs = HashMap::from([("e1", a), ("e2", b)]);
             let (finance, platform) = (Uuid::now_v7(), Uuid::now_v7());
             let works_at = Uuid::now_v7();
@@ -587,7 +587,7 @@ mod tests {
                 .await?;
             }
             let pairs: Vec<(Uuid, Uuid)> = sqlx::query_as(
-                // 只看边：实体身上还有名字事实（0041），那些没有宾语实体
+                // Edges only: entities also carry name facts (0041), and those without an object entity
                 "SELECT subject_id, object_id FROM facts
                   WHERE kb_id = $1 AND object_id IS NOT NULL ORDER BY subject_id",
             )
@@ -608,8 +608,8 @@ mod tests {
             assert!(labels.contains(&(a, Some("Finance".to_string()))));
             assert!(labels.contains(&(b, Some("Platform Engineering".to_string()))));
 
-            // 后一次回复给同一个名字开了一个新句柄，没挑 A 或 B：文本里没有挑的依据，
-            // 不许猜。事实落到一个文档级的 C 上，对 A、对 B 各一条人工审核对
+            // A later reply opened a new handle for the same name, without picking A or B: the text gives no basis for picking,
+            // so it must not guess. The fact lands on a document-level C, with one manual review pair each against A and against B
             let mut later_response_claims = HashMap::new();
             let c = resolve_handle(
                 &pool,
@@ -638,7 +638,7 @@ mod tests {
                 0.9,
             )
             .await?;
-            // 再往后的回复再开一个新句柄，仍是那个 C：一个新拼写不是猜 A 或 B 的许可
+            // A reply after that opens yet another handle, still that same C: a new spelling is no license to guess A or B
             let mut another_response_claims = HashMap::new();
             let c_again = resolve_handle(
                 &pool,
@@ -707,10 +707,10 @@ mod tests {
         run
     }
 
-    /// #270：跨文档的同名并列——不靠句柄，靠画像相似度。库里已有两个「张伟」，画像质心
-    /// 一模一样（同一 chunk 播的种）。新提及对两人打出同一个分。旧路径在最高分 ≥ SIM_ATTACH
-    /// 时静默 attach 到先遇到的那个；修好之后走句柄这条路要：新建第三个实体、两条**人工**
-    /// 审核对、且绝不唤醒 LLM 裁决器（否则两条几乎相同的画像会被自动并掉，正是要防的）。
+    /// #270: same-name ties across documents, decided by profile similarity rather than handles. The store already has two "张伟" whose profile centroids
+    /// are identical (seeded from the same chunk). A new mention scores both the same. The old path, when the top score ≥ SIM_ATTACH,
+    /// silently attaches to whichever was met first; with the fix, the handle path must instead create a third entity, two **manual** review pairs,
+    /// and never wake the LLM adjudicator (otherwise two nearly identical profiles would be auto-merged, which is exactly what must be prevented).
     #[tokio::test]
     async fn a_profile_tie_across_documents_files_human_reviews_not_an_attach() -> anyhow::Result<()>
     {
@@ -747,7 +747,7 @@ mod tests {
         .await?;
 
         let run = async {
-            // 两个同名的人，画像向量完全相同
+            // Two people with the same name, with identical profile vectors
             let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
             for id in [a, b] {
                 sqlx::query(
@@ -762,7 +762,7 @@ mod tests {
                 .await?;
             }
 
-            // 与两人画像都一致的上下文：打出的余弦相同 → 分不开
+            // A context matching both people's profiles: the cosine scored is the same, so they cannot be told apart
             let ctx: Vec<f32> = vec![1.0, 0.0, 0.0];
             let mut response_claims = HashMap::new();
             let mut document_claims = HashMap::new();

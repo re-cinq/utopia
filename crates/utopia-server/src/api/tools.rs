@@ -1,12 +1,12 @@
-//! 七个工具的**执行**，与谁在调用它们无关。
+//! **Execution** of the seven tools, regardless of who calls them.
 //!
-//! 从前这些是 `chat.rs` 里一个 `match` 的七条分支，每条 20–70 行，闭包捕获着
-//! 流式循环的局部变量。那样写在只有对话一个调用方时没问题——**而 MCP 是第二个**。
-//! 抽出来之后两边共用同一份实现，不会出现「对话里的 entity_facts 和 MCP 里的
-//! 不是同一个东西」。
+//! These used to be seven branches of one `match` in `chat.rs`, each 20–70 lines, with closures capturing
+//! the local variables of the streaming loop. That is fine with only one caller, a conversation—**and MCP is the second one**.
+//! After extraction, both sides share one implementation, so "entity_facts in conversation" and "entity_facts in MCP"
+//! cannot become different things.
 //!
-//! 工具定义（给模型看的 JSON schema）仍在 `chat.rs`：那是提示词的一部分，
-//! 随对话策略走；这里只管拿到参数之后干什么。
+//! Tool definitions (the JSON schema the model sees) are still in `chat.rs`: they are part of the prompt
+//! and follow the conversation strategy; here we only handle what happens once the arguments arrive.
 
 use serde_json::json;
 use utopia_core::models::{ChunkView, DataSourceView, EntityFact, GraphChange};
@@ -17,45 +17,45 @@ use crate::state::AppState;
 
 const SEARCH_TOP_K: usize = 6;
 const TOOL_CHUNK_CHARS: usize = 800;
-/// `get_document` 每页的正文预算；超出的部分用字符 offset 续读，不把上下文塞满。
+/// The body budget per page of `get_document`; anything beyond it is read on with a character offset, so the context is not stuffed.
 const DOCUMENT_CHARS: usize = 24_000;
-/// 一次 changes 最多回多少条。刚灌完的库里 asserted 是成百上千条，全发出去
-/// 只会把上下文填满而不增加信息——有信息量的是 corrected/rejected，那类事件
-/// 本来就稀少。截断时正文末尾给出下一页，模型据此续读：界面上那一步的 "40+"
-/// 只给人看，模型读不到
+/// Maximum number of entries returned by one changes call. In a library just ingested, asserted entries run into the hundreds; sending them all
+/// only fills the context without adding information—the informative events are corrected/rejected, and those kinds
+/// are rare to begin with. When truncated, the body's end gives the next page so the model can read on; the "40+" the UI shows at that step
+/// is for people only, the model does not read it
 const CHANGES_LIMIT: i64 = 40;
 
-/// 一次工具调用看得见的世界。**只读**——工具改不了它。
+/// The part of the world one tool call can see. **Read-only**: tools cannot change it.
 pub struct ToolCtx<'a> {
     pub state: &'a AppState,
     pub kb_id: Uuid,
     pub workspace_id: Uuid,
-    /// 本库挂载的数据源。**`query_data` 的安全边界就是这个列表**：
-    /// 凭据不出服务端，模型只能按名字点单
+    /// Sources mounted on this library. **The security boundary of `query_data` is exactly this list**:
+    /// credentials never leave the server, and the model can only pick by name
     pub mounted_sources: &'a [DataSourceView],
-    /// editor 及以上才有 `remember`
+    /// Only editor and above have `remember`
     pub can_write: bool,
-    /// 在说话的人。`remember` 把它记成「谁说的」，一路跟到待确认队列（0015）。
-    /// 对话里恒有值；MCP 也有——令牌以人的身份行事（0014）
+    /// The person speaking. `remember` records it as "who said it", carried all the way to the pending-confirmation queue (0015).
+    /// Always set in conversation; MCP has it too, since the token acts as the person (0014)
     pub actor: Option<Uuid>,
-    /// 经 MCP 时，是哪一枚令牌在说话。**人之外还要记它**：一个人可以同时挂
-    /// 三个 agent，审核卡上只写人名分不出是哪一个记的（0026）。对话里为 None
+    /// Via MCP, which token is speaking. **Besides the person, this is recorded too**: one person can attach
+    /// three agents at once, and a review card that shows only the person's name cannot tell which one recorded it (0026). None in conversation
     pub via_token: Option<Uuid>,
-    /// 用户这一轮的原话。图谱工具拿它消歧：同名候选按「谁的上下文画像离这个问题近」排。
-    /// MCP 没有它（agent 的意图不在请求里），那边按事实数排
+    /// The user's words in this turn. The graph tools use them to disambiguate: same-name candidates are ranked by "whose context profile is closest to this question".
+    /// MCP does not have it (the agent's intent is not in the request), so there candidates are ranked by fact count
     pub question: Option<&'a str>,
 }
 
 impl ToolCtx<'_> {
-    /// 这一轮有没有来源清单：对话有，MCP 没有（MCP 的调用总带着令牌）。
-    /// 图谱事实行上的 `[n]` 只在有清单时印（#935）——号码指向清单里的一条，
-    /// 对一个手里没有清单的调用方没有意义，它从 `structuredContent` 的 `document_ids` 取出处
+    /// Whether there is a source list this turn: conversation has one, MCP does not (MCP calls always carry a token).
+    /// The `[n]` on graph fact lines is printed only when there is a list (#935): the number points at an entry in the list,
+    /// which means nothing to a caller who has no list; such a caller takes its provenance from `document_ids` in `structuredContent`
     pub fn has_source_list(&self) -> bool {
         self.via_token.is_none()
     }
 
-    /// 一段文字的向量，用这个工作区配的嵌入模型。没配、或调用失败时 None：
-    /// 图谱工具照常按子串走，向量只是第二阶段
+    /// The vector of a piece of text, using this workspace's embedding model. None if none is configured or the call fails:
+    /// the graph tools then match by substring as usual, and vectors are just a second stage
     pub async fn embed(&self, text: &str) -> Option<Vec<f32>> {
         let settings = utopia_store::settings::get(&self.state.pool, self.workspace_id)
             .await
@@ -72,7 +72,7 @@ impl ToolCtx<'_> {
         }
     }
 
-    /// [`Self::embed`]，同一轮里同样的文字只嵌一次（见 [`ToolSink::embeddings`]）
+    /// [`Self::embed`]; within one turn the same text is embedded only once (see [`ToolSink::embeddings`])
     pub async fn embed_once(&self, sink: &mut ToolSink, text: &str) -> Option<Vec<f32>> {
         if let Some(vec) = sink.embeddings.get(text) {
             return Some(vec.clone());
@@ -83,32 +83,32 @@ impl ToolCtx<'_> {
     }
 }
 
-/// 工具执行过程中往外攒的东西。
+/// What accumulates outward during tool execution.
 ///
-/// **引用编号是有状态的**：`[3]` 里的 3 取决于这一轮之前已经引过几个，
-/// 所以不能让每个工具各算各的再合并——那样同一个 chunk 会拿到两个号。
+/// **Citation numbers are stateful**: the 3 in `[3]` depends on how many have already been cited earlier in this turn,
+/// so each tool cannot number on its own and merge afterwards—that would give the same chunk two numbers.
 #[derive(Default)]
 pub struct ToolSink {
-    /// 去重键（chunk uuid，或 `charter:{slug}#{anchor}`），下标 +1 就是引用号
+    /// Dedup key (chunk uuid, or `charter:{slug}#{anchor}`); index + 1 is the citation number
     pub source_ids: Vec<String>,
-    /// 发给前端的引用清单，与 `source_ids` 同序
+    /// The source list sent to the frontend, in the same order as `source_ids`
     pub sources: Vec<serde_json::Value>,
-    /// 这一轮认下的实体，落进会话供下一轮回放
+    /// Entities recognized in this turn, which go into the session for replay in the next turn
     pub resolved: Vec<serde_json::Value>,
-    /// 这一轮嵌过的文字与它的向量，不落库。同名实体每按名字查一次，都拿同一句问题去比
-    /// 画像；谓词对不上时，同一个词也会再嵌。一轮之内文字与模型都不变，嵌一次就够：
-    /// 对话一轮一个 sink，MCP 一次调用一个。只记成功的，失败了下次照样再试。
-    /// 挑口径（`mapping_index::relevant`）与检索分块（`search_chunks`）也从这里拿问题的
-    /// 向量、往这里记（#971 的后续）
+    /// Text embedded in this turn and its vector, not stored in the database. Each name-based lookup of a same-name entity compares profiles
+    /// against the same question; when predicates do not match, the same word is embedded again. Within a turn the text and the model are fixed, so embedding once is enough:
+    /// one sink per conversation turn, one per MCP call. Only successes are recorded; a failure is retried next time as usual.
+    /// Picking the scope (`mapping_index::relevant`) and retrieving chunks (`search_chunks`) also take the question's
+    /// vector from here and record it here (follow-up to #971)
     pub embeddings: crate::llm_util::EmbedCache,
 }
 
-/// 界面上的一步（#942）。
+/// A step shown on the UI (#942).
 ///
-/// `kind` 与 `label`（数据：查询、实体名、来源名）照旧；`detail` 是给存量消息和不做
-/// 本地化的读者的英文。界面按结构化字段用读者的语言说（0004）：`status`、`count` /
-/// `total`、时间点，以及个别步骤自己的几样。**成功的一步也写 `status: ok`**——有
-/// status 的按字段说，没有的（这之前存下的消息）退回 detail
+/// `kind` and `label` (data: query, entity name, source name) stay as they are; `detail` is English, for stored messages and for
+/// readers without localization. The UI speaks to the reader in their language from the structured fields (0004): `status`, `count` /
+/// `total`, moments in time, and a few fields specific to individual steps. **A successful step also writes `status: ok`**: steps with
+/// a status are described by their fields, and those without one (messages stored before this) fall back to detail
 pub(crate) struct Step(serde_json::Map<String, serde_json::Value>);
 
 impl Step {
@@ -134,22 +134,22 @@ impl Step {
         self.field("count", n)
     }
 
-    /// 列出来的少于有的：`count` of `total`
+    /// Fewer listed than exist: `count` of `total`
     pub(crate) fn total(self, n: usize) -> Self {
         self.field("total", n)
     }
 
-    /// 参数不对，这次调用什么也没做。`param` 是哪一个——参数名是数据，界面照写
+    /// Bad arguments: this call did nothing. `param` is which one; the parameter name is data, and the UI prints it as is
     pub(crate) fn invalid(self, param: &str) -> Self {
         self.status("invalid").field("param", param)
     }
 
-    /// 参数没给，或给的是空的
+    /// Argument missing, or given as empty
     pub(crate) fn missing(self, param: &str) -> Self {
         self.invalid(param).field("missing", true)
     }
 
-    /// 截在上限、总数不知道（「40+」）
+    /// Cut off at the limit, total unknown ("40+")
     pub(crate) fn more(self, more: bool) -> Self {
         if more {
             self.field("more", true)
@@ -158,11 +158,11 @@ impl Step {
         }
     }
 
-    /// 世界轴的时刻写作 `valid_at`，记录轴写 `before` 或 `as_of`。给了 before 就只写
-    /// before：那是人问的那一刻，as_of 是从它减了一微秒算出来的。
+    /// A moment on the world axis is written as `valid_at`, and on the recording axis as `before` or `as_of`. If before is given, only
+    /// before is written: that is the moment the person asked about, and as_of is computed by subtracting one microsecond from it.
     ///
-    /// **世界轴那个不能叫 `at`**：对话落库的每一步都有 `at`——这一步发生时正文已有多长
-    /// （UTF-16 码元），回放靠它把轨迹穿回正文；写进来会被它覆盖
+    /// **The world-axis key cannot be called `at`**: every step the conversation stores carries `at`—how long the body was when this step happened
+    /// (UTF-16 code units), which replay uses to thread the trace back into the body; writing it here would overwrite that
     pub(crate) fn moments(
         mut self,
         at: Option<chrono::DateTime<chrono::Utc>>,
@@ -193,7 +193,7 @@ impl Step {
     }
 }
 
-/// 一次调用的文本、界面步骤与可选机器读取结果；不放进跨调用累计的 ToolSink。
+/// One call's text, UI steps, and optional machine-readable result; not put into the ToolSink that accumulates across calls.
 pub struct ToolResult {
     pub text: String,
     pub step: serde_json::Value,
@@ -222,8 +222,8 @@ impl ToolResult {
     }
 }
 
-/// 按名字派发。**未知工具不是错误**——模型偶尔会编一个名字出来，
-/// 告诉它没有这个工具，它下一轮就换一个，比中断整场对话好。
+/// Dispatch by name. **An unknown tool is not an error**: the model occasionally invents a name,
+/// and telling it that no such tool exists means it picks another one next turn, which is better than interrupting the whole conversation.
 pub async fn dispatch(
     ctx: &ToolCtx<'_>,
     sink: &mut ToolSink,
@@ -240,9 +240,9 @@ pub async fn dispatch(
         "timeline" => super::tools_graph::timeline(ctx, sink, args).await,
         "paths_between" => super::tools_graph::paths_between(ctx, sink, args).await,
         "changes" => changes(ctx, args).await,
-        // 业务规则只读（0021）：判据要看得见，但**写规则不开给模型**——
-        // 「推理的判据由人写」是 0002 与 0021 共同的那条线，而一个工具调用
-        // 分不出「人口述、agent 代打」与「模型自己编了一条」
+        // Business rules are read-only (0021): their criteria must be visible, but **writing rules is not opened to the model**:
+        // "reasoning criteria are written by people" is the line shared by 0002 and 0021, and a single tool call
+        // cannot tell "a person dictated it, an agent typed it for them" from "the model made up a rule"
         "list_rules" => list_rules(ctx).await,
         "rule_matches" => rule_matches(ctx, args).await,
         "query_data" if !ctx.mounted_sources.is_empty() => query_data(ctx, args).await,
@@ -256,8 +256,8 @@ pub async fn dispatch(
     }
 }
 
-/// 已经引过的给回原号，没引过的落一个新号。**同一个 chunk 在一轮对话里
-/// 只能有一个号**，否则模型引 `[2]` 而界面上有两个 `[2]`。
+/// Something already cited returns its original number; one not yet cited gets a new number. **The same chunk may have only one number
+/// in a conversation turn**, otherwise the model cites `[2]` and the UI shows two `[2]`s.
 pub(super) fn cite(
     sink: &mut ToolSink,
     key: String,
@@ -276,12 +276,12 @@ pub(super) fn cite(
 const QUOTES_PER_SOURCE: usize = 8;
 const QUOTE_CHARS: usize = 400;
 
-/// 给第 `n` 条来源补一句它说出的话（#968 的后续）：号打开的是那一块，`quotes` 是块里被
-/// 引到的那几句，界面按它们在原文里标出来。同一块一个号，块里被引到几句就记几句，去重、
-/// 按引用的先后；检索先登记的块没有这一格，图谱再引到它时补上
+/// Adds a sentence the source said to the n-th source (follow-up to #968): the number opens that chunk, and `quotes` are the sentences
+/// in the chunk that were cited, which the UI marks in the original text. One number per chunk; as many sentences as are cited in the chunk are recorded, deduplicated,
+/// in citation order. A chunk that retrieval registered first lacks this cell; it is filled in when the graph cites it later
 ///
-/// 两个上限：清单每调一次工具就整份重发一遍，收尾那次请求也带着它，一块里抽出几十条事实
-/// 不该让它跟着长。超长的一句整句不记而不是截断——界面按原文找这句话，截过的找不到
+/// Two caps: the list is re-sent in full on each tool call, and the closing request carries it too, so a chunk yielding dozens of facts
+/// must not let it grow. A sentence that is too long is not recorded in full rather than truncated: the UI finds the sentence in the original text, and a truncated one cannot be found
 pub(super) fn add_quote(sink: &mut ToolSink, n: usize, quote: &str) {
     if quote.chars().count() > QUOTE_CHARS {
         return;
@@ -307,11 +307,11 @@ pub async fn search_chunks(
     sink: &mut ToolSink,
     args: &serde_json::Value,
 ) -> ToolResult {
-    // 必填参数由 `chat::check_call` 在派发之前挡下，所以这里不再回落到
-    // 用户那句原话——回落产出的是一个看起来没问题的错误答案
+    // Required parameters are blocked by `chat::check_call` before dispatch, so there is no fallback here
+    // to the user's original words: the fallback would produce a wrong answer that looks fine
     let q = args["query"].as_str().unwrap_or_default().to_string();
-    // 记录轴（0019 / #347）：只搜那一刻库里有的东西。全文那一路仍是"现在"，
-    // 命中不会错但会缺——retrieval.rs 的头上写了
+    // Recording axis (0019 / #347): search only what the store held at that moment. The full-text path is still "now",
+    // so hits are not wrong but may be missing: retrieval.rs's header says so
     let as_of = args["as_of"].as_str().and_then(parse_when);
     let chunks = match retrieval::hybrid(
         ctx.state,
@@ -338,7 +338,7 @@ pub async fn search_chunks(
     let mut lines = Vec::new();
     for c in &chunks {
         let n = cite(sink, c.id.to_string(), |n| source_json(n, c));
-        // 行里带 document_id：命中被切在 800 字上时，模型得有办法把整篇要回去
+        // Rows carry document_id: when a hit is cut at 800 characters, the model needs a way to fetch the whole document
         lines.push(format!(
             "[{n}] \"{}\" section {} (document_id: {}):\n{}",
             c.filename,
@@ -370,9 +370,9 @@ pub async fn search_chunks(
     }))
 }
 
-/// 一篇文档的全文。**search_chunks 够不到的东西全在这里**：它只回前六条命中、
-/// 每条切在 800 字上，答案落在第 801 字或落在没排上的那一块时，检索本身没错，
-/// 错在没有第二步。
+/// The full text of one document. **Everything search_chunks cannot reach is here**: it returns only the top six hits,
+/// each cut at 800 characters; when the answer falls at character 801 or in a chunk that did not make the list, retrieval itself is not wrong,
+/// the fault is the lack of a second step.
 pub async fn get_document(
     ctx: &ToolCtx<'_>,
     sink: &mut ToolSink,
@@ -406,7 +406,7 @@ pub async fn get_document(
             offset
         }
     };
-    // 本库之外的 id 一律当作不存在——分不出「没有」和「不给你看」才是对的
+    // Ids outside this library are all treated as nonexistent: being unable to tell "none" from "not allowed to see" is the correct behaviour
     let doc = match utopia_store::documents::find_in_kb(&ctx.state.pool, ctx.kb_id, id).await {
         Ok(Some(doc)) => doc,
         Ok(None) => return refuse(Step::new("document", "?", "not found").status("not_found")),
@@ -441,15 +441,15 @@ pub async fn get_document(
     for c in &chunks {
         let body = c.text.trim();
         let len = body.chars().count();
-        // offset 只数按顺序拼接的正文，不数标题、引证和分块之间的排版。
+        // The offset counts only the body as concatenated in order; it does not count headings, citations, or layout between chunks.
         if offset > 0 && skip >= len {
             skip -= len;
             continue;
         }
         let remaining = len - skip;
         let room = DOCUMENT_CHARS.saturating_sub(used);
-        // 装不下的分块整块不发，也不引——发一个引证编号出去而正文不在，
-        // 界面上落成一条指不到东西的引证
+        // A chunk that does not fit is not sent whole, nor cited: sending a citation number whose body is absent
+        // would show up in the UI as a citation pointing at nothing
         if room == 0 {
             omitted += remaining;
             continue;
@@ -510,10 +510,10 @@ pub async fn search_docs(
     sink: &mut ToolSink,
     args: &serde_json::Value,
 ) -> ToolResult {
-    // 必填参数由 `chat::check_call` 在派发之前挡下，所以这里不再回落到
-    // 用户那句原话——回落产出的是一个看起来没问题的错误答案
+    // Required parameters are blocked by `chat::check_call` before dispatch, so there is no fallback here
+    // to the user's original words: the fallback would produce a wrong answer that looks fine
     let q = args["query"].as_str().unwrap_or_default().to_string();
-    // Tantivy 是同步的，放到阻塞线程池上，别占 runtime 线程（#515，与 retrieval.rs 同理）
+    // Tantivy is synchronous, so put it on the blocking thread pool rather than tying up a runtime thread (#515, same reasoning as retrieval.rs)
     let hits = {
         let docs = ctx.state.docs.clone();
         let q = q.clone();
@@ -547,8 +547,8 @@ pub async fn search_docs(
     )
 }
 
-/// 这个库的判据。**把阈值原样给出来**——模型要能解释「凭什么算含气井」，
-/// 而不是猜一个听起来合理的门槛。
+/// This library's criteria. **Give the thresholds exactly as they are**: the model must be able to explain "why is this counted as a gas well",
+/// rather than guessing a plausible-sounding threshold.
 pub async fn list_rules(ctx: &ToolCtx<'_>) -> ToolResult {
     let Ok(rules) = utopia_store::business_rules::list(&ctx.state.pool, ctx.kb_id).await else {
         return ToolResult::new(
@@ -683,7 +683,7 @@ pub async fn list_rules(ctx: &ToolCtx<'_>) -> ToolResult {
         text = "This base has no business rules.".to_string();
     }
     if !axioms.is_empty() {
-        // 声明存在不等于本库正在据此派生；关闭开关时仍列定义，但必须说明没有执行。
+        // A declared rule is not the same as this library actually deriving from it: with the switch off, the definitions are still listed, but it must say nothing was run.
         let Ok(kb) = utopia_store::kbs::get(&ctx.state.pool, ctx.kb_id).await else {
             return ToolResult::new(
                 "Could not read the rules.".to_string(),
@@ -721,7 +721,7 @@ pub async fn list_rules(ctx: &ToolCtx<'_>) -> ToolResult {
     )
 }
 
-/// 一条规则此刻标了谁。**前提一起给**：结论没有前提就跟一条凭空的断言没区别。
+/// A rule's current tagging: who. **The premises are given too**: a conclusion without its premises is no different from an unsupported assertion.
 pub async fn rule_matches(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResult {
     let Some(rule_id) = args["rule_id"]
         .as_str()
@@ -798,7 +798,7 @@ pub async fn rule_matches(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolRe
         })
         .collect::<Vec<_>>()
         .join("\n");
-    // 截断要说出来：模型看到 50 条会当成全部，而库里可能有两百
+    // Truncation must be said: the model seeing 50 entries will take them as all of them, while the library may have two hundred
     let text = if total > rows.len() as i64 {
         format!("{text}\n(showing {} of {total} matches)", rows.len())
     } else {
@@ -812,7 +812,7 @@ pub async fn rule_matches(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolRe
     )
 }
 
-/// 两个按行分页的工具共用边界：数据库 OFFSET 收 i64，内存分页收 usize。
+/// The two row-paged tools share the bounds: the database OFFSET takes i64, in-memory paging takes usize.
 pub(super) fn page_offset(args: &serde_json::Value, kind: &str) -> Result<usize, ToolResult> {
     match args.get("offset") {
         None => Ok(0),
@@ -836,8 +836,8 @@ pub async fn changes(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResult 
         Ok(offset) => offset,
         Err(result) => return result,
     };
-    // 两端与 `at` 同一种写法：YYYY / YYYY-MM / YYYY-MM-DD。`since` 取那一段的第一天，
-    // `until` 取最后一天——「2023 年有什么变化」不该逼模型编一个 12 月 31 日
+    // Both ends use the same notation as `at`: YYYY / YYYY-MM / YYYY-MM-DD. `since` takes the first day of that span,
+    // `until` takes the last day. "What changed in 2023" should not force the model to invent a December 31
     let since = args["since"]
         .as_str()
         .and_then(utopia_extract::parse_time)
@@ -846,7 +846,7 @@ pub async fn changes(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResult 
         .as_str()
         .and_then(utopia_extract::parse_time)
         .map(|(t, p)| period_last_day(t.date_naive(), p));
-    // 窗口的两头按问的那天交给界面：label 里的 "now" 是英文
+    // Both ends of the window go to the UI with the day that was asked about: the "now" in the label is English
     let (since_day, until_day) = (since, until);
     let Some((since, until, window)) = changes_window(since, until, chrono::Utc::now()) else {
         return ToolResult::new(
@@ -890,7 +890,7 @@ pub async fn changes(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResult 
             .error();
         }
     };
-    // 满一页不等于还有下一页；多读的一条只用来给出续读位置。
+    // A full page does not mean there is a next page; the one extra row read is only used to give the position for reading on.
     let more = rows.len() as i64 > CHANGES_LIMIT;
     rows.truncate(CHANGES_LIMIT as usize);
     let next_offset = more.then(|| offset + rows.len());
@@ -900,8 +900,8 @@ pub async fn changes(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResult 
         format!("No recorded changes in {window}.")
     } else {
         let mut lines: Vec<String> = rows.iter().map(change_line).collect();
-        // 取的是**最近**的四十条，更早的被截掉。不说的话模型会把这四十条当成窗口的
-        // 全部，而要找的那次更正可能正好在更早的地方
+        // It takes the **most recent** forty entries; earlier ones are cut off. Without saying so, the model would treat these forty as the window's
+        // entirety, when the correction it is looking for may be earlier
         if let Some(next) = next_offset {
             let page = if offset == 0 {
                 format!("Only the {CHANGES_LIMIT} most recent changes in this window are listed")
@@ -952,7 +952,7 @@ pub async fn query_data(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResu
     let ds_name = args["data_source"].as_str().map(str::trim).unwrap_or("");
     let sql = args["sql"].as_str().map(str::trim).unwrap_or("");
     let purpose = args["purpose"].as_str().map(str::trim).unwrap_or("");
-    // 安全边界：只允许本 KB 挂载的源（凭据不出服务端）
+    // Security boundary: only sources mounted on this KB are allowed (credentials never leave the server)
     let found = ctx
         .mounted_sources
         .iter()
@@ -962,8 +962,8 @@ pub async fn query_data(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResu
     } else {
         purpose.to_string()
     };
-    // 界面上的这一步带着写下的那条 SQL（#936）：读者能展开看到数是怎么算出来的；
-    // 查询出错、源不存在各是一种结果，不再和「查到了」长得一样
+    // The step on the UI carries the SQL that was written (#936): a reader can expand it and see how the number was computed;
+    // a query error and a missing source are each a result of their own, no longer looking the same as "found it"
     let step = Step::new("query", ds_name, detail).field("sql", sql);
     let (text, step) = match found {
         None => (
@@ -982,7 +982,7 @@ pub async fn query_data(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResu
                 query_text(&result),
                 step.count(result.rows.len()).more(result.truncated),
             ),
-            // 错误透传：模型可据此修正 SQL 重试
+            // Errors pass through: the model can correct the SQL and retry on that basis
             Err(e) => (format!("Query failed: {e}"), step.status("failed")),
         },
     };
@@ -990,13 +990,13 @@ pub async fn query_data(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResu
 }
 
 pub async fn remember(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResult {
-    // NUL 在入口就剥（#665）：`append_episode` 自己也剥，但这里拼的回复与卡片详情
-    // 用的是同一份文本——对话里它们要落进会话记录，Postgres 的 TEXT 与 JSONB 一样
-    // 不收 0x00，一轮对话会因为回显了几个字节而存不下来
+    // NUL is stripped at the entry (#665): `append_episode` strips it too, but the reply assembled here and the card details
+    // use the same text. In conversation they are stored in the session record, and Postgres TEXT, like JSONB,
+    // does not accept 0x00, so a turn could fail to be stored just because it echoed a few bytes
     let text = utopia_core::without_nul(args["text"].as_str().unwrap_or(""));
     let text = text.trim();
-    // 与 `at` 同一种写法：YYYY / YYYY-MM / YYYY-MM-DD 或 RFC3339。日期落在那段第一天的
-    // 正午——离两边的日界都最远；时刻照给的。回显按给的精度写，不把「2023 年」说成 1 月 1 日
+    // Same notation as `at`: YYYY / YYYY-MM / YYYY-MM-DD or RFC3339. A date lands at the noon of the span's first day, which is farthest from both day boundaries;
+    // a moment is given as is. The echo is written at the precision given, so "2023" is not presented as 1 January
     let (occurred_at, occurred_text) = match args["occurred_at"].as_str().map(str::trim) {
         Some(s) if !s.is_empty() => match utopia_extract::parse_time(s) {
             Some((d, precision)) => (
@@ -1032,9 +1032,9 @@ pub async fn remember(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResult
     match utopia_store::memory::append_episode(&ctx.state.pool, ctx.kb_id, text, occurred_at).await
     {
         Ok((doc_id, chunk_id)) => {
-            // 摄入(embedding/索引/增量抽取)异步走队列，不阻塞对话。
-            // 抽出来的事实**先等人点头**（0015）——所以这里只能如实说「记下了这句话」，
-            // 说不出抽出了几条：抽取还没跑。卡片在任务完成时长到对话里
+            // Ingestion (embedding / indexing / incremental extraction) runs asynchronously through the queue and does not block the conversation.
+            // Extracted facts **wait for a person's nod first** (0015), so here it can only honestly say "this sentence was recorded",
+            // and cannot say how many were extracted: extraction has not yet run. The card grows into the conversation when the task completes
             let _ = utopia_store::jobs::enqueue(
                 &ctx.state.pool,
                 "memory_ingest",
@@ -1055,7 +1055,7 @@ pub async fn remember(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResult
                      any fact has been added to the knowledge graph.",
                     occurred_text
                 ),
-                // 对话里那张确认卡按 chunk_id 取待确认项；回放时也据此重画
+                // The confirmation card in the conversation takes its pending item by chunk_id; replay also redraws it from that
                 Step::new(
                     "tool",
                     "remember",
@@ -1076,7 +1076,7 @@ pub async fn remember(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> ToolResult
 }
 
 // ---------------------------------------------------------------------------
-// 排版与执行的辅助。**对话降级路径也用它们**，所以是 pub(super) 而不是私有
+// Helpers for layout and execution. **The conversation's degraded path uses them too**, which is why they are pub(super) rather than private
 // ---------------------------------------------------------------------------
 
 pub(super) fn source_json(n: usize, c: &ChunkView) -> serde_json::Value {
@@ -1089,7 +1089,7 @@ pub(super) fn source_json(n: usize, c: &ChunkView) -> serde_json::Value {
     })
 }
 
-/// Charter 引用：前端渲染成手册行，链到 /docs/{slug}#{anchor}。
+/// Charter reference: the frontend renders it as a manual line, linking to /docs/{slug}#{anchor}.
 pub(super) fn charter_source_json(n: usize, h: &utopia_search::DocsSection) -> serde_json::Value {
     json!({
         "n": n,
@@ -1102,26 +1102,26 @@ pub(super) fn charter_source_json(n: usize, h: &utopia_search::DocsSection) -> s
     })
 }
 
-/// 问数执行：安全闸（解析白名单）→ 引擎执行（只读会话 + 强制 LIMIT + 超时）→ JSON 行。
+/// Data-query execution: safety gate (parse allowlist) → engine execution (read-only session + forced LIMIT + timeout) → JSON rows.
 pub(crate) async fn run_query(state: &AppState, ds_id: Uuid, sql: &str) -> anyhow::Result<String> {
     Ok(query_text(&execute_query(state, ds_id, sql).await?))
 }
 
-/// 同 `run_query`，但交回行与截断标记本身：对话里那一步要行数和截断（#936）
+/// The same as `run_query`, but hands back the rows and the truncation flag themselves: the step in conversation needs the row count and truncation (#936)
 async fn execute_query(
     state: &AppState,
     ds_id: Uuid,
     sql: &str,
 ) -> anyhow::Result<crate::query_engine::QueryResult> {
     let (engine, conn) = utopia_store::datasources::engine_and_conn(&state.pool, ds_id).await?;
-    // 闸门按引擎选方言：Databricks 的反引号、Snowflake 的 :: 转型都得先过得了解析
+    // The gate picks a dialect per engine: Databricks' backticks and Snowflake's :: casts must both pass the parser first
     let guarded = crate::query_engine::guard_sql_for(&engine, sql)?;
     crate::query_engine::engine_for(&engine, &conn)?
         .execute(&guarded)
         .await
 }
 
-/// 结果给模型读的样子：每行一个 JSON 对象，末尾是行数与截断说明
+/// The shape of the result as the model reads it: one JSON object per row, with the row count and truncation note at the end
 fn query_text(result: &crate::query_engine::QueryResult) -> String {
     let mut out = String::new();
     if result.rows.is_empty() {
@@ -1140,8 +1140,8 @@ fn query_text(result: &crate::query_engine::QueryResult) -> String {
     out
 }
 
-/// 时间线关上一行时接任的那一端怎么写（#970 第二步）：接任者或新宾语的名字，属性事实是
-/// 新的值，写法同事实行上的字面值（`literal_text`）
+/// How the end that succeeds a line is written when the timeline closes that line (#970 step 2): the successor's name, or the new object;
+/// an attribute fact's new value is written the same way as the literal on a fact line (`literal_text`)
 pub(super) fn successor_text(
     name: Option<&str>,
     value: Option<&serde_json::Value>,
@@ -1150,12 +1150,12 @@ pub(super) fn successor_text(
         .or_else(|| value.and_then(literal_text))
 }
 
-/// 事实行："works at → 星云科技 (2023-08 → now) [90%]"，in 方向用 ←。`closer_mark` 是关上
-/// 它的那一行证据的号（对话里 ` [n]`，MCP 与没有证据时为空）
+/// A fact line: "works at → Nebula Tech (2023-08 → now) [90%]", with the in direction shown as ←. `closer_mark` is the number
+/// of the evidence line that closed it (` [n]` in conversation; empty in MCP and when there is no evidence)
 pub(super) fn fact_line(f: &EntityFact, closer_mark: &str) -> String {
-    // 属性事实没有对端实体，值在 `object_value` 里（0004）。从前这里只看 `other_name`，
-    // 于是薪资、职位到了模型眼前是 `salary → ?`——区间和置信度都在，唯独值没到，
-    // 模型只能说"没有薪资信息"（#348）。渲染规则与客户端 `fmtObjectValue` 一致
+    // An attribute fact has no counterpart entity; the value lives in `object_value` (0004). Previously this looked only at `other_name`,
+    // so salary and title reached the model as `salary → ?`: the interval and confidence were there, but the value was not, and
+    // the model could only say "no salary information" (#348). The rendering rule matches the client's `fmtObjectValue`
     let literal = f
         .object_value
         .as_ref()
@@ -1166,8 +1166,8 @@ pub(super) fn fact_line(f: &EntityFact, closer_mark: &str) -> String {
         .as_deref()
         .or(literal.as_deref())
         .unwrap_or("?");
-    // 边上的属性（0037）跟在对端后面：`invested_in → Kestrel [amount: 4000000000 $]`。
-    // 模型读事实行时最常问的就是"投了多少"，数不在行里它就答"没有金额信息"
+    // Attributes on an edge (0037) follow the counterpart: `invested_in → Kestrel [amount: 4000000000 $]`.
+    // The most common question when reading a fact line is "how much was invested"; if the figure is not on the line, the model answers "no amount information"
     let quals: Vec<String> = f
         .qualifiers
         .iter()
@@ -1186,16 +1186,16 @@ pub(super) fn fact_line(f: &EntityFact, closer_mark: &str) -> String {
     } else {
         format!("{other} [{}]", quals.join(", "))
     };
-    // 本体没认下、原文说法也没留下时用 "?"——与 other 同一个约定。
-    // 不编一个"相关"出来：那正是删掉 related_to 要消灭的东西
+    // When the ontology did not catch it and the original wording was not kept, use "?", the same convention as other
+    // Do not invent a "related": that is exactly what removing related_to was meant to eliminate
     let pred = f.predicate_label.as_deref().unwrap_or("?");
     let core = if f.direction == "out" {
         format!("{pred} → {other}")
     } else {
         format!("{pred} ← {other}")
     };
-    // 两端各按自己的精度写；没起点的从证据起，结束了不知哪天的到说出它的那份文档为止
-    //（time_text，0022）。从前一律 %Y-%m-%d，年精度印成 1 月 1 日、结束未知印成 now
+    // Each end is written at its own precision; a start that is missing runs from the evidence, and an end of unknown date runs up to the document that states it
+    //(time_text, 0022). It used to be %Y-%m-%d throughout, which printed a year-precision date as 1 January and an unknown end as now
     let successor = successor_text(f.closed_by.as_deref(), f.closed_by_value.as_ref());
     let range = crate::time_text::span(crate::time_text::Span {
         valid_from: f.valid_from,
@@ -1217,14 +1217,14 @@ pub(super) fn fact_line(f: &EntityFact, closer_mark: &str) -> String {
     format!("{core}{range} [{}%]", (f.confidence * 100.0).round() as i32)
 }
 
-// 记录轴上的两次更正可以发生在同一秒；输出必须能原样交回 as_of，不能截到天或秒。
+// Two changes on the recording axis can happen within the same second; the output must be able to go back into as_of unchanged, so it cannot be truncated to day or second.
 fn record_stamp(time: chrono::DateTime<chrono::Utc>) -> String {
     crate::time_text::instant(time)
 }
 
-/// 严格早于 T，按账本的分辨率（timestamptz 是微秒）：不晚于 T − 1µs。
-/// `recorded_at <= T−1µs` 恰好是 `recorded_at < T`，`invalidated_at > T−1µs` 恰好是
-/// `invalidated_at >= T`——0019 的 held_at 一个字不用改
+/// Strictly before T, at the ledger's resolution (timestamptz is microseconds): no later than T − 1µs.
+/// `recorded_at <= T−1µs` is exactly `recorded_at < T`, and `invalidated_at > T−1µs` is exactly
+/// `invalidated_at >= T`: 0019's held_at does not change a word
 pub(super) fn just_before(t: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
     t - chrono::Duration::microseconds(1)
 }
@@ -1235,7 +1235,7 @@ pub(super) fn entity_facts_detail(
     as_of: Option<chrono::DateTime<chrono::Utc>>,
     before: Option<chrono::DateTime<chrono::Utc>>,
 ) -> String {
-    // 记录轴那半句：给了 before 就说「before T」，是人问的那个时刻，不是减过一微秒的
+    // The recording-axis clause: if before was given, say "before T", the moment the person asked about, not the one minus one microsecond
     let record = match (before, as_of) {
         (Some(b), _) => Some(format!("as recorded before {}", record_stamp(b))),
         (None, Some(r)) => Some(format!("as recorded by {}", record_stamp(r))),
@@ -1249,24 +1249,24 @@ pub(super) fn entity_facts_detail(
     }
 }
 
-/// 时刻参数：`YYYY-MM-DD` 或 RFC3339。`at` 与 `as_of` 共用一个解析——记录轴上的
-/// 时刻常常是一个带时间的戳（"第一波灌完那一刻"），日期粒度装不下它
+/// The moment parameter: `YYYY-MM-DD` or RFC3339. `at` and `as_of` share one parse; a moment on the recording axis
+/// is often a timestamp with a time ("the moment the first wave finished ingesting"), which day precision cannot hold
 pub(super) fn parse_when(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let s = raw.trim();
-    // 完整的 RFC3339 时刻原样收下，小数秒也留着——记录轴上同一秒内可以先录入再更正
-    // （#351），这里截掉一位就把两次认知叠回一起。日期形式（YYYY / YYYY-MM / YYYY-MM-DD，
-    // 或带时区的缩略钟点）才交给抽取端同一个解析，取那一段的开头
+    // A full RFC3339 moment is accepted as given, with fractional seconds kept: within one second on the recording axis, an entry can be made before it is corrected
+    // (#351), and cutting one digit here would fold the two beliefs back together. Date forms (YYYY / YYYY-MM / YYYY-MM-DD,
+    // or an abbreviated time with a zone) are handed to the same parser the extraction side uses, taking the start of that span
     if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
         return Some(t.with_timezone(&chrono::Utc));
     }
     utopia_extract::parse_time(s).map(|(d, _)| d)
 }
 
-/// 字面值宾语给模型看的样子：`{value, unit}` → "28000 CNY"，布尔 → ✓/✗，
-/// 映射那类 `{summary}` → 摘要本身。与 `web/src/pages/Graph.tsx::fmtObjectValue` 同一条规则，
-/// 两边分叉的话，人看到的和模型看到的就不是同一个值
+/// How a literal object is shown to the model: `{value, unit}` → "28000 CNY", boolean → ✓/✗,
+/// and mapping-type `{summary}` → the summary itself. The same rule as `web/src/pages/Graph.tsx::fmtObjectValue`;
+/// if the two sides diverge, what people see and what the model sees are no longer the same value
 pub(super) fn literal_text(v: &serde_json::Value) -> Option<String> {
-    // 裸标量（`changes` 那头的旧数据长这样）：字符串读成它自己，不带引号
+    // A bare scalar (old data in `changes` looks like this): a string is read as itself, without quotes
     match v {
         serde_json::Value::Null => return None,
         serde_json::Value::String(s) => return Some(s.clone()),
@@ -1298,15 +1298,15 @@ pub(super) fn literal_text(v: &serde_json::Value) -> Option<String> {
     Some(v.to_string())
 }
 
-/// changes 的时间窗：把两个可选日期变成 (SQL 用的半开区间, 展示用的窗口串)。
+/// The time window for changes: turns two optional dates into (the half-open interval for SQL, the window string for display).
 ///
-/// **抽成纯函数是因为这里出过一次错。** `until` 进 SQL 前要加一天（说"到 3 月 31 日
-/// 为止"的人要的是含 31 日，而 SQL 那头是 `< $3`），第一版把加过一天的值也印进了
-/// 展示串，模型于是照着答"截至 8 月 30 日"——问的是 29 日。两个值必须一起算、
-/// 一起被测住；分在两处写，迟早再次分叉。
+/// **Extracted as a pure function because this once went wrong.** `until` gets a day added before it goes into SQL (a person saying "up to March 31"
+/// wants the 31st included, while the SQL side is `< $3`). The first version also printed the value with the day added into
+/// the display string, and the model therefore answered "up to August 30", when the question was about the 29th. The two values must be computed together
+/// and tested together; written in two places they would diverge again sooner or later
 ///
-/// `now` 从外面传进来而不是在里面取，纯粹是为了这个函数测得动。
-/// 一段（年 / 月 / 日）的最后一天：`until=2023` 是到 12 月 31 日为止，含那一整天。
+/// `now` is passed in from outside rather than read inside, purely so this function can be tested
+/// The last day of a span (year / month / day): `until=2023` means up to December 31, including that whole day.
 fn period_last_day(first: chrono::NaiveDate, precision: &str) -> chrono::NaiveDate {
     use chrono::Datelike;
     match precision {
@@ -1340,7 +1340,7 @@ fn changes_window(
         .and_then(|d| d.succ_opt())
         .map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc())
         .unwrap_or(now);
-    // 展示用的是**问的那天**，没问就写 now——绝不是 end
+    // The display uses **the day asked about**; if nothing was asked, it writes now: never the end
     let label = format!(
         "{} → {}",
         from.format("%Y-%m-%d"),
@@ -1352,14 +1352,14 @@ fn changes_window(
     Some((start, end, label))
 }
 
-/// 认知轴上的一行。
+/// One line on the knowledge axis.
 ///
-/// 排版把两根轴**分开写**：`at` 前面标事件类型，世界轴的区间夹在括号里跟在断言后。
-/// 若把它们排成一串日期，模型会把"2026 年记下的"读成"2026 年发生的"——那正是
-/// 这个工具要防的误读。
+/// Layout writes the two axes **separately**: `at` is preceded by the event type, and the world-axis interval sits in brackets after the assertion.
+/// If they were arranged as a string of dates, the model would read "recorded in 2026" as "happened in 2026", which is exactly
+/// the misreading this tool exists to prevent.
 fn change_line(c: &GraphChange) -> String {
-    // 字面值宾语与 `fact_line` 同一条规则（`literal_text`）：两个工具看到的
-    // 不能是两种写法，否则 `{value, unit}` 在这里会印成一段 JSON
+    // A literal object follows the same rule as `fact_line` (`literal_text`): the two tools the model sees must not
+    // use two different notations, or `{value, unit}` would print here as a block of JSON
     let object_text = |name: &Option<String>, value: &Option<serde_json::Value>| match (name, value)
     {
         (Some(name), _) => name.clone(),
@@ -1375,7 +1375,7 @@ fn change_line(c: &GraphChange) -> String {
     } else {
         object
     };
-    // 世界轴两端按自己的精度写（time_text）；事件行上没有锚点，结束未知只能写成话
+    // Both ends of the world axis are written at their own precision (time_text); an event line has no anchor, so an unknown end can only be written as words
     let range = crate::time_text::span(crate::time_text::Span {
         valid_from: c.valid_from,
         from_precision: c.valid_from_precision.as_deref(),
@@ -1383,7 +1383,7 @@ fn change_line(c: &GraphChange) -> String {
         to_precision: c.valid_to_precision.as_deref(),
         holds_from: None,
         holds_to: None,
-        // 记录轴上的一次变更，不是事实行：它自己就说了改的是什么
+        // One change on the recording axis, not a fact line: it says for itself what was changed
         end_derived: false,
         corrected: None,
         closed_by: None,
@@ -1394,8 +1394,8 @@ fn change_line(c: &GraphChange) -> String {
     } else {
         format!(" [valid {range}]")
     };
-    // 文件名不带 [n]：引证编号是 chunk 的，这里只有 document，发一个编号出去
-    // 会在界面上落成一条指不到东西的引证
+    // The file name carries no [n]: citation numbers belong to chunks, and here there is only a document, so sending a number out
+    // would show up in the UI as a citation pointing at nothing
     let src = match (&c.filename, &c.quote) {
         (Some(f), Some(q)) => format!(" — from \"{f}\": \"{}\"", truncate(q, 160)),
         (Some(f), None) => format!(" — from \"{f}\""),
@@ -1436,8 +1436,8 @@ mod tests {
 
     // --- parse_when -------------------------------------------------------------
 
-    /// `at` 与 `as_of` 共用一个解析：日期按当天零点，RFC3339 原样；别的一律 None，
-    /// 不猜——猜出来的时刻会安静地把问题答到另一天上
+    /// `at` and `as_of` share one parse: a date becomes the start of that day, RFC3339 is kept as is; anything else is None,
+    /// and nothing is guessed—a guessed moment would quietly answer the question for another day
     #[test]
     fn a_moment_is_a_date_or_an_rfc3339_stamp_and_nothing_else() {
         assert_eq!(parse_when("2024-08-01"), Some(t("2024-08-01T00:00:00Z")));
@@ -1451,8 +1451,8 @@ mod tests {
 
     // --- changes_window -----------------------------------------------------
 
-    /// 说"到 3 月 31 日为止"的人要的是**含 31 日**。SQL 那头是 `< end`，
-    /// 所以 end 必须落在 4 月 1 日零点——差这一天，问 31 日会安静地丢掉 31 日
+    /// Someone saying "up to March 31" wants **the 31st included**. The SQL side is `< end`,
+    /// so end must fall at midnight on April 1; without this day, asking about the 31st would quietly drop the 31st
     #[test]
     fn until_names_a_day_the_window_must_contain() {
         let (start, end, label) = changes_window(
@@ -1463,13 +1463,13 @@ mod tests {
         .unwrap();
         assert_eq!(start, t("2026-03-01T00:00:00Z"));
         assert_eq!(end, t("2026-04-01T00:00:00Z"));
-        // 但**展示串里绝不能出现 04-01**：那是半开区间的内部细节，
-        // 印出去等于告诉模型窗口比它要的宽一天，模型会照着答（这条真的发生过）
+        // But **April 1 must never appear in the display string**: that is an internal detail of the half-open interval;
+        // printing it would tell the model the window is a day wider than requested, and the model would answer on that basis (this really happened)
         assert_eq!(label, "2026-03-01 → 2026-03-31");
     }
 
-    /// 没给 until 时，展示串写 now。写成 end 的格式化结果就等于把服务器时钟
-    /// 当成用户问的边界——看着像个精确答案，其实只是"现在几点"
+    /// When until is not given, the display string says now. Formatting end would mean treating the server clock
+    /// as the boundary the user asked for—it looks like a precise answer, but is really just "what time it is now"
     #[test]
     fn an_open_window_says_now_rather_than_the_clock() {
         let now = t("2026-06-01T13:45:00Z");
@@ -1504,7 +1504,7 @@ mod tests {
         assert!(change_line(&c).ends_with("old: 7 kg → new: 8 kg"));
     }
 
-    /// 年精度的起点写成年，不再印成 1 月 1 日；结束了不知哪天绝不写 now
+    /// A start at year precision is written as the year, not printed as 1 January; an unknown end is never written as now
     #[test]
     fn a_change_line_shows_each_end_at_its_precision() {
         let mut c = change("asserted");
@@ -1529,7 +1529,7 @@ mod tests {
         assert_eq!(period_last_day(d("2024-02-01"), "month"), d("2024-02-29"));
         assert_eq!(period_last_day(d("2023-12-01"), "month"), d("2023-12-31"));
         assert_eq!(period_last_day(d("2023-06-15"), "day"), d("2023-06-15"));
-        // parse_when 与 at 同一种写法
+        // parse_when, the same notation as at
         assert_eq!(parse_when("2023"), Some(t("2023-01-01T00:00:00Z")));
         assert_eq!(parse_when("2023-06"), Some(t("2023-06-01T00:00:00Z")));
     }
@@ -1548,8 +1548,8 @@ mod tests {
             previous_object_value: None,
             valid_from: None,
             valid_to: None,
-            // 两端都没日期就没有精度——夹具也得守这条不变量（见 `facts.valid_from_precision`）
-            // 两端都没日期，所以两端都没有精度（见 facts 的两个精度列）
+            // With no dates at either end there is no precision—the fixture must uphold this invariant too (see `facts.valid_from_precision`)
+            // Neither end has a date, so neither end has a precision (see the two precision columns on facts)
             valid_from_precision: None,
             valid_to_precision: None,
             confidence: 0.9,
@@ -1560,7 +1560,7 @@ mod tests {
         }
     }
 
-    // 同一秒内也能先录入再更正；截到整秒会把这两次认知重新叠在一起。
+    // Within the same second one can also record first and correct later; truncating to the whole second would fold the two beliefs back together.
     #[test]
     fn change_stamps_round_trip_without_losing_the_record_clock() {
         let mut c = change("corrected");
@@ -1578,7 +1578,7 @@ mod tests {
         }
     }
 
-    /// `before` 减的是账本分辨率的一微秒——不是一秒、不是一天；摘要里写的是人问的那个时刻
+    /// `before` subtracts one microsecond at the ledger's resolution, not one second and not one day; the summary says the moment the person asked about
     #[test]
     fn before_is_the_microsecond_before_at_the_ledgers_resolution() {
         let t0 = t("2026-09-05T02:43:53.382Z");
@@ -1656,8 +1656,8 @@ mod tests {
         }
     }
 
-    /// 属性事实的值要到模型眼前（#348）。从前这里是 `salary → ? (2023-06-01 → 2024-02-20)`：
-    /// 区间和置信度都在，唯独值没到，模型只能说"没有薪资信息"——而账本里明明有
+    /// The value of an attribute fact has to reach the model's eyes (#348). Previously this was `salary → ? (2023-06-01 → 2024-02-20)`:
+    /// the interval and confidence were there, but the value was not, so the model could only say "no salary information"—even though the ledger had it
     #[test]
     fn an_attribute_fact_shows_the_model_its_value() {
         let line = fact_line(
@@ -1667,7 +1667,7 @@ mod tests {
         assert!(line.starts_with("salary → 28000 CNY"), "{line}");
         assert!(line.contains("(2023-06-01 → 2024-02-20)"), "{line}");
 
-        // 与客户端 fmtObjectValue 同一条规则：布尔画成 ✓/✗，映射摘要读摘要本身
+        // The same rule as the client's fmtObjectValue: a boolean is drawn as ✓/✗, and a mapping summary reads its summary
         let flag = fact_line(&attribute_fact(serde_json::json!({ "value": true })), "");
         assert!(flag.starts_with("salary → ✓"), "{flag}");
         let mapped = fact_line(
@@ -1677,7 +1677,7 @@ mod tests {
         assert!(mapped.starts_with("salary → orders.total"), "{mapped}");
     }
 
-    /// 本体没接住的关系仍然是 "?"：那个问号是给「没有谓词」留的，不是给「有值」用的
+    /// A relation the ontology did not catch is still "?": that question mark is for "no predicate", not for "has a value"
     #[test]
     fn a_missing_object_still_reads_as_a_question_mark() {
         let mut f = attribute_fact(serde_json::json!(null));
@@ -1689,8 +1689,8 @@ mod tests {
         );
     }
 
-    /// 字面值要读成它自己。走 `Value::to_string()` 会把字符串连引号一起印出来，
-    /// 模型于是把 `"1993"` 当成答案的一部分
+    /// A literal value is read as itself. Going through `Value::to_string()` would print the string with its quotes,
+    /// and the model would then treat `"1993"` as part of the answer
     #[test]
     fn a_literal_value_reads_as_itself_not_as_json() {
         let mut c = change("asserted");
@@ -1702,9 +1702,9 @@ mod tests {
         );
     }
 
-    /// 两根轴必须在同一行里**看得出是两样东西**：记录时刻在前、无标签，
-    /// 世界轴区间在后、带 `valid` 字样。排成一串裸日期，模型会把
-    /// "2026 年记下的"读成"2026 年发生的"——这个工具存在的理由就是防这个
+    /// The two axes must be **visibly two different things** on the same line: the recording moment first, unlabelled,
+    /// and the world-axis interval after it, marked with the word `valid`. If they were a run of bare dates, the model would
+    /// read "recorded in 2026" as "happened in 2026"—the very reason this tool exists is to prevent that
     #[test]
     fn the_record_time_and_the_valid_range_do_not_read_as_one_date_run() {
         let mut c = change("corrected");
@@ -1720,8 +1720,8 @@ mod tests {
         assert!(line.contains("[valid 2019-01-01 → now]"), "{line}");
     }
 
-    /// 没有证据就什么都别说。凭空补一句 from "…" 会让一条无出处的断言
-    /// 看起来有出处
+    /// With no evidence, say nothing at all. Inventing a from "…" would make an assertion with no provenance
+    /// look as if it had provenance
     #[test]
     fn a_fact_with_no_evidence_claims_no_document() {
         let mut c = change("rejected");

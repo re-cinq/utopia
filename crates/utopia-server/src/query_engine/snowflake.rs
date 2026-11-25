@@ -1,8 +1,8 @@
-//! Snowflake SQL API v2（`/api/v2/statements`）。同步提交（`async=false`）拿不完的
-//! 语句回 202，沿 statementHandle 轮询。值全是字符串，按 rowType 还原数与布尔。
+//! Snowflake SQL API v2 (`/api/v2/statements`). A statement that does not finish within the synchronous submission (`async=false`) returns 202,
+//! and is polled along statementHandle. Values are all strings, restored to numbers and booleans by rowType.
 //!
-//! 只收令牌，不收密码：programmatic access token 或 OAuth。密钥对 JWT 要本地签名，
-//! 这一版不做——见 `conn.rs`。
+//! Accepts only tokens, not passwords: a programmatic access token or OAuth. Key-pair JWTs would need local signing,
+//! which this version does not do: see `conn.rs`.
 
 use super::conn::SnowflakeConn;
 use super::{
@@ -35,7 +35,7 @@ struct Meta {
     row_type: Vec<RowType>,
     #[serde(rename = "numRows")]
     num_rows: Option<u64>,
-    /// 每条只描述分区的行数和大小；分区号是数组下标，后续请求使用 statementHandle。
+    /// Each describes only the row count and size of a partition; the partition number is the array index, and later requests use statementHandle.
     #[serde(rename = "partitionInfo")]
     partition_info: Option<Vec<PartitionInfo>>,
 }
@@ -47,17 +47,17 @@ struct RowType {
     ty: String,
 }
 
-/// 每个分区的行数，用于核对按数组下标获取的完整结果集。
+/// Row count of each partition, used to check the complete result set fetched by array index.
 #[derive(Deserialize, Clone)]
 struct PartitionInfo {
     #[serde(rename = "rowCount")]
     row_count: u64,
 }
 
-/// SQL API 把日期与时刻给成从纪元起的数：DATE 是天数（`18262`），TIME 与
-/// TIMESTAMP_* 是秒数带九位小数（`1616173619.000000000`），TIMESTAMP_TZ 再跟一个
-/// 空格和 1440 加时区分钟数。原样交出去，模型看到的只是一个大数。这里写回 ISO，
-/// 其余类型照 `coerce`
+/// The SQL API gives dates and times as numbers counted from the epoch: DATE is a day count (`18262`), TIME and
+/// TIMESTAMP_* are seconds with nine decimal places (`1616173619.000000000`), and TIMESTAMP_TZ adds
+/// a space and the time zone as a count of minutes from 1440. Handing these over as-is would leave the model seeing only a big number. Here they are converted back to ISO, and
+/// the other types follow `coerce`
 fn cell(ty: &str, raw: &serde_json::Value) -> serde_json::Value {
     use chrono::SecondsFormat::AutoSi;
     let serde_json::Value::String(s) = raw else {
@@ -96,7 +96,7 @@ fn cell(ty: &str, raw: &serde_json::Value) -> serde_json::Value {
     text.map_or_else(|| raw.clone(), serde_json::Value::String)
 }
 
-/// `-1.500000000` → (-2, 500000000)：秒向下取整，纳秒总是正的
+/// `-1.500000000` → (-2, 500000000): seconds round down, and the nanoseconds are always positive
 fn epoch(s: &str) -> Option<(i64, u32)> {
     let (whole, frac) = s.split_once('.').unwrap_or((s, ""));
     let secs = whole.parse::<i64>().ok()?;
@@ -149,7 +149,7 @@ impl SnowflakeEngine {
             .send()
             .await?;
         let started = Instant::now();
-        // 202 = 还在跑；其余非 2xx 的 body 里带 message
+        // 202 = still running; any other non-2xx body carries a message
         while http.status() == StatusCode::ACCEPTED {
             let partial: StatementResponse = http.json().await?;
             let handle = partial.handle.ok_or_else(|| {
@@ -178,13 +178,13 @@ impl SnowflakeEngine {
         }
         let resp: StatementResponse = http.json().await?;
         if let (Some(code), Some(message)) = (&resp.code, &resp.message) {
-            // 2xx 里也可能带业务错误码；090001 是 "statement executed successfully"
+            // A 2xx can also carry a business error code; 090001 is "statement executed successfully"
             if code != "090001" && resp.meta.is_none() {
                 anyhow::bail!("Snowflake {code}: {message}");
             }
         }
-        // 把 meta 拷出一份再消费；下面既要从 partition_info 拉分块，
-        // 又要从 row_type 还原类型，两个都要用
+        // Copy the meta out before consuming it: below we need both to fetch chunks from partition_info
+        // and to restore types from row_type
         let meta = resp.meta.clone();
         let types: Vec<RowType> = meta
             .as_ref()
@@ -206,8 +206,8 @@ impl SnowflakeEngine {
                     .collect()
             })
             .collect();
-        // partitionInfo 没有 URL。首个分区已在响应中，后续按 statementHandle 和
-        // 从 1 开始的 partition 参数读取；后续响应不再带列元数据，沿用首块的类型。
+        // partitionInfo has no URL. The first partition is already in the response; later ones are read by statementHandle and the
+        // 1-based partition parameter; later responses no longer carry column metadata, so the first chunk's types are reused.
         let mut seen_partition_rows: u64 = rows.len() as u64;
         if partitions.len() > 1 {
             let handle = resp.handle.as_deref().ok_or_else(|| {
@@ -234,8 +234,8 @@ impl SnowflakeEngine {
                 }));
             }
         }
-        // numRows 是整个结果集的总数（不是当前 chunk 的）；分区 rowCount 之和也应该是它
-        // ——任一对不上都说明服务端偷偷改 protocol 或中途丢包，残缺数据不要灌进结构文档
+        // numRows is the total of the whole result set (not the current chunk); the sum of the partition rowCounts should equal it too
+        // — any mismatch means the server quietly changed the protocol or dropped packets mid-way, so incomplete data must not be poured into the structured document
         if let Some(expected) = expected_total_rows {
             if seen_partition_rows != expected {
                 anyhow::bail!(
@@ -352,8 +352,8 @@ mod tests {
         assert_eq!(out.rows, vec![r#"{"REGION":"east","TOTAL":42.1}"#]);
     }
 
-    /// SQL API 的日期与时刻是从纪元起的数：DATE 是天，TIME 与 TIMESTAMP_* 是秒，
-    /// TIMESTAMP_TZ 后面再跟 1440 加上时区的分钟
+    /// The SQL API's dates and times are counts from the epoch: DATE is days, TIME and TIMESTAMP_* are seconds,
+    /// and TIMESTAMP_TZ is followed by 1440 plus the time zone in minutes
     #[tokio::test]
     async fn dates_and_times_read_as_dates_and_times() {
         let server = MockServer::start().await;
@@ -590,9 +590,9 @@ mod tests {
         }
     }
 
-    /// 401/403 一类（auth、权限）也是 status 路径——message 字段照样送出。
-    /// 与 422 的区别仅在状态码，调用者拿到的错误形态应保持一致（都是
-    /// `Snowflake {status}: {message}`），便于上层按错误形态分类
+    /// 401/403 kinds (auth, permissions) also take the status path: the message field is still sent through.
+    /// Apart from the status code, the difference from 422 is nothing; the shape of the error the caller gets should stay the same (all
+    /// `Snowflake {status}: {message}`), so that callers above can classify by error shape
     #[tokio::test]
     async fn auth_failure_body_is_surfaced() {
         for status in [401u16, 403, 503] {
@@ -615,9 +615,9 @@ mod tests {
         }
     }
 
-    /// 5xx 一类（如 Snowflake 内部 504 / 503 + GW 错配）时 body 不是 JSON——
-    /// 现有逻辑会尝试 JSON.parse 然后退回原文，所以「消息文案」仍能送达
-    /// 调用者。把这层兜底路径钉住，免得被人「美化」掉
+    /// For 5xx kinds (such as Snowflake's internal 504 / 503, or a gateway mismatch) the body is not JSON:
+    /// the existing logic tries JSON.parse and then falls back to the raw text, so the "message wording" still reaches
+    /// the caller. Pin this fallback path so no one "beautifies" it away
     #[tokio::test]
     async fn non_json_error_body_falls_back_to_plain_text() {
         let server = MockServer::start().await;
@@ -640,9 +640,9 @@ mod tests {
         );
     }
 
-    /// 2xx body 里若带非「成功」code（如 query canceled 取消信号），必须以业务
-    /// 错误形态抛出，不让屏蔽在「看似 OK」的响应里——这是 Snowflake 的双层错误
-    /// 模型，应当与 4xx/5xx 共用同一条 message 通道
+    /// If the 2xx body carries a code other than "success" (such as the query-canceled signal), it must be thrown in the business
+    /// error shape and must not be hidden in a response that looks OK: this is Snowflake's two-layer error
+    /// model: it should share the same message channel as 4xx/5xx
     #[tokio::test]
     async fn business_error_code_in_a_2xx_body_is_bubbled_up() {
         let server = MockServer::start().await;
@@ -651,7 +651,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "code": "000605",
                 "message": "Statement was canceled by user.",
-                // 没有 resultSetMetaData，与状态一致——成功响应必有 meta 或 data
+                // No resultSetMetaData, consistent with the status: a success response must carry either meta or data
             })))
             .mount(&server)
             .await;

@@ -1,4 +1,4 @@
-//! 驱动可取消的生成，再不受取消打断地保存唯一结果。
+//! Drives cancellable generation, and saves the single result without letting cancellation interrupt the save.
 use super::{carried_sources, delta_event, error_event, Failure};
 use crate::live::{Frame, Handle};
 use futures_util::{Stream, StreamExt};
@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 pub(super) enum ProducerEvent {
     Progress(Frame),
-    /// 仅供历史使用，不通过 SSE 发送；停止时只保留已完成的调用。
+    /// Only for history use; not sent over SSE. On stop, only completed calls are kept.
     Context {
         resolved: Vec<Value>,
         tool_exchange: Vec<Value>,
@@ -21,7 +21,7 @@ pub(super) enum ProducerEvent {
 pub(super) struct Answer {
     pub content: String,
     pub record: TurnRecord,
-    /// 验证过的最终回答只有保存成功后才发布。
+    /// A verified final answer is published only after the save succeeds.
     pub final_text: Option<String>,
 }
 
@@ -33,14 +33,14 @@ pub(super) async fn run(
     previous_answer: String,
     previous_sources: Vec<Value>,
 ) {
-    // collect 持有模型和工具的 future，在持久化前将它们丢弃。
-    // 迟到的 Stop 不能打断提交，也不能再创建一条助手消息。
+    // collect holds the model and tool futures; they are dropped before persistence.
+    // A late Stop must not interrupt the commit, nor create another assistant message.
     let result = collect(&handle, producer, &previous_answer, &previous_sources).await;
     let terminal = match result {
         Ok(answer) => save(&pool, conversation_id, &handle, answer).await,
         Err(failure) => {
-            // 失败只送给浏览器一份，服务端一行不留，线上就只能请人打开开发者工具抄
-            // 回来。code 与原句都记：原句是端点说的话，code 是界面查措辞的键
+            // A failure is sent to the browser only, and the server keeps no record of it, so in production the only way to recover it is to ask someone to open devtools and copy it back.
+            // Both the code and the original sentence are recorded: the original is what the endpoint said, the code is the key the UI uses to look up the wording
             tracing::warn!(
                 %conversation_id,
                 code = failure.code,
@@ -69,7 +69,7 @@ async fn collect(
         let event = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
-                // 先丢弃生成器，保存部分答案期间不能继续执行模型或工具。
+                // Drop the generator first: no model or tool may keep running while the partial answer is saved.
                 drop(producer);
                 let mut snapshot = handle.snapshot().await;
                 if !gathered && snapshot.sources.is_empty() {
@@ -99,7 +99,7 @@ async fn collect(
                         "Producer sent a terminal as progress",
                     ));
                 }
-                // 旧 RAG 路径即使没搜到结果也会发布 sources。
+                // The old RAG path publishes sources even when the search found nothing.
                 gathered |= matches!(frame.event, "step" | "sources");
                 handle.emit(frame).await;
             }
@@ -158,11 +158,11 @@ async fn save(
     )
 }
 
-/// 并行工具可能只完成一部分就被停止。不能回放没有结果的 tool_call：
-/// 模型服务要求每个保留的调用都有对应结果。
+/// Parallel tools may only partly complete before being stopped. A tool_call with no result must not be replayed:
+/// the model service requires every kept call to have a matching result.
 fn completed_exchange(mut exchange: Vec<Value>) -> Vec<Value> {
-    // 模型服务可能在后续轮次复用 ID。倒序遍历，让每条助手消息只匹配
-    // 它之后、下一条助手消息之前的工具结果。
+    // The model service may reuse IDs in later turns. Iterate in reverse so each assistant message only matches
+    // the tool results between it and the next assistant message.
     let mut answered = HashSet::new();
     for message in exchange.iter_mut().rev() {
         if message["role"] == "tool" {

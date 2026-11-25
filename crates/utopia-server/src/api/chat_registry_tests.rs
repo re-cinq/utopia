@@ -1,4 +1,4 @@
-//! 用真实生成流程和可控的本地模型验证 Stop，与 SSE 断开分开验证。
+//! Verifies Stop with a real generation flow and a controllable local model, separately from SSE disconnects.
 use super::*;
 use axum::http::StatusCode;
 use axum::response::Response;
@@ -98,8 +98,8 @@ async fn embedding(State(gates): State<Gates>, Json(body): Json<serde_json::Valu
     let stream = async_stream::stream! {
         let _connection = ConnectionDropped(gates.tool_disconnected.clone());
         yield Ok::<_, Infallible>(axum::body::Bytes::from_static(b"{\"data\":["));
-        // 服务端已发出部分响应；真实 search_chunks 工具仍停在 embed()，
-        // 等待这个 JSON 文档的剩余部分。
+        // The server has already emitted part of the response; the real search_chunks tool is still blocked in embed(),
+        // waiting for the rest of this JSON document.
         gates.tool_started.notify_one();
         gates.release[0].notified().await;
         yield Ok::<_, Infallible>(axum::body::Bytes::from_static(b"]}"));
@@ -209,8 +209,8 @@ async fn stop_saves_partial_text_and_stops_model_requests_at_each_stage() -> any
                 .map_err(|_| anyhow::anyhow!("chat refused"))?;
             let (snapshot, mut rx) = f.state.live.attach(id).await.unwrap();
             gates.ready[0].notified().await;
-            // 上游可能在响应字节到达生成器前发信号。
-            // 等待正文真正发布，不依赖固定睡眠。
+            // The upstream may signal before the response bytes reach the generator.
+            // Wait for the body to really be published, without relying on a fixed sleep.
             if pause != Pause::BeforeText && snapshot.content.is_empty() {
                 while rx.recv().await?.event != "delta" {}
             }
@@ -276,7 +276,7 @@ async fn stop_during_a_real_search_tool_closes_its_http_request_and_saves_partia
             let id =
                 utopia_store::conversations::create(&f.pool, f.kb, f.user.id, "tool in flight")
                     .await?;
-            // 无回答的问题代表上一轮失败；重试必须沿用这个 id，不能再插入问题。
+            // An unanswered question means the previous turn failed; the retry must reuse this id and must not insert a new question.
             let question_id = if retry {
                 Some(
                     utopia_store::conversations::append_message(
@@ -330,7 +330,7 @@ async fn stop_during_a_real_search_tool_closes_its_http_request_and_saves_partia
                 );
             }
             request_stop(&f, id, snapshot.generation_id).await?;
-            // 保持 embedding 响应阻塞，只有取消才能关闭它。
+            // Keep the embedding response blocked; only cancellation may close it.
             gates.tool_disconnected.notified().await;
             assert_done(&finished(&mut rx).await?, true);
             let body = axum::body::to_bytes(response.into_body(), 65536).await?;
@@ -490,8 +490,8 @@ async fn stop_after_save_starts_keeps_one_complete_answer_and_holds_busy_until_c
         gates.ready[0].notified().await;
         let (snapshot, mut rx) = f.state.live.attach(id).await.unwrap();
 
-        // 让助手消息 INSERT 成功，再阻塞 append_message 的 UPDATE。
-        // 观察真实数据库锁等待，确认发送 Stop 前保存已经开始。
+        // Let the assistant message INSERT succeed, then block the UPDATE in append_message.
+        // Observe the real database lock wait, to confirm that saving has started before Stop is sent.
         let mut lock = f.pool.begin().await?;
         sqlx::query("SELECT id FROM conversations WHERE id=$1 FOR NO KEY UPDATE")
             .bind(id)

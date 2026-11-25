@@ -1,7 +1,7 @@
-//! 数据映射 API：口径的列表、改写与改版历史。
+//! Data mapping API: listing, revising and the revision history of definitions.
 //!
-//! 审批（`decide`）留在 `review_routes`——那条端点已经在写审计流水
-//! （`mapping.decided`），换个界面调它即可，没有理由为了搬页面而搬端点。
+//! Approval (`decide`) stays in `review_routes`: that endpoint already writes the audit ledger
+//! (`mapping.decided`), so calling it from another screen is enough; there is no reason to move an endpoint just to move a page.
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -16,23 +16,23 @@ use crate::auth::AuthUser;
 use crate::error::ApiResult;
 use crate::state::AppState;
 
-/// 一页多少条。口径比审阅队列密（一行就是一个定义），一页给得起 25 条
+/// Rows per page. Definitions are denser than the review queue (one row is one definition), so a page can afford 25
 const MAPPING_PAGE: i64 = 25;
 
 #[derive(Deserialize)]
 pub struct ListQuery {
-    /// proposed | confirmed | rejected；缺省 = 全部
+    /// proposed | confirmed | rejected; default = all
     status: Option<String>,
     q: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
 
-/// 一页口径 + 三种状态各多少。
+/// A page of definitions, plus how many there are in each of the three states.
 ///
-/// **Viewer 就能看。** 口径是「这个数怎么算」，问数的答案直接由它决定——
-/// 看得见答案却看不见口径，等于要人信一个不给看的算法。改（`revise`）
-/// 才要 Editor。
+/// **Viewers can see it.** A definition is "how this number is computed", and it directly decides the answer to a data question;
+/// seeing an answer without seeing its definition is asking a person to trust an algorithm they are not allowed to look at. Revising (`revise`)
+/// requires Editor.
 pub async fn list(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -58,8 +58,8 @@ pub async fn list(
         utopia_store::mappings::page(&state.pool, kb_id, status, needle, limit, offset).await?;
     let (proposed, confirmed, rejected) =
         utopia_store::mappings::status_counts(&state.pool, kb_id).await?;
-    // 上一轮探索的账（#503）。**列表本身答不了「漏了多少」**——十一条提议对着
-    // 一张八十列的宽表，与十一条刚好覆盖完一个小库，在 items 里长得一模一样
+    // The tally of the previous exploration round (#503). **The list alone cannot answer "how much was missed"**: eleven proposals against
+    // a wide table of eighty columns look exactly the same in items as eleven that happen to cover a small KB completely
     let last_run = utopia_store::exploration_runs::recent(&state.pool, kb_id, 1)
         .await?
         .into_iter()
@@ -83,10 +83,10 @@ pub struct ReviseReq {
     derived: bool,
 }
 
-/// 改一条口径。
+/// Revise one definition.
 ///
-/// **在此之前 `mappings::revise` 是零调用的**：函数在、留痕表在、没有路由。
-/// 于是口径确认之后就再没人改得动，也没人看得见——问数照着它算，人却够不着。
+/// **Before this, `mappings::revise` had zero callers**: the function existed, the audit table existed, but there was no route.
+/// So once a definition was confirmed, no one could change it or even see it: data questions were answered by it, yet people could not reach it.
 pub async fn revise(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -94,8 +94,8 @@ pub async fn revise(
     Json(req): Json<ReviseReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_kb(&state, &user, kb_id, Role::Editor).await?;
-    // 空白等于没填：前端清空一个输入框传来的是 ""，落库该是 NULL 而不是空串，
-    // 否则「有没有配 expr」这个判断要同时问 IS NULL 和 = ''
+    // Blank counts as unset: when the frontend clears an input box it sends "", which should be stored as NULL, not an empty string,
+    // otherwise the check for "is expr configured" would have to ask both IS NULL and = ''
     let clean = |s: &Option<String>| -> Option<String> {
         s.as_deref()
             .map(str::trim)
@@ -142,8 +142,8 @@ pub async fn revise(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 一条口径的改版历史。0006 说留痕是为了答得出「上季度这个数是怎么算的」，
-/// 这是那句话的兑现处。
+/// Revision history of one definition. 0006 says the audit trail exists so you can answer "how was this number computed last quarter",
+/// and this is where that promise is kept.
 pub async fn revisions(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -160,11 +160,11 @@ pub struct RelevantQuery {
     k: Option<usize>,
 }
 
-/// 跟一个问题有关的口径，按相关度排——问数进提示词用的正是这一条检索（#574）。
+/// Definitions related to a question, ranked by relevance: the data-question prompt uses exactly this retrieval (#574).
 ///
-/// 开成端点是为了两件事：测量台直接量 recall@k（那条对的口径在不在前 k 里），
-/// 不用真的问一遍；页面以后能在问题旁边列出「用到的口径」。Viewer 就能看，
-/// 与列表同一个理由——看得见答案却看不见口径，等于要人信一个不给看的算法。
+/// It is exposed as an endpoint for two reasons: the measurement bench can measure recall@k directly (is the right definition in the top k),
+/// without asking the question for real; and the page can later list "definitions used" beside a question. Viewers can see it,
+/// for the same reason as the list: seeing an answer without seeing its definition is asking a person to trust an algorithm they are not allowed to look at.
 pub async fn relevant(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -181,7 +181,7 @@ pub async fn relevant(
     Ok(Json(json!({ "items": items, "k": k })))
 }
 
-/// 空白等于没填：前端清空一个输入框传来的是 ""，落库该是 NULL 而不是空串。
+/// Blank counts as unset: when the frontend clears an input box it sends "", which should be stored as NULL, not an empty string.
 fn clean(s: &Option<String>) -> Option<String> {
     s.as_deref()
         .map(str::trim)
@@ -189,8 +189,8 @@ fn clean(s: &Option<String>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// 一条口径至少得有表、表达式、SQL 之一，否则它不是一个可执行的定义。
-/// `create`、`preview` 与 `revise` 判的是同一条。
+/// A definition must have at least one of table, expression or SQL, otherwise it is not an executable definition.
+/// `create`, `preview` and `revise` check the same thing.
 fn definition_shape(
     table_name: &Option<String>,
     expr: &Option<String>,
@@ -205,9 +205,9 @@ fn definition_shape(
     Ok(())
 }
 
-/// 一条口径跑起来是哪句 SQL：给了 `sql` 用 `sql`，否则 `expr` + `table` 拼一句。
-/// 测量台（`scripts/bench/mappings.mjs` 的 `proposalSql`）判分用的是同一个拼法，
-/// 所以页面上预览到的数就是测量台会打分的数。
+/// The SQL a definition runs as: if `sql` is given use it, otherwise build one from `expr` + `table`.
+/// The measurement bench (`proposalSql` in `scripts/bench/mappings.mjs`) scores with the same construction,
+/// so the number previewed on the page is the number the bench will score.
 fn render_sql(
     table_name: &Option<String>,
     expr: &Option<String>,
@@ -225,7 +225,7 @@ fn render_sql(
 #[derive(Deserialize)]
 pub struct CreateReq {
     concept: String,
-    /// metric | dimension；缺省 metric
+    /// metric | dimension; default metric
     #[serde(default = "default_kind")]
     kind: String,
     source: String,
@@ -241,15 +241,15 @@ fn default_kind() -> String {
     "metric".into()
 }
 
-/// 人从零写一条口径（#562）。
+/// A person writes a definition from scratch (#562).
 ///
-/// 从前这张表只有探索一条来路。一个数据团队手上有自己的指标口径文档，却没有地方
-/// 把它填进去——而口径进了问数的提示词，宽表语料从 1/18 到 17/18（#520）。缺的
-/// 不是结构，是这扇门。
+/// Before, this table had only one route in: exploration. A data team has its own metrics definition document, but nowhere
+/// to enter it; and definitions go into the data-question prompt, which took wide-table coverage from 1/18 to 17/18 (#520). What was missing
+/// was not the structure, it was this door.
 ///
-/// 概念仍落成 Metric / Dimension 类的实体——那是这张表的现状（`concept_id` 非空
-/// 指向实体）。0035 要退役这个形状（#556），但保留这张表并往里渲染，人写的 SQL
-/// 搬得过去。
+/// Concepts still become Metric / Dimension entities: that is how the table works today (`concept_id` non-null
+/// points at an entity). 0035 is retiring this shape (#556), but the table is kept and rendered into, and SQL a person writes
+/// carries over.
 pub async fn create(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -272,7 +272,7 @@ pub async fn create(
         clean(&req.summary),
     );
     definition_shape(&table_name, &expr, &sql)?;
-    // 源按名字点单，且必须是本库挂载的——与 `query_data` 同一条安全边界
+    // Sources are picked by name, and must be mounted in this KB: the same safety boundary as `query_data`
     let mounted = utopia_store::datasources::mounted(&state.pool, kb_id).await?;
     let Some(ds) = mounted
         .iter()
@@ -294,7 +294,7 @@ pub async fn create(
             .bind(&req.kind)
             .fetch_one(&state.pool)
             .await?;
-    // 概念实体走消解：同名归并，跟探索提的那些落在一处
+    // Concept entities go through resolution: same-name ones are merged, landing in the same place as those exploration proposed
     let resolved = utopia_store::resolution::resolve_mention(
         &state.pool,
         kb_id,
@@ -341,11 +341,11 @@ pub struct PreviewReq {
     sql: Option<String>,
 }
 
-/// 把一条口径过只读闸跑一遍，回第一行——写口径的人当场看到它算出来的数。
+/// Run a definition through the read-only gate and return the first row: the person writing the definition sees the number it computes on the spot.
 ///
-/// 这正是测量台判分的那个动作（#501 / #520：把定义跑一遍，跟 gold 比数），
-/// 搬到页面上来。跑不通的定义无害，它失败得很响；跑得通而算错的才是全部风险，
-/// 而看一眼数是人能做的唯一一道检查。
+/// This is exactly the action the measurement bench takes when scoring (#501 / #520: run the definition and compare the numbers to gold),
+/// brought onto the page. A definition that fails to run is harmless, since it fails loudly; only one that runs and computes wrongly is a real risk,
+/// and looking at the number is the only check a person can do.
 pub async fn preview(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -373,11 +373,11 @@ pub async fn preview(
         )
         .into());
     };
-    // 引擎的报错原样带回：列名拼错、语法错、超时是三件不同的事
+    // Pass the engine's error back as-is: a misspelled column name, a syntax error and a timeout are three different things
     let out = super::tools::run_query(&state, ds.id, &rendered)
         .await
         .map_err(|e| AppError::invalid("preview_failed", e.to_string()))?;
-    // 结果是 JSON Lines；第一行就是这条口径算出来的那个数（或那一组数）
+    // The result is JSON Lines; the first line is the number (or group of numbers) this definition computes
     let rows: Vec<serde_json::Value> = out
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn preview_runs_what_the_bench_scores() {
         let none: Option<String> = None;
-        // sql 优先，且去掉结尾的分号——闸门只放行单条语句
+        // sql takes precedence, and the trailing semicolon is removed: the gate only lets through a single statement
         assert_eq!(
             render_sql(
                 &Some("t".into()),
@@ -423,7 +423,7 @@ mod tests {
             .as_deref(),
             Some("SELECT sum(amt) / 100.0 FROM dw.orders")
         );
-        // 只有表名不是一个可执行的口径
+        // Only a table name is not an executable definition
         assert_eq!(render_sql(&Some("t".into()), &none, &none), None);
     }
 }

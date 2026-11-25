@@ -260,7 +260,7 @@ async fn incremental_github_sync_preserves_the_complete_discussion() -> anyhow::
             .iter()
             .filter(|request| request.url.path() == "/repos/test/repo/issues")
             .collect();
-        // 每轮先选窗口，再复读检查分页期间是否发生移动。
+        // Each round first picks the window, then re-reads to check whether anything moved during paging.
         anyhow::ensure!(issue_requests.len() == 12);
         for (index, request) in issue_requests.iter().enumerate() {
             let lower_bound = request

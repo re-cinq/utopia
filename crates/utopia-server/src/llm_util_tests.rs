@@ -1,4 +1,4 @@
-//! 限额就地调整（#1302）：管理员调高，已经在等的任务当场放行；调低要等在飞的调用还回来才生效。
+//! In-place adjustment of limits (#1302): an admin raising a limit lets tasks already waiting proceed on the spot; lowering it takes effect only once in-flight calls return.
 
 use super::ModelGates;
 use axum::body::Body;
@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 const SOON: Duration = Duration::from_millis(100);
 
-/// 调高不靠下一个来取许可的任务：所有 worker 都等着时，管理员存下新限额的那一下就得把它们放进来
+/// Raising does not rely on the next task that takes a permit: when all workers are waiting, the moment the admin saves the new limit must let them in
 #[tokio::test]
 async fn an_admin_raising_a_limit_admits_a_task_already_waiting() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -49,7 +49,7 @@ async fn an_admin_raising_a_limit_admits_a_task_already_waiting() -> anyhow::Res
         let mut waiting = tokio::spawn(async move { super::acquire(&s, &b, "m").await.is_some() });
         let parked = timeout(SOON, &mut waiting).await.is_err();
 
-        // 这个接口每次都写 open_registration，原样送回去，部署设置那一行不变
+        // This endpoint always writes open_registration; send it back unchanged, so the deployment settings line stays the same
         let open = utopia_store::access::open_registration(&pool).await?;
         let body = json!({
             "open_registration": open,
@@ -92,7 +92,7 @@ async fn lowering_the_limit_takes_effect_as_in_flight_calls_return() {
     let g = gates.clone();
     let mut waiting = tokio::spawn(async move { g.admit("u", "m", 1).await });
 
-    // 两个在飞降到一个：还回来的第一张被收走，第二个调用还没完就仍满额
+    // Two in flight drop to one: the first one returned is taken, and the second call, still not finished, stays at the full limit
     drop(first);
     assert!(timeout(SOON, &mut waiting).await.is_err());
     drop(second);

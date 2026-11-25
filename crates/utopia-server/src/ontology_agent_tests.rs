@@ -1,6 +1,6 @@
-//! 本体代理的一轮（0061）：没绑上的形状和接受了的问题交给脚本化的模型，提案落进
-//! `ontology_proposals` 并记下服务的问题与形状；采纳建出属性并排对齐；提过的形状下一轮
-//! 不再送。没有 `UTOPIA_DATABASE_URL` 时跳过。
+//! One round of the ontology agent (0061): unmatched shapes and accepted questions go to a scripted model, proposals land in
+//! `ontology_proposals` and record the questions and shapes served; adoption builds the property and queues alignment; a shape already proposed is not
+//! sent again next round. Skipped when there is no `UTOPIA_DATABASE_URL`.
 use super::*;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -17,7 +17,7 @@ struct Model {
     requests: Arc<Mutex<Vec<Value>>>,
     embeds: Arc<AtomicUsize>,
 }
-/// 嵌入端点只数次数：采纳不该在请求里调它
+/// The embedding endpoint only counts calls: adoption should not call it in the request
 async fn embed(State(m): State<Model>) -> Json<Value> {
     m.embeds.fetch_add(1, Ordering::SeqCst);
     Json(json!({ "data": [] }))
@@ -46,7 +46,7 @@ struct Fx {
     organization: Uuid,
     place: Uuid,
     located_in: Uuid,
-    /// 采纳的人（decided_by 是外键）
+    /// The person adopting (decided_by is a foreign key)
     user: Uuid,
     model: Model,
     server: tokio::task::JoinHandle<()>,
@@ -54,9 +54,9 @@ struct Fx {
 }
 
 impl Fx {
-    /// 一个库：organization、place 两个类，一条属性 located_in（organization → place）；
-    /// Acme —founded in→ London、Acme —located in→ London 两条开放陈述（形状按短语排：
-    /// s0 = founded in，s1 = located in）
+    /// One KB: two classes, organization and place, and one property located_in (organization → place);
+    /// two open statements, Acme —founded in→ London and Acme —located in→ London (shapes are ordered by phrase:
+    /// s0 = founded in, s1 = located in)
     async fn new(replies: Vec<Value>) -> anyhow::Result<Option<Self>> {
         let Some(url) = utopia_store::test_db::url() else {
             return Ok(None);
@@ -144,7 +144,7 @@ impl Fx {
         }))
     }
 
-    /// 对齐判过这两条形状：没有属性可绑
+    /// Alignment has judged these two shapes: there is no property to bind to
     async fn decide_none(&self) -> anyhow::Result<()> {
         let sigs = phrase_bindings::signatures(&self.pool, self.kb).await?;
         assert_eq!(sigs.len(), 2, "two open statements, two signatures");
@@ -169,7 +169,7 @@ impl Fx {
         Ok(())
     }
 
-    /// 库里有一条人写的问题：本体代理就不先去提问题（那是没问题的库才走的一步）
+    /// The KB has a question a person wrote: the ontology agent does not ask questions first (that step is for KBs without questions)
     async fn seed_question(&self) -> anyhow::Result<Uuid> {
         Ok(competency_questions::create(
             &self.pool,
@@ -190,7 +190,7 @@ impl Fx {
         self.model.requests.lock().unwrap().len()
     }
 
-    /// 一条形状写进提案里的样子，带第一条例句的陈述 id
+    /// What a shape looks like written into a proposal, with the statement id of its first example sentence
     async fn shape(&self, phrase: &str) -> anyhow::Result<Value> {
         let sigs = phrase_bindings::signatures(&self.pool, self.kb).await?;
         let sig = sigs
@@ -200,7 +200,7 @@ impl Fx {
         Ok(shape_of(sig))
     }
 
-    /// 代理提过的一条，直接落库
+    /// One the agent proposed, stored directly
     async fn seed(
         &self,
         section: &str,
@@ -223,7 +223,7 @@ impl Fx {
         Ok(())
     }
 
-    /// 以这个库的编辑身份走一次接口
+    /// Call the endpoint as this KB's editor
     async fn post(&self, path: &str, body: Value) -> anyhow::Result<(StatusCode, Value)> {
         sqlx::query(
             "INSERT INTO kb_members(kb_id,user_id,role) VALUES($1,$2,'editor') ON CONFLICT DO NOTHING",
@@ -248,7 +248,7 @@ impl Fx {
         ))
     }
 
-    /// 这个库排着的任务，按到期的先后
+    /// Jobs queued for this KB, ordered by due time
     async fn queued(&self) -> anyhow::Result<Vec<String>> {
         Ok(sqlx::query_scalar(
             "SELECT kind FROM jobs WHERE status='queued' AND payload->>'kb_id'=$1 ORDER BY run_at, id",
@@ -258,7 +258,7 @@ impl Fx {
         .await?)
     }
 
-    /// 一个键留下了什么：同键的元素在不在、提案的状态、这个库的任务数、回归用例数
+    /// What one key left behind: whether the element with that key exists, the proposal's status, this KB's job count, and the regression case count
     async fn left_by(&self, key: &str) -> anyhow::Result<(bool, String, i64, i64)> {
         Ok(sqlx::query_as(
             "SELECT EXISTS(SELECT 1 FROM relation_types WHERE kb_id=$1 AND key=$2)
@@ -279,7 +279,7 @@ impl Fx {
             .bind(self.kb.to_string())
             .execute(&self.pool)
             .await?;
-        // decided_by 指向 users，不级联：先清提案再删组织
+        // decided_by points at users and does not cascade: clear the proposals first, then delete the organization
         sqlx::query("DELETE FROM ontology_agent_reviews WHERE kb_id=$1")
             .bind(self.kb)
             .execute(&self.pool)
@@ -296,13 +296,13 @@ impl Fx {
     }
 }
 
-/// founded in 那条形状提成的关系：organization → place
+/// Relation produced from the founded in shape: organization → place
 fn founded_in() -> Value {
     json!({ "key": "founded_in", "label": "founded in", "description": "where an organization was founded",
             "temporal": "state", "domains": ["organization"], "ranges": ["place"], "proposed_by": "agent" })
 }
 
-/// 代理提的新类：city，父类 place
+/// A new class proposed by the agent: city, parent class place
 fn city() -> Value {
     json!({ "key": "city", "label": "City", "description": "a city", "parents": ["place"], "proposed_by": "agent" })
 }
@@ -340,7 +340,7 @@ async fn an_unbound_shape_becomes_a_proposal_that_serves_a_question_and_adoption
 
     propose(&f.state, f.kb).await?;
 
-    // 模型看到了形状、词表和问题
+    // The model saw the shapes, the vocabulary and the question
     let requests = f.model.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 1, "one batch, one call");
     let text = user_text(&requests[0]);
@@ -361,7 +361,7 @@ async fn an_unbound_shape_becomes_a_proposal_that_serves_a_question_and_adoption
         "the accepted question is offered: {text}"
     );
 
-    // 提案落库，带着谁提的、服务的问题、会绑的形状
+    // The proposal is stored, carrying who proposed it, the question served, and the shape it would bind
     let open = utopia_store::ontology::open_proposals(&f.pool, f.kb).await?;
     assert_eq!(open.len(), 1, "one proposal: {open:?}");
     let p = &open[0];
@@ -394,7 +394,7 @@ async fn an_unbound_shape_becomes_a_proposal_that_serves_a_question_and_adoption
         "the place where an organization was founded"
     );
 
-    // 提过的形状、看过没提的形状（located in）下一轮都不再送：没有模型调用
+    // Shapes already proposed, and shapes seen but not proposed (located in), are not sent next round: no model call
     let outcomes: Vec<(String, String)> = sqlx::query_as(
         "SELECT shape->>'phrase', outcome FROM ontology_agent_reviews WHERE kb_id=$1 ORDER BY 1",
     )
@@ -416,7 +416,7 @@ async fn an_unbound_shape_becomes_a_proposal_that_serves_a_question_and_adoption
         "already-proposed and declined shapes are not offered again"
     );
 
-    // 采纳：属性建出来，签名域值域照提案，提案标记 adopted，短语对齐排上
+    // Adopt: the property is built, the signature's domain and range follow the proposal, the proposal is marked adopted, and phrase alignment is queued
     let id = adopt(
         &f.state,
         f.kb,
@@ -436,7 +436,7 @@ async fn an_unbound_shape_becomes_a_proposal_that_serves_a_question_and_adoption
         .find(|p| p.id == id)
         .expect("the property exists");
     assert_eq!(built.key, "founded_in");
-    // 属性标签照库里的规矩写成小驼峰：人的改动进去了，只是换了写法
+    // The property label follows the library's convention, written as lowerCamelCase: the person's edits went in, only the spelling changed
     assert_eq!(built.label, "foundedIn", "the person's edit wins");
     assert_eq!(built.kind, "relation");
     assert_eq!(built.domains, vec![f.organization]);
@@ -470,7 +470,7 @@ async fn an_unbound_shape_becomes_a_proposal_that_serves_a_question_and_adoption
         "adoption re-decides the shapes through alignment"
     );
 
-    // 采纳过的不能再采纳
+    // Something already adopted cannot be adopted again
     let again = adopt(
         &f.state,
         f.kb,
@@ -531,12 +531,12 @@ async fn an_unbound_shape_becomes_a_proposal_that_serves_a_question_and_adoption
 async fn a_proposal_for_an_existing_key_or_binding_nothing_is_dropped() -> anyhow::Result<()> {
     let Some(f) = Fx::new(vec![json!({
         "p": [
-            // 已有的类：不提
+            // Existing classes: not proposed
             {"kind": "class", "key": "place", "label": "Place", "definition": "x", "parents": [], "s": [], "k": [], "q": []},
-            // 什么都不绑：坏项
+            // Bind nothing: bad item
             {"kind": "property", "key": "orphan", "label": "orphan", "definition": "x", "value": false,
              "domains": [], "ranges": [], "s": [], "k": [], "q": []},
-            // 字面值属性：进 attribute_types，datatype 缺省 text
+            // Literal-value property: goes into attribute_types, datatype defaults to text
             {"kind": "property", "key": "founding_note", "label": "founding note", "definition": "x", "value": true,
              "datatype": "weird", "domains": ["organization"], "ranges": [], "s": [0], "k": [], "q": []}
         ],
@@ -562,9 +562,9 @@ async fn a_proposal_for_an_existing_key_or_binding_nothing_is_dropped() -> anyho
 async fn a_declined_shape_returns_when_its_statements_double_and_an_existing_answer_becomes_a_binding(
 ) -> anyhow::Result<()> {
     let Some(f) = Fx::new(vec![
-        // 第一轮：founded in 没提；located in 本体里已经有（located_in，正向）
+        // Round one: founded in was not proposed; located in is already in the ontology (located_in, forward)
         json!({ "p": [], "existing": [{ "key": "located_in", "dir": "forward", "s": [1], "k": [] }] }),
-        // 陈述翻倍之后的那轮：只有 founded in 送来（这一批里它是 s0），答成 located_in 反着读
+        // The round after the statements doubled: only founded in is sent (it is s0 in this batch), and the answer reads located_in in reverse
         json!({ "p": [], "existing": [{ "key": "located_in", "dir": "reverse", "s": [0], "k": [] }] }),
     ])
     .await?
@@ -595,11 +595,11 @@ async fn a_declined_shape_returns_when_its_statements_double_and_an_existing_ans
     assert_eq!(m.signatures["phrases"][0]["phrase"], "located in");
     assert_eq!(m.signatures["phrases"][0]["direction"], "forward");
 
-    // 第二轮：一条提过（map_to）、一条看过没提，词表没变——不问
+    // Round two: one proposed (map_to), one seen but not proposed, vocabulary unchanged: do not ask
     propose(&f.state, f.kb).await?;
     assert_eq!(f.requests().await, 1, "nothing new to look at");
 
-    // 词表变了（多了一个类）：看过没提的不再问——对齐自己会拿新元素去重判，问代理只是烧 token
+    // The vocabulary changed (one more class): the seen-but-not-proposed ones are not asked again; alignment itself will judge the new elements, asking the agent only burns tokens
     utopia_store::ontology::create_entity_type(
         &f.pool,
         f.kb,
@@ -618,7 +618,7 @@ async fn a_declined_shape_returns_when_its_statements_double_and_an_existing_ans
         "a changed glossary alone does not re-offer declined shapes"
     );
 
-    // founded in 的陈述翻倍了（1 → 2）：再送一次；map_to 已经提过的 located in 不送
+    // The statements for founded in doubled (1 → 2): send it again; located in, already proposed under map_to, is not sent
     sqlx::query(
         "INSERT INTO facts(id,kb_id,subject_id,object_id,layer,phrase)
          SELECT $1, kb_id, subject_id, object_id, 'open', 'founded in' FROM facts
@@ -644,7 +644,7 @@ async fn a_declined_shape_returns_when_its_statements_double_and_an_existing_ans
         "the shape already proposed as map_to is not offered: {text}"
     );
 
-    // 这一轮的答案并进同一条 map_to：两条形状，各自的方向
+    // This round's answers are merged into the same map_to: two shapes, each with its own direction
     let open = utopia_store::ontology::open_proposals(&f.pool, f.kb).await?;
     assert_eq!(open.len(), 1, "still one map_to row: {open:?}");
     let shapes = open[0].signatures["phrases"].as_array().unwrap().clone();
@@ -662,7 +662,7 @@ async fn a_declined_shape_returns_when_its_statements_double_and_an_existing_ans
         json!(["located in", "founded in"])
     );
 
-    // 采纳 map_to：两条形状都成了人的绑定，绑到 located_in，各按自己的方向
+    // Adopt map_to: both shapes became the person's bindings, bound to located_in, each in its own direction
     let id = adopt(
         &f.state,
         f.kb,
@@ -691,7 +691,7 @@ async fn a_declined_shape_returns_when_its_statements_double_and_an_existing_ans
             .is_empty(),
         "the map_to proposal is adopted"
     );
-    // 再来一轮：两条都绑上了——不问
+    // Another round: both are bound now, so do not ask
     propose(&f.state, f.kb).await?;
     assert_eq!(f.requests().await, 2);
     f.cleanup().await
@@ -701,14 +701,14 @@ async fn a_declined_shape_returns_when_its_statements_double_and_an_existing_ans
 async fn a_base_with_no_questions_gets_them_proposed_and_the_report_counts_them(
 ) -> anyhow::Result<()> {
     let Some(f) = Fx::new(vec![
-        // 本体代理发现库里一条问题都没有：先提问题（这一轮的第一次调用）
+        // The ontology agent finds the KB has no questions at all: ask questions first (this round's first call)
         json!({ "q": [
             { "question": "Where is each organization located?", "classes": ["organization", "place"], "properties": ["located_in", "made_up"] },
             { "question": "Why?", "classes": [], "properties": [] }
         ] }),
-        // 然后照旧按说法提本体
+        // Then propose the ontology by phrase, as before
         json!({ "p": [], "existing": [] }),
-        // 界面上再叫一次提问题：同一句不重复，新的进来
+        // Asking to raise questions again from the UI: the same sentence is not repeated, new ones come in
         json!({ "q": [
             { "question": "where is each ORGANIZATION located?", "classes": [], "properties": [] },
             { "question": "Which organizations were founded in each place?", "classes": ["organization"], "properties": [] }
@@ -745,7 +745,7 @@ async fn a_base_with_no_questions_gets_them_proposed_and_the_report_counts_them(
         Some(json!({ "classes": ["organization", "place"], "properties": ["located_in"] })),
         "keys the ontology lacks are dropped from needs"
     );
-    // 提出来的还没接受：本体那一轮没有问题可用
+    // Raised but not yet accepted: this ontology round has no questions to use
     let text = user_text(&f.model.requests.lock().unwrap()[1]);
     assert!(text.contains("(none written yet"), "{text}");
 
@@ -759,7 +759,7 @@ async fn a_base_with_no_questions_gets_them_proposed_and_the_report_counts_them(
         "{text}"
     );
 
-    // 接受一条、问过一条：报告数得出来
+    // One accepted, one asked: the reported counts can be read
     let qs = competency_questions::list(&f.pool, f.kb).await?;
     competency_questions::set_status(&f.pool, f.kb, qs[0].id, "accepted").await?;
     competency_questions::set_status(&f.pool, f.kb, qs[1].id, "accepted").await?;
@@ -785,8 +785,8 @@ async fn a_base_with_no_questions_gets_them_proposed_and_the_report_counts_them(
     f.cleanup().await
 }
 
-/// 采纳半途失败什么都不留。字面值属性的例句宾语是实体，回归用例写不进去：从前属性先提交、
-/// 对齐先排上，提案还开着而键已被占，这条提案再也采纳不了
+/// Adoption that fails midway leaves nothing behind. A literal-value property's example object is an entity, and the regression case cannot be written: before, the property was committed first,
+/// alignment was queued, the proposal stayed open while its key was already taken, and this proposal could never be adopted again
 #[tokio::test]
 async fn a_failed_adoption_leaves_nothing_behind() -> anyhow::Result<()> {
     let Some(f) = Fx::new(Vec::new()).await? else {
@@ -809,7 +809,7 @@ async fn a_failed_adoption_leaves_nothing_behind() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// 只改状态的接口不再收「采纳」：从前它把提案标成采纳，元素却没建
+/// The endpoint that only changes status no longer accepts "adopt": before, it marked the proposal adopted, but the element was never built
 #[tokio::test]
 async fn the_status_only_endpoint_does_not_adopt() -> anyhow::Result<()> {
     let Some(f) = Fx::new(Vec::new()).await? else {
@@ -828,8 +828,8 @@ async fn the_status_only_endpoint_does_not_adopt() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// 退役的 Suggest 留下的提案不能采纳：工作台早就不列它（`stored_proposals`），从前直接调采纳的
-/// 接口却照样建出元素
+/// A proposal left by the retired Suggest cannot be adopted: the workbench no longer lists it (`stored_proposals`), but before, the adopt endpoint called directly
+/// still built the element
 #[tokio::test]
 async fn a_proposal_the_retired_suggest_left_is_not_adopted() -> anyhow::Result<()> {
     let Some(f) = Fx::new(Vec::new()).await? else {
@@ -847,15 +847,15 @@ async fn a_proposal_the_retired_suggest_left_is_not_adopted() -> anyhow::Result<
     f.cleanup().await
 }
 
-/// 采纳像编辑器一样先排补向量、再排对齐（新属性排短语对齐，新类排类别词对齐），和元素同一次
-/// 提交，请求里不调嵌入。对齐晚 5 秒到期：同时到期的话两份一起被领走，对齐看见补向量正跑着，
-/// 就把自己挪到半分钟后
+/// Adoption, like the editor, queues a vector backfill first and then alignment (new properties queue phrase alignment, new classes queue category-word alignment), committed together with the elements,
+/// with no embedding call in the request. Alignment is due 5 seconds late: if both were due at once, both would be picked up together, and alignment would see the backfill still running,
+/// so it moves itself half a minute later
 #[tokio::test]
 async fn adoption_queues_vectors_before_alignment() -> anyhow::Result<()> {
     let Some(f) = Fx::new(Vec::new()).await? else {
         return Ok(());
     };
-    // 配上嵌入模型：请求里就地嵌的话，嵌入端点数得到
+    // With an embedding model configured: if embedding ran in the request, the embedding endpoint's count would be affected
     sqlx::query(
         "UPDATE llm_settings SET embed_base_url = chat_base_url, embed_model = 'scripted-embed'
           WHERE workspace_id = (SELECT workspace_id FROM knowledge_bases WHERE id = $1)",
@@ -896,7 +896,7 @@ async fn adoption_queues_vectors_before_alignment() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// 复用属性时每条形状写一条人的绑定，整次采纳排一份投影，不是一条形状一份
+/// Reusing a property writes one person binding per shape, and one projection is queued for the whole adoption, not one per shape
 #[tokio::test]
 async fn a_reuse_queues_one_projection_for_its_shapes() -> anyhow::Result<()> {
     let Some(f) = Fx::new(Vec::new()).await? else {
@@ -923,8 +923,8 @@ async fn a_reuse_queues_one_projection_for_its_shapes() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// 复用类时类别词写成人的判定，整次采纳另排一份短语对齐，已经排着一份也照排：那份可能在这次
-/// 提交之前就被领走，读不到换过的类
+/// Reusing a class writes the category word as a person's decision; the whole adoption queues a separate phrase alignment, and one already queued is still queued: that one may be picked up
+/// before this commit, and would not see the class that changed
 #[tokio::test]
 async fn a_class_reuse_queues_its_own_phrase_alignment() -> anyhow::Result<()> {
     let Some(f) = Fx::new(Vec::new()).await? else {
@@ -951,17 +951,17 @@ async fn a_class_reuse_queues_its_own_phrase_alignment() -> anyhow::Result<()> {
     f.cleanup().await
 }
 
-/// 复用替掉的是代理读到的那个判定，读过之后人定的照人留着。founded in、firm 是人在代理读之前
-/// 说的「没有」，照样替掉（firm 是第一轮读的，company 下一轮并进同一行，并的时候不丢它读到的时刻）；
-/// located in、company 是读过之后人绑到别处的，留着、列在回执里，located in 还是同事在采纳等着那一行
-/// 时才提交的；headquartered in、wharf 是读过之后人绑得和提案一样的，算已写：不重写、不列，形状照样
-/// 有回归用例；只有 wharf 的那条复用什么都没写，不另排短语对齐。venue 那条一个也写不了，整条不算
-/// 采纳；没记下读到哪一刻的旧提案，人的判定一概不改
+/// Reuse replaces the decision the agent read, while what a person decided after reading is kept. founded in and firm are "none" that a person stated before the agent read, which is still replaced
+/// (firm was read in round one, and company merges into the same row next round; the merge does not lose the moment it was read);
+/// located in and company were bound elsewhere by a person after reading: they are kept and listed in the receipt, and located in is committed when a colleague's adoption waiting on that row
+/// is committed; headquartered in and wharf were bound by a person after reading exactly as the proposal said: already written, so not rewritten and not listed, while the shape still
+/// has its regression case; the wharf-only entry reuses nothing and queues no separate phrase alignment. The venue entry cannot write anything at all, so the whole entry does not count
+/// as adopted; old proposals that did not record the moment they were read have all their person decisions left unchanged
 #[tokio::test]
 async fn a_reuse_keeps_what_a_person_decided_after_the_agent_read_it() -> anyhow::Result<()> {
     let Some(f) = Fx::new(vec![
-        // 形状按短语排：s0 founded in、s1 headquartered in、s2 located in；
-        // 类别词 k0 firm、k1 venue、k2 wharf
+        // Shapes are ordered by phrase: s0 founded in, s1 headquartered in, s2 located in;
+        // category words k0 firm, k1 venue, k2 wharf
         json!({ "p": [], "existing": [{ "key": "located_in", "s": [0, 1, 2] },
             { "key": "organization", "k": [0] }, { "key": "place", "k": [1] },
             { "key": "site", "k": [2] }] }),
@@ -975,7 +975,7 @@ async fn a_reuse_keeps_what_a_person_decided_after_the_agent_read_it() -> anyhow
     f.seed_question().await?;
     let based_in = Uuid::now_v7();
     let site = Uuid::now_v7();
-    // 类别词放在不出现在陈述里的实体上：归了类，形状的两端也不跟着变
+    // Category word placed on an entity that does not appear in the statements: classed, and the shape's ends do not change with it
     sqlx::raw_sql(&format!(
         "INSERT INTO relation_types(id,kb_id,key,label,kind,temporal,description)
              VALUES ('{based_in}','{kb}','based_in','based in','relation','state','x');
@@ -1021,19 +1021,19 @@ async fn a_reuse_keeps_what_a_person_decided_after_the_agent_read_it() -> anyhow
     word("firm", None, "person").await?;
     word("venue", None, "agent").await?;
     word("wharf", None, "agent").await?;
-    // company 还没判过，这一轮不送；判成「没有」后下一轮才送
+    // company has not been judged yet, so it is not sent this round; it is sent next round once judged "none"
     propose(&f.state, f.kb).await?;
     word("company", None, "agent").await?;
     propose(&f.state, f.kb).await?;
     assert_eq!(f.requests().await, 2);
 
-    // 代理读过之后人定的
+    // A person decided this after the agent read it
     shape("headquartered in", Some(f.located_in)).await?;
     word("company", Some(f.place), "person").await?;
     word("venue", Some(f.organization), "person").await?;
     word("wharf", Some(site), "person").await?;
-    // located in 是同事定的，等 located_in 的采纳排到那一行后面才提交。那次的事务在代理读到的判定
-    // 之前就开始了：decided_at 是事务开始的时刻，比读到的还早，照样是读过之后定的
+    // located in was decided by a colleague, and is committed only after located_in's adoption is queued behind that row. That transaction started
+    // before the decision the agent read: decided_at is the transaction start time, which is earlier than the read time, yet it was still decided after reading
     let mut deciding = f.pool.begin().await?;
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *deciding)
@@ -1096,7 +1096,7 @@ async fn a_reuse_keeps_what_a_person_decided_after_the_agent_read_it() -> anyhow
         (StatusCode::CONFLICT, &json!("proposal_stale")),
         "{body}"
     );
-    // 这一格之前存的复用没记读到的时刻：founded in 此刻是人的判定，不改，整条不算采纳
+    // A reuse saved in this cell before the read moment was recorded: founded in is now a person's decision, not changed, and the whole entry does not count as adopted
     let reuse = json!({ "key": "based_in", "kind": "relation", "proposed_by": "agent" });
     let shapes = json!({ "phrases": [f.shape("founded in").await?] });
     f.seed("map_to", "based_in", reuse, shapes).await?;
@@ -1157,18 +1157,18 @@ async fn a_reuse_keeps_what_a_person_decided_after_the_agent_read_it() -> anyhow
         ["founded in", "headquartered in"],
         "none for the kept shape"
     );
-    // venue 那条还开着。后三次都没多排任务、没多写用例：两份任务、两条用例都是前两次采纳的
+    // The venue entry is still open. The last three did not queue extra jobs or write extra cases: the two jobs and two cases came from the first two adoptions
     assert_eq!(f.left_by("place").await?, (true, "open".to_string(), 2, 2));
     f.cleanup().await
 }
 
-/// 采纳途中，提案要的类被删了：等删完答 unknown_class，什么都不写，不是写父类时才撞上外键
+/// Mid-adoption, the class the proposal needs was deleted: after the deletion it answers unknown_class and writes nothing, rather than hitting the foreign key only when the parent class is written
 #[tokio::test]
 async fn a_class_deleted_during_adoption_answers_unknown_class() -> anyhow::Result<()> {
     let Some(f) = Fx::new(Vec::new()).await? else {
         return Ok(());
     };
-    // 没有实体的类才删得掉
+    // Only a class with no entities can be deleted
     sqlx::query(
         "INSERT INTO entity_types(id,kb_id,key,label,color,shape,description)
          VALUES ($1,$2,'region','Region','#000','circle','x')",
@@ -1190,7 +1190,7 @@ async fn a_class_deleted_during_adoption_answers_unknown_class() -> anyhow::Resu
         .await?;
     let pool = f.pool.clone();
     let delete = async move {
-        // 等采纳排到这次删除后面，再提交
+        // Commit only after adoption is queued behind this deletion
         for _ in 0..500 {
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",

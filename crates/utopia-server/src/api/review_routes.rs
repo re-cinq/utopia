@@ -1,4 +1,4 @@
-//! 审核队列 API：消解疑似重复对 + 低置信事实 + 合并日志/回滚。
+//! Review queue API: resolve suspected duplicate pairs, plus low-confidence facts, merge log and rollback.
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -20,17 +20,17 @@ mod phrase_tests;
 #[path = "review_conflict_tests.rs"]
 mod conflict_tests;
 
-/// 一页多少条。**服务端的默认，不是上限**——前端可以要更少，多则被 clamp 挡住
+/// Items per page. **The server default, not a cap**: the front end may ask for fewer, and more is stopped by the clamp
 const REVIEW_PAGE: i64 = 10;
 
-/// 事实快照（决策台账用）：reject 后事实从图里消失，台账必须自包含展示文本。
-/// 一律在动作执行前取。
+/// Fact snapshot (for the decision ledger): after reject the fact disappears from the graph, so the ledger must show the text on its own.
+/// Always taken before the action runs.
 pub(crate) async fn fact_snapshot(
     state: &AppState,
     kb_id: Uuid,
     fact_id: Uuid,
 ) -> Option<serde_json::Value> {
-    // 宾语可能是实体或字面值；结构化字面值优先取 summary（与队列卡片同一显示口径）
+    // The object may be an entity or a literal value; for a structured literal, prefer the summary (the same display convention as the queue card)
     let row: Option<(String, Option<String>, Option<String>, f32)> = sqlx::query_as(
         "SELECT s.canonical_name, COALESCE(r.label, fact_surface_predicate(f.id)),
                 COALESCE(o.canonical_name, f.object_value ->> 'summary',
@@ -52,10 +52,10 @@ pub(crate) async fn fact_snapshot(
 
 #[derive(Deserialize)]
 pub struct ReviewQuery {
-    /// 要看哪一档。缺省 duplicates
+    /// Which tier to look at. Default duplicates
     #[serde(default)]
     pub queue: Option<String>,
-    /// 只对 duplicates 有意义：any（缺省）/ same（两边同类）/ conflict（两边类型冲突）
+    /// Only meaningful for duplicates: any (default) / same (both sides the same kind) / conflict (type conflict between the two sides)
     #[serde(default)]
     pub types: Option<String>,
     #[serde(default)]
@@ -64,15 +64,15 @@ pub struct ReviewQuery {
     pub offset: Option<i64>,
 }
 
-/// 审核队列：**计数与内容分开取**。
+/// Review queue: **counts and contents are fetched separately**.
 ///
-/// 从前一次把八个队列全端回来，每个固定 100 条，前端再客户端分页——于是左栏
-/// 的徽标是截断后的数字（库里 164 条低置信事实，界面写 100），而第十一页之后
-/// 的东西界面上不存在。
+/// Previously all eight queues came back in one go, each fixed at 100 items, and the front end paged them client-side, so the left-column
+/// badge was a truncated number (the library has 164 low-confidence facts, the UI showed 100), and anything beyond page eleven
+/// did not exist on screen.
 ///
-/// 现在：计数每次都回（八个 COUNT 一条查询，走的是与列表同一套 WHERE），
-/// 内容只回当前那一档的一页。切换分档或翻页各发一次请求，代价是多几次往返，
-/// 换来的是**数字不再骗人**，而且一个有十万条待办的库也翻得到底。
+/// Now: counts come back every time (eight COUNTs in one query, using the same WHERE as the list),
+/// and the content returns only one page of the current tier. Switching tiers or paging each sends one request: the cost is a few more round-trips,
+/// and the gain is that **the numbers no longer mislead**, and a library with a hundred thousand items to review can still be paged through to the end.
 pub async fn list(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -82,12 +82,12 @@ pub async fn list(
     require_kb(&state, &user, kb_id, Role::Viewer).await?;
     let counts = utopia_store::review::counts(&state.pool, kb_id).await?;
     let queue = q.queue.as_deref().unwrap_or("duplicates");
-    // 上限挡住「limit=1000000 把库拖垮」，同时留出足够一页的余量
+    // The cap stops "limit=1000000 drags the library down", while leaving enough headroom for a full page
     let limit = q.limit.unwrap_or(REVIEW_PAGE).clamp(1, 200);
     let offset = q.offset.unwrap_or(0).max(0);
 
     let items = match queue {
-        // 记忆抽出、等人点头的事实（0015）。排第一：它是人自己说的话
+        // Facts extracted from memory, awaiting a person's nod (0015). First: they are things the person said themselves
         "pending" => json!(utopia_store::pending::list(&state.pool, kb_id, limit, offset).await?),
         "duplicates" => json!(
             utopia_store::resolution::list_reviews(
@@ -118,11 +118,11 @@ pub async fn list(
         "mappings" => {
             json!(utopia_store::mappings::proposed(&state.pool, kb_id, limit, offset).await?)
         }
-        // 对齐器两票不一致的签名与类别词（#725 对齐队列，0044 决定 3）
+        // Signatures and category words where the two aligners disagree (#725 alignment queue, 0044 decision 3)
         "alignment" => {
             json!(utopia_store::alignment_queue::list(&state.pool, kb_id, limit, offset).await?)
         }
-        // 勘误 agent 留给人的动作（0044 决定 7）：闸门拦下的撤、改、加
+        // Actions the correction agent leaves for a person (0044 decision 7): retract, change, or add ones the gate stopped
         "errata" => json!(utopia_store::errata::held(&state.pool, kb_id, limit, offset).await?),
         "violations" => {
             json!(
@@ -135,10 +135,10 @@ pub async fn list(
         "merges" => {
             json!(utopia_store::resolution::list_merges(&state.pool, kb_id, limit, offset).await?)
         }
-        // agent 的每一笔（0025）：建议、自动裁决与人的回答，最新的在前
+        // Every entry of the agent (0025): suggestions, automatic rulings and the human's answers, newest first
         "agent" => json!(utopia_store::governance::list(&state.pool, kb_id, limit, offset).await?),
-        // 认不出的档名当成契约错误报出来，而不是悄悄回空——悄悄回空会让前端
-        // 拼错一个字母之后看到「这一档清空了」
+        // An unrecognised tier name is reported as a contract error rather than silently returning empty: silent empty would let the front end
+        // misspell one letter and then show "this tier is empty"
         other => {
             return Err(utopia_core::AppError::invalid(
                 "unknown_queue",
@@ -158,15 +158,15 @@ pub async fn list(
 #[derive(Deserialize)]
 pub struct CloseFactBody {
     pub valid_to: chrono::DateTime<chrono::Utc>,
-    /// year | month | day。**写多少位就是多少精度**（与图谱页的区间编辑同一约定）；
-    /// 不给按日——只发日期的老客户端就是这个意思
+    /// year | month | day. **The number of digits given is the precision** (same convention as interval editing on the graph page);
+    /// omitted means day: this is what old clients that send only a date mean
     #[serde(default)]
     pub valid_to_precision: Option<String>,
 }
 
-/// 人给的世界轴精度。从前这里一律写 "day"（「人在界面上选的是一个日期」），于是
-/// 「2023 年 6 月结束」只能编成 6 月 1 日——在无知的地方填一个确定的值，正是
-/// `facts.valid_to_precision` 那条注释说的病
+/// Precision given by the person on the world axis. It used to always be written as "day" ("the person picked a date in the UI"), so
+/// "ended June 2023" could only be encoded as 1 June: filling in a definite value where you do not know is exactly
+/// the problem the `facts.valid_to_precision` comment describes
 fn world_precision(p: Option<&str>) -> Result<&'static str, utopia_core::AppError> {
     let Some(p) = p else { return Ok("day") };
     utopia_store::graph::WORLD_PRECISIONS
@@ -181,8 +181,8 @@ fn world_precision(p: Option<&str>) -> Result<&'static str, utopia_core::AppErro
         })
 }
 
-/// 人工闭合一条事实的有效区间（"这事在某时结束了"）——走作废+改写，
-/// 与自动闭合同一机制，账本可回放。
+/// Manually close a fact's validity interval ("this ended at some point"): goes through void + rewrite,
+/// the same mechanism as automatic closing, so the ledger can be replayed.
 pub async fn close_fact(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -190,7 +190,7 @@ pub async fn close_fact(
     Json(body): Json<CloseFactBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_kb(&state, &user, kb_id, Role::Editor).await?;
-    // 归属与状态校验：本 KB 的、未作废、开放区间的事实才可闭合
+    // Ownership and status check: only this KB's facts that are not voided and have an open interval may be closed
     let ok: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM facts
          WHERE id = $1 AND kb_id = $2 AND invalidated_at IS NULL AND valid_to IS NULL",
@@ -229,21 +229,21 @@ pub async fn close_fact(
 pub struct ConflictBody {
     /// close | retime_new | keep | reject_new
     pub action: String,
-    /// close 且新事实无起点时必填
+    /// Required when closing and the new fact has no start
     #[serde(default)]
     pub close_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// `close_at` 的精度（year 到 second），不给按日
+    /// Precision of `close_at` (year to second); omitted means day
     #[serde(default)]
     pub close_at_precision: Option<String>,
-    /// retime_new 时必填：只改新事实起点，终点仍由原文或时间线定。
+    /// Required for retime_new: only changes the new fact's start; the end is still set by the source text or the timeline.
     #[serde(default)]
     pub new_from: Option<chrono::DateTime<chrono::Utc>>,
-    /// `new_from` 的精度（year 到 second），不给按日。
+    /// Precision of `new_from` (year to second); omitted means day.
     #[serde(default)]
     pub new_from_precision: Option<String>,
 }
 
-/// 时态冲突裁决（S3：自动闭合拿不准的那些）。
+/// Temporal conflict ruling (S3: those automatic closing is unsure about).
 pub async fn resolve_conflict(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -275,7 +275,7 @@ pub async fn resolve_conflict(
 pub struct DecideBody {
     /// merge | keep
     pub action: String,
-    /// 人拍板时写的那一句（0026）：什么让你这么定。可空
+    /// The sentence written when a person decides (0026): what made you decide this. Nullable
     #[serde(default)]
     pub rationale: Option<String>,
 }
@@ -310,7 +310,7 @@ pub async fn decide(
     )
     .await?;
     if let Some((l, r, score)) = snap {
-        // 理由也进台账：先例是从这里读的，不是从 resolution_reviews
+        // The reason also goes into the ledger: precedents are read from here, not from resolution_reviews
         let _ = utopia_store::audit::record(
             &state.pool,
             Some(kb_id),
@@ -340,16 +340,16 @@ pub async fn decide(
 
 #[derive(Deserialize)]
 pub struct AgentAnswerBody {
-    /// merge | keep 答一条建议（与建议相同是接受，不同是改判）；
-    /// revert 撤回一条自动合并；merge 也能推翻一条自动分开
+    /// merge | keep answers a suggestion (same as the suggestion means accept, different means overrule);
+    /// revert withdraws an automatic merge; merge can also overturn an automatic split
     pub action: String,
-    /// 什么让你这么答（0026）。改判 agent 的时候尤其值得写：那一句就是下次的先例
+    /// What made you answer this (0026). Especially worth writing when overruling the agent: that sentence becomes the next precedent
     #[serde(default)]
     pub rationale: Option<String>,
 }
 
-/// 人回答 agent 的一笔（0025）。回答走的是人的裁决路径：decided_by 是这个人，
-/// 台账记的是这个人——它就此成为下一轮的先例
+/// A person answers one of the agent's entries (0025). The answer takes the human ruling path: decided_by is this person,
+/// and the ledger records this person; it becomes the precedent for the next round
 pub async fn agent_answer(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -412,7 +412,7 @@ pub async fn agent_answer(
                 json!({ "source": l, "target": r, "agent_decision": decision_id }),
             )
             .await;
-            // 撤回 agent 的合并到了两次：保险丝
+            // Withdrawing the agent's merge has gone to two: a fuse
             crate::governance::fuse(&state, kb_id).await;
         }
         ("applied", "merge") if d.action == "keep" => {
@@ -471,18 +471,18 @@ pub async fn agent_answer(
 #[derive(Deserialize)]
 pub struct BatchBody {
     pub ids: Vec<Uuid>,
-    /// merge | keep，整批一个动作
+    /// merge | keep, one action for the whole batch
     pub action: String,
-    /// 整批一句理由（0026）：一批同一个动作，多半也是同一个依据
+    /// One reason for the whole batch (0026): a batch with one action is most likely based on one reason too
     #[serde(default)]
     pub rationale: Option<String>,
 }
 
-/// 一批 id 最多多少条：够一屏「全选」，又挡住一次请求把库锁上几分钟
+/// Maximum number of ids in one batch: enough for a "select all" on a screen, and stops one request from locking the library for minutes
 const BATCH_MAX: usize = 500;
 
-/// 批量裁决（#428）：与单条 `decide` 同一条路——每条各自合并/分开、各自记
-/// 台账，回来的是逐条结果。一次只推一遍前端刷新。
+/// Batch ruling (#428): the same path as single `decide`; each item merges or splits on its own and records its own
+/// ledger entry, and what comes back is a per-item result. The front-end refresh is pushed only once.
 pub async fn batch(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -497,7 +497,7 @@ pub async fn batch(
         )
         .into());
     }
-    // 台账要的名字与分数在裁决前取——合并之后 source 一侧的名字已经不在原处了
+    // The names and scores the ledger needs are taken before the ruling; after a merge the source side's names are no longer where they were
     let snaps: Vec<(Uuid, String, String, f32)> = sqlx::query_as(
         "SELECT rr.id, a.canonical_name, b.canonical_name, rr.score
          FROM resolution_reviews rr
@@ -637,7 +637,7 @@ pub async fn revert_merge(
         )
         .await;
     }
-    // 撤的是 agent 自己裁的合并：那一行记成 reverted，并看保险丝（0025）
+    // Withdrawing a merge that the agent itself ruled on: that row is recorded as reverted, and the fuse is checked (0025)
     crate::governance::after_revert(&state, kb_id, merge_id, user.id).await;
     state.emit_review(kb_id);
     Ok(Json(json!({ "ok": true })))
@@ -647,12 +647,12 @@ pub async fn revert_merge(
 pub struct ManualMergeBody {
     pub source: Uuid,
     pub target: Uuid,
-    /// 什么让你把它们并起来（0026）。可空
+    /// What made you merge them (0026). Nullable
     #[serde(default)]
     pub rationale: Option<String>,
 }
 
-/// 手动合并（实体面板"Merge into…"入口）。
+/// Manual merge (the "Merge into…" entry on the entity panel).
 pub async fn manual_merge(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -713,7 +713,7 @@ fn default_history_per() -> i64 {
     20
 }
 
-/// 决策台账：review 域的审计事件，服务端分页。
+/// Decision ledger: audit events of the review domain, paged server-side.
 pub async fn history(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -728,7 +728,7 @@ pub async fn history(
     Ok(Json(json!({ "events": events, "total": total })))
 }
 
-/// 审核台的总览（#377）：等着办的、办过的、库的成色。三段聚合，一次返回。
+/// Overview of the review desk (#377): what is waiting, what has been handled, and the library's state. Three aggregates, returned in one response.
 pub async fn summary(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -746,11 +746,11 @@ pub struct DecideMappingReq {
     pub status: String,
 }
 
-/// 对一条语义层映射表态（0011）。
+/// Take a position on a semantic-layer mapping (0011).
 ///
-/// **改状态不删行**：确认发生过、拒绝也发生过。而拒绝留痕当下就有用——
-/// 下一轮探索会再次算出被拒绝过的那条，`propose` 的 `WHERE status = 'proposed'`
-/// 据此不把它刷回待看。
+/// **Changing status does not delete the row**: the confirmation happened, and so did the rejection. A rejection recorded at the time is useful in itself:
+/// the next exploration round will compute the rejected pair again, and `propose`'s `WHERE status = 'proposed'`
+/// uses this so that it is not sent back to waiting.
 pub async fn decide_mapping(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -784,26 +784,26 @@ pub async fn decide_mapping(
 pub struct DecideViolationReq {
     /// fact_retracted | fact_closed | axiom_relaxed | accepted
     pub resolution: String,
-    /// `fact_closed` 必填：旧断言在哪一天结束
+    /// Required when `fact_closed`: the day on which the old assertion ends
     #[serde(default)]
     pub close_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// `close_at` 的精度（year | month | day），不给按日
+    /// Precision of `close_at` (year | month | day); omitted means day
     #[serde(default)]
     pub close_at_precision: Option<String>,
-    /// `fact_retracted` 时撤哪条：双事实与环上的违规必填，单事实的可省（#202）
+    /// Which one to retract when `fact_retracted`: required for two-fact and in-cycle violations, can be omitted for single-fact (#202)
     #[serde(default)]
     pub fact_id: Option<Uuid>,
 }
 
-/// 人裁决一处公理违规。
+/// A person rules on one axiom violation.
 ///
-/// **三个出路而不是两个。** `axiom_relaxed` 是这一档独有的：矛盾可能出在定义
-/// 而不是数据——用户导的本体把某个属性声明成反对称，而他自己的语料里那关系
-/// 其实双向。这时该改的是本体，不是二十条事实。
+/// **Three exits, not two.** `axiom_relaxed` is unique to this tier: the contradiction may lie in the definition
+/// rather than the data. The ontology the user imported declared some property as antisymmetric, while the relation in their own corpus
+/// is in fact bidirectional. In that case it is the ontology that should change, not twenty facts.
 ///
-/// **「数据错了」真的撤事实**（#202）：此前只记决定，事实照样活在图里，而队列又
-/// 不再提它。撤哪条由请求指名（`fact_id`），单事实的种类可省；撤完重算一遍检查，
-/// 那条事实牵连的其它违规一并清掉。改公理仍然走本体页——那是另一个页面的事。
+/// **"The data is wrong", so really retract the fact** (#202): previously only the decision was recorded, the fact still lived in the graph, and the queue
+/// no longer raised it. Which one to retract is named by the request (`fact_id`); the kind can be omitted for a single fact. After retracting, the check is recomputed,
+/// and the other violations entangled with that fact are cleared too. Changing axioms still goes through the ontology page; that is another page's business.
 pub async fn decide_violation(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -834,7 +834,7 @@ pub async fn decide_violation(
         return Err(utopia_core::AppError::NotFound.into());
     };
     let repaired = kind == "derived_contradiction";
-    // 撤事实的那条路自己会把违规标成 resolved；其余出路在下面统一记
+    // The retraction path itself marks the violation resolved; the other exits are recorded together below
     let mut decided = false;
     match (repaired, req.resolution.as_str()) {
         (_, "fact_retracted") => {
@@ -924,12 +924,12 @@ pub async fn decide_violation(
         utopia_store::reasoning::decide(&state.pool, kb_id, violation_id, &req.resolution, user.id)
             .await?;
     }
-    // 路清了就让派生落地，人不必再去点一次「推一遍」。撤与闭合把断言挪开了，
-    // 认可则在 materialize 里放行
+    // Once that path is cleared, let the derivations land so a person need not click "derive" again. Retraction and closing have moved assertions away,
+    // and acceptance is let through in materialize
     if repaired {
         utopia_store::reasoning::materialize(&state.pool, kb_id).await?;
     }
-    // 撤掉的事实可能还挂在别的违规里：重算一遍，那些行随之清掉，队列不留死账
+    // A retracted fact may still hang off other violations: recompute, those rows are cleared along with it, so the queue leaves no stale entries
     if req.resolution == "fact_retracted" {
         utopia_store::reasoning::run(&state.pool, kb_id).await?;
     }
@@ -947,14 +947,14 @@ pub async fn decide_violation(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 手动跑一遍一致性检查。
+/// Run a consistency check manually.
 ///
-/// **同步跑而不是排任务**：这是纯计算，没有模型调用也没有网络——一个几万条
-/// 事实的库跑下来是毫秒级。排进任务队列只会让人点完按钮盯着一个"排队中"，
-/// 而队列真正要解决的是"这活儿要跑几分钟"。
+/// **Run synchronously rather than queuing a job**: this is pure computation, with no model call and no network. A library of tens of thousands
+/// of facts runs in milliseconds. Queuing it would only make a person click a button and stare at "queued",
+/// whereas what the queue really solves is "this work takes minutes".
 ///
-/// `predicates_with_axioms` 一并回给前端：**零和零的含义不同**。没有公理时
-/// 结论是"没有判据"，界面该说"先导一份带公理的本体"，而不是"未发现矛盾"。
+/// `predicates_with_axioms` is returned to the front end too: **zero and zero mean different things**. With no axioms,
+/// the conclusion is "no criteria", and the UI should say "first import an ontology with axioms", not "no contradictions found".
 pub async fn run_consistency_check(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -962,8 +962,8 @@ pub async fn run_consistency_check(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_kb(&state, &user, kb_id, Role::Editor).await?;
     let report = utopia_store::reasoning::run(&state.pool, kb_id).await?;
-    // 本体自洽性一并算。两者判据同源（都是本体声明的公理），分两个按钮
-    // 只会让人点两次
+    // The ontology's own self-consistency is computed too. Both use the same criteria (both are axioms the ontology declares); two buttons
+    // would only make a person click twice
     let onto = utopia_store::reasoning::check_ontology(&state.pool, kb_id).await?;
     let _ = utopia_store::audit::record(
         &state.pool,
@@ -990,11 +990,11 @@ pub async fn run_consistency_check(
         "found": report.found,
         "inserted": report.inserted,
         "cleared": report.cleared,
-        // 环没搜完的谓词数（#642）：不为零时环只报了一部分，界面该说「这个谓词的环
-        // 太多，先看公理」，而不是让人以为那就是全部
+        // The number of predicates whose cycle search did not finish (#642): when non-zero, the cycles reported are only partial, and the UI should say
+        // "too many cycles for this predicate, check the axioms first", rather than let a person think that is all of them
         "cycles_capped": report.cycles_capped,
-        // 本体自己那一档单独回。**不加进 found**：两个数不是一类东西，
-        // 加起来之后「3 处矛盾」既可能是三条事实抵触，也可能是本体自己写反了三处
+        // The ontology's own tier is returned separately. **Not added into found**: the two counts are not the same kind of thing,
+        // and after adding them "3 contradictions" could mean three facts clash, or the ontology itself has three reversed declarations
         "classes": onto.classes,
         "defects_found": onto.found,
         "defects_new": onto.inserted,
@@ -1007,9 +1007,9 @@ pub struct DecideDefectReq {
     pub resolution: String,
 }
 
-/// 人对一处本体缺陷表态。
+/// A person takes a position on one ontology defect.
 ///
-/// **两个出路而不是三个**：本体缺陷压根没看数据，所以没有「数据错了」这一条。
+/// **Two exits, not three**: an ontology defect never looked at the data, so there is no "the data is wrong" option.
 pub async fn decide_defect(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -1040,20 +1040,20 @@ pub async fn decide_defect(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 跑一遍推理（R1）。
+/// Run one round of inference (R1).
 ///
-/// **受 `materialize_inferences` 开关约束。** 默认关，因为这一步往图里加东西，
-/// 而 0001 判据 2 说「本体是引导不是执法」——声明可能是错的，不该在用户没表态时
-/// 就按它改图。开关关着时不静默跳过：回一个明确的错，界面才说得出为什么没动。
+/// **Governed by the `materialize_inferences` switch.** Off by default, because this step adds things to the graph,
+/// and 0001 criterion 2 says "the ontology guides, it does not enforce": a declaration may be wrong, so the graph should not
+/// be changed by it before the user has taken a position. When the switch is off, do not skip silently: return an explicit error so the UI can say why nothing moved.
 ///
-/// 同步跑，与一致性检查同一个理由：纯计算，没有模型调用也没有网络。
+/// Runs synchronously, for the same reason as the consistency check: pure computation, with no model call and no network.
 #[derive(Deserialize)]
 pub struct PendingQuery {
     pub chunk_id: Uuid,
 }
 
-/// 一句记忆抽出的全部待确认项——对话里那张确认卡按这个取（0015）。
-/// Viewer 也能看：看得见提议、看不见按钮，与 Review 页同一口径
+/// All the pending items from one memory extraction; the confirmation card in the conversation fetches these (0015).
+/// Viewers can see them too: they see the proposals but no buttons, the same convention as the Review page
 pub async fn pending_for_chunk(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -1067,15 +1067,15 @@ pub async fn pending_for_chunk(
 
 #[derive(Deserialize)]
 pub struct DecidePendingBody {
-    /// `confirm` 进账本；`reject` 记进 `rejected_facts`，下一轮重抽不再提
+    /// `confirm` goes into the ledger; `reject` is recorded in `rejected_facts`, and the next extraction round no longer raises it
     pub action: String,
 }
 
-/// 人对一条待确认事实点头或摇头。
+/// A person nods or shakes their head at one pending fact.
 ///
-/// 两个动作都进决策台账，快照自包含——行删了之后台账上还读得出当时确认的是什么。
-/// 确认走与抽取相同的那条路（事实 + 证据 + 时态对账），所以一句「Mira 交给 Devin 了」
-/// 点头之后，Mira 那条会像从文档里抽出来时一样被闭合
+/// Both actions go into the decision ledger, with self-contained snapshots: after the row is deleted, the ledger can still show what was confirmed at the time.
+/// Confirmation takes the same path as extraction (fact + evidence + temporal reconciliation), so after "Mira handed it to Devin" is nodded through,
+/// Mira's fact is closed just as when it was extracted from a document
 pub async fn decide_pending(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -1096,8 +1096,8 @@ pub async fn decide_pending(
                 done.snapshot,
             )
             .await;
-            // 点头落下的开放陈述带着时间词：按文档重排一次时间解析（0045），
-            // 幂等，同一篇排着就不重复
+            // The open statement that was nodded through carries a time word: time parsing is re-run on the document (0045),
+            // idempotent, so the same document queued twice does not repeat
             let _ = utopia_store::jobs::enqueue_unless_queued(
                 &state.pool,
                 "resolve_time",
@@ -1189,28 +1189,28 @@ pub async fn run_inference(
 
 #[derive(Deserialize)]
 pub struct DecideAlignmentPhraseReq {
-    /// 属性的键；空 = 没有属性对得上，陈述留在开放图谱
+    /// The attribute's key; empty = no attribute matched, the statement stays in the open graph
     #[serde(default)]
     pub property: Option<String>,
-    /// forward | reverse；给了属性就得给
+    /// forward | reverse; if an attribute is given, a direction must be given too
     #[serde(default)]
     pub direction: Option<String>,
-    /// start | end | none：状态属性下，带着某一刻的陈述那一刻标的是开始、结束，还是都不是
-    /// （#966）。不给 = 未知：这样的陈述不算类型化行，签名留在队列里等人补
+    /// start | end | none: under a state attribute, whether the moment a statement carries marks a start, an end, or neither (#966).
+    /// Not given = unknown: such a statement does not count as a typed row, and its signature stays in the queue waiting for a person to fill it in
     #[serde(default)]
     pub marks: Option<String>,
 }
 
-/// 人定一条短语签名绑到哪个属性（#725 对齐队列）。写成人的判定，代理此后不再改它；
-/// 类型化图谱立刻按新绑定重算。
+/// A person decides which attribute a short-phrase signature binds to (#725 alignment queue). Written as the person's ruling, the agent does not change it again;
+/// the typed graph is recomputed at once with the new binding.
 #[derive(Deserialize)]
 pub struct DecideAlignmentRuleReq {
     pub approve: bool,
 }
 
-/// 人批或驳一条蕴含规则（0044 决定 3 第五片）。与短语判定同一套：决定和它的后续工作
-/// 一次提交，答 202 和 job id。批准且要读数的先排 `read_phrases`（填缓存后自己排物化），
-/// 否则直接排物化——驳回也要重算，隐含行得退掉
+/// A person approves or rejects an entailment rule (0044 decision 3, fifth slice). It is the same set as the phrase decision: the decision and its follow-up work
+/// are submitted together, answering 202 with a job id. If approving and it needs reading, `read_phrases` is queued first (it fills the cache and then queues materialisation itself);
+/// otherwise materialisation is queued directly. Rejection also needs recomputation, so the implied rows have to be retired
 pub async fn decide_alignment_rule(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -1316,9 +1316,9 @@ pub async fn decide_alignment_phrase(
     };
     let votes = json!({ "person": { "property": req.property, "direction": direction,
                                     "marks": marks } });
-    // 判定和它的重算任务一次提交（0051）。这里**不再**同步重算：等物化锁占的是池里的
-    // 连接，而正在跑的那次对齐可能已经读完最后一遍，谁也不替这条判定投影。一个 job
-    // 只在判定提交后可见，worker 读的是当前绑定；屏幕上等的是 `review` / `graph` 事件
+    // The decision and its recompute job are submitted together (0051). Recomputing here synchronously is **no longer** done: waiting for the materialisation lock holds a
+    // connection from the pool, and the alignment that is already running may have read the last pass, and nobody there projects this decision. A job
+    // is visible only after the decision is submitted, and the worker reads the current binding; what the screen waits on is the `review` / `graph` event
     let job_id = utopia_store::phrase_bindings::decide_with_delivery(
         &state.pool,
         kb_id,
@@ -1348,7 +1348,7 @@ pub async fn decide_alignment_phrase(
     )
     .await;
     state.emit_review(kb_id);
-    // 202：收下了，投影在路上。不编一个 typed: {added: 0} 出来——那不是这次请求知道的事
+    // 202: accepted, the projection is on its way. Do not make up a typed: {added: 0}; that is not something this request knows
     Ok((
         axum::http::StatusCode::ACCEPTED,
         Json(json!({ "ok": true, "job_id": job_id, "status": "accepted" })),
@@ -1357,16 +1357,16 @@ pub async fn decide_alignment_phrase(
 
 #[derive(Deserialize)]
 pub struct DecideAlignmentKindWordReq {
-    /// 类的键；空 = 没有类对得上
+    /// Key of the class; empty = no class matched
     #[serde(default)]
     pub class: Option<String>,
 }
 
-/// 人定一个类别词绑到哪个类（#725 对齐队列）。绑上的类写到它名下的实体上；两端的类变了，
-/// 短语签名跟着变，所以再排一次短语对齐——与判定同一事务排下（`decide_and_apply_human`），
-/// 提交之后再排的话，进程在两步之间退出就只剩判定。
+/// A person binds a category word to a class (#725 alignment queue). The bound class is written onto the entities under it; when either side's class changes,
+/// the short-phrase signature changes with it, so alignment is queued again in the same transaction as the decision (`decide_and_apply_human`),
+/// queuing it after the submission would leave only the decision if the process exits between the two steps.
 ///
-/// 写令牌也能定（0014 决定 6）：判定记在发令牌的人名下，与网页上点的一样
+/// A write token can also decide (0014 decision 6): the decision is recorded under the name of the person who issued the token, just as with a click in the web page
 pub async fn decide_alignment_kind_word(
     State(state): State<AppState>,
     caller: SessionOrToken,
@@ -1430,7 +1430,7 @@ pub struct DecideErrataReq {
     pub approve: bool,
 }
 
-/// 人答勘误 agent 留下的一笔（0044 决定 7）：批了就执行那个动作，否了只记一笔
+/// A person answers an entry left by the correction agent (0044 decision 7): approve and that action is carried out; reject and only one entry is recorded
 pub async fn decide_errata(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,

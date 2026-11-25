@@ -1,24 +1,24 @@
-//! 时间给模型看的写法：**一条规则，所有工具行都走它**。
+//! How time is written for the model: **one rule, which every tool line goes through**.
 //!
-//! - 世界轴的端点按**自己的精度**写：year → `2023`，month → `2023-06`，day → `2023-06-01`。
-//!   从前一律 `%Y-%m-%d`——年精度的事实印成 1 月 1 日，正是 `facts.valid_from_precision`
-//!   那条注释说的病：在无知的地方填一个确定的值。多少精度写多少位。
-//! - 没有精度的时刻——`at`、`as_of`、`recorded_at`、`doc_time`，以及锚点顶上来的界
-//!   （派生行的两端、没起点的事实读出来的起点，0022）——写完整 RFC3339，含小数秒。
-//!   记录轴上同一秒内可以先录入再更正（#351），截到天或秒都会把两次认知叠回一起。
-//! - 「结束了，不知哪天」写成 `ended by <锚点>`，绝不写 `now`。
+//! - Endpoints on the world axis are written at **their own precision**: year → `2023`, month → `2023-06`, day → `2023-06-01`.
+//!   It used to be `%Y-%m-%d` throughout, which printed a year-precision fact as 1 January: the very problem the
+//!   comment on `facts.valid_from_precision` describes, filling in a definite value where nothing is known. Write as many digits as the precision has.
+//! - Moments without a precision (`at`, `as_of`, `recorded_at`, `doc_time`, and the bounds that anchors bring up
+//!   (the two ends of derived rows, and the start of a fact with no start, read out per 0022) are written as full RFC3339, with fractional seconds.
+//!   Within one second on the recording axis, an entry can be made before it is corrected (#351); truncating to day or second would fold the two beliefs back together.
+//! - "Ended, date unknown" is written as `ended by <anchor>`, never `now`.
 //!
-//! 界面的 `web/src/time.ts::fmtTime` 与导出的 `rdf::world_time` 是同一条规则的另两份；
-//! 三处分叉的话，人看到的、模型看到的、审计者拿到的就不是同一个日期。
+//! The `web/src/time.ts::fmtTime` in the UI and the exported `rdf::world_time` are the other two copies of this same rule;
+//! if the three diverge, what people see, what the model sees and what an auditor gets will not be the same date.
 use chrono::{DateTime, SecondsFormat, Utc};
 
-/// 一个时刻，完整写出。
+/// A moment, written out in full.
 pub fn instant(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::AutoSi, true)
 }
 
-/// 世界轴的一端，按精度写。小时以下用 ISO 8601 的缩略形式（`2026-06-01T14:32Z`），
-/// 同一个字符串能解析回同一个值和精度。没有精度就是一个时刻（锚点、派生的界），写完整。
+/// One end of the world axis, written at its precision. Below hour precision, use the abbreviated ISO 8601 form (`2026-06-01T14:32Z`),
+/// so the same string parses back to the same value and precision. Without a precision it is a moment (an anchor, a derived bound), written in full.
 pub fn world(t: DateTime<Utc>, precision: Option<&str>) -> String {
     match precision {
         Some("year") => t.format("%Y").to_string(),
@@ -31,9 +31,9 @@ pub fn world(t: DateTime<Utc>, precision: Option<&str>) -> String {
     }
 }
 
-/// 一条事实的两端：原文说的（`valid_*` 与精度）和读出来的（`holds_*`，0022），以及日期
-/// 从哪来（#970）：终点是时间线推出来的、区间是人改过的，这两样都不在那一行 `[n]` 打开的
-/// 原句里。
+/// The two ends of a fact: what the source states (`valid_*` and precision) and what is read out (`holds_*`, 0022), and where the date
+/// comes from (#970): the end is what the timeline inferred, and the interval is what a person edited. Neither is in the source sentence
+/// that the line's `[n]` opens.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Span<'a> {
     pub valid_from: Option<DateTime<Utc>>,
@@ -42,22 +42,22 @@ pub struct Span<'a> {
     pub to_precision: Option<&'a str>,
     pub holds_from: Option<DateTime<Utc>>,
     pub holds_to: Option<DateTime<Utc>>,
-    /// 终点是后一条事实开始时时间线关上的（`facts.end_derived`）
+    /// The end is closed by the timeline when the next fact starts (`facts.end_derived`)
     pub end_derived: bool,
-    /// 人改过哪一端：`start` / `end` / `both`（`facts.corrected_ends`）；None 是没改过
+    /// Which end a person corrected: `start` / `end` / `both` (`facts.corrected_ends`); None means never corrected
     pub corrected: Option<&'a str>,
-    /// 关上它的那一行（#970 第二步）：接任的那一端，和它证据的号（对话里是 ` [n]`，MCP 里空）
+    /// The line that closes it (#970 step 2): the end that succeeds it, and the number of its evidence (` [n]` in chat, empty in MCP)
     pub closed_by: Option<(&'a str, &'a str)>,
-    /// 人改区间时写下的备注
+    /// A note written when a person edited the interval
     pub correction_note: Option<&'a str>,
 }
 
-/// 备注在行上最多这么多字：再长就是一段话，不是一个说明
+/// A note on the line is at most this many characters: any longer and it is a paragraph, not a caption
 const NOTE_CHARS: usize = 120;
 
-/// 备注折成一行、去掉两端空白，过长截断。空的就是没写
+/// Folds the note into one line, strips the outer whitespace, and truncates if too long. An empty one means nothing was written
 fn note_text(note: &str) -> Option<String> {
-    // 方括号换掉：备注是人写的话，里面一个 `[2]` 落在行上就成了一个像引用的号
+    // Replace the square brackets: the note is words a person wrote, and a `[2]` inside it would land on the line looking like a citation number
     let flat = note
         .replace('[', "(")
         .replace(']', ")")
@@ -73,25 +73,25 @@ fn note_text(note: &str) -> Option<String> {
     Some(flat)
 }
 
-/// `from → to`，给模型看。
+/// `from → to`, shown to the model.
 ///
-/// 起点：原文给了按精度写；没给但有锚点写 `attested <时刻>`——模型该知道这条事实
-/// 只是从那份证据起有据可查。终点：原文给了按精度写；结束了不知哪天写
-/// `ended by <锚点>`（没有锚点时写 `ended, date unknown`）；否则 `now`。
-/// 两端都无可写时返回空串，调用方据此决定不带括号。
+/// Start: if the source gave one, written at its precision; if not but there is an anchor, write `attested <moment>`, so the model knows
+/// this fact is only documented from that evidence onward. End: if the source gave one, written at its precision; "ended, date unknown" is written
+/// `ended by <anchor>` (or `ended, date unknown` with no anchor); otherwise `now`.
+/// If neither end can be written, return an empty string, and the caller leaves out the brackets.
 ///
-/// 日期不是原文说的就跟在后面说出来（#970）：人改过的那一端写 `start corrected` 或
-/// `end corrected`，两端都改过写 `corrected`——没改的那一端仍是原文说的；写了备注就带上
-/// 备注（`start corrected: …`，人的话不是原文段落，不带号）；时间线推出来的终点写
-/// `superseded by X [m]`——`[m]` 打开的是接任那条事实读出来的原句，那里写着这个
-/// 日期——找不到接任的那一行时写 `end derived`。这两样只在有终点时说。行尾的 `[n]` 仍是
-/// 这条事实自己读出来的原句
+/// A date that is not what the source states is said after the interval (#970): an end a person corrected is written `start corrected` or
+/// `end corrected`, and `corrected` when both ends were changed; an end that was not changed is still what the source says. If a note was written, include it
+/// (`start corrected: …`; a person's words are not a source paragraph, so no number); an end the timeline inferred is written
+/// `superseded by X [m]`, where `[m]` opens the source sentence that the successor fact reads out, which states this
+/// date. If the successor's line cannot be found, write `end derived`. These are said only when there is an end. The `[n]` at the line's end is still
+/// the source sentence this fact reads out itself
 pub fn span(s: Span<'_>) -> String {
     let from = match (s.valid_from, s.holds_from) {
         (Some(t), _) => Some(world(t, s.from_precision)),
-        // 没有说出来的起点就说没有。从前写 `attested <文档日期>`，模型把那个日期当成
-        // 事情发生的日子念出来（"OpenAI 于 2026 年 9 月 6 日被确认为…"）；锚点是过滤用的，
-        // 不是给人读的
+        // A start that was not stated is said not to be stated. It used to write `attested <document date>`, and the model read that date
+        // aloud as the day the event happened ("OpenAI was confirmed as … on 6 September 2026"); the anchor is for filtering,
+        // not for people to read
         (None, Some(_)) => Some("undated".to_string()),
         (None, None) => None,
     };
@@ -99,7 +99,7 @@ pub fn span(s: Span<'_>) -> String {
         s.valid_to.is_none() && s.to_precision == Some(utopia_store::graph::ENDED_UNKNOWN);
     let to = match (s.valid_to, ended_unknown, s.holds_to) {
         (Some(t), _, _) => Some(world(t, s.to_precision)),
-        // 「结束了，不知哪天」照实说；说出它的那份文档的日期同样不给
+        // "Ended, date unknown" is stated as is; the date of the document that states it is likewise not given
         (None, true, Some(_)) => Some("ended, date unknown".to_string()),
         (None, true, None) => Some("ended, date unknown".to_string()),
         (None, false, _) => None,
@@ -154,7 +154,7 @@ mod tests {
         assert_eq!(world(clock, Some("hour")), "2026-06-01T14Z");
         assert_eq!(world(clock, Some("minute")), "2026-06-01T14:32Z");
         assert_eq!(world(clock, Some("second")), "2026-06-01T14:32:07Z");
-        // 写出来的能读回去，且是同一个精度
+        // What is written can be read back, at the same precision
         for (p, s) in [
             ("hour", "2026-06-01T14Z"),
             ("minute", "2026-06-01T14:32Z"),
@@ -163,7 +163,7 @@ mod tests {
             let (back, bp) = utopia_extract::parse_time(s).unwrap();
             assert_eq!((bp, world(back, Some(p))), (p, s.to_string()));
         }
-        // 没有精度 = 一个时刻（锚点、派生的界）：写完整，不冒充哪一天
+        // No precision = one moment (an anchor, a derived bound): write it in full, and do not pass it off as a particular day
         assert_eq!(world(at, None), "2023-06-15T00:00:00Z");
     }
 
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn a_span_reads_each_end_by_its_own_rule() {
         let day = |s: &str| Some(t(s));
-        // 原文给了两端
+        // The source gave both ends
         assert_eq!(
             span(Span {
                 valid_from: day("2023-01-01T00:00:00Z"),
@@ -194,7 +194,7 @@ mod tests {
             }),
             "2023 → 2024-07"
         );
-        // 没起点：从证据起；仍在继续
+        // No start: from the evidence on; still ongoing
         assert_eq!(
             span(Span {
                 holds_from: day("2024-02-20T00:00:00Z"),
@@ -202,7 +202,7 @@ mod tests {
             }),
             "undated → now"
         );
-        // 结束了不知哪天：到说出它的那份文档为止，绝不是 now
+        // Ended, date unknown: up to the document that states it, never now
         assert_eq!(
             span(Span {
                 valid_from: day("2023-06-01T00:00:00Z"),
@@ -215,7 +215,7 @@ mod tests {
             }),
             "2023-06-01 → ended, date unknown"
         );
-        // 记录轴事件里没有锚点可用
+        // No anchor is available for a recording-axis event
         assert_eq!(
             span(Span {
                 to_precision: Some("unknown"),
@@ -226,8 +226,8 @@ mod tests {
         assert_eq!(span(Span::default()), "");
     }
 
-    /// 日期不是原文说的，就在区间后面说出来（#970）：时间线关上的终点、人改过的区间。
-    /// 没有终点就没有「推出来的终点」；区间为空却改过，只说改过
+    /// A date that is not what the source states is said after the interval (#970): an end closed by the timeline, or an interval a person corrected.
+    /// With no end there is no "derived end"; an empty interval that was corrected is only said to be corrected
     #[test]
     fn a_span_says_when_a_date_is_not_the_passages() {
         let day = |s: &str| Some(t(s));
@@ -260,7 +260,7 @@ mod tests {
             }),
             "2024-07-05 → 2025-09-01, corrected, end derived"
         );
-        // 时间线关在一个没说起点的后任上：结束了不知哪天，也是推出来的
+        // The timeline closed it on a successor that states no start: ended, date unknown, and that is also derived
         assert_eq!(
             span(Span {
                 valid_to: None,
@@ -270,7 +270,7 @@ mod tests {
             }),
             "2024-07-05 → ended, date unknown, end derived"
         );
-        // 开着的行没有终点可推
+        // An open row has no end to derive
         assert_eq!(
             span(Span {
                 valid_to: None,
@@ -288,8 +288,8 @@ mod tests {
             "corrected"
         );
     }
-    /// 找得到关上它的那一行时，推出来的终点说出谁接任、带上那一行的号（#970 第二步）；
-    /// MCP 没有号。人改过的区间带着备注：折成一行，过长截断，空的等于没写
+    /// When the line that closes it can be found, the derived end names who succeeds and carries that line's number (#970 step 2);
+    /// MCP has no number. An interval a person corrected carries a note: folded into one line, truncated if too long, and empty means not written
     #[test]
     fn a_derived_end_names_what_closed_it_and_a_correction_its_note() {
         let day = |s: &str| Some(t(s));
@@ -315,7 +315,7 @@ mod tests {
             }),
             "2024-07-05 → 2025-09-01, superseded by Zhou Qi"
         );
-        // 开着的行没有终点，也就没有谁接任
+        // An open row has no end, so there is no successor to name
         assert_eq!(
             span(Span {
                 valid_to: None,
@@ -363,8 +363,8 @@ mod tests {
         );
     }
 
-    /// 人只改了一端就只说那一端（#976 的评审）：没改的那一端仍是原文说的，终点仍可以是
-    /// 时间线推出来的
+    /// If a person corrected only one end, only that end is named (#976 review): the uncorrected end is still what the source says, and the other end can still be
+    /// derived by the timeline
     #[test]
     fn a_correction_names_the_end_a_person_changed() {
         let day = |s: &str| Some(t(s));

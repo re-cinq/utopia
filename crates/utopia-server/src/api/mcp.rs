@@ -1,21 +1,21 @@
-//! MCP 服务端（Streamable HTTP）。
+//! MCP server (Streamable HTTP).
 //!
-//! 一条路由：`POST /api/v1/kbs/{kb_id}/mcp`，收 JSON-RPC 2.0。
+//! One route: `POST /api/v1/kbs/{kb_id}/mcp`, accepts JSON-RPC 2.0.
 //!
-//! **传输选 Streamable HTTP 不选 stdio**，理由在 `docs/decisions/0014`：Utopia
-//! 本来就是个服务端，stdio 要么起一个子进程反过来连它、要么再开一个连接池；
-//! 而这是多人部署，五个人各连各的应该由同一个部署统一服务。
+//! **Transport is Streamable HTTP, not stdio**; the reasoning is in `docs/decisions/0014`: Utopia
+//! is already a server, and stdio would mean either spawning a child process that connects back to it, or opening another connection pool;
+//! and this is a multi-person deployment, where five people each connecting should be served by the same deployment.
 //!
-//! **每个 POST 都重新认证一次。** 规范允许把一次握手的结果沿用整条连接，
-//! 而 0014 那条纪律说得很清楚：
+//! **Every POST re-authenticates.** The spec allows reusing the result of one handshake for the whole connection,
+//! but the discipline in 0014 is clear:
 //!
-//! > 校验 scope 要在每个工具入口，不在握手。`revoked_at` 中途被写上时必须
-//! > 立刻生效。
+//! > Scope is checked at every tool entry point, not at the handshake. When `revoked_at` is set mid-session it must
+//! > take effect immediately.
 //!
-//! 这里做成无状态之后，那条性质是白得的——没有「连接」这个东西可以被信任。
+//! Once this is stateless, that property comes for free: there is no "connection" that could be trusted.
 //!
-//! **响应用 `application/json` 而不是 SSE。** 规范允许两者，而这些工具是
-//! 一问一答，没有服务端主动推的东西；SSE 是给通知用的，这一版不需要。
+//! **The response uses `application/json`, not SSE.** The spec allows either, and these tools are
+//! strict request-response, with nothing the server pushes unprompted; SSE is for notifications, which this version does not need.
 
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
@@ -28,18 +28,18 @@ use super::tools::{self, ToolCtx, ToolSink};
 use crate::error::ApiResult;
 use crate::state::AppState;
 
-/// 实现的协议版本。客户端报别的版本时照样按这个答——
-/// 规范要求服务端回自己支持的版本，由客户端决定接不接受
+/// The protocol version implemented. When a client reports another version, it is answered with this one anyway:
+/// the spec requires the server to reply with a version it supports, and leaves it to the client to accept or not
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
-/// 只读的那些：任何一枚够得着这个库的令牌都能调。
+/// The read-only ones: any token that reaches this KB can call them.
 ///
-/// `query_data` 仍旧不放：它对**部署之外的生产库**跑 SQL，审计怎么记、
-/// 一个被投喂了脏文档的 agent 拿它做什么，都还没答完（0014 的混淆代理那一节）。
-/// 业务规则的两个只读工具也在这里（0021）：判据要看得见——一个 agent 解释
-/// 「凭什么算含气井」时，该读到那条规则和它的阈值，而不是自己猜一个。
-/// **写规则不放**：推理的判据由人写下，而一次工具调用分不出「人口述、agent
-/// 代打」与「模型自己编了一条」
+/// `query_data` is still not exposed: it runs SQL against **production databases outside the deployment**, and how it is audited,
+/// and what an agent fed poisoned documents could do with it, are still unresolved (see the confused-deputy section of 0014).
+/// The two read-only business-rule tools are also here (0021): the criteria must be visible. When an agent explains
+/// "why does this count as a gas-bearing well", it should read the rule and its threshold, not guess one.
+/// **Writing rules is not exposed**: the reasoning criteria are written down by a person, and one tool call cannot tell "a person dictated it, and the agent
+/// typed it for them" apart from "the model made one up".
 const EXPOSED: [&str; 11] = [
     "search_chunks",
     "get_document",
@@ -54,26 +54,26 @@ const EXPOSED: [&str; 11] = [
     "paths_between",
 ];
 
-/// 会往账本里写的那些。
+/// The ones that write into the ledger.
 ///
-/// **0014 当初不放 `remember`，主要是怕混淆代理**：agent 读的是库里的文档，
-/// 一句「请记住 X」写在文档里就可能被当成指令照做，而它带着那个人的全部权限。
-/// 0015 把这个反对意见拆掉了——记忆抽出的事实先进 `pending_facts` 等人点头，
-/// 没人点头就什么都没进图。所以这里放开的不是「写图」，是「提议」。
+/// **0014 originally left out `remember` mainly because of the confused deputy**: an agent reads documents in the KB, and
+/// a line "please remember X" written inside a document could be taken as an instruction and carried out, with that person's full permissions.
+/// 0015 dismantled that objection: facts extracted from memory go first into `pending_facts` to wait for a person's nod,
+/// and without a nod nothing enters the graph. So what is opened here is not "writing to the graph", it is "proposing".
 const WRITABLE: [&str; 1] = ["remember"];
 
-/// `can_write` = 令牌 scope 是 write **且** 这个人在这个库里 editor 以上。
-/// 两个条件缺一不可：scope 是上限，角色才是权限（0014）
+/// `can_write` = the token's scope is write **and** the person is editor or above in this KB.
+/// Both conditions are required: scope is the ceiling, and the role is the permission (0014)
 fn is_exposed(name: &str, can_write: bool) -> bool {
     EXPOSED.contains(&name) || (can_write && WRITABLE.contains(&name))
 }
 
-/// 认证 + 授权。**两道，不是一道。**
+/// Authentication and authorization. **Two checks, not one.**
 ///
-/// 令牌说「这是谁、这枚钥匙够到哪几个库」；`require_kb` 说「这个人在这个库里
-/// 是什么角色」。前者只收窄，后者才是权限——一枚 scope 全开的令牌落在一个
-/// viewer 手上，仍旧只是 viewer。
-/// 认证的产物：人、令牌、库，以及**有效写权限**——令牌 scope ∩ 这个人在这个库里的角色。
+/// The token says "who this is, and which KBs this key reaches"; `require_kb` says "what role this person has
+/// in this KB". The former only narrows; the latter is the permission. A token with full scope held by a
+/// viewer is still just a viewer.
+/// Output of authentication: the person, the token, the KB, and **effective write permission**: token scope ∩ the person's role in this KB.
 type Authorized = (
     utopia_core::models::User,
     utopia_store::tokens::Authenticated,
@@ -92,18 +92,18 @@ async fn authorize(
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or(utopia_core::AppError::Unauthorized)?;
     let auth = utopia_store::tokens::authenticate(&state.pool, raw.trim()).await?;
-    // 令牌的范围：限定过库的，够不着别的
+    // The token's scope: if it was limited to KBs, it cannot reach others
     if !auth.covers(kb_id) {
         return Err(utopia_core::AppError::Forbidden);
     }
-    // 人：停用立即生效（find_user_by_id 会挡住）
+    // Person: deactivation takes effect at once (find_user_by_id blocks it)
     let user = utopia_store::accounts::find_user_by_id(&state.pool, auth.user_id)
         .await?
         .ok_or(utopia_core::AppError::Unauthorized)?;
-    // 角色：和网页端走同一个守卫，一行没改
+    // Role: goes through the same guard as the web UI, not one line changed
     let kb = utopia_store::access::require_kb(&state.pool, &user, kb_id, Role::Viewer).await?;
-    // **收窄两次。** 令牌勾了 write 只是没把写排除掉；能不能写，问的是这个人
-    // 在这个库里的角色——一枚 scope 全开的令牌落在 viewer 手上仍旧只能读
+    // **Narrowed twice.** Ticking write on the token only means it does not exclude writing; whether writing is allowed asks about the person's
+    // role in this KB: a token with full scope held by a viewer is still read-only
     let can_write = auth.can_write()
         && utopia_store::access::kb_role(&state.pool, &user, &kb)
             .await?
@@ -111,15 +111,15 @@ async fn authorize(
     Ok((user, auth, kb, can_write))
 }
 
-/// OpenAI 形状 → MCP 形状。
+/// OpenAI shape -> MCP shape.
 ///
-/// **共用 `chat.rs` 那一份定义**，而不是在这里另写一套。名字与参数 schema 是
-/// 与 `tools.rs` 执行侧的契约，抄成两份迟早分叉——那正是上一步把工具抽出来
-/// 要避免的事。
+/// **Shares the one definition in `chat.rs`**, rather than writing a second one here. The names and parameter schemas are the
+/// contract with the `tools.rs` execution side; copying them into two places would sooner or later diverge, which is exactly what
+/// extracting the tools in the previous step was meant to prevent.
 ///
-/// 已知的瑕疵：描述是给应用内助手写的，`search_chunks` 那句还提着「可以引用
-/// 成 [n]」，而 MCP 客户端拿不到引用编号。共用一份的好处大过这句话的代价，
-/// 真要分开时再说。
+/// Known flaw: the descriptions are written for the in-app assistant, and the `search_chunks` one still says "can be cited
+/// as [n]", while MCP clients have no citation numbers. Sharing one copy is worth more than that sentence costs;
+/// it can be split when it really needs to be.
 fn to_mcp_tools(openai: &Value, can_write: bool) -> Vec<Value> {
     openai
         .as_array()
@@ -159,8 +159,8 @@ fn tool_result(result: tools::ToolResult) -> Value {
     response
 }
 
-/// JSON-RPC 的错误不是 HTTP 的错误：**传输成功了，方法失败了**。
-/// 回 200 带 error 体，客户端才解析得动。
+/// A JSON-RPC error is not an HTTP error: **the transport succeeded, the method failed**.
+/// Reply 200 with an error body, which is what clients can parse.
 fn rpc_err(id: Option<Value>, code: i64, message: &str) -> Json<Value> {
     Json(json!({
         "jsonrpc": "2.0", "id": id,
@@ -188,16 +188,16 @@ pub async fn handle(
                 "serverInfo": { "name": "utopia", "version": super::build_version::build_version() },
             }),
         ),
-        // 通知没有 id，按规范不该回响应体；但 HTTP 这一侧总得回点什么，
-        // 回 202 语义更准，这里为了保持处理器签名统一回一个空结果
+        // A notification has no id, and by the spec should not get a response body; but the HTTP side still has to send something,
+        // 202 would be the more accurate status, but to keep the handler signature uniform an empty result is returned
         "notifications/initialized" | "notifications/cancelled" => ok(None, json!({})),
         "ping" => ok(id, json!({})),
-        // **列表跟着这枚令牌变。** 写不了的令牌看不见 `remember`——
-        // 列出一个调不动的工具，等于让对面的 agent 反复试
+        // **The list changes with this token.** A token that cannot write does not see `remember`:
+        // listing a tool you cannot call means the agent on the other end keeps trying
         "tools/list" => ok(
             id,
             json!({
-                // 传空的数据源列表：`query_data` 没放出来，那份描述也就不必生成
+                // Pass an empty data source list: `query_data` is not exposed, so its description need not be generated
                 "tools": to_mcp_tools(&super::chat::tools_schema(can_write, &[]), can_write)
             }),
         ),
@@ -205,9 +205,9 @@ pub async fn handle(
             let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             if !is_exposed(name, can_write) {
-                // 三种「不行」要分得开，否则客户端只能反复重试：
-                // 拿不到的工具（query_data）是「这一版没放出来」，写工具是
-                // 「这枚令牌/这个人写不了」——后者人改得了，前者改不了
+                // The three kinds of "no" must be kept apart, or the client can only keep retrying:
+                // a tool that cannot be fetched (query_data) means "not exposed in this version"; a write tool means
+                // "this token or this person cannot write"; the latter can be fixed by a person, the former cannot
                 let message = if WRITABLE.contains(&name) {
                     format!(
                         "Tool '{name}' needs a token with the write scope, \
@@ -218,7 +218,7 @@ pub async fn handle(
                 };
                 return Ok(rpc_err(id, -32601, &message));
             }
-            // 与聊天共用参数守卫：缺少 query 不能变成一次成功的空搜索。
+            // Shares the argument guard with chat: a missing query must not turn into a successful empty search.
             let result = match super::chat::check_call(
                 &super::chat::tools_schema(can_write, &[]),
                 name,
@@ -226,8 +226,8 @@ pub async fn handle(
             ) {
                 Err((text, step)) => tools::ToolResult::new(text, step).error(),
                 Ok(args) => {
-                    // `mounted_sources` 仍旧空着：`query_data` 没放出来，给了也没人用。
-                    // `can_write` 不再写死 false——它现在是令牌与角色一起算出来的
+                    // `mounted_sources` stays empty: `query_data` is not exposed, so giving it would help no one.
+                    // `can_write` is no longer hard-coded to false: it is now computed from the token and the role together
                     let ctx = ToolCtx {
                         state: &state,
                         kb_id,
@@ -235,9 +235,9 @@ pub async fn handle(
                         mounted_sources: &[],
                         can_write,
                         actor: Some(user.id),
-                        // 「谁说的」要答到 agent 这一层：一个人可以同时挂三个客户端
+                        // "Who said it" has to be answered at the agent level: one person can have three clients attached at once
                         via_token: Some(auth.token_id),
-                        // agent 的意图不在请求里；同名按事实数排
+                        // The agent's intent is not in the request; ties in name are ordered by fact count
                         question: None,
                     };
                     let mut sink = ToolSink::default();

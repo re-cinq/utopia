@@ -11,7 +11,7 @@ use crate::error::ApiResult;
 use crate::llm_util;
 use crate::state::AppState;
 
-/// GET：脱敏视图（密钥只回传是否已配置）。
+/// GET: redacted view (for keys, only whether they are configured is returned).
 pub async fn get(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -45,10 +45,10 @@ pub async fn get(
 #[derive(Deserialize)]
 pub struct PutSettingsReq {
     pub chat_base_url: Option<String>,
-    /// None 或空串 = 保留旧密钥
+    /// None or empty string = keep the old key
     pub chat_api_key: Option<String>,
     pub chat_model: Option<String>,
-    /// minimal | low | medium | high；空 = 不带字段，端点按默认。缺席 = 不改
+    /// minimal | low | medium | high; empty = field omitted, the endpoint uses its default. Absent = unchanged
     pub chat_reasoning_effort: Option<String>,
     pub embed_base_url: Option<String>,
     pub embed_api_key: Option<String>,
@@ -99,15 +99,15 @@ pub async fn put(
         )
         .await?;
     }
-    // **配好嵌入模型的这一刻，就是本体索引能开工的最早时刻。**
+    // **The moment the embedding model is configured is the earliest moment the ontology index can start.**
     //
-    // 注册时自动建的默认库会装上本体包，而那一刻还没有模型：`embed_ontology`
-    // 空转即报 done，此后没有任何东西会再排一次——库里躺着一份没有向量的本体，
-    // 直到有人去编辑本体或跑一次类型消解。于是默认库的第一批文档必然走
-    // 「全量铺本体」那条又贵又差的路。
+    // The default KB created automatically at registration gets the ontology pack installed, but at that moment there is no model yet: `embed_ontology`
+    // runs empty and reports done, and nothing queues it again after that. The ontology then sits in the KB with no vectors
+    // until someone edits it or runs type resolution. So the default KB's first documents necessarily take the expensive, poor path of
+    // "populate the whole ontology".
     //
-    // 在这里补一次，索引在用户还在想上传什么的时候就建起来了。抽取那边也各自
-    // 兜底（见 extraction.rs），这里只是把它提前，不是唯一的保障。
+    // Backfilling here builds the index while the user is still deciding what to upload. Extraction also has its own
+    // fallback (see extraction.rs); this just brings it forward, and is not the only safeguard.
     if nonempty(&req.embed_model).is_some() {
         for kb in utopia_store::kbs::list(&state.pool, workspace_id).await? {
             let _ = utopia_store::jobs::enqueue_unless_queued(
@@ -123,22 +123,22 @@ pub async fn put(
 
 #[derive(Deserialize)]
 pub struct PutOcrReq {
-    /// `mineru` 或 `ark`（0065）；老客户端不传时保留已有供应商，新设置默认 MinerU
+    /// `mineru` or `ark` (0065); when an old client does not send it, the existing provider is kept; new settings default to MinerU
     pub provider: Option<String>,
-    /// 空 = 关掉：扫描件、图片照第一刀降级
+    /// Empty = off: scanned documents and images are degraded as in the first slice
     pub base_url: Option<String>,
-    /// None 或空串 = 保留旧密钥；换供应商时不保留
+    /// None or empty string = keep the old key; not kept when the provider changes
     pub api_key: Option<String>,
     pub backend: Option<String>,
-    /// 方舟的视觉模型名；MinerU 忽略
+    /// The vision model name for Ark; ignored by MinerU
     pub model: Option<String>,
 }
 
-/// 版面识别服务（0040 第二刀）。单独一个接口：管理页上它是自己的一张卡片，存它不该把
-/// 对话、嵌入那几列按表单里的空值抹掉。
+/// Layout recognition service (0040 second slice). Its own endpoint: on the admin page it is its own card, and saving it must not
+/// clear the chat and embedding columns according to empty form values.
 ///
-/// 配上的这一刻，这个工作区里因为没有它而停在 failed 的扫描件、图片重新排进处理队列——
-/// 告警里说的「配上会自己重新处理」就是这里
+/// The moment it is configured, scanned documents and images that stopped at failed in this workspace for lack of it are re-queued for processing;
+/// the alert's "it will reprocess itself once configured" refers to this
 pub async fn put_ocr(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -189,15 +189,15 @@ pub async fn put_ocr(
 
 #[derive(Deserialize)]
 pub struct PutTranscribeReq {
-    /// 地址或模型空 = 关掉：录音照第一刀降级
+    /// Address or model empty = off: recordings degrade as in the first slice
     pub base_url: Option<String>,
-    /// None 或空串 = 保留旧密钥
+    /// None or empty string = keep the old key
     pub api_key: Option<String>,
     pub model: Option<String>,
 }
 
-/// 转写模型（0040 第三刀）。跟版面识别服务一样单独一个接口；配上的这一刀，这个工作区里
-/// 等着转写的录音重新排队——包括上一个模型分不出说话人、被拒收的那些
+/// Transcription model (0040 third slice). Like the layout recognition service, its own endpoint; once configured in this slice, the recordings in this workspace
+/// waiting to be transcribed are re-queued, including those the previous model could not separate by speaker and rejected
 pub async fn put_transcribe(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -236,12 +236,12 @@ pub async fn put_transcribe(
     Ok(Json(json!({ "ok": true, "requeued": requeued })))
 }
 
-/// 对话模型按任务真正发出的三种请求各试一次（#1354）：普通一问；抽取那种流式、带完成上限、
-/// 温度 0 的一问；带一个工具的一问。只发普通一问的话，拒收 `max_tokens`、`temperature` 或工具的
-/// 端点照样「测试通过」，毛病要等到抽取任务成片失败、对话悄悄退回一步检索时才露出来。
-/// 普通一问就失败的，端点本身不通，后两问不再发，免得同一个错报三遍。每问只要一个词，
-/// 托管模型上花不了几个 token。后两问同时发，每一问都有 [`PROBE_LIMIT`] 的上限：接了连接却
-/// 不说话的端点，最多让人等两个上限，而不是三次五分钟的沉默超时
+/// Each of the three kinds of request the chat model actually sends by task is tried once (#1354): a plain question; a one-shot streamed request with a completion cap and
+/// temperature 0 as extraction does; and a question with one tool. If only the plain question is sent, an endpoint that rejects `max_tokens`, `temperature` or tools
+/// still "passes the test", and the fault only shows once extraction jobs fail en masse or chat quietly falls back to one-step retrieval.
+/// If the plain question itself fails, the endpoint itself is unreachable, so the last two are not sent, to avoid reporting the same error three times. Each question needs only one word,
+/// so it costs few tokens on a hosted model. The last two go out together, each capped at [`PROBE_LIMIT`]: an endpoint that accepts the connection but never
+/// replies makes the person wait at most two caps, rather than three five-minute silent timeouts
 async fn chat_checks(client: &utopia_llm::LlmClient) -> serde_json::Value {
     let msg = [ChatMessage {
         role: "user".into(),
@@ -274,7 +274,7 @@ async fn chat_checks(client: &utopia_llm::LlmClient) -> serde_json::Value {
     out
 }
 
-/// 设置页测试里每一问的上限
+/// The cap on each question in the settings-page test
 const PROBE_LIMIT: std::time::Duration = std::time::Duration::from_secs(45);
 
 async fn limited<T>(f: impl std::future::Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
@@ -290,8 +290,8 @@ async fn limited_for<T>(
         .unwrap_or_else(|_| Err(TimedOut(limit).into()))
 }
 
-/// 一问没在上限里答完。与被拒分开报（#1363 评审）：被拒说的是端点不收这个形状，超时说的是
-/// 它没说话，读的人该去查的东西不一样
+/// A question that did not finish within its cap. Reported separately from a rejection (#1363 review): a rejection says the endpoint does not accept this shape, while a timeout says
+/// it did not reply; the person reading it needs to check different things
 #[derive(Debug)]
 struct TimedOut(std::time::Duration);
 
@@ -303,7 +303,7 @@ impl std::fmt::Display for TimedOut {
 
 impl std::error::Error for TimedOut {}
 
-/// 没答完：撞上探测上限，或者更早撞上探测客户端自己的读超时（`chat_probe_client` 是 30 s，比上限短）
+/// Did not finish: hit the probe cap, or hit the probe client's own read timeout earlier (`chat_probe_client` is 30 s, shorter than the cap)
 fn timed_out(e: &anyhow::Error) -> bool {
     e.downcast_ref::<TimedOut>().is_some()
         || e.chain().any(|c| {
@@ -322,7 +322,7 @@ fn check(r: &anyhow::Result<()>) -> serde_json::Value {
     }
 }
 
-/// 设置页的四张模型卡，各有一个「测试」
+/// The four model cards on the settings page, each with a "Test"
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelCard {
@@ -334,13 +334,13 @@ pub enum ModelCard {
 
 #[derive(Deserialize)]
 pub struct TestQuery {
-    /// 只测这一张卡。缺席 = 四张都测
+    /// Test only this card. Absent = test all four
     pub card: Option<ModelCard>,
 }
 
-/// 连通性测试：对话按任务的三种请求形状各试一次（见 [`chat_checks`]）；embedding 试算一条并
-/// 返回维度；版面识别服务问一声健康。带 `?card=`（[`ModelCard`]）只测那一张卡，回来的也只有
-/// 那一项；不带就四张都测（#1424）。
+/// Connectivity test: the chat model is tried once for each of the three request shapes by task (see [`chat_checks`]); embedding tries one item and
+/// returns the dimension; the layout recognition service is pinged for health. With `?card=` ([`ModelCard`]) only that card is tested, and only its
+/// item comes back; without it all four cards are tested (#1424).
 pub async fn test(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -352,8 +352,8 @@ pub async fn test(
     Ok(Json(probe(s.as_ref(), q.card).await))
 }
 
-/// 只测点了的那张卡（#1424）。从前四张卡共用一次测试，按任意一张四套一起测；自 #1363 起
-/// 对话一测要发三问，测嵌入、读扫描件的卡也跟着白花这几问的 token。回来的只有测了的那几项
+/// Tests only the card that was clicked (#1424). Before, the four cards shared one test, so pressing any one of them tested all four at once; since #1363
+/// a chat test sends three questions, and testing the embedding card or the scanned-document card wasted those tokens too. Only the items tested come back
 async fn probe(s: Option<&LlmSettings>, only: Option<ModelCard>) -> serde_json::Value {
     let wants = |card| only.is_none_or(|c| c == card);
     let not_configured = || json!({ "ok": false, "error": "Not configured" });
@@ -409,7 +409,7 @@ mod tests {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-    /// 只认普通与流式、见到工具就 400 的端点；`down` 时什么都 500。收到的请求体由测试逐个查
+    /// Only accepts plain and streamed requests, and returns 400 on seeing a tool; `down` returns 500 for everything. Each incoming request body is checked one by one by the tests
     async fn endpoint(down: bool) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -468,7 +468,7 @@ mod tests {
                 && plain.get("max_tokens").is_none(),
             "{plain}"
         );
-        // 后两问同时发，到达的先后不定
+        // The last two go out together, and their arrival order is not fixed
         let streamed = sent
             .iter()
             .find(|b| b["stream"] == true)
@@ -542,7 +542,7 @@ mod tests {
         );
     }
 
-    /// #1424：按嵌入卡的「测试」，对话模型一问都收不到；不指定卡的旧调用照旧四项都回
+    /// #1424: a click on the embedding card's "Test" gets no chat-model question at all; a legacy call that does not name a card still returns all four items
     #[tokio::test]
     async fn testing_one_card_sends_nothing_to_the_others() {
         let chat = endpoint(false).await;

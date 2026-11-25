@@ -1,5 +1,5 @@
-//! 用录下的真实 GitHub 响应跑仓库同步：筛选、同一 blob 只收一处、没变不再取、
-//! 树截断时不判「不在来源中」。
+//! Runs repo sync against recorded real GitHub responses: filtering, one copy per identical blob, no re-fetch when unchanged,
+//! and a truncated tree does not judge "not in source".
 use super::sync_github_repo_with_client;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -9,7 +9,7 @@ use wiremock::{matchers::method, Mock, MockServer, Request, ResponseTemplate};
 const PACKS: &str = "crates/utopia-server/packs/README.md";
 const TESTDATA: &str = "crates/utopia-server/testdata/README.md";
 
-/// 录下的树再加一个 testdata/README.md 的副本。阶段 1、2 去掉 packs，阶段 1 还标了截断
+/// The recorded tree plus one extra copy of testdata/README.md. Stages 1 and 2 drop packs; stage 1 also flags truncation
 fn tree(fixture: &Value, stage: u8) -> Value {
     let mut entries = fixture["tree"]["tree"].as_array().unwrap().clone();
     let mut copy = entries
@@ -38,7 +38,7 @@ async fn a_repository_sync_takes_each_changed_file_once() -> anyhow::Result<()> 
         Uuid::now_v7(),
     );
     let result = async {
-        // 2000 字节的上限把 2920 字节的 SECURITY.md 挡在外面
+        // The 2000-byte cap keeps the 2920-byte SECURITY.md out
         sqlx::raw_sql(&format!(
             r#"INSERT INTO organizations(id,name) VALUES('{org}','repo-test');
                INSERT INTO workspaces(id,org_id,name) VALUES('{ws}','{org}','repo-test');

@@ -1,4 +1,4 @@
-//! 从工作区设置构造 LLM 客户端，以及按模型的并发闸门。
+//! Building the LLM client from workspace settings, and the per-model concurrency gates.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,9 +23,9 @@ pub fn chat_client(s: &LlmSettings) -> Option<LlmClient> {
     )
 }
 
-/// 设置页「测试」用的对话客户端：设置与 [`chat_client`] 相同，超时短得多（#1354 评审）。
-/// 任务的客户端容得下五分钟的沉默，是因为推理模型先想再答；测试只问一个词，一个接了
-/// 连接却不说话的端点不该让人在设置页干等一刻钟
+/// Chat client for the settings page's "Test" button: same settings as [`chat_client`], with a much shorter timeout (#1354 review).
+/// The task client tolerates five minutes of silence because reasoning models think before they answer; the test asks a single word, and an endpoint
+/// that accepts the connection but never replies should not make someone wait on the settings page for a quarter of an hour.
 pub fn chat_probe_client(s: &LlmSettings) -> Option<LlmClient> {
     if !s.chat_ready() {
         return None;
@@ -42,7 +42,7 @@ pub fn chat_probe_client(s: &LlmSettings) -> Option<LlmClient> {
     )
 }
 
-/// 对话模型的设置：地址、密钥、模型、推理力度。任一项变了就是另一个客户端
+/// Chat model settings: address, key, model, reasoning effort. If any of them changes, it is a different client.
 type ChatConfig = (
     Option<String>,
     Option<String>,
@@ -50,11 +50,11 @@ type ChatConfig = (
     Option<String>,
 );
 
-/// 各工作区的对话客户端，跨轮次留着。
+/// Chat clients per workspace, kept across turns.
 ///
-/// 端点报过的上下文窗口记在客户端上（`LlmClient::remember_context_window`），每轮新建一个
-/// 就等于每轮都忘，下一轮照样撞上同一个 400（#964）。模型设置一变就换新的：学到的窗口
-/// 是那个模型的，不是这个工作区的。密钥和窗口都不跨工作区
+/// The context window an endpoint reported is recorded on the client (`LlmClient::remember_context_window`). Creating a new one each turn
+/// would forget it every turn, so the next turn hits the same 400 again (#964). When the model settings change, a new one is created: the learned window
+/// belongs to that model, not to this workspace. Neither the key nor the window is shared across workspaces.
 #[derive(Default)]
 pub struct ConversationClients {
     inner: std::sync::Mutex<HashMap<uuid::Uuid, (ChatConfig, LlmClient)>>,
@@ -84,9 +84,9 @@ impl ConversationClients {
     }
 }
 
-/// 一轮对话里嵌过的文字与它的向量（#971）。挑口径、检索分块、按名字查实体都要把问题嵌成
-/// 向量，一轮之内是同一句话、同一个模型，嵌一次就够。缓存跟着这一轮的 `ToolSink` 走，不落库，
-/// 只记成功的；没有这一轮的调用方（HTTP 检索、口径页）传 `None`，各嵌各的
+/// Text embedded during a turn, with its vectors (#971). Choosing the scope, chunking for retrieval, and looking up entities by name all need the question embedded as
+/// vectors; within one turn it is the same sentence with the same model, so embedding it once is enough. The cache follows this turn's `ToolSink` and is not persisted;
+/// only successes are recorded. Callers with no turn (HTTP retrieval, the scope page) pass `None` and each embeds on its own.
 pub type EmbedCache = std::collections::HashMap<String, Vec<f32>>;
 
 pub fn embed_client(s: &LlmSettings) -> Option<LlmClient> {
@@ -100,19 +100,19 @@ pub fn embed_client(s: &LlmSettings) -> Option<LlmClient> {
     ))
 }
 
-/// 按模型的信号量注册表：每个模型一把，限额变了就地调整（#1302）。
+/// Per-model semaphore registry: one per model, with limits adjusted in place when they change (#1302).
 ///
-/// 原来限额一变就换一把新的。等在旧的那把上的任务不会挪过去，每个都要拿旧限额再做
-/// 完一次调用才换到新的上——抽取一次调用几分钟，八个 worker 排在一张许可后面，限额
-/// 从 1 调到 4 之后好几个小时还是一次只跑一个，看起来就是「改了不生效」。
+/// It used to swap in a new semaphore whenever a limit changed. Tasks waiting on the old one did not move over; each had to finish one call
+/// with the old limit before switching to the new one. An extraction call takes several minutes, and eight workers queued behind one permit, so after the limit went
+/// from 1 to 4 it still ran only one call at a time for hours, which looked like "the change did not take effect".
 ///
-/// 调高用 `add_permits`，已经在等的立刻放进来。调低时空着的许可当场收走
-/// （`forget_permits`）；正被在飞调用占着的记成欠账，由等着的任务拿到时收掉。没用
-/// 「另起一个任务把差额 acquire 下来再 forget」：信号量先来先得，那个任务排在已经在等的
-/// 任务后面，还回来的许可先发给它们，它们全在调低之后的限额之上进去了，它才拿到。
+/// Raising uses `add_permits`, so tasks already waiting are let in at once. When lowering, free permits are reclaimed on the spot
+/// (`forget_permits`); permits held by in-flight calls are recorded as debt, and collected by the waiting task that gets them. Acquiring the difference in a separate task
+/// and then forgetting it does not work: the semaphore is first-come, first-served, so that task queues behind the tasks already waiting, and the returned permits go to them first.
+/// They all get in above the lowered limit, and only then does it get one.
 ///
-/// 限额在两处读：取许可时，和管理员改了限额时（[`ModelGates::refresh`]）。只靠前一处
-/// 的话，所有 worker 都等在闸门上、唯一在飞的又是一次复读的调用时，没人来读新限额
+/// The limit is read in two places: when taking a permit, and when an admin changes it ([`ModelGates::refresh`]). Relying on the first alone
+/// fails when all workers wait on the gate and the only call in flight is a repeat that never returns: nobody reads the new limit.
 #[derive(Default)]
 pub struct ModelGates {
     inner: std::sync::Mutex<HashMap<(String, String), Gate>>,
@@ -121,7 +121,7 @@ pub struct ModelGates {
 struct Gate {
     sem: Arc<Semaphore>,
     limit: usize,
-    /// 调低之后还该收走、当时正被在飞调用占着的许可数
+    /// Number of permits that should still be reclaimed after lowering, which in-flight calls were holding at the time
     owed: usize,
 }
 
@@ -143,7 +143,7 @@ impl ModelGates {
         }
     }
 
-    /// 按库里的限额把认识的每个模型调一遍：管理员改了限额就调，等着的任务当场放行或收紧
+    /// Call each known model once with the limit stored in the DB: run when an admin changes a limit, so waiting tasks are let in or held back on the spot
     pub async fn refresh(&self, pool: &sqlx::PgPool) -> utopia_core::AppResult<()> {
         let keys: Vec<(String, String)> = self.inner.lock().unwrap().keys().cloned().collect();
         for key in keys {
@@ -170,7 +170,7 @@ impl ModelGates {
         gate.sem.clone()
     }
 
-    /// 还欠着许可就该收掉刚拿到的这张
+    /// If permits are still owed, reclaim the one just acquired
     fn repay(&self, key: &(String, String)) -> bool {
         match self.inner.lock().unwrap().get_mut(key) {
             Some(gate) if gate.owed > 0 => {
@@ -182,14 +182,14 @@ impl ModelGates {
     }
 }
 
-/// 后台任务调模型前取一张许可，持有到调用结束。
+/// Take a permit from the model before a background task calls it, and hold it until the call ends.
 ///
-/// **只给后台任务用**（抽取、裁决、摄入嵌入、本体建议）。用户的对话与检索
-/// 不走这里——让人打字等在十个后台抽取后面，产品就成了坏的；真正会打爆
-/// 供应商速率限制的也从来不是一个人在打字。
+/// **Only for background tasks** (extraction, adjudication, ingest embedding, ontology suggestions). User chat and retrieval
+/// do not go through here: if a person typing waited behind ten background extractions, the product would feel broken; and what really exhausts
+/// a provider's rate limit is never one person typing.
 ///
-/// 限额读不到（表还没建、库暂时不可达）时**放行**：并发限制是保护措施，
-/// 不该因为读不到配置而把整条流水线卡死。
+/// If the limit cannot be read (the table does not exist yet, or the DB is briefly unreachable), **let it through**: concurrency limits are a protection,
+/// and should not stall the whole pipeline just because the config cannot be read.
 pub async fn acquire(
     state: &AppState,
     base_url: &str,
@@ -201,13 +201,13 @@ pub async fn acquire(
     state.model_gates.admit(base_url, model, limit).await
 }
 
-/// `acquire` 的便捷形式：直接从工作区设置取 chat 模型的身份。
+/// Convenience form of `acquire`: takes the chat model's identity straight from the workspace settings.
 pub async fn acquire_chat(state: &AppState, s: &LlmSettings) -> Option<OwnedSemaphorePermit> {
     let (base, model) = (s.chat_base_url.as_deref()?, s.chat_model.as_deref()?);
     acquire(state, base, model).await
 }
 
-/// `acquire` 的便捷形式：embedding 模型。
+/// Convenience form of `acquire`: the embedding model.
 pub async fn acquire_embed(state: &AppState, s: &LlmSettings) -> Option<OwnedSemaphorePermit> {
     let (base, model) = (s.embed_base_url.as_deref()?, s.embed_model.as_deref()?);
     acquire(state, base, model).await

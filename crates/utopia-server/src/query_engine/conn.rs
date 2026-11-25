@@ -1,10 +1,10 @@
-//! 连接串解析。一个输入框，scheme 决定引擎；这里把 HTTP 族的 URL 拆成各引擎要的字段。
+//! Connection string parsing. One input box, with the scheme choosing the engine; this splits HTTP-family URLs into the fields each engine needs.
 //!
-//! 写法沿用 `postgres://user:pass@host/db` 的形状：凭据在 userinfo 里，HTTP 族的
-//! 令牌放 password 位（`databricks://:TOKEN@…`），路径是「目录 / 库 / schema」，
-//! 引擎特有的开关走 query。`ssl=false` 让 HTTP 族走明文——给本地代理与测试用。
-//! Databricks 与 Snowflake 线上只认 https；Trino 与 ClickHouse 默认明文，按端口与
-//! `ssl` 升级（各自的规则见 `TrinoConn` / `ClickHouseConn`）。
+//! The format follows the shape of `postgres://user:pass@host/db`: credentials sit in the userinfo, and for the HTTP family the
+//! token goes in the password slot (`databricks://:TOKEN@…`); the path is "catalog / database / schema",
+//! and engine-specific switches go in the query. `ssl=false` makes HTTP-family connections plaintext, for local proxies and tests.
+//! Databricks and Snowflake accept only https online; Trino and ClickHouse default to plaintext, upgraded by port and
+//! `ssl` (their own rules are in `TrinoConn` / `ClickHouseConn`).
 
 use percent_encoding::percent_decode_str;
 use url::Url;
@@ -33,8 +33,8 @@ fn segments(u: &Url) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 令牌：password 位优先；没有 password 时 username 位也算（`databricks://TOKEN@host`
-/// 少打一个冒号是最常见的手滑）；最后看 `?token=`
+/// The token: the password slot takes priority; without a password, the username slot also counts (`databricks://TOKEN@host`,
+/// leaving out one colon is the most common slip); finally look at `?token=`
 fn token_of(u: &Url) -> Option<String> {
     u.password()
         .map(decode)
@@ -49,7 +49,7 @@ fn base_of(u: &Url, https: bool, default_port: u16) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("{}://: a host is required", u.scheme()))?;
     let port = u.port().unwrap_or(default_port);
     let scheme = if https { "https" } else { "http" };
-    // 默认端口不写进 URL：reqwest 照样能连，日志里也干净
+    // The default port is not written into the URL: reqwest still connects, and the logs stay clean
     let explicit = match (https, port) {
         (true, 443) | (false, 80) => String::new(),
         _ => format!(":{port}"),
@@ -59,8 +59,8 @@ fn base_of(u: &Url, https: bool, default_port: u16) -> anyhow::Result<String> {
 
 /// `trino://user[:password]@host[:port]/[catalog[/schema]][?ssl=true|false]`
 ///
-/// 明文 http 是 Trino 的默认（8080）；带密码、`ssl=true`、或端口 443 / 8443 时走 https——
-/// Trino 自己也拒绝在明文上收密码。`presto://` 是同一个协议的旧名。
+/// Plain http is Trino's default (8080); with a password, `ssl=true`, or port 443 / 8443, it uses https,
+/// since Trino itself refuses to accept a password over plaintext. `presto://` is the old name for the same protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrinoConn {
     pub base: String,
@@ -96,10 +96,10 @@ impl TrinoConn {
 
 /// `clickhouse://user[:password]@host[:port]/[database][?ssl=true|false]`
 ///
-/// 走 HTTP 接口：明文 8123，https 8443。`ssl=true`（clickhouse-go 的 `secure=true` 也认）
-/// 或端口 443 / 8443 时走 https，`ssl=false` 强制明文。跟 Trino 不同，带密码**不**升级
-/// https：ClickHouse 在明文口上照收密码，自建实例多半就是这样。不写用户就是服务器的
-/// `default` 用户；库名是之后每条查询的默认库，也是取 schema 的范围。
+/// Uses the HTTP interface: plaintext on 8123, https on 8443. `ssl=true` (clickhouse-go's `secure=true` is also accepted)
+/// or port 443 / 8443 uses https, and `ssl=false` forces plaintext. Unlike Trino, a password does **not** upgrade to
+/// https: ClickHouse accepts passwords on its plaintext port, and self-hosted instances mostly run like that. Without a user, the server's
+/// `default` user is used; the database name is the default database for every later query, and the scope for fetching schemas.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClickHouseConn {
     pub base: String,
@@ -127,7 +127,7 @@ impl ClickHouseConn {
 
 /// `databricks://:TOKEN@workspace-host/sql/1.0/warehouses/WAREHOUSE_ID[?catalog=main&schema=default]`
 ///
-/// 路径就是 JDBC 里的 httpPath，从控制台复制过来不用改；`?warehouse=ID` 也认。
+/// The path is the httpPath from JDBC, which can be copied from the console unchanged; `?warehouse=ID` is also accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabricksConn {
     pub base: String,
@@ -164,13 +164,13 @@ impl DatabricksConn {
 
 /// `snowflake://:TOKEN@account.snowflakecomputing.com/[DATABASE[/SCHEMA]][?warehouse=WH&role=R&token_type=pat|oauth]`
 ///
-/// SQL API 不收密码，只收令牌：默认当作 programmatic access token，`token_type=oauth`
-/// 换成 OAuth 令牌。密钥对 JWT 要本地签名，这一版不做。
+/// The SQL API does not accept a password, only a token: by default it is treated as a programmatic access token; `token_type=oauth`
+/// switches to an OAuth token. Key-pair JWT signing must happen locally, and this version does not do it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnowflakeConn {
     pub base: String,
     pub token: String,
-    /// `X-Snowflake-Authorization-Token-Type` 的值
+    /// The value of `X-Snowflake-Authorization-Token-Type`
     pub token_type: &'static str,
     pub database: Option<String>,
     pub schema: Option<String>,
@@ -218,7 +218,7 @@ mod tests {
         let c = ClickHouseConn::parse("clickhouse://analyst:p%40ss@ch.internal/sales").unwrap();
         assert_eq!(c.base, "http://ch.internal:8123");
         assert_eq!(c.user.as_deref(), Some("analyst"));
-        // 带密码不升级：这一点跟 Trino 相反，见 ClickHouseConn 上的注释
+        // With a password there is no upgrade: this is the opposite of Trino, see the comment on ClickHouseConn
         assert_eq!(c.password.as_deref(), Some("p@ss"));
         assert_eq!(c.database.as_deref(), Some("sales"));
 
@@ -232,7 +232,7 @@ mod tests {
         let c = ClickHouseConn::parse("clickhouse://u@127.0.0.1:8443?ssl=false").unwrap();
         assert_eq!(c.base, "http://127.0.0.1:8443");
 
-        // 没有用户就交给服务器的 default 用户
+        // No user means the server's default user
         let c = ClickHouseConn::parse("clickhouse://ch.internal:8123").unwrap();
         assert_eq!(c.user, None);
         assert_eq!(c.password, None);

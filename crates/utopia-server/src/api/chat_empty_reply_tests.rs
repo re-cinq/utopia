@@ -1,18 +1,18 @@
-//! 空回复重问一次（`agent::EMPTY_REPLY_RETRY`，由 `Policy::on_model_turn_finished` 发出）。
+//! Re-asks once on an empty reply (`agent::EMPTY_REPLY_RETRY`, emitted by `Policy::on_model_turn_finished`).
 //!
-//! 走整条对话：直接调 `chat` 处理函数，把它返回的 SSE 收完读帧。模型由 wiremock 按脚本
-//! 假扮成 OpenAI 兼容的 `/chat/completions`——第几次请求回什么事先写好，于是「模型回空」
-//! 这件真模型上几十轮才碰一次的事，在这里每次都发生。
+//! Runs the whole conversation: calls the `chat` handler directly and reads the SSE frames it returns to the end. The model is faked by wiremock, scripted
+//! to act as an OpenAI-compatible `/chat/completions`: what each request returns is written in advance, so "the model replied empty",
+//! which happens on a real model only once every few dozen turns, happens here every time.
 //!
-//! 1. **查完之后空一次，重问后答出来。** 这是台子上碰到的真实形状：工具先跑完，模型接着
-//!    回空。用户看到的是查证步骤接着答案，不是报错；重问只发了一次，它的末尾正是那句
-//!    重问；落库的助手消息就是重问后的答案。
-//!    （先调一个工具，与真实失败一致：首轮一步不查就答，会被 `required` 的闸门退回，
-//!    那是另一件事。）
-//! 2. **一直空，报错，而且只重问一次。** 两次请求之后是 `error` 帧——不是第三次、第四次：
-//!    一个始终不说话的端点不能让循环空转。
+//! 1. **Empty once after a lookup, answered after the re-ask.** This is the real shape seen on the bench: the tool finishes first, then the model
+//!    replies empty. The user sees the lookup step followed by the answer, not an error; the re-ask is sent only once, its tail is exactly that
+//!    re-ask line; the assistant message persisted is the answer given after the re-ask.
+//!    (Calls one tool first, matching the real failure: if the first turn answers without any lookup, the `required` gate sends it back,
+//!    which is a different matter.)
+//! 2. **Empty throughout: an error, and only one re-ask.** After two requests the stream ends with an `error` frame, not a third or fourth:
+//!    an endpoint that never speaks must not keep the loop spinning.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` the test is skipped rather than failed. It sets up and tears down its own database and never touches an existing one.
 
 use super::agent::EMPTY_REPLY_RETRY;
 use super::*;
@@ -24,30 +24,30 @@ use wiremock::{
     Mock, MockServer, Request, Respond, ResponseTemplate,
 };
 
-/// 假模型的一次回复
+/// One reply from the fake model
 #[derive(Clone, Copy)]
 pub(super) enum Reply {
-    /// 没有正文，也不调工具
+    /// No body and no tool calls
     Empty,
     Document(Uuid),
     Text(&'static str),
     SplitText(&'static [&'static str]),
     NarratedTool,
-    /// 一段正文，同一回合里还真的调了 find_entities
+    /// A body of text, while in the same turn it also really called find_entities
     TextWithTool(&'static str),
     ParallelTools,
     OversizedText,
     Finished(&'static str, &'static str),
     Http(u16),
     HttpError(u16, &'static str),
-    /// 调一个工具：(名字, 参数 JSON)
+    /// Calls one tool: (name, arguments JSON)
     Tool(&'static str, &'static str),
     ThoughtTool(&'static str, &'static str, &'static str),
     ThoughtText(&'static str, &'static str),
 }
 
-/// 按脚本回话的假模型。`replies[i]` 是第 i+1 次请求的回复，脚本读完之后一律回空。
-/// 每次请求的正文都记下来，好查重问那一次问了什么
+/// Fake model that replies per script. `replies[i]` is the reply to request i+1; once the script is exhausted every reply is empty.
+/// The body of each request is recorded, so the re-ask can be checked for what it asked
 #[derive(Clone)]
 pub(super) struct Scripted {
     replies: Arc<Vec<Reply>>,
@@ -155,7 +155,7 @@ impl Respond for Scripted {
         if let Some(frame) = frame {
             sse.push_str(&format!("data: {frame}\n\n"));
         }
-        // 空回复就是只有这一帧：没有正文增量，也没有工具调用
+        // An empty reply is just this one frame: no text delta, no tool call
         sse.push_str("data: [DONE]\n\n");
         ResponseTemplate::new(200)
             .insert_header("content-type", "text/event-stream")
@@ -259,7 +259,7 @@ pub(super) async fn fixture(fake: Scripted) -> anyhow::Result<Option<Fx>> {
 }
 
 impl Fx {
-    /// 问一句，把整条 SSE 收成文本
+    /// Asks one question and collects the whole SSE stream into text
     pub(super) async fn ask(&self, message: &str) -> anyhow::Result<String> {
         let sse = chat(
             State(self.state.clone()),
@@ -345,7 +345,7 @@ impl Fx {
 /// two such tests never queue behind each other's locks.
 pub(super) static HELD_DB_LOCKS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// 发给模型的请求里，最后一条消息的正文
+/// The body of the last message in the request sent to the model
 fn last_message(request: &serde_json::Value) -> String {
     request["messages"]
         .as_array()

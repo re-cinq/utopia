@@ -1,5 +1,5 @@
-//! 个人令牌读得到一份文档的抽取结果，也导得出整个库（#1262，0014 决定 7）。
-//! 库的 viewer 就够；令牌的 `kb_ids` 排除掉的库一律 404（0052）。
+//! A personal token can read a document's extraction result, and can export the whole library (#1262, 0014 decision 7).
+//! The library's viewer is enough; libraries excluded by the token's `kb_ids` all answer 404 (0052).
 use crate::state::AppState;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -12,7 +12,7 @@ struct Fixture {
     pool: sqlx::PgPool,
     app: axum::Router,
     org: Uuid,
-    /// 库的 viewer
+    /// The library's viewer
     viewer: Uuid,
     kb: Uuid,
     doc: Uuid,

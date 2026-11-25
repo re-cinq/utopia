@@ -1,7 +1,7 @@
-//! 检索交得出它的分数、翻得了页、收个人令牌（#1271）。
+//! Search returns its scores, pages through results, and accepts a personal token (#1271).
 //!
-//! 夹具：一个库、一个 statements 来源推来的一篇文档、五个都含 apple 的分块，
-//! 只进了全文索引；工作区没配嵌入模型，所以只有 BM25 那一路。
+//! Fixture: one library, one document pushed by a statements source, five chunks that all contain apple,
+//! which only went into the full-text index; the workspace has no embedding model configured, so only the BM25 path is in play.
 use crate::state::AppState;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -17,7 +17,7 @@ struct Fixture {
     kb: Uuid,
     source: Uuid,
     doc: Uuid,
-    /// BM25 排第一的那块
+    /// The chunk BM25 ranks first
     best: Uuid,
     token: String,
     _dir: tempfile::TempDir,
@@ -98,7 +98,7 @@ impl Fixture {
         }))
     }
 
-    /// 本库 statements 来源里再推一篇一块的文档，进全文索引；交回那一块的 id
+    /// In this library's statements source, push one more single-chunk document into the full-text index; return that chunk's id
     async fn search(&self, body: Value) -> anyhow::Result<(StatusCode, Value)> {
         let request = Request::post(format!("/api/v1/kbs/{}/search", self.kb))
             .header("authorization", format!("Bearer {}", self.token))

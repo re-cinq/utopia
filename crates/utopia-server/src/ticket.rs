@@ -1,32 +1,32 @@
-//! 一张工单一篇文档，三个工单来源共用这一份排版（0013 决定 7）。
+//! One ticket is one document, and the three ticket sources share this one layout (0013 decision 7).
 //!
-//! 每个来源把自己的数据装进 [`Ticket`]、自己去取；这里只管把它写成文档。措辞（GitHub 写
-//! "Opened by"、Jira 写 "Reported by"）由来源成句后放进来，这里不改一个字：文档的字节就是
-//! 它的身份，改一个字就是每张工单下次同步都多一个版本。`ticket_golden_tests` 钉着这一点
+//! Each source loads its own data into [`Ticket`] and fetches it itself; this file only writes it into a document. The wording (GitHub writes
+//! "Opened by", Jira writes "Reported by") is composed by the source and passed in, and nothing here changes a single word: a document's bytes are its identity,
+//! so changing one word gives every ticket one more version on its next sync. `ticket_golden_tests` pins this down
 
 use chrono::{DateTime, Utc};
 
 pub struct Ticket {
-    /// `# ` 后面那一行，如 `#12 Fix it`、`KAFKA-1 Summary`
+    /// The line after `# `, such as `#12 Fix it` or `KAFKA-1 Summary`
     pub heading: String,
-    /// 抬头下的句子，已经成句、按来源自己的顺序
+    /// The sentences under the heading, already composed, in the source's own order
     pub sentences: Vec<String>,
-    /// `## Description` 下的正文；空白的不写这一节
+    /// The body under `## Description`; a blank body writes no section
     pub description: Option<String>,
-    /// `(时刻, 文字)`，写成 `- <时刻> — <文字>`，按时刻稳定排序
+    /// `(instant, text)`, written as `- <instant> — <text>`, stably sorted by instant
     pub history: Vec<(DateTime<Utc>, String)>,
-    /// 空正文的评论不写，但只要有评论就有 `## Comments` 这一节，与从前一样
+    /// Comments with an empty body are not written, but as long as there is any comment the `## Comments` section appears, as before
     pub comments: Vec<Comment>,
 }
 
 pub struct Comment {
     pub author: String,
-    /// 没有时刻的写成 `?`
+    /// An entry with no instant is written as `?`
     pub at: Option<DateTime<Utc>>,
     pub body: String,
 }
 
-/// 工单上的一个时刻，写进正文的样子：到秒、带 `Z`（#691，0024 第 3 节）
+/// How an instant on a ticket looks when written into the body: to the second, with `Z` (#691, 0024 section 3)
 pub fn stamp(t: DateTime<Utc>) -> String {
     crate::time_text::world(t, Some("second"))
 }
@@ -47,8 +47,8 @@ pub fn render(t: &Ticket) -> String {
         out.push_str(d);
         out.push('\n');
     }
-    // 端点的顺序不是契约，排序自己做——排错了的后果是历史倒着讲。稳定排序：同一刻的几条
-    // 保持来源给的先后
+    // The endpoint's order is not a contract; sort it ourselves: getting it wrong means the history is told backwards. A stable sort: several entries at the same instant
+    // keep the order the source gave
     if !t.history.is_empty() {
         let mut history: Vec<&(DateTime<Utc>, String)> = t.history.iter().collect();
         history.sort_by_key(|(at, _)| *at);

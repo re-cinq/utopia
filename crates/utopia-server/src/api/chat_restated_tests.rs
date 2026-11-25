@@ -130,8 +130,8 @@ async fn a_stopped_restatement_keeps_its_sources_live_and_after_reload() -> anyh
         &utopia_store::conversations::TurnRecord::empty(),
     )
     .await?;
-    // 改写正文的增量发出后触发真实的停止与保存流程；上游保持等待，
-    // 因此正常完成的答案不能让这个测试误通过。
+    // After the rewritten body's delta is emitted, trigger the real stop-and-save flow; upstream stays pending,
+    // so an answer that completes normally must not let this test pass by mistake.
     let producer = async_stream::stream! {
         yield ProducerEvent::Progress(delta_event("Target: 95% [1].\n"));
         cancellation.cancel();

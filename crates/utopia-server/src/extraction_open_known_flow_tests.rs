@@ -1,16 +1,16 @@
-//! 前面的分块认下的实体，后面的分块认得（#588 cut 1）。
+//! Entities recognized by earlier chunks are recognized by later ones (#588 cut 1).
 //!
-//! 抽取按分块走：每一块的提示词里列着这篇文档前面的块已经认下的实体（`known`），模型
-//! 在后面的块里提到它，不必再列一遍，落库时认回同一行。分块并发调模型（cut 2）要保住的
-//! 就是这一条，所以先把它钉住：第一块列出 `Acme`，第二块的回复**不列**它、只在陈述里
-//! 提到——两条陈述挂在同一个实体上，而且第二块的提示词里有 `- Acme (organization)`。
-//! 第二块要是自己再列一遍 `Acme`，按名字去库里也认得回来，那测的就不是 `known` 了。
+//! Extraction works chunk by chunk: each chunk's prompt lists the entities that earlier chunks of this document already recognized (`known`), so the model
+//! does not need to list an entity again when a later chunk mentions it; the write matches it back to the same row. Concurrent chunk model calls (cut 2) must keep
+//! exactly this, so pin it down first: chunk one lists `Acme`, chunk two's reply does **not** list it and only mentions it in the statements,
+//! and two statements hang on the same entity, with `- Acme (organization)` in chunk two's prompt.
+//! If chunk two listed `Acme` again itself, looking it up by name in the store would still find it, and then the test would not be measuring `known`.
 //!
-//! `extract_known_in_prompt` 关掉之后（召回台子量并发的影响用它）提示词里没有那一行，
-//! 落库照样认回去。
+//! With `extract_known_in_prompt` turned off (the recall bench uses this to measure the effect of concurrency), the prompt has no such line,
+//! and the write still matches it back.
 //!
-//! 脚本化的模型端点、真库，与 `phrase_alignment_tests.rs` 同一个做法。
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Scripted model endpoint plus a real database, the same approach as `phrase_alignment_tests.rs`.
+//! Skipped rather than failing without `UTOPIA_DATABASE_URL`. It creates and tears down its own database and never touches an existing one.
 use super::*;
 use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
 use serde_json::{json, Value};
@@ -32,9 +32,9 @@ struct Model {
     pause_second: Option<Arc<Pause>>,
 }
 
-/// 开放抽取的回复：脚本里的字符串就是 chat 流里的 `delta.content`。
-/// 与 `errata_tests.rs::reply` 同一档（text/event-stream + `usage` 收尾），
-/// 但 `chat_retrying_rate_limits_at` 解析流时只读 `content` 这一段。
+/// The open-extraction reply: the script's string is the `delta.content` of the chat stream.
+/// Same tier as `errata_tests.rs::reply` (text/event-stream, closed with `usage`),
+/// but `chat_retrying_rate_limits_at` reads only the `content` part when parsing the stream.
 async fn reply(State(m): State<Model>, Json(body): Json<Value>) -> impl IntoResponse {
     let request = {
         let mut requests = m.requests.lock().unwrap();
@@ -85,7 +85,7 @@ impl Fx {
         utopia_store::db::migrate(&pool).await?;
         let ids: Vec<Uuid> = (0..6).map(|_| Uuid::now_v7()).collect();
         let (org, ws, kb, doc, chunk0, chunk1) = (ids[0], ids[1], ids[2], ids[3], ids[4], ids[5]);
-        // 插进去的只有本地生成的 UUID
+        // Only locally generated UUIDs are inserted
         sqlx::raw_sql(&format!(
             "INSERT INTO organizations(id,name) VALUES ('{org}','open-known-flow');
              INSERT INTO workspaces(id,org_id,name) VALUES ('{ws}','{org}','open-known-flow');
@@ -157,8 +157,8 @@ impl Fx {
     }
 }
 
-/// 两块的回复：第一块列出 `Acme`，第二块不列、只在陈述里提到它。
-/// 紧凑数组的 8 格是 `[quote, subject, phrase, object, value, qualifiers, when, ended]`
+/// Replies for the two chunks: chunk one lists `Acme`; chunk two does not list it and mentions it only in statements.
+/// The 8 cells of a compact array are `[quote, subject, phrase, object, value, qualifiers, when, ended]`
 fn replies() -> Vec<String> {
     vec![
         json!({
@@ -176,7 +176,7 @@ fn replies() -> Vec<String> {
     ]
 }
 
-/// 跑完抽取：只有一个 `Acme`，两条陈述都挂在它上面。交回第二块的提示词
+/// After extraction: there is only one `Acme`, and both statements hang on it. Returns chunk two's prompt
 async fn extract_and_read_the_second_prompt(f: &Fx) -> anyhow::Result<String> {
     crate::extraction::extract_document(&f.state, f.doc, utopia_core::models::Proposer::default())
         .await?;
@@ -226,7 +226,7 @@ async fn a_thing_listed_by_an_earlier_chunk_reaches_a_later_one_via_known() -> a
     Ok(())
 }
 
-/// 旋钮关掉：第二块的提示词里不再列前面认下的实体，落库仍然认回同一个 `Acme`
+/// Knob turned off: chunk two's prompt no longer lists the previously recognized entities, yet the write still matches the same `Acme`
 #[tokio::test]
 async fn with_known_left_out_of_the_prompt_a_later_chunk_still_lands_on_the_same_entity(
 ) -> anyhow::Result<()> {
@@ -251,11 +251,11 @@ enum Interruption {
     PurgeDuringApply,
 }
 
-// facts 上的触发器 DDL 会锁整张表，两条屏障用例必须串行到清理结束。
+// The trigger DDL on facts locks the whole table, so the two barrier cases must run serially until cleanup finishes.
 static FACTS_TRIGGER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// 第一块留下缓存的 Acme id；重建会删掉它，单篇重抽则保留实体、重置分块。
-/// 写入阶段的屏障放在真正的 INSERT 上，确保重建发生在 epoch 检查之后。
+/// Chunk one leaves behind a cached Acme id; a rebuild deletes it, while a single-document re-extract keeps the entity and resets the chunking.
+/// The barrier for the write phase sits on the actual INSERT, to ensure the rebuild happens after the epoch check.
 async fn interrupt_the_second_chunk(interruption: Interruption) -> anyhow::Result<()> {
     let during_apply = matches!(
         interruption,
@@ -296,7 +296,7 @@ async fn interrupt_the_second_chunk(interruption: Interruption) -> anyhow::Resul
             _ = pause.arrived.notified() => {}
         }
         if during_apply {
-            // 标识符和条件都来自本夹具的 UUID；别的知识库不会等这把锁。
+            // Identifiers and conditions all come from this fixture's UUIDs; other knowledge bases do not wait on this lock.
             sqlx::raw_sql(&format!(
                 "CREATE FUNCTION {barrier}() RETURNS trigger LANGUAGE plpgsql AS $$
                  BEGIN
@@ -346,7 +346,7 @@ async fn interrupt_the_second_chunk(interruption: Interruption) -> anyhow::Resul
         pause.resume.notify_one();
         let result = extraction.await;
         if interruption == Interruption::PurgeDuringApply {
-            // 同样的外键失败，没有新 epoch 就仍是当前任务的错误，不能一律吞掉。
+            // The same foreign key failure, without a new epoch, is still the current task's error and must not be swallowed wholesale.
             let error = result.err().ok_or_else(|| anyhow::anyhow!("current job lost its error"))?;
             anyhow::ensure!(format!("{error:#}").contains("facts_subject_same_kb"), "{error:#}");
             return Ok(());

@@ -1,17 +1,17 @@
-//! MySQL 线协议族。**一条协议顺带覆盖一片**：TiDB、OceanBase、Doris、StarRocks
-//! 都说这个协议，MariaDB 也是，所以这个文件的性价比在四个引擎里最高。
+//! MySQL wire protocol family. **One protocol also covers a whole group**: TiDB, OceanBase, Doris, StarRocks
+//! all speak it, and so does MariaDB, so this file gives the best value of the four engines.
 //!
-//! 与 `postgres.rs` 的两处不同，都来自 MySQL 自己：
+//! Two differences from `postgres.rs`, both coming from MySQL itself:
 //!
-//! - **没有 `row_to_json`。** PG 那边把整行交给库转成 JSON 文本，列序天然保留；
-//!   这里只能逐列取值自己拼（同 HTTP 族的 `rows_to_json_lines`），于是多出一张
-//!   类型映射表。那张表的判据是驱动的 `ColumnType::name` 与各类型的
-//!   `compatible`，不是 MySQL 手册：两处分歧会静默地把整列变成 null——
-//!   无符号整数的类型名带 ` UNSIGNED` 后缀，而 `DECIMAL` 被同时挡在 `f64`
-//!   与 `String` 之外，只有 `BigDecimal` 读得出来（见 `Cell`）
-//! - **超时的写法有两种。** MySQL 是 `max_execution_time`（毫秒），MariaDB 是
-//!   `max_statement_time`（秒）。两个都试，都不认才报错：这一层挡的是全表扫描
-//!   拖垮库，外包的 LIMIT 挡不住它（先扫完再截断），所以不能静默降级
+//! - **No `row_to_json`.** On the PG side the library turns the whole row into JSON text, and column order is kept naturally;
+//!   here values must be read column by column and assembled by hand (as `rows_to_json_lines` does in the HTTP family), so an extra
+//!   type-mapping table is needed. That table's criterion is the driver's `ColumnType::name` and each type's
+//!   `compatible`, not the MySQL manual: two mismatches silently turn a whole column into null:
+//!   unsigned integers' type names carry an ` UNSIGNED` suffix, and `DECIMAL` is blocked from both `f64`
+//!   and `String`, so only `BigDecimal` can read it (see `Cell`).
+//! - **Timeouts are written two ways.** MySQL uses `max_execution_time` (milliseconds), and MariaDB uses
+//!   `max_statement_time` (seconds). Try both, and error only if neither is recognized: this layer guards against a full table scan
+//!   dragging the database down, and an outer LIMIT cannot stop that (it scans everything before truncating), so it must not degrade silently.
 
 use super::{
     coerce, rows_to_json_lines, truncate_rows, wrap_limit, QueryEngine, QueryResult, SchemaColumn,
@@ -27,7 +27,7 @@ pub struct MysqlEngine {
 
 impl MysqlEngine {
     pub fn new(conn: &str) -> Self {
-        // sqlx 只认 mysql://，而 mariadb:// 是同一套协议的另一个写法
+        // sqlx only accepts mysql://, while mariadb:// is another way to write the same protocol
         let conn = match conn.strip_prefix("mariadb://") {
             Some(rest) => format!("mysql://{rest}"),
             None => conn.to_string(),
@@ -44,39 +44,39 @@ impl MysqlEngine {
     }
 }
 
-/// 列类型 → 按哪一档去读。
+/// Column type → which tier to read it with.
 ///
-/// **分派与读取分开**，因为只有前者测得了：造一个 `MySqlRow` 需要真的连上
-/// 服务器，而这张表恰恰是这个文件里最容易写错的地方。
+/// **Dispatch and reading are separate, because only the former can be tested**: building a `MySqlRow` requires actually connecting to
+/// a server, and this table is exactly the most error-prone part of this file.
 #[derive(Debug, PartialEq, Eq)]
 enum Cell {
     Bool,
-    /// 有符号整数。驱动的 `i64` 明确排除 UNSIGNED，所以无符号另走一档
+    /// Signed integers. The driver's `i64` explicitly excludes UNSIGNED, so unsigned types take their own tier
     Int,
-    /// `BIGINT UNSIGNED` 一类。驱动给的类型名**带 UNSIGNED 后缀**，
-    /// 认不出来就会掉进兜底档，而兜底读不出整数——整列变 null
+    /// `BIGINT UNSIGNED` and the like. The driver's type name **carries the UNSIGNED suffix**,
+    /// so if it is not recognized it falls into the fallback tier, which cannot read integers: the whole column becomes null
     UnsignedInt,
     Float,
-    /// `DECIMAL`。驱动把它同时挡在 `f64`（"floating-point numbers have
-    /// different semantics"）和 `String`（不在字符串兼容表里）之外，
-    /// 只能用 `BigDecimal` 读。金额列几乎都是这个类型，掉档的代价最大
+    /// `DECIMAL`. The driver blocks it from both `f64` ("floating-point numbers have
+    /// different semantics") and `String` (not in the string-compatible table),
+    /// so it can only be read with `BigDecimal`. Almost every money column is this type, so falling to the wrong tier costs the most
     Decimal,
     Json,
     Date,
     Time,
     DateTime,
     Timestamp,
-    /// 兜底：先字符串，再字节。整数不走这里——`42` 变成 `"42"` 之后，
-    /// 模型对它的算术不一样
+    /// Fallback: string first, then bytes. Integers do not go here: once `42` becomes `"42"`, the model
+    /// does arithmetic on it differently
     Text,
 }
 
-/// 类型名 → 档位。名字取自驱动的 `ColumnType::name`，那张表是这个函数的唯一依据：
-/// `TINYINT(1)` 报 `BOOLEAN`、`DECIMAL` 与 `NEWDECIMAL` 都报 `DECIMAL`、
-/// 无符号整数带 ` UNSIGNED` 后缀。
+/// Type name → tier. The names come from the driver's `ColumnType::name`, and that table is the only basis for this function:
+/// `TINYINT(1)` reports `BOOLEAN`, both `DECIMAL` and `NEWDECIMAL` report `DECIMAL`,
+/// and unsigned integers carry the ` UNSIGNED` suffix.
 fn cell_kind(type_name: &str) -> Cell {
     let ty = type_name.to_ascii_uppercase();
-    // 后缀先判：`INT UNSIGNED` 落到 `INT` 那一档会用 i64 去读，驱动直接拒绝
+    // Check the suffix first: `INT UNSIGNED` falling into the `INT` tier would be read as i64, which the driver rejects outright
     if let Some(base) = ty.strip_suffix(" UNSIGNED") {
         return match base {
             "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "BIGINT" => Cell::UnsignedInt,
@@ -88,7 +88,7 @@ fn cell_kind(type_name: &str) -> Cell {
     match ty.as_str() {
         "BOOLEAN" | "BOOL" => Cell::Bool,
         "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "BIGINT" => Cell::Int,
-        // 名字里没有 UNSIGNED，驱动却只认 u64：i64 与 String 都读不出，整列变 null
+        // The name has no UNSIGNED, but the driver accepts only u64: neither i64 nor String can read it, so the whole column becomes null
         "YEAR" | "BIT" => Cell::UnsignedInt,
         "FLOAT" | "DOUBLE" => Cell::Float,
         "DECIMAL" => Cell::Decimal,
@@ -101,12 +101,12 @@ fn cell_kind(type_name: &str) -> Cell {
     }
 }
 
-/// 一格的值 → JSON。取不出来就退字符串，再取不出来才 null。
+/// One cell's value → JSON. If it cannot be read, fall back to a string; only if that fails too, null.
 fn cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize, type_name: &str) -> serde_json::Value {
     use serde_json::Value;
-    // 每个分支都取 `Option<T>`，NULL 在各自那一档里变成 JSON null——
-    // 不做统一的前置探测：二进制列取 `Option<String>` 会报错而不是给 None，
-    // 那种探测会把一个有值的 BLOB 判成空
+    // Every branch takes `Option<T>`, so NULL becomes JSON null within each tier;
+    // there is no uniform pre-check: a binary column read as `Option<String>` errors rather than giving None,
+    // and such a pre-check would judge a BLOB that has a value as empty
     let ty = type_name.to_ascii_uppercase();
     match cell_kind(&ty) {
         Cell::Bool => row
@@ -121,8 +121,8 @@ fn cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize, type_name: &str) -> serde
             .try_get::<Option<u64>, _>(i)
             .map(|v| v.map_or(Value::Null, |n| n.into()))
             .unwrap_or(Value::Null),
-        // BigDecimal → 文本 → coerce，与 Databricks / Snowflake 的 DECIMAL 同一条路。
-        // 转数走 coerce 里的 f64，超出 f64 精度的值会留成字符串而不是变成一个近似数
+        // BigDecimal → text → coerce: the same route as Databricks / Snowflake DECIMAL.
+        // Numbers go through f64 in coerce; values beyond f64 precision are kept as strings rather than becoming an approximate number
         Cell::Decimal => row
             .try_get::<Option<sqlx::types::BigDecimal>, _>(i)
             .ok()
@@ -145,7 +145,7 @@ fn cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize, type_name: &str) -> serde
             r.try_get::<Option<chrono::NaiveDate>, _>(i)
                 .map(|v| v.map(|d| d.to_string()))
         }),
-        // TIME 是一段时长（-838:59:59 到 838:59:59），NaiveTime 装不下 24 小时以上，还丢负号
+        // TIME is a duration (-838:59:59 to 838:59:59); NaiveTime cannot hold more than 24 hours and also drops the sign
         Cell::Time => try_text(row, i, |r| {
             r.try_get::<Option<sqlx::mysql::types::MySqlTime>, _>(i)
                 .map(|v| v.map(time_text))
@@ -159,8 +159,8 @@ fn cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize, type_name: &str) -> serde
                 .map(|v| v.map(|t| t.to_rfc3339()))
         }),
         Cell::Text => {
-            // CHAR / VARCHAR / TEXT / ENUM / SET 走这里。仍然过一遍 coerce：
-            // 服务器把数字列声明成字符串的情况不少见
+            // CHAR / VARCHAR / TEXT / ENUM / SET come here. Still run through coerce:
+            // servers sometimes declare a numeric column as a string, which is not rare
             let raw = row
                 .try_get::<Option<String>, _>(i)
                 .ok()
@@ -168,8 +168,8 @@ fn cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize, type_name: &str) -> serde
                 .map(Value::String);
             match raw {
                 Some(v) => coerce(&ty, &v),
-                // 二进制列（BLOB / VARBINARY / GEOMETRY）不是合法 UTF-8，
-                // 给个长度而不是塞一堆转义字节进模型的上下文
+                // Binary columns (BLOB / VARBINARY / GEOMETRY) are not valid UTF-8,
+                // so give a length rather than stuffing a pile of escaped bytes into the model's context
                 None => match row.try_get::<Option<Vec<u8>>, _>(i) {
                     Ok(Some(bytes)) => Value::String(format!("<{} bytes>", bytes.len())),
                     _ => Value::Null,
@@ -179,9 +179,9 @@ fn cell_to_json(row: &sqlx::mysql::MySqlRow, i: usize, type_name: &str) -> serde
     }
 }
 
-/// 照 MySQL 自己的写法：`-01:30:00`、`30:15:00`，有小数才写小数
+/// Follow MySQL's own notation: `-01:30:00`, `30:15:00`; write decimals only when there are some
 fn time_text(t: sqlx::mysql::types::MySqlTime) -> String {
-    // sqlx 0.8 的 `MySqlTime::is_negative` 返回的是 is_positive，要看 sign 本身
+    // sqlx 0.8's `MySqlTime::is_negative` returns is_positive, so check the sign itself
     let sign = if t.sign().is_negative() { "-" } else { "" };
     let mut s = format!(
         "{sign}{:02}:{:02}:{:02}",
@@ -189,8 +189,8 @@ fn time_text(t: sqlx::mysql::types::MySqlTime) -> String {
         t.minutes(),
         t.seconds()
     );
-    // 小数照 chrono 的 NaiveTime 写：整毫秒三位（`.500`），否则六位（`.000500`），
-    // 一天以内的 TIME 输出和从前一样
+    // Fractions follow chrono's NaiveTime: whole milliseconds use three digits (`.500`), otherwise six (`.000500`),
+    // and TIME output within one day is the same as before
     match t.microseconds() {
         0 => {}
         us if us % 1000 == 0 => s.push_str(&format!(".{:03}", us / 1000)),
@@ -199,7 +199,7 @@ fn time_text(t: sqlx::mysql::types::MySqlTime) -> String {
     s
 }
 
-/// 按类型读文本，读不出来退回通用字符串（时间列被服务器配置成字符串时会走到）。
+/// Reads text by type, falling back to a generic string if that fails (this is reached when the server configures time columns as strings).
 fn try_text<F>(row: &sqlx::mysql::MySqlRow, i: usize, f: F) -> serde_json::Value
 where
     F: Fn(&sqlx::mysql::MySqlRow) -> Result<Option<String>, sqlx::Error>,
@@ -226,14 +226,14 @@ impl QueryEngine for MysqlEngine {
 
     async fn fetch_schema(&self) -> anyhow::Result<Vec<SchemaColumn>> {
         let pool = self.pool().await?;
-        // MySQL 的 schema 就是 database。系统库按名字排除——information_schema
-        // 在这里是**要排除的对象**，与 PG 那边同名的概念不是一回事。
+        // In MySQL the schema is the database. System databases are excluded by name: information_schema
+        // here is **the thing to exclude**, and it is not the same concept as the namesake on the PG side.
         //
-        // **每列都要 CAST(... AS CHAR)。** MySQL 8.0 起 information_schema 是建在
-        // 数据字典上的视图，这些列经二进制协议报成 VARBINARY，sqlx 严格类型解码
-        // 会拒绝把它读进 String（`VARCHAR is not compatible with VARBINARY`）。
-        // 原始 SQL 在命令行里看着好好的——命令行不做强类型解码，这一处只有连真
-        // 服务器才现形。MariaDB 上 CAST 无害，两边同一条语句
+        // **Every column needs CAST(... AS CHAR).** From MySQL 8.0 on, information_schema is a view built on
+        // the data dictionary, and these columns are reported as VARBINARY over the binary protocol, while sqlx's strict type decoding
+        // refuses to read them into a String (`VARCHAR is not compatible with VARBINARY`).
+        // The raw SQL looks fine on the command line; the command line does no strict type decoding, so this shows up only against a real
+        // server. On MariaDB CAST is harmless, so one statement works on both.
         let cols: Vec<(String, String, String, String, Option<String>)> = sqlx::query_as(
             "SELECT CAST(table_schema AS CHAR), CAST(table_name AS CHAR),
                     CAST(column_name AS CHAR), CAST(column_type AS CHAR),
@@ -245,10 +245,10 @@ impl QueryEngine for MysqlEngine {
         )
         .fetch_all(&pool)
         .await?;
-        // 键是锦上添花：读不出来就照从前那样只给列，不让整次取 schema 失败（#502）。
-        // 可见性：`statistics` 与 `key_column_usage` 对只有 SELECT 的用户照样有行
-        // （实测 MariaDB 11.4）；`table_constraints` / `referential_constraints` 对这种
-        // 用户是空的——所以键从前两张视图读，不要换成后两张
+        // Keys are a nice-to-have: if they cannot be read, only columns are given as before, so the whole schema fetch does not fail (#502).
+        // Visibility: `statistics` and `key_column_usage` still have rows for a user with only SELECT
+        // (measured on MariaDB 11.4); `table_constraints` / `referential_constraints` are empty for such
+        // a user, so keys are read from the first two views; do not switch to the latter two
         let keys = match keys(&pool).await {
             Ok(k) => k,
             Err(e) => {
@@ -269,7 +269,7 @@ impl QueryEngine for MysqlEngine {
                     table,
                     column,
                     data_type,
-                    // 没有注释时这一列是空串而不是 NULL，照抄会让每张表都挂一个空注释
+                    // Without a comment this column is an empty string rather than NULL, so copying it would give every table an empty comment
                     comment: comment.filter(|c| !c.trim().is_empty()),
                     is_primary_key,
                     references_table,
@@ -280,8 +280,8 @@ impl QueryEngine for MysqlEngine {
 
     async fn execute(&self, sql: &str) -> anyhow::Result<QueryResult> {
         let pool = self.pool().await?;
-        // 纵深防御第 3 层：会话只读 + 语句超时。只读在自动提交下逐条生效，
-        // parser 万一漏网也写不进去
+        // Defence in depth, layer 3: session read-only + statement timeout. Read-only takes effect per statement under autocommit,
+        // so even if the parser slips through, nothing can be written
         sqlx::query("SET SESSION TRANSACTION READ ONLY")
             .execute(&pool)
             .await?;
@@ -290,7 +290,7 @@ impl QueryEngine for MysqlEngine {
             .execute(&pool)
             .await;
         if mysql_form.is_err() {
-            // MariaDB：秒，且是浮点
+            // MariaDB: seconds, and a float
             sqlx::query(&format!(
                 "SET SESSION max_statement_time = {STATEMENT_TIMEOUT_SECS}"
             ))
@@ -311,7 +311,7 @@ impl QueryEngine for MysqlEngine {
                 truncated,
             });
         };
-        // 列名与类型只取一次：同一结果集每行的列都一样
+        // Column names and types are fetched once: the columns of every row in the same result set are identical
         let columns: Vec<String> = first
             .columns()
             .iter()
@@ -339,37 +339,37 @@ impl QueryEngine for MysqlEngine {
 
 type ColumnKey = (String, String, String);
 
-/// `keys()` UNION ALL 的返回形状：前三列是 (schema, table, column)；后两列是
-/// 仅 FK 行填的（PK 行是 NULL 占位）
+/// The return shape of `keys()`'s UNION ALL: the first three columns are (schema, table, column); the last two are
+/// filled only for FK rows (PK rows hold NULL placeholders)
 type KeyRow = (String, String, String, Option<String>, Option<String>);
 
-/// 一个库里的单列主键与单列外键，按 (schema, table, column) 查
+/// Single-column primary keys and single-column foreign keys in one database, looked up by (schema, table, column)
 #[derive(Default)]
 struct Keys {
     primary: std::collections::HashSet<ColumnKey>,
-    /// 外键列 → 它指向的 `schema.table`
+    /// Foreign key column → the `schema.table` it points to
     foreign: std::collections::HashMap<ColumnKey, String>,
 }
 
-/// 从 information_schema 读键，两支 UNION ALL：
+/// Reads keys from information_schema, with two UNION ALL branches:
 ///
-/// - 单列主键：`statistics` 里 `index_name = 'PRIMARY'`，按表分组、只有一列的那些；
-/// - 单列外键：`key_column_usage` 里 `referenced_table_name` 非空，按约束分组、只有
-///   一列的那些。
+/// - single-column primary keys: `index_name = 'PRIMARY'` in `statistics`, grouped by table, only those with one column;
+/// - single-column foreign keys: `referenced_table_name` non-empty in `key_column_usage`, grouped by constraint, only those
+///   with one column.
 ///
-/// 组合主键、组合外键的成员都不标——探索提示词拿 PK 当 ID、拿 FK 当关联路径，
-/// 把组合键的一列单独标出来是误导。
+/// Members of composite primary keys and composite foreign keys are not marked: the exploration prompt treats PK as ID and FK as the join path,
+/// and marking one column of a composite key on its own would be misleading.
 ///
-/// **每张视图只扫一遍，用 GROUP BY 数列，不写逐行的相关子查询。** MariaDB（与
-/// MySQL 5.7）每次读 information_schema 都现场重建这张表：逐行子查询在 1,000 张表时
-/// 要 19 秒、2,000 张时 4 分钟，而取 schema 跑在挂载请求里、没有语句超时，慢到头
-/// 就是挂住。分组写法在 2,000 张表上是 0.6 秒。
+/// **Each view is scanned once, counting columns with GROUP BY, not with per-row correlated subqueries.** MariaDB (and
+/// MySQL 5.7) rebuilds this table on every read of information_schema: a per-row subquery takes 19 seconds at 1,000 tables and
+/// 4 minutes at 2,000, and schema fetch runs inside a mounting request with no statement timeout, so slow means hung.
+/// The grouped form takes 0.6 seconds at 2,000 tables.
 ///
-/// 外键约束名在一个库里唯一（InnoDB），按 (库, 表, 约束名) 分组分得开。一列同时在
-/// 两个单列外键里（少见）：五列全排序、先到先得，结果不随服务器的返回顺序变。
+/// Foreign key constraint names are unique within a database (InnoDB), so grouping by (database, table, constraint name) keeps them apart. A column that sits in
+/// two single-column foreign keys at once (rare): sort on all five columns, first come first served, so the result does not depend on the server's return order.
 ///
-/// 列名经二进制协议报成 VARBINARY（MySQL 8.0+），跟 fetch_schema 的列查询一样
-/// 必须 CAST(... AS CHAR) 才能让 sqlx 用 String 读出来
+/// Column names are reported as VARBINARY over the binary protocol (MySQL 8.0+), so as in fetch_schema's column query
+/// they must be CAST(... AS CHAR) before sqlx can read them as String
 async fn keys(pool: &sqlx::MySqlPool) -> anyhow::Result<Keys> {
     let rows: Vec<KeyRow> = sqlx::query_as(
         "SELECT CAST(table_schema AS CHAR), CAST(table_name AS CHAR),
@@ -401,7 +401,7 @@ async fn keys(pool: &sqlx::MySqlPool) -> anyhow::Result<Keys> {
         let key = (schema, table, column);
         match (ref_schema, ref_table) {
             (None, _) => {
-                // 来自 UNION 的第一支，是 PK 行
+                // The first branch of the UNION is the PK row
                 keys.primary.insert(key);
             }
             (Some(rs), Some(rt)) => {
@@ -419,14 +419,14 @@ mod tests {
     use sqlx::mysql::MySqlPoolOptions;
     use uuid::Uuid;
 
-    /// 对着真服务器跑的那一档。没有 `UTOPIA_TEST_MYSQL_URL` 就跳过——
-    /// 这三样（information_schema 的列名、两种超时写法、取值往返）是
-    /// 类型表之外唯一测不到的部分，而它们只在真服务器上才有答案。
+    /// The tier that runs against a real server. Skipped without `UTOPIA_TEST_MYSQL_URL`:
+    /// these three things (information_schema column names, the two timeout forms, value round-trips) are
+    /// the only parts beyond the type table that cannot be tested, and they only have answers on a real server.
     ///
-    /// 起一个来跑：
+    /// Start one to run it:
     /// `docker run -d -e MARIADB_ROOT_PASSWORD=pw -p 13306:3306 mariadb:11.4`
-    /// 然后 `UTOPIA_TEST_MYSQL_URL=mysql://root:pw@127.0.0.1:13306/sales`。
-    /// 建表语句见 #316。
+    /// then `UTOPIA_TEST_MYSQL_URL=mysql://root:pw@127.0.0.1:13306/sales`.
+    /// The table DDL is in #316.
     fn live_url() -> Option<String> {
         std::env::var("UTOPIA_TEST_MYSQL_URL")
             .ok()
@@ -441,8 +441,8 @@ mod tests {
         let engine = MysqlEngine::new(&url);
         engine.test().await.expect("SELECT 1");
 
-        // information_schema 的列名与 PG 不同（column_type / column_comment），
-        // 写错了不会报错，只会让 schema 文档少一半
+        // information_schema's column names differ from PG's (column_type / column_comment),
+        // and getting them wrong raises no error; it just halves the schema document
         let schema = engine.fetch_schema().await.expect("schema");
         let amount = schema
             .iter()
@@ -463,7 +463,7 @@ mod tests {
             "空注释是空串不是 NULL，要过滤掉"
         );
 
-        // 取值往返：每一种掉档都会在这里现形——数变成字符串，或者整列 null
+        // Value round-trip: every kind of tier loss shows up here, whether numbers become strings or a whole column becomes null
         let r = engine
             .execute(
                 "SELECT id, region, amount, qty, flag, placed_on FROM sales.orders ORDER BY id",
@@ -474,25 +474,25 @@ mod tests {
         let first: serde_json::Value = serde_json::from_str(&r.rows[0]).unwrap();
         assert_eq!(first["id"], serde_json::json!(1));
         assert_eq!(first["region"], serde_json::json!("east"));
-        // DECIMAL：没有 BigDecimal 这一格就是 null
+        // DECIMAL: without the BigDecimal cell, it is null
         assert_eq!(first["amount"], serde_json::json!(1234.56));
-        // BIGINT UNSIGNED：i64 装不下，且驱动拒绝用 i64 读它
+        // BIGINT UNSIGNED: i64 cannot hold it, and the driver refuses to read it as i64
         assert_eq!(first["qty"], serde_json::json!(18446744073709551615u64));
-        // TINYINT(1) 报的类型名是 BOOLEAN
+        // The type name reported for TINYINT(1) is BOOLEAN
         assert_eq!(first["flag"], serde_json::json!(true));
         assert_eq!(first["placed_on"], serde_json::json!("2023-06-01"));
 
-        // 全 NULL 的那一行：每一格都该是 JSON null，而不是某个类型的零值
+        // The row with all NULLs: every cell should be JSON null, not a zero value of some type
         let third: serde_json::Value = serde_json::from_str(&r.rows[2]).unwrap();
         for k in ["region", "amount", "qty", "flag", "placed_on"] {
             assert_eq!(third[k], serde_json::Value::Null, "{k} 该是 null");
         }
 
-        // 写路径仍然被闸挡住（第 1 层），只读会话是第 3 层
+        // The write path is still blocked by the gate (layer 1); the read-only session is layer 3
         assert!(super::super::guard_sql_for("mysql", "DELETE FROM sales.orders").is_err());
     }
 
-    /// 超出 f64 精度的 DECIMAL 留字符串，分毫不差；装得下的仍是数
+    /// DECIMAL beyond f64 precision is kept as a string, exact to the digit; those that fit are still numbers
     #[tokio::test]
     async fn a_decimal_longer_than_a_double_keeps_every_digit_mysql() {
         let Some(fx) = Fx::new(1).await else { return };
@@ -513,7 +513,7 @@ mod tests {
         fx.cleanup().await;
     }
 
-    /// YEAR 与 BIT 只有无符号整数读得出：字符串、字节都不收它们，落进兜底档就整列 null
+    /// Only unsigned integers can read YEAR and BIT: strings and bytes do not accept them, and falling into the fallback tier makes the whole column null
     #[tokio::test]
     async fn a_year_or_bit_column_reads_as_its_number_mysql() {
         let Some(fx) = Fx::new(1).await else { return };
@@ -531,7 +531,7 @@ mod tests {
         fx.cleanup().await;
     }
 
-    /// TIME 是一段时长：TIMEDIFF 过了 24 小时或是负的，都还是它自己
+    /// TIME is a duration: a TIMEDIFF past 24 hours or negative is still itself
     #[tokio::test]
     async fn a_time_past_a_day_or_below_zero_reads_as_itself_mysql() {
         let Some(url) = live_url() else { return };
@@ -549,9 +549,9 @@ mod tests {
         );
     }
 
-    /// 每个测试自己的库，名字带随机后缀：并行跑不撞，也不碰服务器上已有的库。
-    /// 测完逐个 `DROP DATABASE`。**这是 MySQL 的「schema」，跟 PG 的命名空间
-    /// 不同——MySQL 的 schema 就是 database**（见 fetch_schema 顶上的注释）
+    /// Each test gets its own database, with a random suffix in the name: parallel runs do not collide, and existing databases on the server are not touched.
+    /// Each is dropped with `DROP DATABASE` after the test. **This is MySQL's "schema", which differs from PG's namespace:
+    /// in MySQL the schema is the database** (see the comment at the top of fetch_schema)
     struct Fx {
         url: String,
         pool: sqlx::MySqlPool,
@@ -561,7 +561,7 @@ mod tests {
     impl Fx {
         async fn new(schemas: usize) -> Option<Self> {
             let url = live_url()?;
-            // 连接串照原样用：带不带库名都行，CREATE DATABASE 不需要当前库
+            // The connection string is used as is: with or without a database name works, since CREATE DATABASE needs no current database
             let pool = MySqlPoolOptions::new()
                 .max_connections(1)
                 .connect(&url)
@@ -586,7 +586,7 @@ mod tests {
 
         async fn columns(&self, url: &str) -> Vec<SchemaColumn> {
             let mut cols = MysqlEngine::new(url).fetch_schema().await.expect("schema");
-            // 只留本测试建的库。库名带反引号，先去掉
+            // Keep only the databases this test created. The names are backticked, so strip them first
             let our: std::collections::HashSet<String> = self
                 .schemas
                 .iter()
@@ -597,8 +597,8 @@ mod tests {
         }
 
         async fn cleanup(self) {
-            // 跨库外键会让 DROP DATABASE ... 顺序敏感——B 库里的表引用 A 库，
-            // 先 drop A 库就报 FK 约束。临时关掉 session 级的外键检查再依次删
+            // Cross-database foreign keys make DROP DATABASE order-sensitive: a table in database B referencing database A
+            // would fail with an FK constraint if A is dropped first. Temporarily disable the session-level foreign key check, then delete in turn
             sqlx::query("SET FOREIGN_KEY_CHECKS = 0")
                 .execute(&self.pool)
                 .await
@@ -629,7 +629,7 @@ mod tests {
             .unwrap_or_else(|| panic!("{schema}.{table}.{column}"))
     }
 
-    /// 单列主键标出来；组合主键、组合外键的成员都不标
+    /// Single-column primary keys are marked; members of composite primary keys and composite foreign keys are not
     #[tokio::test]
     async fn a_single_column_key_is_marked_and_a_composite_one_is_not_mysql() {
         let Some(fx) = Fx::new(1).await else { return };
@@ -669,7 +669,7 @@ mod tests {
         fx.cleanup().await;
     }
 
-    /// 外键带上它指向的表：自引用、跨库；一列同时在两个单列外键里时取排序在前的那个
+    /// The foreign key carries the table it points to: self-referencing or cross-database; when a column sits in two single-column foreign keys, the one that sorts first is taken
     #[tokio::test]
     async fn a_foreign_key_points_at_its_own_target_mysql() {
         let Some(fx) = Fx::new(2).await else { return };
@@ -711,8 +711,8 @@ mod tests {
         fx.cleanup().await;
     }
 
-    /// 只有 SELECT 权限的连接照样读得到键：BI 连接大多就是这种用户。
-    /// 建不了用户（测试账号没有 CREATE USER / GRANT）就跳过
+    /// A connection with only SELECT permission still reads keys: BI connections are mostly this kind of user.
+    /// If a user cannot be created (the test account has no CREATE USER / GRANT), skip
     #[tokio::test]
     async fn a_read_only_login_still_sees_the_keys_mysql() {
         let Some(fx) = Fx::new(1).await else { return };
@@ -739,7 +739,7 @@ mod tests {
         match sqlx::query(&grant).execute(&fx.pool).await {
             Ok(_) => {}
             Err(e) => {
-                // 测试用户没有 GRANT 权（root 之外）：跳过这一档
+                // The test user has no GRANT privilege (other than root): skip this tier
                 eprintln!("跳过：GRANT 失败（{e}）");
                 let _ = sqlx::query(&format!("DROP USER '{user}'@'%'"))
                     .execute(&fx.pool)
@@ -749,8 +749,8 @@ mod tests {
             }
         }
 
-        // 换成只读用户，并去掉库名：它只在测试库上有 SELECT，连到连接串里写的
-        // 那个库（比如 `/sales`）会被拒
+        // Switch to a read-only user and drop the database name: it has SELECT only on the test database, and connecting to the one
+        // named in the connection string (such as `/sales`) gets rejected
         let ro_url = {
             let mut parsed = url::Url::parse(&fx.url).expect("parse mysql url");
             parsed.set_username(&user).expect("username");
@@ -773,7 +773,7 @@ mod tests {
         fx.cleanup().await;
     }
 
-    /// CI 没有 MySQL，时长的写法在这里直接验：过 24 小时、负的、带小数
+    /// CI has no MySQL, so the duration forms are checked here directly: over 24 hours, negative, with decimals
     #[test]
     fn a_time_is_written_as_the_duration_it_holds() {
         use sqlx::mysql::types::{MySqlTime, MySqlTimeSign};
@@ -786,8 +786,8 @@ mod tests {
 
     #[test]
     fn mariadb_is_the_same_protocol_under_another_name() {
-        // sqlx 只认 mysql://，而界面允许写 mariadb://——不改写的话驱动会以
-        // 「未知 scheme」拒掉一个完全正常的连接串
+        // sqlx accepts only mysql://, while the UI allows mariadb:// — without rewriting, the driver rejects
+        // a perfectly valid connection string as "unknown scheme"
         assert_eq!(
             MysqlEngine::new("mariadb://u:p@h:3306/db").conn,
             "mysql://u:p@h:3306/db"
@@ -796,22 +796,22 @@ mod tests {
             MysqlEngine::new("mysql://u:p@h:3306/db").conn,
             "mysql://u:p@h:3306/db"
         );
-        // 只剥前缀：密码里出现同样的字符不该被动到
+        // Strip only the prefix: the same characters appearing in the password must not be touched
         assert_eq!(
             MysqlEngine::new("mysql://u:mariadb://x@h/db").conn,
             "mysql://u:mariadb://x@h/db"
         );
     }
 
-    /// 这三个断言各对应一种「整列变 null」。名字来自驱动的 `ColumnType::name`——
-    /// 那张表是判据，不是猜的。
+    /// Each of these three assertions corresponds to one way of "a whole column turns null". The names come from the driver's `ColumnType::name`:
+    /// that table is the criterion, not a guess.
     #[test]
     fn every_number_shape_lands_in_a_readable_slot() {
         for t in ["TINYINT", "SMALLINT", "MEDIUMINT", "INT", "BIGINT", "int"] {
             assert_eq!(cell_kind(t), Cell::Int, "{t}");
         }
-        // 驱动的 i64 明确排除 UNSIGNED，而类型名带着后缀过来。
-        // 少了这一档，一个 BIGINT UNSIGNED 列会掉进兜底，兜底读不出整数
+        // The driver's i64 explicitly excludes UNSIGNED, while the type name arrives with the suffix.
+        // Without this tier, a BIGINT UNSIGNED column falls into the fallback, which cannot read integers
         for t in [
             "TINYINT UNSIGNED",
             "SMALLINT UNSIGNED",
@@ -821,17 +821,17 @@ mod tests {
         ] {
             assert_eq!(cell_kind(t), Cell::UnsignedInt, "{t}");
         }
-        // YEAR 与 BIT 的类型名不带 UNSIGNED，驱动却只肯用无符号整数读它们
+        // YEAR and BIT type names carry no UNSIGNED, yet the driver accepts only unsigned integers to read them
         for t in ["YEAR", "BIT"] {
             assert_eq!(cell_kind(t), Cell::UnsignedInt, "{t}");
         }
-        // DECIMAL 被驱动同时挡在 f64 与 String 之外，只有 BigDecimal 读得出。
-        // 金额列几乎都是这个类型，掉档的代价最大
+        // DECIMAL is blocked by the driver from both f64 and String; only BigDecimal reads it.
+        // Money columns are almost all this type, so falling to the wrong tier costs the most
         assert_eq!(cell_kind("DECIMAL"), Cell::Decimal);
         assert_eq!(cell_kind("DECIMAL UNSIGNED"), Cell::Decimal);
         assert_eq!(cell_kind("DOUBLE"), Cell::Float);
         assert_eq!(cell_kind("DOUBLE UNSIGNED"), Cell::Float);
-        // TINYINT(1) 在这个驱动里就报 BOOLEAN，不是 TINYINT
+        // TINYINT(1) reports BOOLEAN in this driver, not TINYINT
         assert_eq!(cell_kind("BOOLEAN"), Cell::Bool);
         assert_eq!(cell_kind("VARCHAR"), Cell::Text);
         assert_eq!(cell_kind("BLOB"), Cell::Text);
@@ -839,8 +839,8 @@ mod tests {
 
     #[test]
     fn each_time_type_keeps_its_own_shape() {
-        // 四种时间各读各的。DATE 当成 DATETIME 读会报错退回字符串，
-        // 拿到的就不是 2023-06-01 而是驱动的原始形态
+        // Each of the four time kinds reads separately. Reading DATE as DATETIME errors and falls back to a string,
+        // so you get not 2023-06-01 but the driver's raw form
         assert_eq!(cell_kind("DATE"), Cell::Date);
         assert_eq!(cell_kind("TIME"), Cell::Time);
         assert_eq!(cell_kind("DATETIME"), Cell::DateTime);

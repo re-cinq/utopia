@@ -1,22 +1,22 @@
-//! 时间提及按文档解析（0045 决定 2–5）：模型读，代码算。
+//! Time mentions are resolved per document (0045 decisions 2-5): the model reads, the code computes.
 //!
-//! 抽取只记时间**词**（`time_mentions`：原样的字、块、偏移、起/止）。这里是它后面的任务：
+//! Extraction records only time **words** (`time_mentions`: the verbatim text, chunk, offsets, start and end). This is the task that comes after it:
 //!
-//! 1. **文档时间上下文**（决定 3；0064 起由抽取时各块报上来，这里不再问模型）。从前：把开头交给模型，它转写文档自己的日期
-//!    （落款、备案日、公报的报告年）和文档命名的期间（「fiscal 2027」及其起止）；日期词要在
-//!    开头里核对得到才算数。结果存在 `documents.time_context`；文档自己的日期写进 `doc_time`
-//!    （来源 `content`）。上传时间永远不进来（#714）。
-//! 2. **解释**（决定 2）。把文档的每个时间词连同它所在的那句话，和上下文一起交给模型；模型
-//!    只回形状、引用（写明的数字部分 / 锚点加偏移 / 命名的期间 / 没有）和粒度，**从不算日期**。
-//!    解释原样存回提及上，错了看得见、改得了。
-//! 3. **算**。日历算术、期间到区间、按粒度截断、形状蕴含的区间，都在这里用结构化字段算，
-//!    没有一个时间词写在代码里（决定 8）。写明的日期是 A 级，从文档自己给的锚点算出来的是
-//!    B 级，锚不到的是 C 级——C 级什么也不写，等锚点（决定 4、6）。
-//! 4. 结果落到开放陈述的 `valid_from` / `valid_to`（决定 5 的第一根轴），时间轴上才有它。
+//! 1. **Document time context** (decision 3; since 0064 each chunk reports it during extraction, so no model is asked here). Previously the opening was handed to the model, which transcribed the document's own dates
+//!    (signature date, filing date, the reporting year of a bulletin) and the periods the document names ("fiscal 2027" and its start and end); a date word counts only if it can be checked against the opening.
+//!    The result is stored in `documents.time_context`; the document's own date goes into `doc_time`
+//!    (source `content`). The upload time never enters (#714).
+//! 2. **Interpretation** (decision 2). Each time word in the document, with the sentence it sits in, is handed to the model along with the context; the model
+//!    returns only the shape, the reference (the stated numeric part / an anchor plus offset / a named period / none) and the granularity, and **never computes a date**.
+//!    The interpretation is stored back on the mention as is; a wrong one is visible and can be changed.
+//! 3. **Compute**. Calendar arithmetic, period-to-interval, truncation by granularity, and intervals implied by the shape are all computed here from structured fields,
+//!    with no time word written in the code (decision 8). A stated date is grade A; one computed from an anchor the document gives itself is
+//!    grade B; one that cannot be anchored is grade C -- grade C writes nothing and waits for an anchor (decisions 4, 6).
+//! 4. The result lands on the open statement's `valid_from` / `valid_to` (the first axis of decision 5), which is what puts it on the timeline.
 //!
-//! 例外只长在推送的陈述上（0054 来源）：`when` / `ended` 写的是完整日期或带区时刻时，
-//! 载荷就已经是结构化的绝对值——结构化的时间戳不是时间词（0045 决定 8，#1089），代码
-//! 直接读成解释，不送模型；没有对话模型时，代码读得动的照解，读不动的留 C，任务照常收工。
+//! The exception appears only on pushed statements (0054 source): when `when` / `ended` hold a full date or a time with a zone,
+//! the payload is already a structured absolute value -- a structured timestamp is not a time word (0045 decision 8, #1089), so the code
+//! reads it directly as the interpretation without sending it to a model; without a chat model, what the code can read is interpreted, what it cannot read stays C, and the task finishes as usual.
 
 use crate::extraction::chat_retrying_rate_limits_at;
 use crate::llm_util;
@@ -31,17 +31,17 @@ use utopia_extract::time::{
 use utopia_store::graph::{truncate_to, ENDED_UNKNOWN, WORLD_PRECISIONS};
 use uuid::Uuid;
 
-/// 一批解释问多少个提及。
+/// How many mentions one batch of interpretation asks about.
 const BATCH: usize = 40;
 
-/// 一次解析的结果：世界轴上的位置与等级。
+/// The result of one parse: the position on the world axis and its grade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Resolved {
     from: Option<DateTime<Utc>>,
     from_p: Option<&'static str>,
     to: Option<DateTime<Utc>>,
     to_p: Option<&'static str>,
-    /// A：写明的；B：从文档自己的锚点算出来的；C：锚不到
+    /// A: stated; B: computed from the document's own anchors; C: cannot be anchored
     grade: &'static str,
 }
 
@@ -53,9 +53,9 @@ const UNRESOLVED: Resolved = Resolved {
     grade: "C",
 };
 
-/// 数字部分 → 时刻与精度。精度是字写到的那一档：只有年就是年。
+/// Numeric part -> moment and precision. Precision is the level the word actually reaches: a word giving only the year is year precision.
 fn parts_to_time(p: &DateParts) -> Option<(DateTime<Utc>, &'static str)> {
-    // 写明的季度从它的头一个月起（日历季度；财年的季度走命名的期间）
+    // A stated quarter starts from its first month (calendar quarter; fiscal quarters go through named periods)
     let month = p.month.or(p.quarter.map(|q| (q - 1) * 3 + 1));
     let p = &DateParts { month, ..p.clone() };
     let date = NaiveDate::from_ymd_opt(p.year, p.month.unwrap_or(1), p.day.unwrap_or(1))?;
@@ -80,8 +80,8 @@ fn parts_to_time(p: &DateParts) -> Option<(DateTime<Utc>, &'static str)> {
     Some((Utc.from_utc_datetime(&date.and_time(time)), precision))
 }
 
-/// 区间终点。一个季度单独写时止于它的最后一个月（7 月到 9 月）；写在「到第三季度」
-/// 的那一端也是最后一个月，不能停在这一季的头一个月。
+/// The interval's end. A quarter written alone ends at its last month (July to September); on the end side of "to the third quarter"
+/// it is also the last month, and it must not stop at the quarter's first month.
 fn parts_to_end(p: &DateParts) -> Option<(DateTime<Utc>, &'static str)> {
     let (t, precision) = parts_to_time(p)?;
     if p.quarter.is_some() {
@@ -102,7 +102,7 @@ fn granularity_str(g: Granularity) -> &'static str {
     }
 }
 
-/// 两档精度取粗的那一档：字只写到年，模型说是「天」也只能是年——精度不能比字更细
+/// Of two precision levels, take the coarser: the word only reaches the year, so even if the model says "day" it can only be year -- precision cannot be finer than the word
 fn coarser(a: &'static str, b: &'static str) -> &'static str {
     let rank = |p: &str| WORLD_PRECISIONS.iter().position(|x| *x == p).unwrap_or(0);
     if rank(a) <= rank(b) {
@@ -112,7 +112,7 @@ fn coarser(a: &'static str, b: &'static str) -> &'static str {
     }
 }
 
-/// 锚点加偏移（决定 2 的算术）。月、季、年按月份加减（月末自动收口）；周和天以下按时长。
+/// Anchor plus offset (decision 2's arithmetic). Months, quarters and years add and subtract by month (end-of-month clamps automatically); weeks and finer by duration.
 fn shift(t: DateTime<Utc>, offset: &Offset) -> Option<DateTime<Utc>> {
     let count = offset.count.unsigned_abs();
     let forward = (offset.direction == Direction::After) == (offset.count >= 0);
@@ -143,16 +143,16 @@ fn shift(t: DateTime<Utc>, offset: &Offset) -> Option<DateTime<Utc>> {
     }
 }
 
-/// 一个时刻和它的精度（世界轴的一端）。
+/// A moment and its precision (one end of the world axis).
 type Bound = (DateTime<Utc>, &'static str);
 
-/// 一个季度：包含 `t` 的那三个月（有财年结束日就按财年的季，否则按日历季），
-/// 起是季首月，止是季末月（终点精度到月）。「本季度」「上季度」都从这里来
+/// A quarter: the three months containing `t` (by fiscal quarter if a fiscal year-end date is given, otherwise by calendar quarter),
+/// the start is its first month, the end is its last month (end precision to the month). "This quarter" and "last quarter" both come from here
 fn quarter_around(t: DateTime<Utc>, fiscal_year_end: Option<(u32, u32)>) -> Option<(Bound, Bound)> {
     use chrono::Datelike;
-    // 财年从结束日的下一个月算起：结束于 1 月 25 日的财年，季首月是 2、5、8、11 月
+    // A fiscal year counts from the month after its end date: a fiscal year ending on January 25 has quarter-start months 2, 5, 8, 11
     let first_month = fiscal_year_end.map(|(m, _)| m % 12 + 1).unwrap_or(1);
-    let month0 = (t.month() as i32 - first_month as i32).rem_euclid(12); // 财年内第几个月（0 起）
+    let month0 = (t.month() as i32 - first_month as i32).rem_euclid(12); // month index within the fiscal year (0-based)
     let start_month0 = month0 - month0 % 3;
     let start = t.checked_sub_months(Months::new(u32::try_from(month0 - start_month0).ok()?))?;
     let start = truncate_to(start, Some("month"));
@@ -160,15 +160,15 @@ fn quarter_around(t: DateTime<Utc>, fiscal_year_end: Option<(u32, u32)>) -> Opti
     Some(((start, "month"), (end, "month")))
 }
 
-/// 一个期间的起止（写明的数字部分）。写在终点的季度是那一季的最后一个月：
-/// 「第一季度到第三季度」止于 9 月，同 [`parts_to_end`]。
+/// The start and end of a period (the stated numeric part). A quarter written at the end is that quarter's last month:
+/// "first quarter to third quarter" ends in September, as in [`parts_to_end`].
 fn period_bounds(from: &DateParts, to: &DateParts) -> Option<(Bound, Bound)> {
     Some((parts_to_time(from)?, parts_to_end(to)?))
 }
 
-/// 形状决定字在世界轴上占哪一段（决定 7：形状另存，这里只算区间）。
-/// 点：一刻，两端同值（0031 事件的写法）；自：起点；至：终点；区间：两端；
-/// 截至：观察到的起点；时长：没有位置；结束但不知何时：终点精度 unknown
+/// The shape determines which segment of the world axis the word occupies (decision 7: shape is stored separately; here only the interval is computed).
+/// Point: one instant, both ends the same value (the event style of 0031); from: the start; to: the end; interval: both ends;
+/// "until": the observed start; duration: no position; ended but not known when: end precision unknown
 fn place(
     shape: Shape,
     at: Option<(DateTime<Utc>, &'static str)>,
@@ -224,7 +224,7 @@ fn place(
     r
 }
 
-/// 一个锚点在世界轴上的位置：文档日期、另一个提及、命名的期间。
+/// The position of an anchor on the world axis: a document date, another mention, or a named period.
 fn anchor_time(
     anchor: &Anchor,
     ctx: &DocumentDating,
@@ -248,14 +248,14 @@ fn anchor_time(
     }
 }
 
-/// 一条解释 → 世界轴位置。`earlier` 是同一文档里已经算出来的提及（锚点指着它们）。
+/// One interpretation -> position on the world axis. `earlier` are the mentions already computed in the same document (anchors point at them).
 fn resolve_one(
     interp: &Interpretation,
     ctx: &DocumentDating,
     earlier: &HashMap<i64, Resolved>,
 ) -> Resolved {
     let g = granularity_str(interp.granularity);
-    // 「结束了，不知哪天」是字明说的（#393 的那一档）：没有日期可算，但结束本身是 A 级
+    // "Ended, not known which day" is stated by the word itself (that tier of #393): there is no date to compute, but the ending itself is grade A
     if interp.shape == Shape::EndedUnknown {
         return place(Shape::EndedUnknown, None, None, "A");
     }
@@ -265,7 +265,7 @@ fn resolve_one(
                 return UNRESOLVED;
             };
             let until = to.as_ref().and_then(parts_to_end);
-            // 一个季度是三个月的区间：到它最后一个月为止
+            // A quarter is an interval of three months: it runs to its last month
             if let (Some(_), None) = (from.quarter, &until) {
                 let last = t.checked_add_months(Months::new(2)).map(|m| (m, "month"));
                 let shape = match interp.shape {
@@ -280,8 +280,8 @@ fn resolve_one(
             let Some(((t, p), until)) = anchor_time(anchor, ctx, earlier) else {
                 return UNRESOLVED;
             };
-            // 对着一个期间说「截至」「至」（「年末」对着报告年）：说的是期间的末，不是首。
-            // 这是形状的语义，不是认词
+            // "until" / "to" said against a period ("year-end" against the reporting year): it speaks of the end of the period, not its start.
+            // This is a semantic of the shape, not word recognition
             if offset.is_none()
                 && matches!(anchor, Anchor::Period { .. })
                 && matches!(interp.shape, Shape::AsOf | Shape::Until)
@@ -295,8 +295,8 @@ fn resolve_one(
                     let Some(moved) = shift(t, o) else {
                         return UNRESOLVED;
                     };
-                    // 以「年」「月」为单位的偏移（本年、去年、上个月）说的是那一整段：
-                    // 起止同一个桶，精度就是那个单位
+                    // Offsets in units of "year" or "month" (this year, last year, last month) refer to that whole span:
+                    // start and end are the same bucket, and the precision is that unit
                     if matches!(o.unit, Unit::Year | Unit::Month)
                         && matches!(interp.shape, Shape::Point | Shape::Interval)
                     {
@@ -308,7 +308,7 @@ fn resolve_one(
                         let start = truncate_to(moved, Some(unit_p));
                         return place(Shape::Point, Some((start, unit_p)), None, "B");
                     }
-                    // 以「季」为单位的偏移（本季度、上季度）说的是那一整个季度，不是某一天
+                    // Offsets in units of "quarter" (this quarter, last quarter) refer to that whole quarter, not a specific day
                     if o.unit == Unit::Quarter {
                         let Some((from, to)) = quarter_around(moved, ctx.fiscal_year_end) else {
                             return UNRESOLVED;
@@ -325,11 +325,11 @@ fn resolve_one(
                 }
                 None => (t, until),
             };
-            // 锚点算出来的时刻，精度由字说的粒度定，但不能比锚点自己更细
+            // A moment computed from an anchor takes its precision from the granularity the word states, but cannot be finer than the anchor itself
             place(interp.shape, Some((t, coarser(p, g))), until, "B")
         }
         Reference::Period { name, from, to } => {
-            // 只写了一端的期间（「三个月截至 6 月 30 日」）：写明的那一端照写，另一端不猜
+            // A period with only one end written ("three months until June 30"): the end that is written stays as written; the other end is not guessed
             match (from, to) {
                 (None, Some(t)) => {
                     return place(Shape::Until, None, parts_to_time(t), "A");
@@ -352,7 +352,7 @@ fn resolve_one(
             let Some((from, to)) = bounds else {
                 return UNRESOLVED;
             };
-            // 一个期间本身是区间；「截至期末」这类形状照形状算
+            // A period is itself an interval; shapes like "until period end" are computed as their shape
             let shape = match interp.shape {
                 Shape::Point | Shape::Since | Shape::Duration => Shape::Interval,
                 s => s,
@@ -363,7 +363,7 @@ fn resolve_one(
     }
 }
 
-/// 计算已收到的解释；每条解释使用它自己的章节上下文。
+/// Computes the interpretations received; each interpretation uses its own section context.
 fn resolve_interpretations(
     interpretations: &[Interpretation],
     context_for: impl Fn(i64) -> DocumentDating,
@@ -380,8 +380,8 @@ fn resolve_interpretations(
             resolved.insert(interp.id, r);
             false
         });
-        // 每轮至少解开一条才继续；循环、自引用、缺失或不可用的锚点都在无进展时留下 C。
-        // 不能固定遍数：模型回复可以把任意长的依赖链倒着写。
+        // Each round unlocks at least one before continuing; cycles, self-references, and missing or unusable anchors are left as C once no progress is made.
+        // It cannot be a fixed number of passes: a model reply can write an arbitrarily long dependency chain backwards.
         if pending.len() == before {
             break;
         }
@@ -392,7 +392,7 @@ fn resolve_interpretations(
     resolved
 }
 
-/// 算的时候文档的日期换成提及所在那一节的起算点。
+/// When computing, the document's date is replaced by the start point of the section the mention sits in.
 fn context_at(context: &DocumentDating, now: Option<usize>) -> DocumentDating {
     let mut scoped = context.clone();
     if let Some(entry) = now.and_then(|i| context.entries.get(i)) {
@@ -402,15 +402,15 @@ fn context_at(context: &DocumentDating, now: Option<usize>) -> DocumentDating {
     scoped
 }
 
-/// 推送的陈述把 `when` / `ended` 写成完整日期或带区时刻时，这里就把它读成一条解释
-/// （#1089；0045 决定 8：结构化的时间戳不是时间词）。形状是点、参照是照写的绝对值、
-/// 粒度是字写到的那一级——与模型对同样的字该给的回答一致。`from` 存换算成 UTC 后的
-/// 部件：`DateParts` 不带区，偏移在 `parse_time` 里已经折进值里；存 UTC 部件的解释
-/// 再算一遍得到同一个值，存原样的本地钟点反而会读出另一个时刻。
+/// When a pushed statement writes `when` / `ended` as a full date or a time with a zone, it is read here as an interpretation
+/// (#1089; 0045 decision 8: a structured timestamp is not a time word). The shape is a point, the reference is the absolute value as written,
+/// and the granularity is the level the word reaches -- consistent with the answer the model would give for the same word. `from` stores the parts
+/// converted to UTC: `DateParts` has no zone, and the offset is already folded into the value in `parse_time`; an interpretation that stored UTC parts
+/// computes to the same value again, whereas storing the local wall-clock time would read back as a different moment.
 ///
-/// 只收 `parse_time` 读到「日」或更细的：`YYYY-MM-DD` 与带 `Z` 或偏移的
-/// `YYYY-MM-DDTHH[:MM[:SS]]`。光杆的年、年月、以及任何读不动的字都回 `None`，
-/// 照旧走模型那条路——这一刀不替代码认时间词。
+/// Accepts only what `parse_time` reads at "day" or finer: `YYYY-MM-DD`, and
+/// `YYYY-MM-DDTHH[:MM[:SS]]` with `Z` or an offset. A bare year, year-month, or any unreadable word returns `None`,
+/// and takes the model path as before -- this cut does not give the code the job of recognizing time words.
 fn stated_reading(text: &str, id: i64) -> Option<Interpretation> {
     let (t, precision) = utopia_extract::parse_time(text)?;
     use chrono::{Datelike, Timelike};
@@ -424,7 +424,7 @@ fn stated_reading(text: &str, id: i64) -> Option<Interpretation> {
             Some(t.minute()),
             Some(t.second()),
         ),
-        // 光杆的年、年月不在这刀里（#1089 的界），退回 None 让模型读
+        // Bare years and year-months are outside this cut (the limit of #1089); return None so the model reads them
         _ => return None,
     };
     Some(Interpretation {
@@ -446,7 +446,7 @@ fn stated_reading(text: &str, id: i64) -> Option<Interpretation> {
     })
 }
 
-/// 一条陈述的起与止：`when` 给起（点与区间也给止），`ended` 给止。
+/// A statement's start and end: `when` gives the start (a point or interval also gives the end), `ended` gives the end.
 fn combine(when: Option<Resolved>, ended: Option<Resolved>) -> Resolved {
     let mut r = when.unwrap_or(UNRESOLVED);
     if let Some(e) = ended {
@@ -463,8 +463,8 @@ fn combine(when: Option<Resolved>, ended: Option<Resolved>) -> Resolved {
     r
 }
 
-/// 解析一篇文档的全部时间提及（任务 `resolve_time`）。幂等：再跑一次覆盖上一次的结果，
-/// 所以锚点晚到（改了文档日期、后一块给了期间）时重排一次即可（决定 4 的第一步）
+/// Resolve all time mentions of one document (task `resolve_time`). Idempotent: running again overwrites the previous result,
+/// so when an anchor arrives late (the document's date changed, or a later chunk gave a period), requeueing once is enough (decision 4's first step)
 pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Result<()> {
     let pool = &state.pool;
     let doc = utopia_store::documents::get(pool, document_id).await?;
@@ -474,8 +474,8 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
     let kb = utopia_store::kbs::get(pool, doc.kb_id).await?;
     let settings = utopia_store::settings::get(pool, kb.workspace_id).await?;
     let client = settings.as_ref().and_then(llm_util::chat_client);
-    // 推送来的陈述（0054）：`when` / `ended` 写的完整日期或带区时刻由代码直接读（#1089），
-    // 没有对话模型也照常解；别的文档照旧——没有对话模型，这一步就没有替它读字的人
+    // Pushed statements (0054): a full date or a time with a zone written in `when` / `ended` is read by the code directly (#1089),
+    // and interpreted without a chat model; other documents are as before -- with no chat model, there is no one to read the words for this step
     let pushed = crate::pipeline::source_kind(state, doc.source_id)
         .await?
         .as_deref()
@@ -484,11 +484,11 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
         anyhow::bail!("Chat model not configured; cannot resolve time");
     }
 
-    // 1. 文档时间上下文：抽取时各块报上来的（0064）。这里不问模型
+    // 1. Document time context: what each chunk reported during extraction (0064). No model is asked here
     let context: DocumentDating = match doc.time_context.clone() {
         Some(json) => {
             let context: DocumentDating = serde_json::from_value(json)?;
-            // 整篇的起算点照旧记成文档的日期（文库排序、引擎给没起点的行排次序都读它）
+            // The whole document's start point is still recorded as the document's date (library sorting and the engine's ordering of rows without a start both read it)
             if crate::extraction_open::dated_at(&doc).is_none() {
                 if let Some((t, _)) = context.date.as_ref().and_then(parts_to_time) {
                     utopia_store::documents::set_content_date(pool, document_id, t).await?;
@@ -496,14 +496,14 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
             }
             context
         }
-        // 抽取一条日期都没报：文档没说自己是哪天的。不再另问一次开头（0064 决定 1）——
-        // 那一次调用在抽取报了「没有」的文档上问的是同一个问题，测量里二十篇有十六篇这样
-        // 白问；文档里写了日期的，抽取都报上来了
+        // Extraction reported no date at all: the document does not say which day it is. Do not ask a second time about the opening (0064 decision 1) --
+        // that would ask the same question of a document where extraction reported "none", and in the measurement sixteen of twenty documents were asked
+        // pointlessly; documents that state a date had it reported by extraction
         None => DocumentDating::default(),
     };
 
-    // 这一刀之前读开头定出来、存在文档上的日期（只有日期、没有条目）：它就是整篇的起算点，
-    // 和抽取报上来的一样进条目里，下面给陈述作证、给相对的时间词当基准都从条目里找
+    // The date read from the opening before this cut, stored on the document (date only, no entries): it is the start point of the whole,
+    // and like the one extraction reports it goes into the entries; the lookups below for statement evidence and relative time words both search the entries
     let mut context = context;
     if context.entries.is_empty() {
         if let (Some(date), Some(words)) = (context.date.clone(), context.date_words.clone()) {
@@ -521,7 +521,7 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
     }
     attest_statements(state, &doc, &context).await?;
 
-    // 抽取报上来的期间（0064）并进文档命名的期间里：解释时按名字指它
+    // Periods reported by extraction (0064) are merged into the document's named periods: interpretation refers to them by name
     for e in context
         .entries
         .clone()
@@ -545,14 +545,14 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
     }
     let context = context;
 
-    // 2. 提及：同一篇里同样的字在同样的句子里只解释一次
+    // 2. Mentions: the same words in the same sentence in the same document are interpreted only once
     let mentions = utopia_store::time_mentions::for_document(pool, document_id).await?;
     if mentions.is_empty() {
         return Ok(());
     }
-    // 每条提及所在的那一节里管事的起算点（0064 决定 4）：从它那一块正文里的标题读出所在的
-    // 节，再在文档报上来的日期里找范围最深的那个 `now`。一篇文档里两份周报各有各的提报日，
-    // 「上周」在哪一节就从哪一节的日期起算。没有条目的文档（老的、推送来的）照旧用文档的日期
+    // The start point governing each mention's section (0064 decision 4): read the section it sits in from the heading in its chunk's body,
+    // then find the deepest-scope `now` among the dates the document reported. Two weekly reports in one document each have their own report date,
+    // and "last week" counts from the date of the section it sits in. A document with no entries (old, or pushed) still uses the document's date as before
     let chunk_text: HashMap<Uuid, String> =
         sqlx::query_as::<_, (Uuid, String)>("SELECT id, text FROM chunks WHERE document_id = $1")
             .bind(document_id)
@@ -570,10 +570,10 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
     let mut distinct: Vec<Key> = Vec::new();
     let mut index: HashMap<Key, usize> = HashMap::new();
     let mut key_of: HashMap<Uuid, Key> = HashMap::new();
-    // 推送来的陈述（0054）：载荷写的完整日期或带区时刻由代码读成解释（#1089）。
-    // 解释与别的提及同去同回，只是它从不进问模型的清单——重问也只能是这个答案，
-    // 代码读过的不许模型盖掉；判据是文档来自 `statements` 来源，不是字长得像日期，
-    // 普通文档里同样的字照旧交给模型
+    // Pushed statements (0054): a full date or a time with a zone written in the payload is read by the code as an interpretation (#1089).
+    // The interpretation goes along with the other mentions in both directions, but it never enters the list the model is asked about -- a re-ask could only get this answer,
+    // and the model must not overwrite what the code has read; the criterion is that the document comes from a `statements` source, not that the word looks like a date,
+    // the same words in ordinary documents are still handed to the model
     let mut presolved: HashMap<usize, Interpretation> = HashMap::new();
     for m in &mentions {
         let key = (m.text.clone(), m.sentence.clone(), now_of(m));
@@ -598,8 +598,8 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
     let mut interpretations: Vec<Interpretation> = presolved.values().cloned().collect();
     let mut received = HashSet::new();
     let mut malformed = 0usize;
-    // 问两轮：第一轮全部，第二轮只问第一轮没答到的。模型漏答的提及从前就留着字、没有解释，
-    // 也没有人再问（测量台上的「上周」三遍都是这样）。代码已经读出答案的不问
+    // Ask two rounds: the first asks all, the second asks only those the first did not answer. Mentions the model missed used to keep the word with no interpretation,
+    // and nobody asked again ("last week" on the measurement bench was like this three times). Those the code has already read are not asked
     let mut todo: Vec<usize> = (0..distinct.len())
         .filter(|i| !presolved.contains_key(i))
         .collect();
@@ -647,7 +647,7 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
                 };
                 malformed += skipped;
                 if skipped > 0 {
-                    // 坏条目要看得见是哪一条、坏在哪：只报一个数的话，「上周」三遍都没日期也查不出原因
+                    // Bad entries must show which one is bad and what is wrong with it: reporting only a count, "last week" with no date three times over could not be explained
                     tracing::warn!(%document_id, skipped, reply = %reply.text.chars().take(600).collect::<String>(), "时间解释里有读不了的条目");
                 }
                 received.extend(interps.iter().map(|interp| interp.id));
@@ -655,8 +655,8 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
             }
         }
     }
-    // 收到解释和算出日期是两件事：补答只问没收到的，计算则看全部批次和补答里的解释。
-    // 这样下游不用再问模型，也能用上后一批或补答才给出的锚点。
+    // Receiving an interpretation and computing a date are two different things: the follow-up answers only what was not received, while computation looks at all batches and the interpretations from follow-up.
+    // That way downstream does not need to ask the model again, and can still use anchors that only arrive in a later batch or a follow-up answer.
     let computed = resolve_interpretations(&interpretations, |id| {
         let now = usize::try_from(id)
             .ok()
@@ -672,7 +672,7 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
         }
     }
 
-    // 3. 写回提及，再按陈述合起止
+    // 3. Write the mentions back, then merge starts and ends per statement
     let mut per_fact: HashMap<Uuid, (Option<Resolved>, Option<Resolved>)> = HashMap::new();
     let (mut a, mut b, mut c) = (0usize, 0usize, 0usize);
     for m in &mentions {
@@ -680,9 +680,9 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
             continue;
         };
         let Some((interp, r)) = resolved.get(&i) else {
-            // 推送的文档没有对话模型可问（#1089）：代码读不动的提及按 C 记——「有提及、
-            // 没能放上轴」和「没有时间词」要分得出；任务照常收工，不因一个没配的模型
-            // 留下永远失败的任务。解释列留空：没有人读过它，不编一条出来
+            // A pushed document has no chat model to ask (#1089): mentions the code cannot read are recorded as C -- "has a mention but it could not be placed on the axis"
+            // and "no time word at all" must be distinguishable; the task finishes as usual, rather than leaving a task that fails forever over an unconfigured model
+            // The interpretation column is left empty: nobody read it, so do not fabricate one
             if pushed && client.is_none() {
                 utopia_store::time_mentions::set_resolution(
                     pool, m.id, "C", None, None, None, None,
@@ -696,7 +696,7 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
                     slot.0 = Some(UNRESOLVED);
                 }
             }
-            // 有模型而没答到的：留着字，不写等级（下次重跑再问）
+            // Had a model but no answer came back: keep the word, write no grade (ask again on the next rerun)
             continue;
         };
         utopia_store::time_mentions::set_interpretation(
@@ -728,12 +728,12 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
     let mut dated = 0usize;
     for (fact_id, (when, ended)) in per_fact {
         let r = combine(when, ended);
-        // 起点的等级只看起点那条提及。combine 在起点锚不到时借结束端的等级来报数，
-        // 这里不借：引擎问的是「这一行的起点是怎么来的」（0045 第 3 刀）
+        // The grade of a start comes only from the start's own mention. combine borrows the end's grade when the start cannot be anchored, to report a count;
+        // here it does not borrow: the engine asks "how did this row's start come to be" (0045 cut 3)
         let grade = when.map(|w| w.grade);
         let placed = r.from.is_some() || r.to.is_some() || r.to_p.is_some();
-        // 什么都没算出来也要写等级 C：只有这一列说得出「这句话有时间词、我们没能把它
-        // 放到轴上」，否则它和「整句没有时间词」在库里长得一模一样
+        // Even if nothing was computed, write grade C: only this column can say "this sentence has a time word, and we could not place it on the axis"; otherwise
+        // it looks identical in the database to "the whole sentence has no time word"
         if !placed && grade != Some("C") {
             continue;
         }
@@ -761,8 +761,8 @@ pub async fn resolve_document(state: &AppState, document_id: Uuid) -> anyhow::Re
     Ok(())
 }
 
-/// 见证的名字：日期的名字加它的字（「提报日期 2026年9月4日」）。没有名字的光是字；封面上
-/// 一个光秃秃的日期，模型常把日期自己又填成名字，那就只写一遍
+/// Name of the witness: the name of the date plus its words ("reporting date 2026-09-04"). Without a name, just the words; on a cover page
+/// a bare date, the model often fills in the date's own name, so it is written only once
 fn witness_name(name: &str, words: &str) -> String {
     let (name, words) = (name.trim(), words.trim());
     if name.is_empty() || name == words {
@@ -772,11 +772,11 @@ fn witness_name(name: &str, words: &str) -> String {
     }
 }
 
-/// 这篇文档的陈述各由它所在那一节里文本说话的那一刻作证（0064 决定 3）。
+/// Each statement in this document is witnessed by the moment its section's text speaks (0064 decision 3).
 ///
-/// 一条陈述在哪一节，看它的引文在它那一块里的位置、那一块正文里的标题；管着它的是范围
-/// 最深的那个 `now`。没有的不写——见证留空，这条陈述在任何时点都成立（决定 5）。
-/// 这是「截至」，不是起点：报告里的「所属市场为全球」说的是那天是这样，不是从那天起
+/// Which section a statement is in is found from the position of its citation within its chunk, and the heading in that chunk's body; what governs it is the deepest-scope `now`.
+/// If there is none, write nothing -- the witness is left empty, and the statement holds at any point in time (decision 5).
+/// This is "as of", not the start: "the market is global" in a report says that is how it was that day, not that it has been so since that day
 async fn attest_statements(
     state: &AppState,
     doc: &utopia_core::models::Document,
@@ -784,7 +784,7 @@ async fn attest_statements(
 ) -> anyhow::Result<()> {
     let pool = &state.pool;
     if !context.entries.iter().any(|e| e.kind == "now") {
-        // 这一遍文档一条日期都没说：上一遍记在证据上的也不算数了
+        // This pass of the document stated no date at all: the earlier evidence recorded from the last pass no longer counts either
         sqlx::query(
             "UPDATE fact_evidence SET attested_at = NULL, attested_by = NULL
               WHERE document_id = $1 AND attested_at IS NOT NULL",
@@ -812,8 +812,8 @@ async fn attest_statements(
             let (at, _) = parts_to_time(&now.from)?;
             Some((at, witness_name(&now.name, &now.words)))
         });
-        // 每条证据记下自己这一节的日期（没说的记成空）：事实上只留最早的那一个，证据所在
-        // 的文档删了之后要照还在的证据重算，得知道每一条各是哪天
+        // Each piece of evidence records the date of its own section (blank if none was stated): in fact only the earliest is kept, and when the document holding the evidence is deleted
+        // the remaining evidence must be recomputed, so each one must know which day it belongs to
         utopia_store::graph::witness_evidence(
             pool,
             fact_id,
@@ -828,11 +828,11 @@ async fn attest_statements(
             moved += 1;
         }
     }
-    // 已经物化出来的、规则算出来的类型化行跟着它们的陈述走
+    // Typed rows already materialized by rules follow their statements
     let typed = utopia_store::materialize::sync_typed_attestation(pool, doc.kb_id, None).await?;
-    // 见证动了的行换了它在唯一性时间线上的位置：只把这些行所在的时间线重算一遍，不是整个库
-    // ——每篇文档都把全库的时间线各开一个事务重算一遍，库一大就是每篇几千个事务。
-    // 先提交同步，再拿时间线锁，不在持有 UPDATE 行锁时等咨询锁（与物化提交后对账的顺序一致）
+    // Rows whose witness changed take a new place on the uniqueness timeline: recompute only the timelines those rows sit in, not the whole database
+    // -- re-running every timeline across the database in a transaction for each document would be thousands of transactions per document once the database grows.
+    // Commit the sync first, then take the timeline lock; do not wait for the advisory lock while holding an UPDATE row lock (same order as reconciliation after a materialization commit)
     let reconciled = utopia_store::temporal::reconcile_moved_facts(pool, doc.kb_id, &typed).await?;
     let typed = typed.len();
     if moved > 0 || typed > 0 {
@@ -860,8 +860,8 @@ mod pushed_tests;
 mod tests {
     use super::*;
 
-    /// 推送载荷里写明的值（#1089）：完整日期与带区时刻读成点状绝对解释，精度随字；
-    /// 光杆的年、年月、读不动的字都回 None——不替代码认时间词
+    /// A value written in the push payload (#1089): a full date or a time with a zone is read as a point-wise absolute interpretation, with precision following the words;
+    /// a bare year, year-month, or unreadable word returns None -- the code does not take over recognizing time words
     #[test]
     fn a_stated_value_reads_at_the_precision_it_writes() {
         let read = |s: &str| {
@@ -904,7 +904,7 @@ mod tests {
                 Granularity::Second
             ))
         );
-        // 偏移折进值里：+08:00 的 08:14 是 UTC 的 00:14
+        // The offset is folded into the value: 08:14 at +08:00 is 00:14 UTC
         assert_eq!(
             read("2026-09-23T08:14:03+08:00"),
             Some((
@@ -912,7 +912,7 @@ mod tests {
                 Granularity::Second
             ))
         );
-        // 这一刀之外的字：光杆的年、年月、自然语言
+        // Words outside this cut: bare years, year-months, natural language
         for s in ["2026", "2026-09", "last Tuesday", "ended", ""] {
             assert!(read(s).is_none(), "{s:?} is not code-resolved");
         }
@@ -1029,7 +1029,7 @@ mod tests {
 
     #[test]
     fn a_long_reverse_chain_does_not_follow_numeric_ids_or_a_fixed_pass_limit() {
-        // 编号上下交错，与依赖次序无关；链长也超过一批的大小。
+        // Numbering interleaves top and bottom, unrelated to dependency order; the chain length also exceeds one batch's size.
         let ids: Vec<i64> = (0..81).map(|depth| 500 + (depth * 37) % 101).collect();
         let mut interpretations = vec![absolute_day(ids[0])];
         for pair in ids.windows(2) {
@@ -1065,11 +1065,11 @@ mod tests {
         };
         let interpretations = [
             next_day(2, 1),
-            next_day(30, 30), // 自引用
+            next_day(30, 30), // self-reference
             next_day(31, 32),
-            next_day(32, 31),  // 循环
-            next_day(33, 999), // 缺失的解释
-            next_day(34, 31),  // 依赖循环的下游
+            next_day(32, 31),  // cycle
+            next_day(33, 999), // missing interpretation
+            next_day(34, 31),  // downstream of a dependency cycle
             next_day(22, 21),
             next_day(1, 0),
             next_day(21, 20),
@@ -1158,7 +1158,7 @@ mod tests {
             },
             ..absolute_day(id)
         };
-        // 偶数在第一节，奇数在第二节；两条链各自从本节日期起算。
+        // Even numbers are in the first section, odd in the second; each of the two chains counts from its own section's date.
         let interpretations = [
             next_day(4, 2),
             next_day(5, 3),
@@ -1302,7 +1302,7 @@ mod tests {
             (r.grade, r.from, r.from_p),
             ("B", Some(at("2025-01-01T00:00:00Z")), Some("year"))
         );
-        // 没有文档日期就锚不到
+        // No document date means the anchor cannot be found
         let undated = DocumentDating::default();
         assert_eq!(resolve_one(&today, &undated, &HashMap::new()), UNRESOLVED);
     }
@@ -1323,7 +1323,7 @@ mod tests {
         assert_eq!(r.grade, "B");
         assert_eq!(r.from, Some(at("2026-01-26T00:00:00Z")));
         assert_eq!(r.to, Some(at("2027-01-25T00:00:00Z")));
-        // 文中自己写了起止的期间是 A 级
+        // A period that states its own start and end within the text is grade A
         let stated = Interpretation {
             reference: Reference::Period {
                 name: "three months ended July 26, 2026".into(),
@@ -1468,7 +1468,7 @@ mod tests {
             },
             granularity: Granularity::Month,
         };
-        // 日历季：9 月 2 日在第三季（7–9 月）
+        // Calendar quarter: 2 September is in the third quarter (July-September)
         let calendar = DocumentDating {
             fiscal_year_end: None,
             ..ctx_dated(2026, 9, 2)
@@ -1485,7 +1485,7 @@ mod tests {
             (r.from_p, r.to_p, r.grade),
             (Some("month"), Some("month"), "B")
         );
-        // 财年结束于 1 月 25 日：季首月是 2、5、8、11 月，9 月 2 日在 8–10 月那一季
+        // Fiscal year ends on January 25: quarter-start months are 2, 5, 8, 11, and 2 September is in the quarter of August-October
         let r = resolve_one(&this_quarter, &ctx_dated(2026, 9, 2), &HashMap::new());
         assert_eq!(
             (r.from, r.to),
@@ -1494,7 +1494,7 @@ mod tests {
                 Some(at("2026-10-01T00:00:00Z"))
             )
         );
-        // 上一季度
+        // The previous quarter
         let last_quarter = Interpretation {
             reference: Reference::Anchored {
                 anchor: Anchor::Document,

@@ -1,15 +1,15 @@
-//! 场景包（0073）：按业务场景预置的一小套词汇，连同它要回答的问题。
+//! Scenario packs (0073): a small set of vocabulary preset for a business scenario, together with the questions it must answer.
 //!
-//! 标准本体包（`ontology_packs`，0008）给的是通用类型，不给语料要的谓词；场景包反过来：
-//! 几个类、十来条属性和关系，定义是写给对齐器读的，单位和 datatype 已经选对，再加上这类
-//! 语料要回答的能力问题（0061）。文件内嵌进二进制，离线部署也有。
+//! The standard ontology packs (`ontology_packs`, 0008) give general types, not the predicates the corpus needs; scenario packs are the reverse:
+//! a few classes and ten or so properties and relations, whose definitions are written for the aligner to read, with units and datatypes already chosen, plus the
+//! capability questions this kind of corpus must answer (0061). The file is embedded in the binary, so offline deployments have it too.
 //!
-//! **走编辑器的路，不走 OWL 导入。** 类和属性用本体页同样的调用建出来，没有 IRI，是这个库
-//! 自己的元素（0012）：能改、能删、导出时是库自己的词汇。问题按人提的记（`origin = person`，
-//! 建库的人是作者）：勾上场景包就是这个人对库的要求。只在建库时装：新库没有事实，不必对账。
+//! **Goes through the editor's path, not OWL import.** Classes and properties are created with the same calls the ontology page makes; they have no IRI, and are this KB's
+//! own elements (0012): editable, deletable, and when exported they are the KB's own vocabulary. Questions are recorded as raised by a person (`origin = person`, where
+//! the person who created the KB is the author): ticking a scenario pack means this person's requirements for the KB. Installed only at KB creation: a new KB has no facts, so there is nothing to reconcile.
 //!
-//! 键撞上已有元素（先装的标准包、另一个场景包）的跳过并报告，不合并不覆盖；定义域、值域
-//! 只认包自己的类键或库里已有的键，认不出的丢掉那条声明、照样装。
+//! A key that collides with an existing element (a standard pack installed earlier, or another scenario pack) is skipped and reported, not merged or overwritten; domain and range
+//! only accept the pack's own class keys or keys already in the KB; a declaration that cannot be resolved has that one declaration dropped and the rest installed.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-/// 一段双语文字：标签是数据，按库的 `ontology_lang` 取（0004）
+/// A bilingual text: the label is data, taken by the KB's `ontology_lang` (0004)
 #[derive(Debug, Clone, Deserialize)]
 pub struct Text {
     pub zh: String,
@@ -43,7 +43,7 @@ pub struct Class {
     pub key: String,
     pub label: Text,
     pub description: Text,
-    /// 父类的键，必须在本包里排在前面或已在库里
+    /// The key of the parent class; it must come earlier in this pack or already be in the KB
     #[serde(default)]
     pub parents: Vec<String>,
 }
@@ -51,13 +51,13 @@ pub struct Class {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Attribute {
     pub key: String,
-    /// 挂在哪个类上（定义域）
+    /// Which class it attaches to (the domain)
     pub host: String,
     pub label: Text,
     pub description: Text,
     /// text / number / date / bool
     pub datatype: String,
-    /// 数的单位，按这个语料写的那种；读不出的值记成 `attr_datatype` 丢弃
+    /// The unit of a number, in the form this corpus uses; a value that cannot be read is recorded as `attr_datatype` and dropped
     #[serde(default)]
     pub unit: Option<String>,
     #[serde(default = "yes")]
@@ -73,7 +73,7 @@ pub struct Relation {
     pub domains: Vec<String>,
     #[serde(default)]
     pub ranges: Vec<String>,
-    /// state / event / eternal（0031）
+    /// state / event / eternal (0031)
     #[serde(default = "state")]
     pub temporal: String,
     #[serde(default)]
@@ -85,7 +85,7 @@ pub struct Question {
     pub question: Text,
     #[serde(default)]
     pub expected_answer: Option<Text>,
-    /// 答案要经过的类和属性（0061 决定 1 的「形状」），照原样存
+    /// The classes and properties an answer must pass through (the "shape" of 0061 decision 1), stored as they are
     #[serde(default)]
     pub needs: Option<serde_json::Value>,
 }
@@ -127,8 +127,8 @@ const FILES: &[(&str, &str)] = &[
     ),
 ];
 
-/// 内嵌的全部场景包。文件写错是构建的问题，不是运行时的：这里直接 panic，测试
-/// [`tests::every_shipped_pack_parses_and_resolves`] 在 CI 里先于任何部署撞上它
+/// All the scenario packs embedded. A bad file is a build problem, not a runtime one: this panics directly, and the test
+/// [`tests::every_shipped_pack_parses_and_resolves`] hits it in CI before any deployment
 pub static PACKS: LazyLock<Vec<ScenarioPack>> = LazyLock::new(|| {
     FILES
         .iter()
@@ -145,7 +145,7 @@ pub fn get(id: &str) -> Option<&'static ScenarioPack> {
     PACKS.iter().find(|p| p.id == id)
 }
 
-/// 装了什么、跳过了什么。`skipped` 是人读的句子：键撞上了谁、哪条声明认不出
+/// What was installed and what was skipped. `skipped` is a sentence for people to read: which key collided with whom, and which declaration could not be resolved
 #[derive(Debug, Default, serde::Serialize)]
 pub struct Report {
     pub classes: usize,
@@ -154,8 +154,8 @@ pub struct Report {
     pub skipped: Vec<String>,
 }
 
-/// 把几个场景包装进一个新库。`lang` 是库的 `ontology_lang`：标签与定义按它取。
-/// 建了东西就排一份 `embed_ontology`，第一次对齐之前元素得有向量（同编辑器与导入）
+/// Install several scenario packs into a new KB. `lang` is the KB's `ontology_lang`: labels and definitions are taken by it.
+/// Once something is created, queue one `embed_ontology` pass, since elements need vectors before the first alignment (same as the editor and import)
 pub async fn install(
     state: &AppState,
     kb_id: Uuid,
@@ -174,7 +174,7 @@ pub async fn install(
         })
         .collect::<AppResult<_>>()?;
     let pool = &state.pool;
-    // 库里已有的键（先装的标准包、前一个场景包）：撞上的跳过，声明可以指向它们
+    // KB keys that already exist (a standard pack installed earlier, the previous scenario pack): a colliding one is skipped, and declarations may point at them
     let mut classes: HashMap<String, Uuid> =
         sqlx::query_as::<_, (String, Uuid)>("SELECT key, id FROM entity_types WHERE kb_id = $1")
             .bind(kb_id)
@@ -333,7 +333,7 @@ pub async fn install(
         .await;
     }
     if report.classes + report.properties > 0 {
-        // 新元素要有向量，对齐的短名单才看得见它（同 `reindex_then_align`）
+        // New elements need vectors, or the alignment shortlist cannot see them (same as `reindex_then_align`)
         utopia_store::jobs::enqueue_unless_queued_after(
             pool,
             "embed_ontology",
@@ -353,7 +353,7 @@ mod tests {
     use super::{Text, PACKS};
     use std::collections::HashSet;
 
-    /// 文件是手写的 JSON：解析得了、键不重复、每条声明都指向本包排在前面的类、datatype 合法
+    /// The file is hand-written JSON: it must parse, keys must not repeat, and every declaration must point at a class earlier in this pack, with a valid datatype
     #[test]
     fn every_shipped_pack_parses_and_resolves() {
         assert_eq!(PACKS.len(), 3);

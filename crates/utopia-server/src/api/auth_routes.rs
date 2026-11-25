@@ -59,7 +59,7 @@ pub async fn register(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    // 注册开关：库内配置（/admin 可切）优先；建库前（首用户引导）总是放行
+    // Registration switch: the in-database setting (toggled at /admin) takes precedence; before the database exists (first-user bootstrap) it is always allowed
     let open = utopia_store::access::open_registration(&state.pool)
         .await
         .unwrap_or(state.open_registration);
@@ -77,11 +77,11 @@ pub async fn register(
     )
     .await?;
 
-    // 首个用户那个 General 库**空着起步**（#580）。从前这里给它装 schema.org（#322），
-    // 理由是没有 domain/range 事实就没方向；量过之后（#580 的对照）：包给的是实体
-    // 类型，不是谓词——装了包八成事实照样没谓词；空库靠 bootstrap 从文档里长出
-    // 十几个类、上百条关系，都是语料自己的说法，每块的提示词从 18k tokens 回到 2k。
-    // 包还在建库对话框里，要的人一键装
+    // The first user's General database **starts empty** (#580). It used to install schema.org here (#322),
+    // the reason being that without domain/range facts there is no direction; measured afterwards (the #580 comparison): the package supplies entity
+    // types, not predicates -- even when installed, most facts still have no predicates; an empty database grows its own classes from documents via bootstrap
+    // a dozen-odd classes and over a hundred relations, all in the corpus's own words, and each block's prompt drops from 18k tokens to 2k.
+    // The package is still in the create-database dialog; anyone who wants it can install it with one click
 
     let token = auth::issue_token(&state, user.id)?;
     let secure = auth::behind_tls(&headers, state.cookie_secure);
@@ -102,10 +102,10 @@ pub async fn register(
     ))
 }
 
-/// 登录失败留痕：没有账号可归属，actor 记 NULL，尝试的邮箱进 detail。
-/// 区分「邮箱不存在」与「密码不对」——同一 IP 上大量前者是邮箱枚举，
-/// 集中在一个账号上的后者是撞库，两种攻击的形状不一样。台账仅管理员可读，
-/// 不存在借此探测账号是否注册的问题。
+/// Failed logins are recorded: there is no account to attribute them to, so actor is NULL and the attempted email goes into detail.
+/// Distinguishes "email does not exist" from "wrong password": many of the former from one IP is email enumeration,
+/// while many of the latter against one account is credential stuffing; the two attacks look different. The ledger is readable by admins only,
+/// so there is no way to use it to probe whether an account is registered.
 async fn record_login_failure(state: &AppState, email: &str, reason: &str) {
     let _ = utopia_store::audit::record_opt(
         &state.pool,
@@ -128,10 +128,10 @@ pub async fn login(
     password_login_enabled(&state)?;
     let email = req.email.trim();
     let user = utopia_store::accounts::find_user_by_email(&state.pool, email).await?;
-    // 邮箱存在与否的分支要走一样的代码路径：少了 argon2 的那一支能通过
-    // 响应时间差枚举出哪些邮箱注册过（一份密码库扫完后剩下能登录的就是
-    // 真用户）。在「邮箱不存在」分支里跑一次 argon2 校验，结果忽略——
-    // 这条分支因此和「邮箱存在、密码错」一样慢。
+    // Whether an email exists must take the same code path: without the argon2 branch, response-time differences would reveal which emails are registered
+    // (after going through a password dump, whoever is left able to log in is a real user).
+    // So the "email does not exist" branch runs one argon2 check and discards the result --
+    // this branch is therefore just as slow as the "email exists, wrong password" branch.
     let password_valid = match &user {
         Some(u) => auth::verify_password(&req.password, &u.password_hash),
         None => {
@@ -167,8 +167,8 @@ pub async fn login(
     Ok((jar, Json(json!({ "user": user, "token": token }))))
 }
 
-/// 登出不要求有效会话——cookie 过期时也必须能清掉它，否则前端就卡在一个
-/// 死会话上。所以这里自己解 token 取身份，解不出就只清 cookie 不留痕。
+/// Logout does not require a valid session: the cookie must be clearable even after it expires, otherwise the frontend gets stuck on a
+/// dead session. So this parses the token itself to get identity, and if it cannot be parsed it only clears the cookie without leaving a record.
 pub async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -203,7 +203,7 @@ pub struct UpdateMeReq {
     pub display_name: String,
 }
 
-/// 个人资料：改显示名。
+/// Profile: change display name.
 pub async fn update_me(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -225,7 +225,7 @@ pub struct ChangePasswordReq {
     pub new_password: String,
 }
 
-/// 改密码：验旧密 → 哈希新密。旧密错误与"未登录"区分开，前端能给出准确提示。
+/// Change password: verify the old password -> hash the new one. The wrong old password is distinguished from "not logged in", so the frontend can show an accurate message.
 pub async fn change_password(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,

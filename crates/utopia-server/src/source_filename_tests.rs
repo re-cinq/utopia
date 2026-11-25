@@ -1,4 +1,4 @@
-//! 文件名截断不能让正常的多字节标题掀掉整次来源同步。
+//! A truncated file name must not let a normal multi-byte title bring down a whole source sync.
 use super::{filename_from_url, slugify, sync_source};
 use std::sync::Arc;
 use uuid::Uuid;

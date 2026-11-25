@@ -1,21 +1,21 @@
-//! 口径的检索（#574）：问数按问题挑几条确认口径，而不是按字典序塞前三十条。
+//! Retrieval of metric definitions (#574): for data questions, pick a few confirmed definitions by the question, rather than stuffing the first thirty in dictionary order.
 //!
-//! 两路、RRF 合并、取前几条，照分块检索（`retrieval::hybrid`）的形状：
+//! Two channels, merged by RRF and the top few kept, in the shape of chunk retrieval (`retrieval::hybrid`):
 //!
-//! - **向量**：口径的「名字：说明（单位）」嵌进 `concept_mappings.embedding`，问题
-//!   嵌一次，pgvector 排序。没配嵌入模型就没有这一路。
-//! - **词面**：全部确认口径拉回来在 Rust 里打分——问题切成词（英文按空白与标点，
-//!   中文按两字），数命中了几个。一个库几十到几百条，比在 SQL 里做中文分词便宜，
-//!   也不用 pg_trgm。
+//! - **Vector**: each definition's "name: description (unit)" is embedded into `concept_mappings.embedding`; the question
+//!   is embedded once, and pgvector sorts. Without an embedding model this channel does not exist.
+//! - **Lexical**: all confirmed definitions are fetched back and scored in Rust: the question is split into words (English on whitespace and punctuation,
+//!   Chinese in two-character pairs), and the hits are counted. A library has tens to hundreds of them, which is cheaper than Chinese word segmentation in SQL,
+//!   and pg_trgm is not needed.
 //!
-//! 降级链：向量 + 词面 → 只词面（没嵌入模型）→ 两路都空时按字典序取前几条
-//! （今天的行为）。每一级都比上一级差一点，没有一级是「没有口径」。
+//! Fallback chain: vector + lexical → lexical only (no embedding model) → when both channels are empty, the first few in dictionary order
+//! (today's behaviour). Each level is a little worse than the one above; no level means "no metric definitions".
 //!
-//! 索引是**懒的**：`relevant` 先把没嵌的补上再查。一次问数通常没有要补的；
-//! 刚确认了一批才会有，那一次多等一个嵌入调用。谁都不用记得去刷新。
+//! The index is **lazy**: `relevant` first embeds whatever is not yet embedded, then queries. A data question usually has nothing to fill;
+//! it only happens right after a batch is confirmed, and then that one request waits for one more embedding call. Nobody has to remember to refresh.
 //!
-//! 问题的向量走这一轮的缓存（`llm_util::EmbedCache`，#971 的后续）：对话先在这里嵌一次，
-//! 随后的检索分块和按名字查实体都拿同一个向量，一轮只调一次嵌入端点。
+//! The question's vector goes through this turn's cache (`llm_util::EmbedCache`, follow-up to #971): the conversation embeds it here once,
+//! and the later chunk retrieval and by-name entity lookup reuse the same vector, so one turn calls the embedding endpoint only once.
 
 use crate::llm_util;
 use crate::state::AppState;
@@ -23,18 +23,18 @@ use utopia_core::models::ConceptMapping;
 use utopia_store::mappings::MappingText;
 use uuid::Uuid;
 
-/// 进提示词几条。一道题最多要两条口径（客单价 = 净额 ÷ 订单数），八条够；
-/// 再多就回到「相邻名字互相干扰」——17/18 漏的那题正是三个相邻名字都在场
+/// How many definitions go into the prompt. A question needs at most two (average unit price = net amount ÷ order count), so eight is enough;
+/// more would fall back to "neighbouring names interfere with each other": the question that 17/18 missed is exactly the one where three neighbouring names were all present
 pub const DEFINITIONS_IN_PROMPT: usize = 8;
-/// 每一路召回几条再合并，与分块检索同一个数
+/// How many each channel returns before merging: the same number as chunk retrieval
 const RECALL_PER_CHANNEL: usize = 24;
-/// 一次嵌几条
+/// How many to embed in one go
 const BATCH: usize = 32;
-/// 一问最多补嵌几条。补嵌跑在问数的请求路径上：换了嵌入模型之后的第一问不该把
-/// 几百条口径一口气嵌完才开口——补不完的下一问接着补，这期间少的那些由词面一路兜着
+/// At most this many to fill in per question. Filling runs on the question's request path: the first question after switching embedding models should not
+/// embed several hundred definitions in one go before answering. Whatever cannot be filled is topped up by the next question, and in the meantime the lexical channel covers those that are missing
 const REFRESH_PER_TURN: usize = 64;
 
-/// 把还没嵌的确认口径补上。没配嵌入模型就什么都不做（词面一路照常）。
+/// Fill in the confirmed definitions not yet embedded. Does nothing without an embedding model (the lexical channel still runs).
 pub async fn refresh(state: &AppState, kb_id: Uuid, workspace_id: Uuid) -> anyhow::Result<usize> {
     let Some(settings) = utopia_store::settings::get(&state.pool, workspace_id).await? else {
         return Ok(0);
@@ -65,7 +65,7 @@ pub async fn refresh(state: &AppState, kb_id: Uuid, workspace_id: Uuid) -> anyho
             let _permit = llm_util::acquire_embed(state, &settings).await;
             client.embed(&texts).await?
         };
-        // 数量对不上就整批放弃：配对是按位置的，少一条就全体错位（分块那边同一句话）
+        // If the counts do not match, abandon the whole batch: pairing is by position, so one missing item misaligns everything (the same point as in chunk retrieval)
         if vectors.len() != batch.len() {
             anyhow::bail!(
                 "embedding returned {} vectors for {} texts",
@@ -81,7 +81,7 @@ pub async fn refresh(state: &AppState, kb_id: Uuid, workspace_id: Uuid) -> anyho
     Ok(done)
 }
 
-/// 跟这个问题有关的口径，按相关度排。
+/// The definitions relevant to this question, ranked by relevance.
 pub async fn relevant(
     state: &AppState,
     kb_id: Uuid,
@@ -95,7 +95,7 @@ pub async fn relevant(
         return Ok(utopia_store::mappings::confirmed(&state.pool, kb_id, k as i64).await?);
     }
     if let Err(e) = refresh(state, kb_id, workspace_id).await {
-        // 补不上就用已有的向量和词面，不让一次嵌入失败把问数拖没
+        // If they cannot be filled, use the existing vectors and lexical matching, so that one failed embedding does not sink the question
         tracing::warn!(%kb_id, error = %e, "口径向量没补上，按已有的检索");
     }
 
@@ -121,14 +121,14 @@ pub async fn relevant(
     let fused = utopia_search::rrf_fuse(&lists, k);
     let ids: Vec<Uuid> = fused.iter().filter_map(|s| s.parse().ok()).collect();
     if ids.is_empty() {
-        // 两路都没命中（问题里一个词都对不上）：退回今天的行为，总比空着好
+        // Neither channel hits (no word in the question matches): fall back to today's behaviour; something beats nothing
         return Ok(utopia_store::mappings::confirmed(&state.pool, kb_id, k as i64).await?);
     }
     Ok(utopia_store::mappings::by_ids(&state.pool, kb_id, &ids).await?)
 }
 
-/// 向量那一路。缓存里有这句话的向量就不再嵌（也不占嵌入闸门的名额），模型名还是要
-/// 读设置：只比同一个模型嵌出来的口径
+/// The vector channel. If the cache already holds this sentence's vector it is not embedded again (and takes no embedding-gate slot), but the model name must still be
+/// read from settings: only definitions embedded by the same model are compared
 async fn vector_channel(
     state: &AppState,
     kb_id: Uuid,
@@ -173,8 +173,8 @@ async fn vector_channel(
     Ok(Some(ids.into_iter().map(|id| id.to_string()).collect()))
 }
 
-/// 问题切成词：英文按空白与标点切、转小写；中文按两字（一个字太碎，三个字漏太多）。
-/// 单个 ASCII 字符不算词（「a」「x」命中一切）。
+/// Split the question into words: English is split on whitespace and punctuation and lowercased; Chinese in two-character pairs (a single character is too fragmented, three miss too much).
+/// A single ASCII character does not count as a word ("a" and "x" would match everything).
 fn tokens(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut word = String::new();
@@ -210,7 +210,7 @@ fn tokens(s: &str) -> Vec<String> {
     out
 }
 
-/// 词面一路：每条口径的文字命中了问题里几个词，多的在前；一个都没命中的不要。
+/// Lexical channel: for each definition, the count of the question's words its text hits; more hits come first, and a definition with no hits is not returned.
 fn lexical_rank(query: &str, texts: &[MappingText], limit: usize) -> Vec<Uuid> {
     let qs = tokens(query);
     if qs.is_empty() {
@@ -224,7 +224,7 @@ fn lexical_rank(query: &str, texts: &[MappingText], limit: usize) -> Vec<Uuid> {
         })
         .filter(|(n, _)| *n > 0)
         .collect();
-    // 命中多的在前；同分按 id 定序，两次查同一个问题拿到同一个顺序
+    // More hits first; ties ordered by id, so the same question always gets the same order
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     scored.into_iter().take(limit).map(|(_, id)| id).collect()
 }
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn a_question_is_cut_into_words_in_either_language() {
-        // 输出是排好序去了重的；期望值同样排一遍，不靠手排码点
+        // Output is sorted and de-duplicated; the expected value is sorted the same way, rather than hand-sorted by code point
         let sorted = |v: &[&str]| {
             let mut v: Vec<String> = v.iter().map(|s| s.to_string()).collect();
             v.sort();
@@ -258,7 +258,7 @@ mod tests {
             tokens("What is our total GMV?"),
             sorted(&["what", "is", "our", "total", "gmv"])
         );
-        // 中文按两字；单个 ASCII 字符不算词
+        // Chinese in two-character pairs; a single ASCII character does not count as a word
         assert_eq!(
             tokens("扣掉退款之后的净销售额是多少？"),
             sorted(&[
@@ -288,7 +288,7 @@ mod tests {
             "客单价的说明里也有「净销售额」"
         );
         assert!(!got.contains(&Uuid::from_u128(4)), "运费一个词都不沾");
-        // 一个词都对不上：空，让调用方降级到按字典序
+        // No word matches at all: empty, so the caller falls back to dictionary order
         assert!(lexical_rank("zzz", &texts, 8).is_empty());
     }
 }

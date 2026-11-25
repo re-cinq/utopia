@@ -1,5 +1,5 @@
-//! 写权限的个人令牌能把一个库从无到有搭起来（#1243）：建库、建来源、读推送密钥、
-//! 导入本体、定类别词。令牌照旧只收窄——人的角色是上限，scope 与 `kb_ids` 再往下压。
+//! A personal token with write permission can set a library up from nothing (#1243): create the library, create sources, read the push key,
+//! import the ontology, and define category words. As before, a token only narrows: the person's role is the ceiling, and scope and `kb_ids` press lower still.
 use crate::state::AppState;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -13,9 +13,9 @@ struct Fixture {
     app: axum::Router,
     org: Uuid,
     ws: Uuid,
-    /// 工作区 admin：建得了库
+    /// Workspace admin: can create a library
     admin: Uuid,
-    /// 工作区 viewer：令牌勾了 write 也建不了
+    /// Workspace viewer: even with write ticked on the token, cannot create a library
     viewer: Uuid,
     _dir: tempfile::TempDir,
 }
@@ -92,8 +92,8 @@ impl Fixture {
         self.respond(request).await
     }
 
-    /// 本体导入收 multipart。空表单在读上传那一步就会被拒（`no_files`），
-    /// 够用来分辨「令牌被挡在门外」与「进了门、请求本身不对」
+    /// The ontology import accepts multipart. An empty form is rejected at the step of reading the upload (`no_files`),
+    /// which is enough to tell "the token was blocked at the door" from "got through the door, but the request itself is wrong"
     async fn import_nothing(&self, kb: Uuid, token: &str) -> anyhow::Result<(StatusCode, Value)> {
         let request = Request::post(format!("/api/v1/kbs/{kb}/ontology/imports"))
             .header("authorization", format!("Bearer {token}"))
@@ -102,7 +102,7 @@ impl Fixture {
         self.respond(request).await
     }
 
-    /// 真导入一份 Turtle：字段要带文件名，读上传只收带文件名的，同网页的导入面板
+    /// Really imports a Turtle file: the field must carry a file name, since reading the upload only accepts ones that have a file name, as the web import panel does
     async fn import_turtle(
         &self,
         kb: Uuid,
@@ -179,7 +179,7 @@ impl Fixture {
             .await
     }
 
-    /// 直接写库建一个 admin 名下的库：只测令牌边界的用例不必先走一遍建库
+    /// Write directly to the database to create a library owned by an admin: cases testing only the token boundary need not go through library creation first
     async fn seeded_kb(&self, name: &str) -> anyhow::Result<Uuid> {
         let kb = Uuid::now_v7();
         sqlx::query("INSERT INTO knowledge_bases(id,workspace_id,name) VALUES ($1,$2,$3)")
@@ -197,7 +197,7 @@ impl Fixture {
     }
 
     async fn cleanup(self) -> anyhow::Result<()> {
-        // 任务按载荷里的 kb_id 挂在库上，没有外键，删组织带不走它们
+        // Tasks are attached to the library through the kb_id in their payload, with no foreign key, so deleting the organisation does not take them along
         sqlx::query(
             "DELETE FROM jobs WHERE payload->>'kb_id' IN
                  (SELECT id::text FROM knowledge_bases WHERE workspace_id = $1)",
@@ -240,13 +240,13 @@ async fn a_live_write_token_of_a_workspace_admin_sets_up_a_base_and_a_dead_one_d
             "{key} vs {created}"
         );
 
-        // 进了门、请求本身不对：空上传过了令牌与角色，停在读上传那一步
+        // Got through the door, but the request itself is wrong: an empty upload has passed the token and role checks and stops at the step of reading the upload
         let (status, body) = f.import_nothing(kb, &token).await?;
         anyhow::ensure!(body["code"] == "no_files", "{status} {body}");
         let (status, body) = f.decide_kind_word(kb, &token).await?;
         anyhow::ensure!(status == StatusCode::OK, "{status} {body}");
 
-        // 审计记的是发令牌的人，与会话一样
+        // Audit records the person who issued the token, same as for a session
         let actors: Vec<(String, Option<Uuid>)> = sqlx::query_as(
             "SELECT action, actor_id FROM audit_events
               WHERE kb_id = $1 AND action IN ('source.created', 'alignment.kind_word_decided')
@@ -263,7 +263,7 @@ async fn a_live_write_token_of_a_workspace_admin_sets_up_a_base_and_a_dead_one_d
                 ],
             "{actors:?}"
         );
-        // 哪一枚令牌代人做的（决定 5 靠它）：记在 detail 里
+        // Which token acted on someone's behalf (decision 5 relies on it): recorded in detail
         let detail: Value = sqlx::query_scalar(
             "SELECT detail FROM audit_events WHERE kb_id = $1 AND action = 'source.created'",
         )
@@ -272,7 +272,7 @@ async fn a_live_write_token_of_a_workspace_admin_sets_up_a_base_and_a_dead_one_d
         .await?;
         anyhow::ensure!(detail["token_id"] == json!(token_id), "{detail}");
 
-        // 同一个人、同一条刚走通的路：过期的与撤销的令牌照旧挡在门外
+        // The same person, the same path that just succeeded: expired and revoked tokens are still blocked at the door
         let (_, expired) = utopia_store::tokens::issue(
             &f.pool,
             f.admin,
@@ -469,7 +469,7 @@ async fn a_write_token_reaches_no_further_than_its_owners_role_and_its_base_list
         return Ok(());
     };
     let result = async {
-        // 工作区 viewer：令牌勾了 write，建库照旧要工作区 admin
+        // Workspace viewer: the token ticked write, but creating a library still requires workspace admin
         let viewers = f.token(f.viewer, "write", None).await;
         let (status, body) = f.create_kb(&viewers, "nope").await?;
         anyhow::ensure!(status == StatusCode::FORBIDDEN, "viewer: {status} {body}");
@@ -509,9 +509,9 @@ async fn a_write_token_reaches_no_further_than_its_owners_role_and_its_base_list
     result
 }
 
-/// 文档先到、本体后导（建库对话框说本体以后还能再导）：没有类时类别词判成「没有」，
-/// 短语签名对不上属性。导进来的类与属性要接住它们就得重排对齐，同编辑器的入口一样先排
-/// `embed_ontology` 再排对齐；不排的话要等下一篇文档，最后一篇之后导进来的类没有实例
+/// Documents arrive first, ontology imported later (the create-library dialog says the ontology can be imported again later): with no classes, category words are judged "none",
+/// and short-phrase signatures do not match attributes. For imported classes and attributes to pick them up, alignment has to be re-queued, as the editor's entry does: first queue
+/// `embed_ontology`, then alignment; if not, the classes imported after the last document have no instances until the next document arrives
 #[tokio::test]
 async fn importing_an_ontology_queues_alignment_behind_the_index_refresh() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -545,10 +545,10 @@ async fn importing_an_ontology_queues_alignment_behind_the_index_refresh() -> an
     result
 }
 
-/// 导入读 `utopia:temporal`（0031）。导出端一直写这一条，导入端从前不读：一份本体
-/// 说「这条关系是一个时刻」，导进来照样 `state`，#1242 的「非 state 的关系不经模型
-/// 就能绑」对导入的本体永远不成立。新建的照本体建；重导入时本体说了的改过来，
-/// 没说的不动——与 domain/range 同一个道理。真改了推 `updated_at`，与页面上改一样
+/// Import reads `utopia:temporal` (0031). The export side has always written this; the import side did not read it, so an ontology
+/// that says "this relation is a moment" would be imported as `state` anyway, and #1242's "a non-state relation can bind without the model"
+/// would never hold for imported ontologies. Newly created ones are built from the ontology; on re-import whatever the ontology states is applied,
+/// and what it does not state is left alone: the same logic as domain/range. A real change bumps `updated_at`, as an edit on the page does
 #[tokio::test]
 async fn an_imported_property_keeps_the_temporal_it_declares() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {
@@ -574,7 +574,7 @@ async fn an_imported_property_keeps_the_temporal_it_declares() -> anyhow::Result
             }
         };
 
-        // 第一版没有注解：worksAt 建成 state
+        // The first version has no annotation: worksAt is built as state
         let first =
             format!("{PREFIXES}ex:worksAt a owl:ObjectProperty ; rdfs:label \"works at\" .\n");
         let (status, body) = f.import_turtle(kb, &token, &first).await?;
@@ -582,7 +582,7 @@ async fn an_imported_property_keeps_the_temporal_it_declares() -> anyhow::Result
         let (temporal, created) = works_at().await?;
         anyhow::ensure!(temporal == "state");
 
-        // 第二版：worksAt 加了注解，attended 是带注解新建的
+        // Second version: worksAt gains the annotation, and attended is newly created with the annotation
         let second = format!(
             "{PREFIXES}ex:worksAt a owl:ObjectProperty ; rdfs:label \"works at\" ; \
              utopia:temporal \"eternal\" .\n\
@@ -612,7 +612,7 @@ async fn an_imported_property_keeps_the_temporal_it_declares() -> anyhow::Result
             "a fresh import creates the relation with the temporal it declares"
         );
 
-        // 第三版把注解去掉：没说就不动，人在页面上改过的也不会被重导入抹掉
+        // Third version removes the annotation: unstated means unchanged, and what a person edited on the page is not wiped by re-import
         let (status, body) = f.import_turtle(kb, &token, &first).await?;
         anyhow::ensure!(status == StatusCode::OK, "{status} {body}");
         anyhow::ensure!(
@@ -620,7 +620,7 @@ async fn an_imported_property_keeps_the_temporal_it_declares() -> anyhow::Result
             "an unannotated re-import leaves temporal and updated_at alone"
         );
 
-        // 第四版说回 state：导出端写 state，所以一份导出重导入能把关系带回 state
+        // Fourth version states state again: the export side writes state, so re-importing an export brings the relation back to state
         let back = format!(
             "{PREFIXES}ex:worksAt a owl:ObjectProperty ; rdfs:label \"works at\" ; \
              utopia:temporal \"state\" .\n"

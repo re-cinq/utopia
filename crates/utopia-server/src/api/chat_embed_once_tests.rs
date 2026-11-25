@@ -1,27 +1,27 @@
-//! 同一轮里，同一句话只嵌一次。
+//! Within one turn, the same sentence is embedded only once.
 //!
-//! 同名实体的候选按问题排（`rank_by_question`）：问题嵌成向量，与候选的上下文画像比。
-//! 一轮里每按名字查一次实体都走到那里，句子是同一句；从前每次都重新嵌一遍，读一次模型
-//! 设置、调一次嵌入服务。谓词对不上时的对齐（`aligned_predicates`）也是这样。
+//! Candidates for same-named entities are ranked by the question (`rank_by_question`): the question is embedded into a vector and compared with each candidate's context profile.
+//! Each by-name entity lookup within a turn goes there with the same sentence; previously it re-embedded every time, reading the model
+//! setting and calling the embedding service again. Alignment when predicates do not match (`aligned_predicates`) works the same way.
 //!
-//! 假嵌入服务记下每次请求的文字，每条都回同一个方向。两个都叫 Acme 的实体，画像近的
-//! 那个事实少：不按问题排（MCP 没有问题），按事实数排在前面的是远的那个。
+//! The fake embedding service records the text of each request, and every one returns the same direction. Of two entities both named Acme, the one with the close profile
+//! has fewer facts: without a question (MCP has none), ranking by fact count puts the distant one first.
 //!
-//! - 工具层（同一个 sink 就是同一轮）：find_entities、按名字的 entity_facts 与
-//!   neighbors 都挑中近的那个，问题只嵌一次；同一个对不上的谓词问两次，那个词只嵌
-//!   一次；换一个 sink（下一轮），问题再嵌一次
-//! - 整条对话：模型先 search_chunks（检索词就是那句问题），再 find_entities、按名字
-//!   entity_facts，嵌入服务只收到一次请求
-//! - 挑口径（`mapping_index::relevant`）、检索分块（`retrieval::hybrid`）和按名字查实体
-//!   共用这一轮的缓存：问题只嵌一次；没有缓存的调用方各嵌各的（#971 的后续）
+//! - Tool layer (the same sink means the same turn): find_entities, entity_facts by name and
+//!   neighbors all pick the close one; the question is embedded once; a mismatched predicate asked twice embeds only that word
+//!   once; with a different sink (the next turn), the question is embedded again
+//! - Whole conversation: the model first calls search_chunks (its query is that very question), then find_entities, then by name
+//!   entity_facts; the embedding service receives only one request
+//! - Mapping selection (`mapping_index::relevant`), chunk retrieval (`retrieval::hybrid`) and by-name entity lookup
+//!   share this turn's cache: the question is embedded once; callers without a cache each embed on their own (follow-up to #971)
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failing without `UTOPIA_DATABASE_URL`. It creates and drops its own database, never touching an existing one.
 use super::*;
 use crate::api::tools::{dispatch, ToolCtx, ToolSink};
 
 const QUESTION: &str = "Where is the Acme lab?";
 
-/// 假嵌入服务：记下每次请求的输入，每条都回 (1, 0, 0)
+/// Fake embedding service: records the input of each request and always returns (1, 0, 0)
 #[derive(Clone, Default)]
 struct Embedder {
     inputs: Arc<Mutex<Vec<Vec<String>>>>,
@@ -45,7 +45,7 @@ async fn embeddings(
 }
 
 impl Embedder {
-    /// 每次请求一行，行里是那次嵌的文字
+    /// One line per request; each line is the text embedded that time
     fn requests(&self) -> Vec<Vec<String>> {
         self.inputs.lock().unwrap().clone()
     }
@@ -56,8 +56,8 @@ struct Acme {
     far: Uuid,
 }
 
-/// 起假嵌入服务，把这个库所在工作区的嵌入模型指过去；种两个 Acme：
-/// 近的那个画像与假向量同向、一条事实，远的那个画像正交、两条事实
+/// Start the fake embedding service and point the embedding model of this database's workspace at it; seed two Acmes:
+/// the close one has a profile in the same direction as the fake vector, with one fact; the distant one has an orthogonal profile with two facts
 async fn seed(f: &Fx) -> anyhow::Result<(Embedder, tokio::task::JoinHandle<()>, Acme)> {
     let embedder = Embedder::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -80,7 +80,7 @@ async fn seed(f: &Fx) -> anyhow::Result<(Embedder, tokio::task::JoinHandle<()>, 
     let id = Uuid::now_v7;
     let (org, place, located_in) = (id(), id(), id());
     let (near, far, harbor, port) = (id(), id(), id(), id());
-    // 插进去的只有本地生成的 UUID
+    // Only locally generated UUIDs are inserted
     sqlx::raw_sql(&format!(
         r#"
         INSERT INTO entity_types(id,kb_id,key,label) VALUES
@@ -107,8 +107,8 @@ async fn seed(f: &Fx) -> anyhow::Result<(Embedder, tokio::task::JoinHandle<()>, 
     Ok((embedder, server, Acme { near, far }))
 }
 
-/// 一轮对话的工具上下文；`question` 为 None 就是 MCP 那样没有问题的调用。
-/// `embed` 按工作区读模型设置，所以用这个库真正所在的工作区
+/// Turn-level tool context; `question` None means a call with no question, like MCP's.
+/// `embed` reads the model settings per workspace, so use the workspace this database actually lives in
 async fn ctx<'f>(f: &'f Fx, question: Option<&'f str>) -> anyhow::Result<ToolCtx<'f>> {
     let workspace_id: Uuid =
         sqlx::query_scalar("SELECT workspace_id FROM knowledge_bases WHERE id = $1")
@@ -134,7 +134,7 @@ async fn a_turn_embeds_its_question_and_each_word_once() -> anyhow::Result<()> {
     };
     let (embedder, server, acme) = seed(&f).await?;
     let run = async {
-        // 没有问题（MCP 那样）：不嵌，按事实数挑，排在前面的是远的那个
+        // No question (as with MCP): nothing is embedded; picks by fact count, and the distant one comes first
         let plain = dispatch(
             &ctx(&f, None).await?,
             &mut ToolSink::default(),
@@ -156,7 +156,7 @@ async fn a_turn_embeds_its_question_and_each_word_once() -> anyhow::Result<()> {
         let ctx = ctx(&f, Some(QUESTION)).await?;
         let mut turn = ToolSink::default();
 
-        // 三次按名字查 Acme：都挑中画像近的那个，问题只嵌一次
+        // Three lookups of Acme by name: all pick the close-profile one; the question is embedded only once
         let found = dispatch(&ctx, &mut turn, "find_entities", &json!({"name": "Acme"})).await;
         assert!(
             found
@@ -185,7 +185,7 @@ async fn a_turn_embeds_its_question_and_each_word_once() -> anyhow::Result<()> {
         );
         assert_eq!(embedder.requests(), vec![vec![QUESTION.to_string()]]);
 
-        // 对不上的谓词问两次：那个词只嵌一次，问题仍不重嵌
+        // The mismatched predicate asked twice: that word is embedded only once; the question is still not re-embedded
         for _ in 0..2 {
             dispatch(
                 &ctx,
@@ -200,7 +200,7 @@ async fn a_turn_embeds_its_question_and_each_word_once() -> anyhow::Result<()> {
             vec![vec![QUESTION.to_string()], vec!["headquarters".to_string()]]
         );
 
-        // 下一轮是另一个 sink：问题再嵌一次，挑的还是近的那个
+        // The next turn is another sink: the question is embedded again, and the pick is still the close one
         let mut next = ToolSink::default();
         let again = dispatch(&ctx, &mut next, "find_entities", &json!({"name": "Acme"})).await;
         assert!(
@@ -221,7 +221,7 @@ async fn a_turn_embeds_its_question_and_each_word_once() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn a_chat_turn_embeds_its_question_once() -> anyhow::Result<()> {
-    // 模型先拿那句问题去检索分块：向量那一路把它嵌了，后面按名字查实体拿的是同一个向量
+    // The model first uses that question to retrieve chunks: the vector path embeds it; the later by-name entity lookup reuses the same vector
     let Some(f) = fixture(Scripted::new(vec![
         Reply::Tool("search_chunks", r#"{"query":"Where is the Acme lab?"}"#),
         Reply::Tool("find_entities", r#"{"name":"Acme"}"#),
@@ -246,8 +246,8 @@ async fn a_chat_turn_embeds_its_question_once() -> anyhow::Result<()> {
     run
 }
 
-/// 挑口径、检索分块、按名字查实体三处拿的是同一个向量；换一句检索词才再嵌一次；
-/// 没有缓存的调用方（HTTP 检索、口径页）各嵌各的
+/// Mapping selection, chunk retrieval and by-name entity lookup all use the same vector; a different search query is embedded again;
+/// callers without a cache (HTTP retrieval, the mapping page) each embed on their own
 #[tokio::test]
 async fn mappings_search_and_the_graph_tools_share_one_embedding() -> anyhow::Result<()> {
     let Some(f) = fixture(Scripted::new(vec![])).await? else {
@@ -261,7 +261,7 @@ async fn mappings_search_and_the_graph_tools_share_one_embedding() -> anyhow::Re
             .await?;
         let mut cache = crate::llm_util::EmbedCache::default();
 
-        // 这个库一条确认口径都没有：挑口径两路都空，但问题已经嵌了一次
+        // This database has no confirmed mappings at all: both mapping paths come back empty, but the question was already embedded once
         let mappings =
             crate::mapping_index::relevant(&f.state, f.kb, ws, QUESTION, 8, Some(&mut cache))
                 .await?;
@@ -269,14 +269,14 @@ async fn mappings_search_and_the_graph_tools_share_one_embedding() -> anyhow::Re
         assert_eq!(embedder.requests(), vec![vec![QUESTION.to_string()]]);
         assert!(cache.contains_key(QUESTION));
 
-        // 检索分块拿同一个向量：索引里没有块，向量那一路照样跑，只是不再嵌
+        // Chunk retrieval reuses the same vector: the index has no chunks, the vector path still runs, it just does not embed again
         let chunks =
             crate::retrieval::hybrid(&f.state, f.kb, ws, QUESTION, 8, None, Some(&mut cache))
                 .await?;
         assert!(chunks.is_empty());
         assert_eq!(embedder.requests().len(), 1, "search reuses the vector");
 
-        // 按名字查实体：还是它，挑中画像近的那个
+        // Lookup by name: still the close-profile one
         let ctx = ctx(&f, Some(QUESTION)).await?;
         let mut turn = ToolSink {
             embeddings: cache,
@@ -296,7 +296,7 @@ async fn mappings_search_and_the_graph_tools_share_one_embedding() -> anyhow::Re
             "the graph lookup reuses it too"
         );
 
-        // 模型把检索词改了：另一句话，嵌一次，记进同一个缓存
+        // The model changed the query: another sentence, embedded once and recorded in the same cache
         let _ = crate::retrieval::hybrid(
             &f.state,
             f.kb,
@@ -313,7 +313,7 @@ async fn mappings_search_and_the_graph_tools_share_one_embedding() -> anyhow::Re
         );
         assert!(turn.embeddings.contains_key("Acme lab address"));
 
-        // 没有这一轮的调用方各嵌各的
+        // Callers without this turn's cache each embed on their own
         let _ = crate::retrieval::hybrid(&f.state, f.kb, ws, QUESTION, 8, None, None).await?;
         let _ = crate::mapping_index::relevant(&f.state, f.kb, ws, QUESTION, 8, None).await?;
         assert_eq!(embedder.requests().len(), 4);

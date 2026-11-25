@@ -1,8 +1,8 @@
-//! 一整个用户轮次共用的一个历史窗口和一次上下文超限恢复（#964）。
+//! One history window shared by a whole user turn, and recovery from a context overflow (#964).
 //!
-//! 能丢的只有此前已完成或已失败的整段问答，以及上一轮的工具往返；本轮的问题、系统
-//! 提示和本轮已经拿到的工具结果一个字都不动，工具也不重跑。落库的对话不变：裁的是
-//! 这一次发给模型的东西。
+//! Only whole question-and-answer pairs that are already finished or failed can be dropped, along with the previous turn's tool round trips. This turn's question, system
+//! prompt, and the tool results already obtained in this turn are left untouched, and tools are not rerun. The stored conversation does not change: what is trimmed is
+//! what is sent to the model this time.
 use super::{agent, rig_model};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -10,27 +10,27 @@ use utopia_llm::LlmClient;
 
 type Turns = Vec<(String, String)>;
 
-/// 一轮里三个地方——带工具的请求、RAG 兜底、只看证据的最终作答——共用同一个窗口，
-/// 所以是 `Arc<Mutex<_>>`：谁先撞上超限谁来裁，裁完别处照着发，一轮合计只裁一次
+/// Three places in a turn (the request with tools, the RAG fallback, and the final answer that only looks at evidence) share the same window,
+/// so it is `Arc<Mutex<_>>`: whoever hits the overflow first trims, the others send the trimmed version, and the turn trims only once in total
 #[derive(Clone)]
 pub(super) struct Context(Arc<Mutex<Window>>);
 
 struct Window {
-    /// 落库的历史，最旧在前；`start` 之前的不再发
+    /// Stored history, oldest first; anything before `start` is no longer sent
     turns: Turns,
-    /// 每条终答自己的协议推理，按原始下标随正文一起保留或裁掉。
+    /// Each final answer's own protocol reasoning, kept or trimmed along with its body by original index.
     reasoning: Vec<Option<String>>,
-    /// 上一轮的工具往返：带 tool_calls 的助手消息和配套的 tool 结果，协议 JSON
+    /// The previous turn's tool round trips: the assistant message carrying tool_calls and the matching tool results, as protocol JSON
     exchange: Vec<Value>,
-    /// 最后一条助手消息在 `turns` 里的下标，往返插在它前面
+    /// Index in `turns` of the last assistant message; the round trip is inserted in front of it
     last_assistant: Option<usize>,
     start: usize,
-    /// 往返还发不发。**它单独一位，而且先于任何问答被丢**：一条 get_document 的结果就能
-    /// 有 24,000 字，两条就超过缺省预算。从前它和最后那条回答绑在一起，丢它就得把最旧
-    /// 到最新的问答一起丢，于是「再短一点」这样的追问不带任何历史发出去（#973 评审）。
-    /// 回答是人读过的对话，往返只是那条回答消化过的证据
+    /// Whether to still send the round trip. **It has its own bit, and it is dropped before any question-and-answer pair**: a single get_document result can be
+    /// 24,000 characters, and two of them exceed the default budget. Previously it was tied to the last answer, so dropping it meant dropping everything from the oldest
+    /// to the newest pair, and a follow-up like "make it shorter" went out with no history at all (#973 review).
+    /// The answer is the conversation a person has read; the round trip is only the evidence that answer digested
     exchange_kept: bool,
-    /// 这一轮恢复过没有，三个地方合计
+    /// Whether this turn has recovered, across the three places combined
     retried: bool,
 }
 
@@ -53,20 +53,20 @@ impl Window {
             }
     }
 
-    /// 往返随它的回答走：回答被裁掉了，往返也不能单独留下
+    /// A round trip goes with its answer: if the answer is trimmed, the round trip cannot stay on its own
     fn keeps_exchange(&self) -> bool {
         self.exchange_kept && self.last_assistant.is_some_and(|i| i >= self.start)
     }
 
-    /// 把 `start` 推到下一条用户消息。按条数截的历史可能从一段问答的中间开始，
-    /// 落单的助手回答不发，哪怕预算装得下
+    /// Advance `start` to the next user message. A history cut by count may begin in the middle of a question-and-answer pair,
+    /// and a stray assistant answer is not sent even if the budget would fit it
     fn skip_orphans(&mut self) {
         while self.start < self.turns.len() && self.turns[self.start].0 != "user" {
             self.start += 1;
         }
     }
 
-    /// 先丢往返，再从最旧的问答起整段整段地丢，直到装进预算；一条消息从不截半
+    /// Drop round trips first, then drop whole question-and-answer pairs from the oldest, until it fits the budget; a message is never cut in half
     fn trim(&mut self, budget: usize) {
         self.skip_orphans();
         if self.size() > budget && self.keeps_exchange() {
@@ -79,7 +79,7 @@ impl Window {
     }
 }
 
-/// 落库的历史和往返展开成协议消息，和 rig 的 `wire` 走同一条路，数出来的条数才对得上
+/// Expand the stored history and round trips into protocol messages, on the same path as rig's `wire`, so the counted number matches
 #[cfg(test)]
 fn protocol(turns: &[(String, String)], exchange: &[Value]) -> Vec<Value> {
     protocol_with_reasoning(turns, exchange, &[])
@@ -124,7 +124,7 @@ impl Context {
         Self(Arc::new(Mutex::new(window)))
     }
 
-    /// 现在还发的历史和往返
+    /// The history and round trips currently being sent
     pub fn snapshot(&self) -> (Turns, Vec<Value>) {
         let w = self.0.lock().unwrap();
         (
@@ -137,16 +137,16 @@ impl Context {
         )
     }
 
-    /// rig 的消息列表整轮不变：开头是它当初拿到的完整历史，后面跟本轮的问题和本轮的工具
-    /// 往返。每次发送前把历史那一段换成裁过的。数的是协议消息而不是对话轮次——一条落库
-    /// 的回答能展开成好几条工具消息；system 消息原地不动——认下的实体那条 system 就贴在
-    /// 问题前面。上一轮的往返在最后那条回答之前，丢它是从中间抠掉，不是掐头
+    /// rig's message list stays the same across the turn: it starts with the full history it was given, followed by this turn's question and this turn's tool
+    /// round trips. Before each send, that history section is swapped for the trimmed one. What is counted is protocol messages, not conversation turns: one stored
+    /// answer can expand into several tool messages; the system message stays where it is, so the entity system message that was attached
+    /// sits right before the question. The previous turn's round trip comes before the last answer, so dropping it removes it from the middle, not from the head or tail
     pub fn apply(&self, messages: &[Value]) -> Vec<Value> {
         let w = self.0.lock().unwrap();
         let full = protocol_with_reasoning(&w.turns, &w.exchange, &w.reasoning);
-        // rig 的列表开头应当就是这份完整历史，后面至少还有本轮的问题。少了——rig 没把历史
-        // 全交回来，或者给的不是这一轮的列表——按条数替换会把本轮的问题一起吞掉，还不出声。
-        // 这时原样发：请求超长顶多再挨一次 400，也好过一个没有问题的请求（#973 评审的后续）
+        // rig's list should start with this full history, with at least this turn's question still after it. If it is short, because rig did not hand back
+        // the full history or returned a list that is not this turn's, replacing by count would swallow this turn's question too, silently.
+        // In that case send it as-is: a too-long request at worst gets another 400, which is better than a request with no question (follow-up to #973 review)
         let sent = messages.iter().filter(|m| m["role"] != "system").count();
         if sent <= full.len() {
             if !full.is_empty() {
@@ -178,9 +178,9 @@ impl Context {
         out
     }
 
-    /// 端点说上下文超了：记住它报的窗口，把历史裁到一半再发一次，同一轮只来一次。
-    /// **裁不动就不重发**——历史已经空了、问题本身就超长的时候，原样再发只会再挨一次
-    /// 同样的 400（#973 评审）
+    /// The endpoint says the context is over: record the window it reported, and resend once with the history trimmed by half; this happens only once per turn.
+    /// **If trimming cannot shrink it, do not resend**: when the history is already empty and the question itself is too long, resending as-is only gets
+    /// the same 400 again (#973 review)
     pub fn recover(&self, client: &LlmClient, err: &anyhow::Error) -> bool {
         if utopia_llm::context_too_long(err).is_none() {
             return false;
@@ -286,8 +286,8 @@ mod tests {
         assert!(smaller.snapshot().1.is_empty());
     }
 
-    /// rig 没把完整历史交回来（或者给的不是这一轮的列表）：按条数替换会把本轮的问题吞掉，
-    /// 所以原样发；装着完整历史的列表照常裁
+    /// rig did not hand back the full history (or returned a list that is not this turn's): replacing by count would swallow this turn's question,
+    /// so it is sent as-is; a list carrying the full history is trimmed as usual
     #[test]
     fn a_list_shorter_than_the_history_is_sent_unchanged() {
         let turns: Turns = vec![

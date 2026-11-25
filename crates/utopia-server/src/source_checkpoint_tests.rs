@@ -1,4 +1,4 @@
-//! 增量游标代表已成功覆盖的窗口，失败的尝试不能把尚未读到的条目跳过去。
+//! The incremental cursor represents the window that has been successfully covered; a failed attempt must not skip entries that have not yet been read.
 use super::sync_source;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -54,11 +54,11 @@ async fn retry_reads_the_uncovered_window(
             .bind(started + chrono::Duration::hours(1))
             .execute(&pool)
             .await?;
-        // **源自己的游标落在那一刻**（ADR 0072）。
+        // **The source's own cursor lands at that moment** (ADR 0072).
         //
-        // 从前下界是从跑次推出来的——上一条 `ok` 的 `started_at`。那有两个问题：
-        // 它证不了那个窗口被读完（触顶那一轮也记过 `ok`），而且它没法清空，所以
-        // 老来源没法一次性从头再来一遍（0072 的 Recovery 一节）。
+        // Previously the lower bound was derived from the run -- the `started_at` of the last `ok`. That had two problems:
+        // it cannot prove that window was fully read (the round that hit the ceiling also recorded `ok`), and it cannot be cleared, so old sources cannot start over from scratch in one go
+        // (0072, the Recovery section).
         sqlx::query("UPDATE sources SET sync_checkpoint=$2 WHERE id=$1")
             .bind(source)
             .bind(started)
@@ -83,8 +83,8 @@ async fn retry_reads_the_uncovered_window(
             assert!(failed.last_sync_at.is_some(), "attempt time still drives scheduling and diagnostics");
             server.reset().await;
         }
-        // **把真正发出去的下界记下来**：只断言那条漏掉的更新回来了是不够的，
-        // 假如下界根本没发（每次都全量拉），这个断言照样过，而增量就悄悄没了
+        // **Record the lower bound that was actually sent**: asserting only that the missed update came back is not enough --
+        // if the lower bound was never sent at all (every time a full pull), this assertion would still pass, and the incremental fetch would quietly be gone
         let asked: std::sync::Arc<std::sync::Mutex<Vec<Option<chrono::DateTime<chrono::Utc>>>>> =
             Default::default();
         let seen = asked.clone();
@@ -103,7 +103,7 @@ async fn retry_reads_the_uncovered_window(
         anyhow::ensure!(count == 1, "incremental cursor skipped an unimported update: {count} documents");
         let ok = utopia_store::sources::get(&pool, source).await?;
         assert_eq!(ok.last_sync_status, "ok");
-        // 下界取自上一次**成功**那一轮的开始，不是上一次尝试的结束，也不是没有下界
+        // The lower bound is taken from the start of the last **successful** round, not the end of the last attempt, and not "no lower bound"
         let asked = asked.lock().unwrap().clone();
         let last = asked.last().copied().flatten();
         if prior_success {
@@ -146,16 +146,16 @@ async fn updates_during_a_successful_sync_remain_in_the_next_window() -> anyhow:
     retry_reads_the_uncovered_window(true, false).await
 }
 
-/// #1212 / ADR 0072（Custom 一节）：201 条全都变了，第一轮装下 200 条就停，
-/// 第二轮把没变的前缀让过去、走到第 201 条。
+/// #1212 / ADR 0072 (Custom section): all 201 entries changed; the first round fits 200 and stops,
+/// the second round lets the unchanged prefix pass and reaches entry 201.
 ///
-/// 关键的两条性质都在这里：
+/// Both key properties are here:
 ///
-/// 1. 触顶那一轮 `incomplete` → run 写 `failed` → 下界不前进 → 第二轮拿到的还是同一条
-///    since，因此前 200 条原样回来、但它们现在都是 `Unchanged` 不占预算，第 201 条
-///    这次够得着了。ADR 把「取走同样的前 200 条」列在 Rejected 里说的就是这条。
-/// 2. `stats.discovered` 记的是响应里的条数（201），不是跑进来的条数（200）——
-///    否则日志与那条警告会读成 `(0 > 200)`。
+/// 1. The round that hits the ceiling is `incomplete` -> the run writes `failed` -> the lower bound does not advance -> round two gets the same
+///    since, so the first 200 come back as they were, but they are now all `Unchanged` and take no budget, and entry 201 is now reachable.
+///    This is what the ADR lists under Rejected: "taking the same first 200 again".
+/// 2. `stats.discovered` records the count in the response (201), not the count ingested (200) --
+///    otherwise the log and that warning would read `(0 > 200)`.
 #[tokio::test]
 async fn a_truncated_custom_batch_resumes_on_the_next_run() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -185,8 +185,8 @@ async fn a_truncated_custom_batch_resumes_on_the_next_run() -> anyhow::Result<()
     .execute(&pool)
     .await?;
 
-    // **来源先插，`start_run` 后跑**：source_sync_runs.source_id 上有外键，
-    // 反过来插会以 `source_sync_runs_source_id_fkey` 失败。
+    // **The source is inserted first, `start_run` runs after**: source_sync_runs.source_id has a foreign key;
+    // inserting the other way round fails with `source_sync_runs_source_id_fkey`.
     let server = MockServer::start().await;
     sqlx::query(
         "INSERT INTO sources(id,kb_id,kind,name,config) VALUES($1,$2,'custom','fixture',$3)",
@@ -197,7 +197,7 @@ async fn a_truncated_custom_batch_resumes_on_the_next_run() -> anyhow::Result<()
     .execute(&pool)
     .await?;
 
-    // 201 条，全部是新的：每一轮都会重新拿到它们
+    // 201 entries, all new: each round receives them again
     let all: Vec<serde_json::Value> = (0..201u32)
         .map(|i| {
             serde_json::json!({
@@ -224,7 +224,7 @@ async fn a_truncated_custom_batch_resumes_on_the_next_run() -> anyhow::Result<()
     let state = crate::state::AppState::new(pool.clone(), &cfg, search, "test-only".into());
 
     let result = async {
-        // 第一轮：201 > 200，触顶
+        // Round one: 201 > 200, ceiling hit
         let stats = sync_source(&state, source).await?;
         assert_eq!(
             stats.discovered, 201,
@@ -252,7 +252,7 @@ async fn a_truncated_custom_batch_resumes_on_the_next_run() -> anyhow::Result<()
         .await?;
         assert_eq!(imported, 200, "第一轮装得下 200 条，第 201 条得等下一轮");
 
-        // 第二轮：同一批原样回来，前 200 条是 Unchanged 不占预算，第 201 条这次够得着
+        // Round two: the same batch comes back as they were; the first 200 are Unchanged and take no budget, and entry 201 is reachable this time
         let stats = sync_source(&state, source).await?;
         assert_eq!(
             stats.discovered, 201,
@@ -287,11 +287,11 @@ async fn a_truncated_custom_batch_resumes_on_the_next_run() -> anyhow::Result<()
     result
 }
 
-/// **450 条分三轮读完**（0072 的验收项）。
+/// **450 entries read in three rounds** (an acceptance item of 0072).
 ///
-/// 预算 200，而没变的条目不占预算：所以第二轮能把前 200 条当没变的前缀让过去，
-/// 第三轮把剩下的 50 条收掉。每一轮都读了整条响应——`discovered` 一直是 450，
-/// 不是预算那一段。
+/// The budget is 200, and unchanged entries take no budget: so round two can let the first 200 pass as an unchanged prefix,
+/// and round three collects the remaining 50. Every round reads the whole response -- `discovered` is always 450,
+/// not just the part within the budget.
 #[tokio::test]
 async fn a_capped_custom_batch_is_read_whole_over_three_rounds() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -321,8 +321,8 @@ async fn a_capped_custom_batch_is_read_whole_over_three_rounds() -> anyhow::Resu
     .execute(&pool)
     .await?;
 
-    // **来源先插，`start_run` 后跑**：source_sync_runs.source_id 上有外键，
-    // 反过来插会以 `source_sync_runs_source_id_fkey` 失败。
+    // **The source is inserted first, `start_run` runs after**: source_sync_runs.source_id has a foreign key;
+    // inserting the other way round fails with `source_sync_runs_source_id_fkey`.
     let server = MockServer::start().await;
     sqlx::query(
         "INSERT INTO sources(id,kb_id,kind,name,config) VALUES($1,$2,'custom','fixture',$3)",
@@ -333,7 +333,7 @@ async fn a_capped_custom_batch_is_read_whole_over_three_rounds() -> anyhow::Resu
     .execute(&pool)
     .await?;
 
-    // 450 条，全部是新的：每一轮都会重新拿到它们
+    // 450 entries, all new: each round receives them again
     let all: Vec<serde_json::Value> = (0..450u32)
         .map(|i| {
             serde_json::json!({
@@ -360,7 +360,7 @@ async fn a_capped_custom_batch_is_read_whole_over_three_rounds() -> anyhow::Resu
     let state = crate::state::AppState::new(pool.clone(), &cfg, search, "test-only".into());
 
     let result = async {
-        // 第一轮：装下 200 条，触顶，游标留在原处
+        // Round one: fits 200 entries, hits the ceiling, the cursor stays where it is
         let stats = sync_source(&state, source).await?;
         assert_eq!(
             stats.discovered, 450,
@@ -384,8 +384,8 @@ async fn a_capped_custom_batch_is_read_whole_over_three_rounds() -> anyhow::Resu
                 .is_none(),
             "触顶那一轮游标留在原处，下一轮从那儿接着读"
         );
-        // 触顶不是连接坏了：这一轮记成 `failed`，但**不发** source.sync_failed 告警
-        // （同一件事天天报，#1212）。
+        // Hitting the ceiling is not a broken connection: this round is recorded as `failed`, but it does **not** send the source.sync_failed alert
+        // (the same thing reported daily, #1212).
         let alerts: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM alerts WHERE subject_id=$1 AND kind='source.sync_failed'",
         )
@@ -394,7 +394,7 @@ async fn a_capped_custom_batch_is_read_whole_over_three_rounds() -> anyhow::Resu
         .await?;
         assert_eq!(alerts, 0, "触顶的那一轮不该发同步失败告警");
 
-        // 第二轮：前 200 条原样回来（Unchanged，不占预算），再装下 200 条，又触顶
+        // Round two: the first 200 come back as they were (Unchanged, taking no budget), then 200 more are fetched, and it hits the ceiling again
         let stats = sync_source(&state, source).await?;
         assert_eq!(
             stats.discovered, 450,
@@ -419,7 +419,7 @@ async fn a_capped_custom_batch_is_read_whole_over_three_rounds() -> anyhow::Resu
             "触顶那一轮游标留在原处，下一轮从那儿接着读"
         );
 
-        // 第三轮：前 400 条原样回来，把剩下的 50 条收掉，这一轮走完了
+        // Round three: the first 400 come back as they were, the remaining 50 are collected, and this round completes
         let stats = sync_source(&state, source).await?;
         assert_eq!(
             stats.discovered, 450,
@@ -460,19 +460,19 @@ async fn a_capped_custom_batch_is_read_whole_over_three_rounds() -> anyhow::Resu
     result
 }
 
-/// **端点自己记的账**：每条工单的 id、正文、它是什么时候改的。协议里没有这个
-/// 字段——这是端点自己的账，用来决定回哪几条。
+/// **The endpoint's own ledger**: each ticket's id, body, and when it was last changed. The protocol has no such
+/// field -- this is the endpoint's own ledger, used to decide which entries to return.
 type Feed = Arc<std::sync::Mutex<Vec<(String, String, chrono::DateTime<chrono::Utc>)>>>;
 
-/// **运行期间到达的改动，下一轮还够得着**（ADR 0072 的 Custom 一节：
-/// "preserving the existing protection for changes during the run"）。
+/// **Changes arriving during the run are still reachable in the next round** (ADR 0072, Custom section:
+/// "preserving the existing protection for changes during the run").
 ///
-/// 游标推进到**这一轮开始的时刻**，不是推进到现在：端点在第一轮被问的时候改了
-/// 一条工单（更新时刻在那一轮开始之后），第二轮的下界必须还在那条改动之前，
-/// 否则它就永远读不到了。
+/// The cursor advances to **the start of this round**, not to now: the endpoint changed one ticket in round one (its update time is after that round started),
+/// and round two's lower bound must still be before that change,
+/// otherwise it can never be read.
 ///
-/// 这条断言有牙：把游标改成「推进到现在」，端点就会因为下界太晚而什么都不给，
-/// 这条工单也就永远进不来。
+/// This assertion has teeth: if the cursor were moved to "now", the endpoint would return nothing because the lower bound is too late,
+/// and this ticket would never come in.
 #[tokio::test]
 async fn an_item_changed_during_a_round_is_still_read_by_the_next_one() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -511,8 +511,8 @@ async fn an_item_changed_during_a_round_is_still_read_by_the_next_one() -> anyho
     .execute(&pool)
     .await?;
 
-    // **端点自己记着每条工单是什么时候改的**（协议里没有这个字段，是端点自己的账）。
-    // 第一次被问的时候，它顺手把一条改了、又添了一条——改动时刻落在这一轮开始之后。
+    // **The endpoint records when each ticket was changed itself** (not a field in the protocol; the endpoint's own ledger).
+    // On the first ask, it quietly changed one and added another -- the change times fall after this round started.
     let feed: Feed = Arc::new(std::sync::Mutex::new(vec![(
         "item-0".to_string(),
         "Body 0".to_string(),
@@ -536,7 +536,7 @@ async fn an_item_changed_during_a_round_is_still_read_by_the_next_one() -> anyho
                 });
             seen.lock().unwrap().push(since);
             let mut feed = served.lock().unwrap();
-            // 端点只给「下界之后改过的」那些（custom 协议：下界由端点自己解释）
+            // The endpoint gives only the ones changed after the lower bound (custom protocol: the lower bound is interpreted by the endpoint itself)
             let items: Vec<serde_json::Value> = feed
                 .iter()
                 .filter(|(_, _, changed_at)| since.is_none_or(|s| *changed_at > s))
@@ -549,8 +549,8 @@ async fn an_item_changed_during_a_round_is_still_read_by_the_next_one() -> anyho
                     })
                 })
                 .collect();
-            // 答完这一轮顺手改一条、添一条——改动时刻落在这一轮开始之后，
-            // 所以**下一轮**才看得到（这一轮答的是改动之前的样子）
+            // After answering this round it quietly changes one and adds another -- the change times fall after this round started,
+            // so only **the next round** can see them (this round answered with the state before the change)
             if feed.len() == 1 {
                 let now = chrono::Utc::now();
                 feed[0].1 = "Body 0, changed".to_string();
@@ -571,13 +571,13 @@ async fn an_item_changed_during_a_round_is_still_read_by_the_next_one() -> anyho
     let state = crate::state::AppState::new(pool.clone(), &cfg, search, "test-only".into());
 
     let result = async {
-        // 第一轮：只有 item-0，读完就走完了
+        // Round one: only item-0; once read, it completes
         let first = sync_source(&state, source).await?;
         assert_eq!(first.created, 1, "第一轮只有 item-0");
         let checkpoint = utopia_store::sources::sync_checkpoint(&pool, source).await?;
         assert!(checkpoint.is_some(), "这一轮走完了，游标该落下来");
 
-        // 第二轮：端点现在有两条改过的，下界必须还在它们的改动之前
+        // Round two: the endpoint now has two changed entries, and the lower bound must still be before their changes
         let second = sync_source(&state, source).await?;
         let imported: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM documents WHERE source_id=$1 AND deleted_at IS NULL",

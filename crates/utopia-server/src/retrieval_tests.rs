@@ -1,13 +1,13 @@
-//! #515：混合检索的两路各走各的，丢一路是降级不是失败。
+//! #515: the two legs of hybrid retrieval run separately; losing one leg is a degradation, not a failure.
 //!
-//! 夹具：一个库、一篇文档、两个分块。A 的正文能被 BM25 命中，B 不能；
-//! 两块各有一个 4 维向量，嵌入端点用 wiremock 假扮，想回什么向量就回什么。
-//! 四件事：
-//! 1. **没配嵌入模型也能答**：只剩 BM25 那一路，A 回来，B 不回来。
-//! 2. **嵌入请求失败退化成 BM25**：端点回 500，结果与上一条一样，不是报错。
-//! 3. **两路都在时按 BM25 在前融合**：端点回的向量离 A 最近，A 同时在两路里，排第一；
-//!    B 只在向量那一路，排第二。
-//! 4. **历史过滤先于最终截断**：当时不存在的高排名块不能挤掉已召回的有效块。
+//! Fixture: one KB, one document, two chunks. A's body can be hit by BM25, B's cannot;
+//! each chunk has a 4-dimensional vector, and the embedding endpoint is faked with wiremock, returning whatever vector is wanted.
+//! Four things:
+//! 1. **Answers even without an embedding model**: only the BM25 leg remains, A comes back, B does not.
+//! 2. **A failed embedding request degrades to BM25**: the endpoint returns 500, the result matches the one above, not an error.
+//! 3. **With both legs present, fuse with BM25 first**: the endpoint returns a vector nearest to A, so A is in both legs and ranks first;
+//!    B is only in the vector leg and ranks second.
+//! 4. **History filtering comes before the final cut**: a high-ranked chunk that did not exist at the time must not crowd out a valid recalled chunk.
 
 use std::sync::Arc;
 use uuid::Uuid;
@@ -186,7 +186,7 @@ async fn both_channels_fuse_with_bm25_first() -> anyhow::Result<()> {
         return Ok(());
     };
     let server = MockServer::start().await;
-    // 回的向量就是 A 的向量：向量那一路按距离排出 [A, B]，BM25 那一路只有 [A]
+    // The returned vector is A's vector: the vector leg ranks [A, B] by distance, and the BM25 leg has only [A]
     Mock::given(method("POST"))
         .and(path("/embeddings"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({

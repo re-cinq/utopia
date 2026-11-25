@@ -1,5 +1,5 @@
-//! 个人令牌读图（0014 决定 7）：搜实体、实体详情、认知历史、事实证据、图总览、邻域、本体、
-//! 某类的实例、文档的抽取结果、整库导出和分块检索这些读路由收任何一枚活着的令牌。角色照旧是上限，`kb_ids` 排除了的库答 404；改实体仍只认会话。
+//! Personal tokens read the graph (0014 decision 7): searching entities, entity details, epistemic history, fact evidence, graph overview, neighborhood, ontology,
+//! class instances, documents' extraction results, the whole-database export, and chunk retrieval read routes accept any live token. The role remains the ceiling, and a database excluded by `kb_ids` answers 404; editing entities still accepts only the session.
 use crate::state::AppState;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -13,7 +13,7 @@ struct Fixture {
     app: axum::Router,
     org: Uuid,
     kb: Uuid,
-    /// 令牌够不着的另一个库
+    /// Another database that the token cannot reach
     other_kb: Uuid,
     reader: Uuid,
     person: Uuid,
@@ -34,7 +34,7 @@ impl Fixture {
         let id = Uuid::now_v7;
         let (org, ws, reader, kb, other_kb) = (id(), id(), id(), id(), id());
         let (person, knows, entity, peer, fact, doc) = (id(), id(), id(), id(), id(), id());
-        // 插进去的只有本地生成的 UUID 和写死的日期
+        // Only a locally generated UUID and a fixed date are inserted
         sqlx::raw_sql(&format!(
             "INSERT INTO organizations(id,name) VALUES ('{org}','token-read-test');
              INSERT INTO workspaces(id,org_id,name) VALUES ('{ws}','{org}','token-read-test');
@@ -113,7 +113,7 @@ impl Fixture {
         ]
     }
 
-    /// 每个请求都带同一个检索体；GET 路由不读它
+    /// Every request carries the same retrieval body; the GET routes do not read it
     async fn send(&self, method: Method, path: &str, token: &str) -> anyhow::Result<StatusCode> {
         self.send_json(method, path, token, r#"{"q":"Zhang"}"#)
             .await
@@ -248,7 +248,7 @@ async fn a_search_past_depth_100_or_with_an_unknown_filters_field_gets_422() -> 
     Ok(())
 }
 
-/// 一个 api 来源推了 `identities` 里的每一篇，都讲 harvest；另一个库有个来源
+/// An api source pushed each document in `identities`, all of which talk about harvest; another database has a source
 async fn seed_pushed_and_foreign_sources(
     f: &Fixture,
     identities: &[&str],

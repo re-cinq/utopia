@@ -201,8 +201,8 @@ async fn section_dates_reconcile_values_materialized_before_attestation() -> any
     run
 }
 
-/// 每条证据记下它那一节的日期和名字，没说日期的那一节记成空；文档再解析时一条日期都没说，
-/// 上一遍记下的清掉。删文档之后按还在的证据重算见证（`documents::reattest_tx`）读的就是这两列
+/// Each piece of evidence records the date and name of its section; a section that states no date is recorded as empty. When a document is re-parsed and states no dates at all,
+/// the previous recording is cleared. After a document is deleted, recomputing attestation from the remaining evidence (`documents::reattest_tx`) reads exactly these two columns
 #[tokio::test]
 async fn each_piece_of_evidence_records_the_date_its_section_speaks_from() -> anyhow::Result<()> {
     let Some(fixture) = fixture().await? else {

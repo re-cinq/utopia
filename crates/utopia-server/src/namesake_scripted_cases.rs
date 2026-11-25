@@ -166,7 +166,7 @@ async fn reply(State(m): State<Model>, Json(body): Json<Value>) -> axum::respons
     }
     let step = step.unwrap();
     if !step.stream {
-        // 工具回合要走真实调查传输；普通脚本仍是文本回复，内容里的 JSON 判决照旧传递。
+        // Tool turns must go through the real investigation transport; ordinary scripts still reply with text, and JSON verdicts in the content are still passed through as before.
         let message = serde_json::from_str::<Value>(&step.text)
             .ok()
             .filter(|v| v["tool_calls"].is_array())
@@ -574,7 +574,7 @@ impl Fx {
             }
             _ => {}
         }
-        // 类别词绑到的类，TypedToUntyped 收尾时要核对它
+        // The class the category word bound to; the TypedToUntyped wrap-up must check it
         let mut person_class = None;
         if matches!(guard, TypedToUntyped | UntypedToTyped | IncompatibleType) {
             let person = Uuid::now_v7();
@@ -643,10 +643,10 @@ impl Fx {
         .bind(self.kb)
         .fetch_one(&self.pool)
         .await?;
-        // 消解不给实体定类，类由对齐来定：被选中的无类同名实体记下了提及的类别词
-        // （`set_specific_type`），「person」又已绑到 Person，抽完那一刻的补投影
-        // （`type_bindings::apply_bound`）就把它写成 aligned 的 Person。消解自己写的类
-        // 不会是 aligned；从前它留着空类，是补投影缺席的结果，不是规矩
+        // Resolution does not give an entity a class; the class comes from alignment: the selected untyped same-named entity recorded the mentioned category word
+        // (`set_specific_type`), and since "person" is already bound to Person, the projection right after extraction
+        // (`type_bindings::apply_bound`) writes it as an aligned Person. A class created by resolution itself
+        // is not aligned; previously it stayed as an empty class, which was a consequence of the missing projection, not the rule
         let type_from_alignment = if guard == TypedToUntyped {
             sqlx::query_scalar::<_, bool>(
                 "SELECT type_source = 'aligned' AND type_id = $2 FROM entities WHERE id=$1",

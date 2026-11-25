@@ -1,32 +1,32 @@
-//! Notion 来源：把 integration 能看见的页面同步进来。
+//! Notion source: syncs in the pages the integration can see.
 //!
-//! 按 [0013](../../docs/decisions/0013-a-source-should-hand-over-its-history.md)
-//! 的四条判据，它比对象存储强一档：
+//! By the four criteria of [0013](../../docs/decisions/0013-a-source-should-hand-over-its-history.md),
+//! it is one notch stronger than object storage:
 //!
-//! | 判据 | Notion |
+//! | Criterion | Notion |
 //! |---|---|
-//! | 真实时间戳 | `last_edited_time`，**是文档自己的编辑时刻**，不是我们抓它的时刻 |
-//! | 会不会自我推翻 | 页面被反复改写正是它的常态 |
-//! | 稳定身份 | 页面 UUID，改标题、挪位置都不变 |
-//! | 企业知识住不住在那儿 | 制度、会议纪要、决策记录——正是这套系统要的东西 |
+//! | Real timestamp | `last_edited_time`, **the document's own edit time**, not the time we fetched it |
+//! | Whether it overturns itself | Pages being rewritten again and again is its normal state |
+//! | Stable identity | Page UUID, unchanged by renaming or moving |
+//! | Whether enterprise knowledge lives there | Policies, meeting minutes, decision records: exactly what this system is for |
 //!
-//! **但它只交出现状，不交出历史。** Notion 的版本历史不在公开 API 里，
-//! 所以跟工单系统不同：一次同步只能看见此刻，之前的编辑全靠一次次同步慢慢攒。
-//! 这跟 `url` / `rss` 是同一个形状，而工单那两个能一次把变更史拿全。
+//! **But it hands over only the present state, not the history.** Notion's version history is not in the public API,
+//! so unlike the ticket systems, one sync can only see the present, and earlier edits accumulate only through repeated syncs.
+//! This has the same shape as `url` / `rss`, whereas the two ticket sources can fetch the whole change history at once.
 //!
-//! ## 两个容易踩的
+//! ## Two pitfalls to avoid
 //!
-//! **`Notion-Version` 头是必填的**，而且值是日期。少了它接口直接 400，
-//! 而错误信息只说 "missing version"，不会告诉你该填哪个。
+//! **The `Notion-Version` header is required**, and its value is a date. Without it the API returns 400 outright,
+//! and the error only says "missing version", without telling you which one to fill in.
 //!
-//! **限流是每秒三次**（官方说法是「平均三次」）。顺序发请求还不够：一个 100 毫秒
-//! 的响应紧接着下一个请求就是每秒十次。#215 的复测在一个几百页的 workspace 上
-//! 跑了三分钟，然后 search 回了 429，整次同步就此失败。所以现在两件事一起做：
-//! 请求之间保底间隔（[`MIN_INTERVAL`]），撞上 429 时按 `Retry-After` 等完再发
-//! （[`Paced::send`]）。仍然不并发。这套退避是本地的、很小的——抽取那条路的
-//! 退避是为模型厂商设计的，判据和节奏都不同，不借用。
+//! **The rate limit is three requests per second** (the official wording is "three on average"). Sending requests in sequence is not enough: a 100-millisecond
+//! response followed right away by the next request is ten per second. The re-test in #215 ran for three minutes on a workspace of several hundred pages,
+//! then search returned 429 and the whole sync failed. So now two things are done together:
+//! a minimum gap between requests ([`MIN_INTERVAL`]), and on a 429 waiting out `Retry-After` before sending again
+//! ([`Paced::send`]). Still no concurrency. This backoff is local and small, and is not borrowed from the extraction path,
+//! whose backoff is designed for model vendors, with different criteria and rhythm.
 //!
-//! 错误文案是英文：它会原样落到来源的同步状态里给用户看。
+//! Error messages are in English: they land verbatim in the source's sync status, shown to the user.
 
 use std::time::{Duration, Instant};
 
@@ -34,32 +34,32 @@ use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
 
-/// 请求头里的 API 版本。**写死而不是留给配置**：响应的形状跟着它变，
-/// 让用户填一个我们没适配过的版本，换来的是解析静默失配。
+/// The API version in the request header. **Hard-coded rather than left to config**: the response shape changes with it,
+/// and letting a user fill in a version we have not adapted to would give silent parsing mismatches.
 const NOTION_VERSION: &str = "2026-03-11";
 
-/// 一次同步最多取多少页。理由同别的来源：摄入不可逆，而一个 workspace
-/// 可以有几万页。
+/// The maximum number of pages fetched per sync. The reason is the same as for other sources: ingestion is irreversible, and a workspace
+/// can have tens of thousands of pages.
 const MAX_PAGES_PER_SYNC: usize = 500;
 
-/// 每页所有层级合计最多取多少个 block，包含无文字容器。
-/// 再深的页面截断，比让一次同步卡在一页上好。
+/// The maximum number of blocks fetched per page across all levels, including text-less containers.
+/// A page deeper than this is truncated, which is better than letting one sync hang on one page.
 const MAX_BLOCKS_PER_PAGE: usize = 500;
 
-/// 两次请求之间至少隔这么久。Notion 说的是「平均每秒三次」，取 350 毫秒留一点余量：
-/// 总耗时还取决于每页的嵌套层级与分页数。
+/// The minimum gap between two requests. Notion says "three per second on average"; 350 ms leaves a little margin:
+/// total time also depends on each page's nesting depth and page count.
 const MIN_INTERVAL: Duration = Duration::from_millis(350);
-/// 一次请求撞上 429 最多等几回。`Retry-After` 通常是个位数秒，连等几回还在限流
-/// 就不是节奏问题了，该把错误交出去。
+/// The most times a single request is retried after a 429. `Retry-After` is usually a single-digit number of seconds; still being rate limited after waiting several times
+/// is no longer a pacing problem, so the error should be surfaced.
 const MAX_RATE_LIMIT_RETRIES: u32 = 5;
-/// `Retry-After` 缺失或读不出来时等多久。
+/// How long to wait when `Retry-After` is missing or unreadable.
 const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
-/// 单次等待上限。头里的值我们照做，但不能让一个离谱的值把同步挂死。
+/// Upper bound on a single wait. We honour the value in the header, but an absurd value must not hang the sync.
 const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
 
-/// 一个待摄入的页面。
+/// A page waiting to be ingested.
 pub struct NotionPage {
-    /// `notion://{page_id}`——页面 UUID 是它最稳的身份
+    /// `notion://{page_id}`: the page UUID is its most stable identity
     pub external_key: String,
     pub filename: String,
     pub text: String,
@@ -79,11 +79,11 @@ fn client(token: &str) -> anyhow::Result<reqwest::Client> {
         .build()?)
 }
 
-/// 按 Notion 的节奏发请求的客户端：请求之间保底间隔，429 按 `Retry-After` 等。
+/// A client that sends requests at Notion's pace: a minimum gap between requests, and on a 429 it waits per `Retry-After`.
 struct Paced {
     http: reqwest::Client,
     last: Option<Instant>,
-    // 私有地址入口让 HTTP 测试走真实取页和限流逻辑，不增加用户配置。
+    // The private-address entry point lets HTTP tests go through real page fetching and the rate-limit logic, without adding user config.
     api_root: String,
 }
 
@@ -96,10 +96,10 @@ impl Paced {
         }
     }
 
-    /// 发一次请求并解析 JSON。`what` 进日志和错误文案（"search" / "blocks"）。
+    /// Sends one request and parses the JSON. `what` goes into logs and error messages ("search" / "blocks").
     ///
-    /// 429 在这里消化：等 `Retry-After` 再发，最多 [`MAX_RATE_LIMIT_RETRIES`] 回；
-    /// 其它非 2xx 直接报错，带上 Notion 自己的 message——它比状态码说得清楚。
+    /// A 429 is absorbed here: wait for `Retry-After` and send again, up to [`MAX_RATE_LIMIT_RETRIES`] times;
+    /// other non-2xx errors fail immediately, carrying Notion's own message, which is clearer than the status code.
     async fn send(
         &mut self,
         what: &str,
@@ -152,8 +152,8 @@ impl Paced {
     }
 }
 
-/// `Retry-After` 头 → 等多久。Notion 给的是秒数（可能带小数）；缺失、读不出来、
-/// 或负数都按缺省，离谱的值截到上限。纯函数，下面的单测钉住这几档。
+/// The `Retry-After` header → how long to wait. Notion gives seconds (possibly fractional); if missing, unreadable,
+/// or negative, the default applies, and absurd values are capped at the upper bound. A pure function; the unit tests below pin down these cases.
 fn retry_after(header: Option<&str>) -> Duration {
     header
         .and_then(|h| h.trim().parse::<f64>().ok())
@@ -163,12 +163,12 @@ fn retry_after(header: Option<&str>) -> Duration {
         .min(RETRY_AFTER_CAP)
 }
 
-/// 取 integration 能看见的所有页面。
+/// Fetches all pages the integration can see.
 ///
-/// **只搜页面，不搜 data source。** 后者是表格的容器，它自己没有正文；
-/// 表格里的每一行是一个页面，会在同一次搜索里出现。
+/// **Searches pages only, not data sources.** A data source is the container of a table and has no body of its own;
+/// each row of a table is a page, and it shows up in the same search.
 ///
-/// 第三项是正文没读出来的页，每页一句原因。它们不在第一项里，见 `fetch_pages`。
+/// The third item is pages whose body could not be read, with one reason per page. They are not in the first item; see `fetch_pages`.
 pub async fn fetch(
     token: &str,
     query: Option<&str>,
@@ -202,7 +202,7 @@ async fn fetch_pages(
         let v = http.send("search", |c| c.post(&url).json(&body)).await?;
 
         for p in v["results"].as_array().unwrap_or(&vec![]).clone() {
-            // 回收站里的和归档的都不要——它们在界面上已经不算数了
+            // Items in the trash and archived ones are not wanted either: they no longer count on screen
             if p["in_trash"].as_bool() == Some(true) || p["is_archived"].as_bool() == Some(true) {
                 continue;
             }
@@ -212,10 +212,10 @@ async fn fetch_pages(
             }
             let Some(id) = p["id"].as_str() else { continue };
             let title = page_title(&p);
-            // 正文读不出来的页整页跳过：不摄入，库里已有的正文原样留着，不拿仅标题的
-            // 版本去替换它。**其余的页照常同步**——中止整轮是另一头的错：有的页永远
-            // 读不出来（嵌套块没共享给 integration，Notion 回 404），那样整个来源
-            // 就再也不动了。对象存储的目录占位符是同一个教训（#214）。
+            // Pages whose body cannot be read are skipped whole: not ingested, and the body already in the store is left as is rather than replaced with a title-only
+            // version. **Other pages still sync as usual**: aborting the whole round is the opposite error: some pages can never be read
+            // (nested blocks not shared with the integration; Notion returns 404), and then the whole source would never move again.
+            // The object-storage directory placeholder is the same lesson (#214).
             let text = match page_text(http, id).await {
                 Ok(text) => text,
                 Err(error) => {
@@ -247,11 +247,11 @@ async fn fetch_pages(
     Ok((out, truncated, unread))
 }
 
-/// 页面标题。
+/// Page title.
 ///
-/// **标题藏在 `properties` 里那个 `type == "title"` 的属性下，而它的名字不固定**：
-/// 数据库里的页面可能叫 `Name`、`名称`、`任务`，普通页面叫 `title`。
-/// 按名字找会在别人的 workspace 上找不到，所以按类型找。
+/// **The title sits under the `properties` entry whose `type == "title"`, and its name is not fixed**:
+/// a page in a database may be called `Name`, `名称` (name), or `任务` (task), while plain pages are called `title`.
+/// Looking it up by name fails on someone else's workspace, so look it up by type.
 fn page_title(page: &serde_json::Value) -> String {
     let props = page["properties"].as_object();
     let t = props.and_then(|m| {
@@ -273,7 +273,7 @@ fn page_title(page: &serde_json::Value) -> String {
     }
 }
 
-/// 取一页的正文，逐层展开 block。
+/// Fetches a page's body, expanding blocks level by level.
 async fn page_text(http: &mut Paced, page_id: &str) -> anyhow::Result<String> {
     let mut out = String::new();
     let mut block_count = 0;
@@ -281,8 +281,8 @@ async fn page_text(http: &mut Paced, page_id: &str) -> anyhow::Result<String> {
     Ok(out)
 }
 
-/// 每个父块独立分页，先写父块，再读完子树，最后继续兄弟块。
-/// 输出和预算由整页共享；递归深度也受同一块数上限约束。
+/// Each parent block is paged independently: write the parent first, then read its whole subtree, then continue with sibling blocks.
+/// Output and budget are shared by the whole page; recursion depth is also bound by the same block cap.
 async fn append_children(
     http: &mut Paced,
     parent_id: &str,
@@ -310,8 +310,8 @@ async fn append_children(
                 out.push_str(&line);
                 out.push('\n');
             }
-            // 不能因父块没有 rich_text 而跳过 column 等容器。
-            // 独立页面由 search 单独摄入，数据库也不是父页正文的一部分。
+            // Do not skip containers such as column just because the parent has no rich_text.
+            // Standalone pages are ingested separately by search, and databases are not part of the parent page's body.
             let independent_content =
                 matches!(b["type"].as_str(), Some("child_page" | "child_database"));
             if *block_count < MAX_BLOCKS_PER_PAGE
@@ -341,11 +341,11 @@ async fn append_children(
     Ok(())
 }
 
-/// 把一个 block 渲染成一行文本。
+/// Renders one block as a line of text.
 ///
-/// **认不出的类型返回它的纯文本而不是丢掉。** Notion 的 block 类型一直在加，
-/// 硬编码一张白名单意味着新类型静默消失；普通文字在 `{type}.rich_text`，
-/// 表格行则按 `table_row.cells` 保留每个单元格。
+/// **Unrecognized block types return their plain text rather than being dropped.** Notion keeps adding block types,
+/// and a hard-coded whitelist would make new types silently disappear; ordinary text lives in `{type}.rich_text`,
+/// and table rows keep each cell via `table_row.cells`.
 fn render_block(b: &serde_json::Value) -> Option<String> {
     let t = b["type"].as_str()?;
     let inner = &b[t];
@@ -380,16 +380,16 @@ fn render_block(b: &serde_json::Value) -> Option<String> {
                 .collect();
             format!("| {} |", cells.join(" | "))
         }
-        // 分割线与图片没有 rich_text，但它们在正文里也没有信息量
+        // Dividers and images have no rich_text, but they carry no information in the body either
         "divider" | "image" | "video" | "file" => return None,
-        // child_page 的标题在 `title` 而不是 rich_text
+        // child_page's title is in `title`, not in rich_text
         "child_page" => format!("- {}", inner["title"].as_str().unwrap_or("")),
         _ if text.trim().is_empty() => return None,
         _ => text,
     })
 }
 
-/// 无列头的表用空表头占位，不能把第一条数据误标为列头。
+/// A table with no column header uses an empty header as a placeholder, so the first data row is not mislabeled as the header.
 fn render_table(table: &serde_json::Value, rows: &str) -> anyhow::Result<String> {
     if rows.is_empty() {
         return Ok(String::new());
@@ -417,7 +417,7 @@ fn render_table(table: &serde_json::Value, rows: &str) -> anyhow::Result<String>
     Ok(out)
 }
 
-/// rich_text 数组拼成纯文本。
+/// Joins a rich_text array into plain text.
 fn rich_text(v: &serde_json::Value) -> String {
     v.as_array()
         .map(|arr| {
@@ -428,7 +428,7 @@ fn rich_text(v: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
-/// 标题变成能当文件名的东西。
+/// Turns a title into something usable as a file name.
 fn slug(title: &str) -> String {
     let s: String = title
         .chars()
@@ -449,9 +449,9 @@ mod traversal_tests;
 mod tests {
     use super::*;
 
-    /// **标题属性的名字是任意的。** 数据库里的页面可能把它叫 `Name`、`名称`、
-    /// `任务`；按名字找会在别人的 workspace 上返回 untitled，而那看起来
-    /// 像是「页面没有标题」而不是「我们找错了地方」。
+    /// **The title property's name is arbitrary.** A database page may call it `Name`, `名称`,
+    /// or `任务`; looking it up by name returns untitled on someone else's workspace, which looks
+    /// like "the page has no title" rather than "we looked in the wrong place".
     #[test]
     fn a_title_is_found_by_type_not_by_name() {
         for key in ["title", "Name", "名称", "任务"] {
@@ -465,7 +465,7 @@ mod tests {
         }
     }
 
-    /// 富文本是分段的——加粗、链接都会把一句话切开。拼不全就会丢字。
+    /// Rich text is split into segments: bold and links cut a sentence apart. Failing to join them fully loses text.
     #[test]
     fn rich_text_segments_join_back_into_one_line() {
         let v = serde_json::json!([
@@ -476,9 +476,9 @@ mod tests {
         assert_eq!(rich_text(&v), "把总部搬到深圳了");
     }
 
-    /// **认不出的 block 类型不能丢。** Notion 一直在加类型，而带文字的
-    /// block 都把文字放在 `{type}.rich_text` 下——按白名单渲染会让新类型
-    /// 静默消失。
+    /// **Unrecognized block types must not be dropped.** Notion keeps adding types, and blocks that carry text
+    /// all keep the text under `{type}.rich_text`; rendering through a whitelist would make new types
+    /// silently disappear.
     #[test]
     fn an_unknown_block_keeps_its_text() {
         let b = serde_json::json!({
@@ -488,14 +488,14 @@ mod tests {
         assert_eq!(render_block(&b).as_deref(), Some("还是有内容的"));
     }
 
-    /// 没有文字的装饰性 block 该消失，否则正文里全是空行。
+    /// Decorative blocks with no text should disappear, or the body would be full of blank lines.
     #[test]
     fn a_divider_renders_to_nothing() {
         let b = serde_json::json!({ "type": "divider", "divider": {} });
         assert!(render_block(&b).is_none());
     }
 
-    /// 文件名不能带路径分隔符或换行。
+    /// File names cannot contain path separators or newlines.
     #[test]
     fn a_slug_is_safe_as_a_filename() {
         assert_eq!(slug("2026 Q3 / 复盘"), "2026-Q3---复盘");
@@ -503,9 +503,9 @@ mod tests {
         assert!(slug(&"x".repeat(200)).chars().count() <= 60);
     }
 
-    /// 真连一个 Notion workspace。**没有模拟器**——Notion 是闭源 SaaS，
-    /// 开源的替代品（AppFlowy、AFFiNE）不说这套 API。所以这条只有在
-    /// `Retry-After` 的几档：Notion 给的秒数照做，缺失和垃圾按缺省，离谱的截顶。
+    /// Connects to a real Notion workspace. **There is no emulator**: Notion is closed-source SaaS,
+    /// and open-source stand-ins (AppFlowy, AFFiNE) do not speak this API. So this test is the only place where
+    /// the `Retry-After` tiers are checked: seconds that Notion gives are honoured, missing and garbage values use the default, and absurd values are capped.
     #[test]
     fn retry_after_follows_the_header_within_bounds() {
         assert_eq!(retry_after(Some("3")), Duration::from_secs(3));
@@ -516,10 +516,10 @@ mod tests {
         assert_eq!(retry_after(Some("600")), RETRY_AFTER_CAP);
     }
 
-    /// 有人给出真 token 时才跑，CI 上永远跳过。
+    /// Runs only when someone provides a real token; always skipped on CI.
     ///
     /// ```text
-    /// # 设置 → 我的连接 → 新建内部集成，然后把一个页面分享给它
+    /// # Settings → My connections → New internal integration, then share a page with it
     /// UTOPIA_NOTION_TEST_TOKEN=ntn_xxx cargo test -p utopia-server notion
     /// ```
     #[tokio::test]

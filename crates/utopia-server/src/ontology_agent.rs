@@ -1,9 +1,9 @@
-//! 本体代理（0061 决定 2、3）：对齐判成「没有」「没定」的短语形状与类别词，对着现有本体和
-//! 能力问题交给模型，让它提该建的类与属性。提案进 `ontology_proposals`，**人采纳才成为本体**
-//! （0012）；采纳建出元素后排一次对齐，那些形状按 0053 的指纹自己重判。
+//! Ontology agent (0061 decisions 2 and 3): phrase shapes and category words that alignment judged "none" or "undecided" are handed, together with the existing ontology and
+//! the capability questions, to the model, which proposes the classes and properties to create. Proposals go into `ontology_proposals`; **they become ontology only when a person adopts them**
+//! (0012). After adoption builds the element, one alignment pass is queued, and those shapes re-judge themselves by the 0053 fingerprint.
 //!
-//! 形状的身份是短语加两端的类键加宾语是不是字面值——同 `phrase_bindings` 的键，只是用键
-//! 而不是 id 存进提案，好让人读得懂
+//! A shape's identity is the phrase plus the class keys at both ends plus whether the object is a literal: the same as the `phrase_bindings` key, except that keys are stored in the proposal
+//! rather than ids, so a person can read them
 
 use std::collections::{HashMap, HashSet};
 
@@ -26,28 +26,28 @@ use crate::extraction::chat_retrying_rate_limits_at;
 use crate::llm_util;
 use crate::state::AppState;
 
-/// 给没问题的库一次提这么多问题
+/// Ask this many questions at once for a KB that has none
 pub(crate) const QUESTIONS_PER_ROUND: usize = 10;
-/// 提问题时看多少条说得最多的形状 / 类别词 / 实体
+/// How many of the most-mentioned shapes / category words / entities to look at when raising questions
 const TOP_SIGNATURES: usize = 40;
 const TOP_KIND_WORDS: usize = 20;
 const TOP_ENTITIES: usize = 20;
 
-/// 一条形状结构上对得上的属性多过这个数，就按向量只留最近的这么多带定义（同对齐的短名单）
+/// If more properties than this structurally match a shape, keep only this many nearest by vector, with definitions (same as the alignment shortlist)
 const GLOSSARY_PER_SHAPE: usize = 10;
-/// 每条形状按意思最近的这么多条属性，结构对不上也带定义
+/// For each shape, this many properties nearest in meaning get definitions even if their structure does not match
 const GLOSSARY_NEAREST_ANYWAY: usize = 5;
 
-/// 一次调用交给模型的形状数（0044 决定 3 的成本教训：词表每批只带一次）
+/// Number of shapes handed to the model per call (cost lesson from 0044 decision 3: the vocabulary is sent once per batch, not per shape)
 pub(crate) const SIGNATURES_PER_CALL: usize = 12;
-/// 每批跟着的类别词至多这么多
+/// Each batch carries at most this many category words
 pub(crate) const KIND_WORDS_PER_CALL: usize = 6;
-/// 一轮至多问这么多形状，按陈述数从多到少；其余等下一轮。界面上点一次也只花这么多
+/// Ask at most this many shapes per round, most statements first; the rest wait for the next round. Even clicking once in the UI spends only this much
 pub(crate) const SIGNATURES_PER_ROUND: usize = 120;
-/// 对齐收尾时没绑上的形状够这么多，才叫代理来看（少于这个数人自己在审核页就处理了）
+/// The agent is brought in only if at least this many shapes went unbound when alignment wrapped up (fewer than this and a person handles them on the review page)
 pub(crate) const TRIGGER_UNBOUND: usize = 20;
 
-/// 形状写进提案里的样子
+/// How a shape is written into a proposal
 fn shape_of(sig: &PhraseSignature) -> Value {
     json!({
         "phrase": sig.phrase,
@@ -59,14 +59,14 @@ fn shape_of(sig: &PhraseSignature) -> Value {
     })
 }
 
-/// 任务入口：一个库同时只跑一份（同两种对齐，并行会把端点打出 502）
+/// Job entry point: only one run per KB at a time (same as both alignment kinds; running in parallel would hit the endpoint with 502s)
 #[cfg(test)]
 pub async fn propose(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
     propose_with(state, kb_id, false).await
 }
 
-/// `full_glossary` 是测量用的旋钮（`scripts/bench/agent.mjs`）：每批都送全部属性的定义，
-/// 好和按批裁过的词表在同一批形状上比失败率、重复提案和 token。产品路径不开它
+/// `full_glossary` is a measurement knob (`scripts/bench/agent.mjs`): every batch sends the definitions of all properties,
+/// so that failure rate, duplicate proposals and tokens can be compared with the per-batch trimmed vocabulary on the same batch of shapes. The product path does not turn it on
 pub async fn propose_with(
     state: &AppState,
     kb_id: Uuid,
@@ -77,7 +77,7 @@ pub async fn propose_with(
     let settings = utopia_store::settings::get(pool, kb.workspace_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Chat model not configured; cannot propose ontology"))?;
-    // 提本体是判断题：按端点默认的强度想
+    // Proposing an ontology is a judgment call: think at the endpoint's default strength
     let client = llm_util::chat_client(&settings)
         .ok_or_else(|| anyhow::anyhow!("Chat model not configured; cannot propose ontology"))?;
     let mut guard = pool.acquire().await?;
@@ -99,16 +99,16 @@ pub async fn propose_with(
     result
 }
 
-/// 一条合并后的提案：同一个键在几批里都被提了，形状、类别词、问题并起来，定义取第一次的
+/// One merged proposal: the same key was proposed in several batches, so the shapes, category words and questions are combined, and the definition is taken from the first time
 struct Merged {
     proposal: agent::Proposal,
-    /// Some = 这是「本体里已经有」：relation | attribute | class，进 map_to。
-    /// 方向记在每条形状上（同一个属性，"X wrote Y" 反着读、"Y's author X" 正着读）
+    /// Some = "already in the ontology": relation | attribute | class, goes into map_to.
+    /// The direction is recorded on each shape (for the same property, "X wrote Y" reads in reverse, "Y's author X" reads forward)
     map_kind: Option<String>,
     shapes: Vec<Value>,
     phrases: Vec<String>,
     words: Vec<String>,
-    /// 复用时代理读到每个类别词的判定是哪一刻定的，同形状上的 `seen_decided_at`
+    /// When reusing, the moment at which the agent read each category word's decision; `seen_decided_at` on the same shape
     words_seen: serde_json::Map<String, Value>,
     quotes: Vec<String>,
     serves: Vec<Uuid>,
@@ -132,7 +132,7 @@ async fn propose_locked(
         .iter()
         .map(|p| (p.key.as_str(), p.kind.as_str()))
         .collect();
-    // 词表的指纹：类键 + 属性键。代理看过没提、或答「已有」的形状，词表不变就不再送
+    // Fingerprint of the vocabulary: class keys + property keys. A shape the agent saw but did not propose, or answered "already exists", is not sent again while the vocabulary is unchanged
     let basis = {
         let mut keys: Vec<&str> = class_keys.iter().copied().collect();
         keys.sort_unstable();
@@ -145,12 +145,12 @@ async fn propose_locked(
             .collect::<String>()
     };
 
-    // 已经提过的（不论表态与否）不再提：采纳的等对齐重判；拒绝的人已经说过不要；
-    // 还开着的人还没看。看过没提的和答「已有」的，词表变了才再送（cut 1.1：第一次真跑
-    // 120 条里 85 条没进提案，下一轮又排在最前）
-    // 看过没提的形状记的是当时的陈述数（basis = "count:n"）：陈述数翻倍了才再送——多了一个
-    // 属性不必再问代理，对齐自己会拿新属性去重判（0053 指纹），问代理只会每次采纳后把全部
-    // 没提的形状再烧一遍。答「已有」的记的是词表指纹：词表变了再送
+    // Those already proposed (whether or not the agent took a position) are not proposed again: adopted ones await alignment re-judging; rejected ones a person has already said no to;
+    // open ones a person has not looked at yet. Seen-but-not-proposed and answered "already exists" are sent again only when the vocabulary changes (cut 1.1: in the first real run
+    // 85 of 120 were not proposed, and they came back at the front of the next round)
+    // A seen-but-not-proposed shape records the statement count at the time (basis = "count:n"): it is sent again only when the statement count doubles. Adding one
+    // property need not be asked of the agent again, since alignment itself re-judges with the new property (0053 fingerprint); asking the agent would only burn all the
+    // unproposed shapes again after each adoption. "Already exists" answers record the vocabulary fingerprint: sent again when the vocabulary changes
     let mut proposed_shapes: HashSet<String> = HashSet::new();
     let mut proposed_words: HashSet<String> = HashSet::new();
     let mut declined_shapes: HashMap<String, i64> = HashMap::new();
@@ -208,7 +208,7 @@ async fn propose_locked(
         }
     }
 
-    // 没绑上的形状：对齐判成「没有」或「没定」的。还没判的等对齐，不在这里猜
+    // Shapes that did not bind: those alignment judged "none" or "undecided". Those not yet judged wait for alignment and are not guessed at here
     let sigs = phrase_bindings::signatures(pool, kb_id).await?;
     let bindings: HashMap<_, _> = phrase_bindings::bindings(pool, kb_id)
         .await?
@@ -234,7 +234,7 @@ async fn propose_locked(
     open.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.phrase.cmp(&b.phrase)));
     open.truncate(SIGNATURES_PER_ROUND);
 
-    // 没归类的类别词同理
+    // Unclassified category words likewise
     let words = type_bindings::signatures(pool, kb_id).await?;
     let word_bindings: HashMap<String, _> = type_bindings::bindings(pool, kb_id)
         .await?
@@ -271,7 +271,7 @@ async fn propose_locked(
     }
     open_words.truncate(calls * KIND_WORDS_PER_CALL);
 
-    // 一条问题都没有的库（决定 1）：先让代理提问题，人接受了下一轮才算数；这一轮照旧按说法提
+    // A KB with no questions at all (decision 1): have the agent raise questions first; the answer counts once a person accepts them; this round still proposes by phrase as before
     if competency_questions::list(pool, kb_id).await?.is_empty() {
         if let Err(e) = propose_questions_with(state, kb_id, settings, client).await {
             tracing::warn!(%kb_id, error = %e, "本体代理：提问题失败，这一轮不带问题");
@@ -292,9 +292,9 @@ async fn propose_locked(
             .filter_map(|id| class_key.get(id).copied())
             .collect()
     };
-    // 词表按批裁（第一次真跑：98 条属性带定义每次调用 4k token，占一次调用的一半多）。
-    // 每条形状只给结构对得上的属性定义；对得上的太多就按向量留最近的几条——判据和对齐的
-    // 候选、短名单是同一套。其余属性只报键和标签，让模型知道它们在
+    // The vocabulary is trimmed per batch (first real run: 98 properties with definitions cost 4k tokens per call, more than half of one call).
+    // Each shape gets definitions only for the properties that structurally match; if too many match, keep the nearest few by vector: the criterion is the same
+    // as the alignment candidates and shortlist. The remaining properties report only key and label, so the model knows they are there
     let closure =
         crate::phrase_alignment::closures(classes.iter().map(|c| (c.id, c.parents.as_slice())));
     let nearest: Vec<Vec<Uuid>> = {
@@ -338,9 +338,9 @@ async fn propose_locked(
                 .iter()
                 .filter(|p| crate::phrase_alignment::structurally_fits(p, s, &closure))
                 .collect();
-            // 意思最近的几条不管结构对不对得上都给定义：一端没类型、或宾语是字面值的形状，
-            // 结构上对不上 positionHeld / workLocation，模型看不到定义就把它们又提了一遍
-            // （受控对比里重复提案 1% → 6%，十条里七条是这样来的）
+            // The few nearest in meaning get definitions regardless of whether structure matches: a shape with an untyped end, or a literal object,
+            // does not structurally match positionHeld / workLocation, and without a definition the model proposed them again
+            // (in a controlled comparison duplicate proposals went from 1% to 6%; seven of ten came from this)
             if let Some(near) = near {
                 full.extend(near.iter().take(GLOSSARY_NEAREST_ANYWAY).copied());
             }
@@ -409,14 +409,14 @@ async fn propose_locked(
         })
         .collect();
     tracing::info!(%kb_id, shapes = open.len(), kind_words = open_words.len(), questions = questions.len(), calls, "本体代理开始");
-    // 复用提案记下代理读到的判定是哪一刻定的：采纳时人的判定不是那一刻的，就是代理读过之后定的，
-    // 复用不替人改。不拿提案行存入的时刻比：那在全部模型调用之后，下一轮并进同一行时还会再挪
+    // Reused proposals record the moment the agent's read decision was made. A person's decision at adoption time is not that moment: it was made after the agent read it,
+    // and reuse does not overwrite it. Do not compare against the proposal row's stored time: that comes after all the model calls, and moves again when the next round merges into the same row
     let seen_shape = |s: &PhraseSignature| bindings.get(&s.key()).map(|b| b.decided_at);
     let seen_word = |w: &KindWordSignature| word_bindings.get(&w.kind_word).map(|b| b.decided_at);
 
     let mut merged: HashMap<String, Merged> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
-    // 这一轮看过的每条形状的去向（调用失败的批次不记，下一轮再送）
+    // Where each shape seen this round went (batches whose call failed are not recorded; they are sent again next round)
     let mut reviews: Vec<Review> = Vec::new();
     let (mut failed, mut malformed, mut skipped_existing) = (0usize, 0usize, 0usize);
     for b in 0..calls {
@@ -466,7 +466,7 @@ async fn propose_locked(
         }
         let mut sig_outcome: HashMap<i64, (&str, String)> = HashMap::new();
         let mut word_outcome: HashMap<i64, (&str, String)> = HashMap::new();
-        // 「本体里已经有」：存成 map_to 提案，人点「用已有的」就是一次人的绑定判定
+        // "Already in the ontology": stored as a map_to proposal; a person clicking "use existing" is a person's binding decision
         for e in &parsed.existing {
             let map_kind = if let Some(k) = prop_kind.get(e.key.as_str()) {
                 (*k).to_string()
@@ -505,7 +505,7 @@ async fn propose_locked(
                 }
             });
             if map_kind_is_class(entry) {
-                // 类接的是类别词；形状指给类是答错了格，不记
+                // A class attaches to category words; a shape pointing at a class is a mis-filled cell and is not recorded
                 for id in &e.kind_words {
                     if let Some(w) = open_words.get(*id as usize) {
                         push_word(entry, w, seen_word(w));
@@ -522,7 +522,7 @@ async fn propose_locked(
             }
         }
         for p in parsed.proposals {
-            // 模型被告知已有的不要提；还是提了就当它没说（对齐那边会把形状挂上去）
+            // The model was told not to propose what already exists; if it proposed it anyway, treat it as not said (alignment will attach the shape to it)
             let taken = match p.kind.as_str() {
                 "class" => class_keys.contains(p.key.as_str()),
                 _ => prop_keys.contains(p.key.as_str()),
@@ -551,7 +551,7 @@ async fn propose_locked(
                 }
             });
             let target = format!("{}:{}", section_of(&p), p.key);
-            // 新元素不记读到的时刻：采纳它不替换哪条判定，这一格没人读
+            // New elements do not record the moment they were read: adopting one replaces no decision, and no one reads this cell
             for id in p.signatures {
                 let Some(s) = open.get(id as usize) else {
                     continue;
@@ -679,11 +679,11 @@ async fn propose_locked(
             }
         })
         .collect();
-    // 同一个目标上一轮已经答过一批形状：并起来，不是盖掉（第一次真跑第三轮盖掉了第二轮的）
+    // The same target already had a batch of shapes answered in a previous round: merge them, do not overwrite (in the first real run the third round overwrote the second)
     let mut items = items;
-    // 每条新元素带上本体里离它最近的两个已有元素（按向量，不问模型）。裁过的词表下模型看不到
-    // 大部分属性的定义，受控对比里重复或反向已有属性的提案从 1% 升到 5%（awardReceived、
-    // performer 这几条）；审的人要在采纳前看见"它最像谁"
+    // Each new element carries the two existing elements nearest to it in the ontology (by vector, without asking the model). Under the trimmed vocabulary the model cannot see
+    // the definitions of most properties, and in a controlled comparison proposals that duplicated or reversed an existing property rose from 1% to 5% (awardReceived,
+    // performer are examples); the reviewer must see "which it most resembles" before adopting
     for class_side in [false, true] {
         let idx: Vec<usize> = items
             .iter()
@@ -751,8 +751,8 @@ fn map_kind_is_class(m: &Merged) -> bool {
     m.map_kind.as_deref() == Some("class")
 }
 
-/// 形状的身份写成一个键：短语 + 两端的类键 + 宾语是不是字面值（方向不算——
-/// map_to 里的形状带方向，比身份时得去掉）
+/// The identity of a shape is written as one key: phrase + class keys at both ends + whether the object is a literal (direction does not count --
+/// shapes in map_to carry a direction, which must be removed when comparing identity)
 fn shape_key(v: &Value) -> String {
     json!({
         "phrase": v.get("phrase"),
@@ -763,7 +763,7 @@ fn shape_key(v: &Value) -> String {
     .to_string()
 }
 
-/// 形状的身份：短语 + 两端的类键 + 宾语是不是字面值（方向不算）
+/// A shape's identity: phrase + class keys at both ends + whether the object is a literal (direction does not count)
 fn same_shape(a: &Value, b: &Value) -> bool {
     ["phrase", "subject", "object", "value"]
         .iter()
@@ -812,7 +812,7 @@ fn push_word(entry: &mut Merged, w: &KindWordSignature, seen: Option<DateTime<Ut
     }
 }
 
-/// 把上一轮开着的 map_to 行并进这一轮的：形状、说法、类别词、例句取并集，先前的在前
+/// Merges the map_to row left open by the previous round into this round's: shapes, phrases, category words and examples are unioned, earlier ones first
 fn merge_map_to(
     it: &mut utopia_store::ontology::AgentProposal,
     prev: &utopia_store::ontology::StoredProposal,
@@ -851,8 +851,8 @@ fn merge_map_to(
     let words = union("kind_words", false);
     let forms = union("forms", true);
     let examples: Vec<String> = union("examples", true).into_iter().take(3).collect();
-    // 形状带着各自读到的时刻并过来了；类别词的另存一格，也要并。只留这一轮的，上一轮的词就
-    // 没了读到的时刻，采纳时连代理读过的那个人的判定也不替换了
+    // Shapes come across carrying the moment each was read; category words, kept in a separate cell, must be merged as well. If only this round's is kept, the previous round's words lose
+    // their read moment, and at adoption the person's decision that the agent read is no longer replaced
     let seen_of = |signatures: &Value| {
         signatures
             .get("kind_words_seen_decided_at")
@@ -878,7 +878,7 @@ fn datatype_or_text(d: Option<&str>) -> &str {
     }
 }
 
-/// 采纳时人改过的几格。None = 照提案
+/// The few cells a person changed at adoption. None = as proposed
 #[derive(Debug, Default, Deserialize)]
 pub struct AdoptEdits {
     pub label: Option<String>,
@@ -897,17 +897,17 @@ fn strings(v: Option<&Value>) -> Vec<String> {
         .collect()
 }
 
-/// 采纳的回执
+/// Receipt of adoption
 #[derive(Debug)]
 pub struct Adopted {
-    /// 新元素的 id；复用时是目标的 id
+    /// The id of the new element; when reusing, the id of the target
     pub id: Uuid,
-    /// 复用时留着没写的形状或类别词，各带人定成了什么：代理读过之后人另定了、和提案不一样的。
-    /// 两个人的判断不一样，采纳的人得看见，所以列出来而不是悄悄跳过
+    /// Shapes or category words left unwritten on reuse, each with what the person decided: decided by the person after the agent read it, and differing from the proposal.
+    /// The two people's judgments differ, and the adopting person must see that, so they are listed rather than silently skipped
     pub skipped: Vec<Value>,
 }
 
-/// 一条绑定此刻的判定：谁、什么时候定的、定成了什么（比的时候用 id，回执里写键）
+/// One binding's decision at this moment: who, when it was decided, and what it was decided as (comparisons use ids; the receipt writes keys)
 #[derive(sqlx::FromRow)]
 struct Decided {
     decided_by: String,
@@ -920,15 +920,15 @@ struct Decided {
 }
 
 impl Decided {
-    /// 人在代理读过它之后定的。提案答的是代理读到的那个判定，那个照样替掉；之后人定的，提案和
-    /// 采纳的人看的卡片都没见过，不替人改。只看是不是代理读到的那一刻，不比先后：`decided_at`
-    /// 是定它的事务开始的时刻，先开始、后提交的人的判定，时刻会早于代理读到的那个。没记下读到
-    /// 哪一刻的（这一格之前存的提案），人的判定一概不改
+    /// Decided by the person after the agent read it. The proposal answered the decision the agent read, and that one is still replaced; what the person decided afterward, the proposal and
+    /// the adopting person's card have never seen, so it is not overwritten. Only whether it is the moment the agent read is checked, not the order: `decided_at`
+    /// is the moment the transaction that decided it began, so a person who started first and committed later has a time earlier than the one the agent read. A proposal with no recorded
+    /// read moment (saved before this cell existed) leaves every person's decision unchanged
     fn by_person_after_read(&self, read: Option<DateTime<Utc>>) -> bool {
         self.decided_by == "person" && read.is_none_or(|at| at != self.decided_at)
     }
 
-    /// 和提案定得一样：绑到同一个属性、同一个方向，或同一个类（类别词没有方向）
+    /// Decided the same as the proposal: bound to the same property, same direction, or the same class (category words have no direction)
     fn agrees(&self, target: Uuid, direction: Option<&str>) -> bool {
         self.status == "bound"
             && self.target_id == Some(target)
@@ -936,16 +936,16 @@ impl Decided {
     }
 }
 
-/// 代理读到这条判定时它的 `decided_at`（`push_shape`、`push_word` 记下的）
+/// The `decided_at` the agent had when it read this binding (recorded by `push_shape` and `push_word`)
 fn read_at(seen: Option<&Value>) -> Option<DateTime<Utc>> {
     seen.and_then(|v| serde_json::from_value(v.clone()).ok())
 }
 
-/// 采纳一条代理提案（0061 决定 3）：锁住提案，在一个事务里重读并锁住它要的类或复用的目标，
-/// 写元素（复用时写人的判定）、回归用例、采纳的状态和后续任务，一次提交。
+/// Adopt one agent proposal (0061 decision 3): lock the proposal, in one transaction re-read and lock the class it needs or the target it reuses,
+/// write the element (for reuse, write the person's decision), the regression case, the adopted status and the follow-up jobs, committed once.
 ///
-/// 从前这几步各自提交：属性先落库，例句写回归用例时才发现宾语是实体（`bad_property_shape`），
-/// 留下一个没有提案采纳过的属性、一份排着的对齐，和一条键已被占、再也采纳不了的提案
+/// Before, these steps each committed separately: the property was saved first, and only when writing the regression case from the examples was it found that the object was an entity (`bad_property_shape`),
+/// leaving an adopted-less property, an alignment queued, and a proposal whose key was already taken and could never be adopted again
 pub async fn adopt(
     state: &AppState,
     kb_id: Uuid,
@@ -959,7 +959,7 @@ pub async fn adopt(
     let (adopted, detail) = match adopt_on(&mut tx, kb_id, section, key, edits, actor).await {
         Ok(done) => done,
         Err(error) => {
-            // 回滚完再答：马上重试的请求不会撞上这次还没放掉的锁
+            // Roll back, then answer: a request retried at once does not hit the lock that has not yet been released
             if let Err(rollback) = tx.rollback().await {
                 return Err(AppError::Other(
                     anyhow::Error::new(error)
@@ -987,10 +987,10 @@ pub async fn adopt(
     Ok(adopted)
 }
 
-/// 采纳和别的写撞上、整个事务回滚了，什么都没留下，重试是安全的：答审核页认得、可以重试的
-/// `alignment_busy`。死锁（40P01）在这个事务的哪一步碰上都这样答（比如复用类按词改实体时，
-/// 和先改留下的、再改并掉的实体合并互相等），话里也不指认是谁在改。等锁超时（55P03）只出在
-/// 复用类那一段（只有它设了 `lock_timeout`），照审核页定类别词时的话答
+/// If adoption collides with another write and the whole transaction rolls back, nothing is left behind, and a retry is safe: answered with `alignment_busy`,
+/// which the review page recognizes as retryable. A deadlock (40P01) answers this way wherever it hits in this transaction (for example when reusing a class re-points entities by word,
+/// and merging with entities that an earlier edit changed and a later one merged deadlock each other), and the message does not name who was changing it. A lock wait timeout (55P03) happens only
+/// in the class-reuse section (only it sets `lock_timeout`), and is answered with the same words the review page gives when a category word is classed
 fn busy(error: AppError) -> AppError {
     if matches!(&error, AppError::Db(sqlx::Error::Database(e))
         if e.code().as_deref() == Some("40P01"))
@@ -1004,11 +1004,11 @@ fn busy(error: AppError) -> AppError {
     type_bindings::busy_on_lock_timeout(error)
 }
 
-/// 按键找到这些类，锁住防删（FOR KEY SHARE），返回的 id 和键一一对应：采纳提交之前它们删不掉，
-/// 正被删的等删完再答 `unknown_class`，不会写父类、定义域时才撞上外键答 500。按 id 的顺序锁。
+/// Looks up these classes by key and locks them against deletion (FOR KEY SHARE); the ids returned correspond one-to-one with the keys. Until adoption commits they cannot be deleted;
+/// a class being deleted is waited on and then answers `unknown_class`, so it never writes the parent class or hits a foreign key at the domain step and answers 500. Locked in id order.
 ///
-/// 不用 FOR SHARE：那会挡住这几行上的每一次 UPDATE。补向量的任务（`set_type_embeddings`）在
-/// 一个事务里按堆的顺序改一批类，和按 id 顺序的 FOR SHARE 互相等成死锁。采纳只读 id，防删就够了
+/// Not FOR SHARE: that would block every UPDATE on these rows. The vector backfill task (`set_type_embeddings`) in
+/// one transaction updates a batch of classes in heap order, and FOR SHARE in id order would wait on it into a deadlock. Adoption only reads ids, so blocking deletion is enough
 async fn lock_classes(
     tx: &mut Transaction<'_, Postgres>,
     kb_id: Uuid,
@@ -1035,7 +1035,7 @@ async fn lock_classes(
         .collect()
 }
 
-/// 采纳锁住的那一行
+/// The row adoption locks
 #[derive(sqlx::FromRow)]
 struct Locked {
     id: Uuid,
@@ -1043,7 +1043,7 @@ struct Locked {
     proposal: StoredProposal,
 }
 
-/// 采纳在事务里的全部；返回回执和审计要记的几格
+/// Everything adoption does in its transaction; returns the receipt and the cells the audit should record
 async fn adopt_on(
     tx: &mut Transaction<'_, Postgres>,
     kb_id: Uuid,
@@ -1052,8 +1052,8 @@ async fn adopt_on(
     edits: AdoptEdits,
     actor: Uuid,
 ) -> Result<(Adopted, Value), AppError> {
-    // 先锁提案：同一条的另一次采纳、拒绝和代理的刷新都等这次提交，提交后它已不再开着。
-    // 只认代理提的：旧 Suggest 留下的提案没有采纳的入口
+    // Lock the proposal first: another adoption of the same one, a rejection, and the agent's refresh all wait for this commit, after which it is no longer open
+    // Only accept what the agent proposed: proposals left by the old Suggest have no adoption entry point
     let locked: Option<Locked> = sqlx::query_as(
         "SELECT id, section, key, payload, proposed_by, serves, signatures
            FROM ontology_proposals
@@ -1069,7 +1069,7 @@ async fn adopt_on(
         return Err(AppError::NotFound);
     };
     let p = &locked.proposal;
-    // 人改过几格：决定 5 的第二个数要它
+    // How many cells a person changed: the second number of decision 5 needs it
     let edited = edits.label.is_some()
         || edits.description.is_some()
         || edits.datatype.is_some()
@@ -1093,7 +1093,7 @@ async fn adopt_on(
         .to_string();
     let mut skipped = Vec::new();
     let id = match section {
-        // 「用已有的」：形状各写一条人的绑定判定（同审核页），类别词各归到那个类
+        // "Use existing": each shape gets a person's binding decision (as on the review page), and each category word is put into that class
         "map_to" => adopt_map_to(tx, kb_id, p, &mut skipped).await?,
         "entity_types" => {
             let parents = lock_classes(
@@ -1115,7 +1115,7 @@ async fn adopt_on(
                 &description,
             )
             .await?;
-            // 多了一个类：类别词里「没有」「没定」的要重判，短语对齐跟在它后面
+            // One more class: category words that were "none" or "undecided" must be judged again, and phrase alignment queues behind it
             embed_then_align(tx, kb_id, "align_types").await?;
             id
         }
@@ -1135,7 +1135,7 @@ async fn adopt_on(
             } else {
                 Vec::new()
             };
-            // 定义域和值域一次锁上，整批按 id 排序
+            // Domain and range locked in one go, the whole batch sorted by id
             let classes = lock_classes(tx, kb_id, &[domains.as_slice(), &ranges].concat()).await?;
             let (domains, ranges) = classes.split_at(domains.len());
             let datatype = if kind == "attribute" {
@@ -1166,7 +1166,7 @@ async fn adopt_on(
                 None,
             )
             .await?;
-            // 多了一个属性：判成 none / undecided 的形状也许对得上了（0053 的指纹变了）
+            // One more property: shapes judged none / undecided may now match (the 0053 fingerprint changed)
             embed_then_align(tx, kb_id, "align_phrases").await?;
             id
         }
@@ -1183,12 +1183,12 @@ async fn adopt_on(
     Ok((Adopted { id, skipped }, detail))
 }
 
-/// 新元素的后续任务，和元素一起提交：先补向量、再对齐，同编辑器的次序。新元素要有向量，对齐
-/// 的短名单才看得见它（候选多于短名单长度时按向量挑；没向量的属性永远进不了名单，形状的指纹
-/// 就不变，采纳了也不重判——第一次真跑 bordered_by 就是这样）。从前采纳在请求里就地嵌
-/// （cut 1.1），现在对齐开跑时看见补向量的还排着或跑着就等它（`align_*_reasking`）。
-/// 两份都照排，不看有没有同样的排着：排着的那份可能在这次提交之前就被领走，读的是还没有这个
-/// 元素的本体（0051）
+/// Follow-up jobs for the new element, committed together with the element: backfill vectors first, then align, in the same order as the editor. New elements need vectors, or
+/// the alignment shortlist cannot see them (when candidates outnumber the shortlist length they are picked by vector; a property with no vector never enters the shortlist, so the shape's fingerprint
+/// does not change and it is not re-judged even after adoption — this is how the first real run of bordered_by went). Previously adoption embedded in the request
+/// (cut 1.1); now, when alignment starts and sees that a vector backfill is still queued or running, it waits for it (`align_*_reasking`).
+/// Both are queued without checking for an identical one already queued: a queued one may be picked up before this commit and read an ontology that lacks this
+/// element (0051)
 async fn embed_then_align(
     tx: &mut Transaction<'_, Postgres>,
     kb_id: Uuid,
@@ -1197,8 +1197,8 @@ async fn embed_then_align(
     let payload = json!({ "kb_id": kb_id });
     utopia_store::jobs::enqueue_with_max_attempts_tx(tx, "embed_ontology", payload.clone(), 3)
         .await?;
-    // 对齐晚几秒到期，同编辑器（补向量 2 秒后、对齐 5 秒后）。两份同时到期的话 worker 一起
-    // 领走，对齐看见补向量正跑着，就把自己挪到半分钟后。补向量更慢时照样等它
+    // Alignment is due a few seconds late, the same as the editor (vector backfill at 2 seconds, alignment at 5 seconds). If both were due at once, the workers would pick both up together,
+    // alignment would see the backfill running, and move itself half a minute later. When the backfill is slower it is still waited for
     utopia_store::jobs::enqueue_with_max_attempts_after_tx(
         tx,
         align,
@@ -1210,9 +1210,9 @@ async fn embed_then_align(
     Ok(())
 }
 
-/// 回归用例和采纳的状态（决定 4），在采纳的事务里。人改过没有（决定 5 的第二个数）和状态同一条
-/// UPDATE 写下：从前是采纳提交之后的另一条语句。复用留着没写的形状（`skipped`）不写用例：人定得
-/// 和提案不一样；人后来定得一样的照写
+/// Regression case and adopted status (decision 4), inside the adoption transaction. Whether a person edited it (the second number of decision 5) is written by the same
+/// UPDATE as the status: before, it was a separate statement after adoption committed. A shape left unwritten on reuse (`skipped`) gets no case: the person decided
+/// differently from the proposal; one the person later decided the same is still written
 async fn finish_adoption(
     tx: &mut Transaction<'_, Postgres>,
     kb_id: Uuid,
@@ -1284,12 +1284,12 @@ async fn finish_adoption(
     Ok(())
 }
 
-/// map_to 的采纳，在采纳的事务里：目标是属性，提案里的每条形状写成人的绑定（属性 + 方向），
-/// 投影跟着排（同审核页的 `decide_alignment_phrase`）；目标是类，每个类别词归到它，短语对齐
-/// 跟着排。返回目标的 id。
+/// Adoption of a map_to: inside the adoption transaction. If the target is a property, each shape in the proposal is written as a person's binding (property + direction),
+/// and a projection is queued along with it (same as the review page's `decide_alignment_phrase`); if the target is a class, each category word is put into it, and phrase alignment
+/// is queued along with it. Returns the target's id.
 ///
-/// 代理读过之后人另定了的形状或类别词不写：和提案一样的算已写（形状照样有回归用例），不一样的
-/// 原样留着、记进 `skipped`。一条也写不了的不算采纳
+/// A shape or category word that the person decided differently after the agent read it is not written: one matching the proposal counts as already written (the shape still gets its regression case), and one not matching
+/// is kept as it is and recorded in `skipped`. Adoption where nothing at all could be written does not count as adopted
 async fn adopt_map_to(
     tx: &mut Transaction<'_, Postgres>,
     kb_id: Uuid,
@@ -1301,21 +1301,21 @@ async fn adopt_map_to(
         .get("kind")
         .and_then(Value::as_str)
         .unwrap_or("relation");
-    // 这次写下的；人在代理读过之后定得和提案一样、算作已写的
+    // Written by this call; a person decided it after the agent read it, identically to the proposal, so it counts as already written
     let (mut written, mut agreed) = (0usize, 0usize);
     if kind == "class" {
         let class = lock_classes(tx, kb_id, std::slice::from_ref(&p.key)).await?[0];
-        // 实体正被抽取或对齐改着时只等 2 秒，同审核页的类别词判定
+        // While the entity is being extracted or aligned, wait only 2 seconds, same as the category-word decision on the review page
         sqlx::query("SET LOCAL lock_timeout = '2s'")
             .execute(&mut **tx)
             .await?;
         let votes = json!({ "person": p.key, "via": "ontology_agent" });
         let seen = p.signatures.get("kind_words_seen_decided_at");
         for w in strings(p.signatures.get("kind_words")) {
-            // 已有的绑定行先锁住再看：看过之后、写下之前，人改不了它。还没有这一行时锁不住，
-            // 人第一次定它可能被这次写盖掉。类的键用子查询读，不连表：等到别人提交了这一行，
-            // Postgres 拿新版本重算这条查询，连表连上的却还是等之前那一行（EvalPlanQual），
-            // 回执里人刚定的类就成了空
+            // Lock the existing binding row first and then look: between the look and the write, the person cannot change it. When there is no such row yet, nothing can be locked,
+            // and a person's first decision could be overwritten by this write. The class key is read by subquery, not a join: once another transaction commits this row,
+            // Postgres recomputes this query with the new version, but a join would still wait on the earlier row (EvalPlanQual),
+            // and the class the person just decided would come out empty in the receipt
             let now: Option<Decided> = sqlx::query_as(
                 "SELECT b.decided_by, b.decided_at, b.status, b.type_id AS target_id,
                         (SELECT t.key FROM entity_types t WHERE t.id = b.type_id) AS target
@@ -1329,7 +1329,7 @@ async fn adopt_map_to(
             let read = read_at(seen.and_then(|s| s.get(w.as_str())));
             if let Some(d) = now.filter(|d| d.by_person_after_read(read)) {
                 if d.agrees(class, None) {
-                    // 不重写：判定还是那个人的
+                    // Not rewritten: the decision is still that person's
                     agreed += 1;
                 } else {
                     skipped.push(json!({ "kind_word": w,
@@ -1344,9 +1344,9 @@ async fn adopt_map_to(
         if written + agreed == 0 {
             return Err(nothing_left());
         }
-        // 换了类，这些实体的短语签名跟着变：短语对齐和判定一起提交，整次采纳排一份；一个词都没写
-        // 就不排，人定的那次已经排过。照排，不看有没有同样的排着，理由同 `embed_then_align`：
-        // 排着的那份可能在这次提交之前就被领走
+        // The class changed, so the phrase signatures of these entities change with it: phrase alignment is committed with the decision, and the whole adoption queues one; if no word was written
+        // nothing is queued, since the person's decision already queued one. It is queued regardless of whether an identical one is already queued, for the same reason as `embed_then_align`:
+        // the queued one might be picked up before this commit
         if written > 0 {
             utopia_store::jobs::enqueue_with_max_attempts_tx(
                 tx,
@@ -1358,7 +1358,7 @@ async fn adopt_map_to(
         }
         return Ok(class);
     }
-    // 目标在事务里重读并锁住防删（FOR KEY SHARE，理由同 `lock_classes`）：采纳提交之前它删不掉
+    // The target is re-read in the transaction and locked against deletion (FOR KEY SHARE, same reason as `lock_classes`): until adoption commits it cannot be deleted
     let property: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM relation_types WHERE kb_id = $1 AND key = $2 FOR KEY SHARE",
     )
@@ -1376,7 +1376,7 @@ async fn adopt_map_to(
         .into_iter()
         .flatten()
     {
-        // 此刻已经没有陈述的形状跳过。方向是这条形状自己的
+        // A shape with no statements left at this moment is skipped. The direction is the shape's own
         let Some(sig) = sigs.iter().find(|s| same_shape(&shape_of(s), shape)) else {
             continue;
         };
@@ -1384,7 +1384,7 @@ async fn adopt_map_to(
             Some("reverse") => "reverse",
             _ => "forward",
         };
-        // 已有的绑定行先锁住再看，属性的键用子查询读，同类别词
+        // Lock the existing binding row first, then look; the property key is read by subquery, the same as for category words
         let now: Option<Decided> = sqlx::query_as(
             "SELECT b.decided_by, b.decided_at, b.status, b.relation_type_id AS target_id,
                     (SELECT r.key FROM relation_types r WHERE r.id = b.relation_type_id) AS target,
@@ -1405,10 +1405,10 @@ async fn adopt_map_to(
             now.filter(|d| d.by_person_after_read(read_at(shape.get("seen_decided_at"))))
         {
             if d.agrees(property, Some(direction)) {
-                // 不重写：判定还是那个人的，回归用例照写
+                // Not rewritten: the decision is still that person's, and the regression case is still written
                 agreed += 1;
             } else {
-                // 形状的四格同提案里那条：`finish_adoption` 凭它认出这条，不写回归用例
+                // The shape's four cells are the same as the one in the proposal: `finish_adoption` uses them to recognize this entry, and writes no regression case
                 skipped.push(json!({
                     "phrase": sig.phrase, "subject": sig.subject_type_key,
                     "object": sig.object_type_key, "value": sig.object_is_value,
@@ -1441,8 +1441,8 @@ async fn adopt_map_to(
         return Err(nothing_left());
     }
     if written > 0 {
-        // 判定和它的投影一起提交（0051）。整次提交排一份，不是一条形状一份：这些判定都和这一份
-        // 同一次提交，它跑时读当下的绑定，0051 要的「每条判定都有和它一起提交的任务」照样成立
+        // The decision is committed together with its projection (0051). One job is queued for the whole commit, not one per shape: all these decisions are in the same
+        // commit, and the job reads the current bindings when it runs, so 0051's requirement that "every decision has a job committed with it" still holds
         utopia_store::jobs::enqueue_queued_once_tx(
             tx,
             phrase_bindings::MATERIALIZE_KIND,
@@ -1454,8 +1454,8 @@ async fn adopt_map_to(
     Ok(property)
 }
 
-/// 复用的形状或类别词一条也写不了：都是人定得和提案不一样、照人留着的，或都没有陈述了。话里
-/// 不说人是代理读过之后定的：没记下读到哪一刻的旧提案，人在提案之前定的也照留
+/// None of the reused shapes or category words could be written: they were all decided by a person differently from the proposal and kept as they are, or no longer have statements. The message
+/// does not say the person decided after the agent read it: an old proposal with no recorded read moment keeps a person's earlier decision too
 fn nothing_left() -> AppError {
     AppError::CodedConflict {
         code: "proposal_stale",
@@ -1464,8 +1464,8 @@ fn nothing_left() -> AppError {
     }
 }
 
-/// 任务入口：给库提问题（决定 1 的"没有问题的库不被卡住"）。界面上点、或本体代理发现库里
-/// 一条问题都没有时走这里
+/// Job entry point: raise questions for a KB (decision 1's "a KB without questions is not stuck"). Reached by clicking in the UI, or when the ontology agent finds
+/// the KB has no questions at all
 pub async fn propose_questions(state: &AppState, kb_id: Uuid) -> anyhow::Result<usize> {
     let pool = &state.pool;
     let kb = utopia_store::kbs::get(pool, kb_id).await?;
@@ -1521,7 +1521,7 @@ async fn propose_questions_with(
             .collect(),
         others: Vec::new(),
     };
-    // 说得最多的形状，带上对齐绑到的属性
+    // The most-mentioned shapes, with the property alignment bound them to
     let mut sigs = phrase_bindings::signatures(pool, kb_id).await?;
     sigs.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.phrase.cmp(&b.phrase)));
     sigs.truncate(TOP_SIGNATURES);

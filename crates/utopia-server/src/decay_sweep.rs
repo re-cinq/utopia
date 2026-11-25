@@ -1,7 +1,7 @@
-//! 衰减的每日扫描（RC-003）：把打开了衰减的源淘汰回它的 `max_items`。
+//! Daily decay sweep (RC-003): evicts sources with decay enabled back down to their `max_items`.
 //!
-//! 选谁由 `utopia_store::decay::plan_eviction` 定；这里照人删文档的办法删（可恢复），
-//! 同时把文档从全文索引里拿掉，并记一笔无人操作的审计。
+//! `utopia_store::decay::plan_eviction` picks which items; they are deleted the same way a person deletes a document (recoverable),
+//! and removed from the full-text index too, with an audit entry recorded as having no operator.
 
 use crate::state::AppState;
 use serde_json::json;
@@ -18,7 +18,7 @@ pub async fn sweep_source(state: &AppState, source_id: Uuid) -> anyhow::Result<(
     for id in &eviction.documents {
         match utopia_store::documents::delete(&state.pool, eviction.kb_id, *id, None).await {
             Ok(_) => {}
-            // 扫描进行当中被人先删了
+            // Someone deleted it first while the sweep was in progress
             Err(AppError::NotFound) => continue,
             Err(e) => return Err(e.into()),
         }

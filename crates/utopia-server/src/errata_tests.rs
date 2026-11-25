@@ -1,5 +1,5 @@
-//! 勘误 agent 走脚本化的模型端点：结构报了的先送去看，撤落地、keep 记账、引文不是原话的加
-//! 被拒；账上记着请求数与端点报的 token；看完的文档不再问。没有 `UTOPIA_DATABASE_URL` 时跳过。
+//! The errata agent runs against a scripted model endpoint: flagged structure is sent for review first; retractions land, keeps are booked to the ledger, and quotes that are not verbatim are rejected;
+//! the ledger records the request count and the token usage the endpoint reported. Documents already reviewed are not asked about again. Skipped without `UTOPIA_DATABASE_URL`.
 use super::*;
 use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
 use serde_json::{json, Value};
@@ -10,7 +10,7 @@ struct Model {
     replies: Arc<Mutex<Vec<Value>>>,
     requests: Arc<Mutex<Vec<Value>>>,
 }
-/// 回一段流，最后一帧带用量——和 OpenAI 协议的 `stream_options.include_usage` 一样
+/// Returns a stream, with usage on the final frame, the same as the OpenAI protocol's `stream_options.include_usage`
 async fn reply(State(m): State<Model>, Json(body): Json<Value>) -> impl IntoResponse {
     m.requests.lock().unwrap().push(body);
     let text = {
@@ -43,8 +43,8 @@ struct Fx {
 }
 
 impl Fx {
-    /// 一个库：organization / place / person；based_in、ceo；文档「Acme is based in London. Jane Roe runs Acme.」；
-    /// 两条类型化行：Acme —based_in→ London（对）、Acme —based_in→ Paris（Paris 不在文档里）
+    /// A library: organization / place / person; based_in, ceo; document "Acme is based in London. Jane Roe runs Acme.";
+    /// two typed rows: Acme —based_in→ London (correct), Acme —based_in→ Paris (Paris is not in the document)
     async fn new(replies: Vec<Value>) -> anyhow::Result<Option<Self>> {
         let Some(url) = utopia_store::test_db::url() else {
             return Ok(None);
@@ -166,14 +166,14 @@ impl Fx {
 #[tokio::test]
 async fn the_agent_reviews_flagged_facts_first_and_each_verdict_is_a_recorded_action(
 ) -> anyhow::Result<()> {
-    // 0 是报了的 Paris 行（在前），1 是对的 London 行；加一条 ceo（原话在），再加一条原话不在的
+    // 0 is the flagged Paris row (listed first), 1 is the correct London row; add a ceo (wording present), then add one whose wording is absent
     let script = json!({"a":[
         [0,"retract","Paris is not in the document","Acme is based in London"],
         [1,"keep"],
         [null,"add",{"subject":"Acme","property":"ceo","object":"Jane Roe"},"stated","Jane Roe runs Acme"],
         [null,"add",{"subject":"Acme","property":"ceo","object":"Jane Roe"},"made up","Jane Roe owns Acme"]
     ]});
-    // 第二票：Paris 那条结构报了，agent 要撤，再问一遍；答 not_stated 才撤
+    // Second vote: the Paris row's structure was flagged, so the agent wants to retract and asks again; it retracts only on an answer of not_stated
     let second = json!({"c":[[0,"not_stated"]]});
     let Some(f) = Fx::new(vec![script, second]).await? else {
         return Ok(());
@@ -212,7 +212,7 @@ async fn the_agent_reviews_flagged_facts_first_and_each_verdict_is_a_recorded_ac
         .fetch_one(&f.pool)
         .await?;
         assert_eq!(ceo, 1, "one Jane Roe row: the refused add wrote nothing");
-        // 账：一次请求，端点报的用量
+        // Ledger: one request, with the usage the endpoint reported
         let run_row: (i32, i32, i32, Option<i64>, Option<i64>, bool) = sqlx::query_as(
             "SELECT flagged, sampled, requests, prompt_tokens, completion_tokens, finished_at IS NOT NULL
                FROM errata_runs WHERE kb_id=$1",
@@ -221,7 +221,7 @@ async fn the_agent_reviews_flagged_facts_first_and_each_verdict_is_a_recorded_ac
         .fetch_one(&f.pool)
         .await?;
         assert_eq!(run_row, (1, 1, 2, Some(246), Some(90), true), "two requests: the verdicts and the second vote");
-        // 看完了：再跑不问模型（脚本空了，问了就 panic），也不排下一次
+        // Done reviewing: run again without asking the model (the script is empty, so asking would panic), and do not schedule the next run either
         review(&f.state, f.kb).await?;
         assert_eq!(f.model.requests.lock().unwrap().len(), 2);
         let queued: i64 = sqlx::query_scalar(
@@ -257,7 +257,7 @@ async fn an_unreadable_reply_leaves_the_facts_unreviewed_and_the_job_retries() -
             .await?;
         assert_eq!(actions, 0);
         assert!(f.live(f.absent).await? && f.live(f.fine).await?);
-        // 账还是记的：问了一次，没看成
+        // Ledger still recorded: asked once, but did not get to review
         let run_row: (i32, bool) = sqlx::query_as(
             "SELECT requests, finished_at IS NOT NULL FROM errata_runs WHERE kb_id=$1",
         )

@@ -1,7 +1,7 @@
-//! 人定一条短语签名：判定和它的重算任务一次提交，请求答 202 和 job id，不编数字（0051）。
+//! A person sets a short-phrase signature: the verdict and its recompute job are submitted together; the request answers 202 with a job id and does not make up a number (0051).
 //!
-//! 三件事：路由答 202、job 排着、绑定写成人判的；`GET /kbs/{id}/jobs/{job_id}` 在本库能读、
-//! 换个库答 404；Viewer 能读状态但不能判。没有 `UTOPIA_DATABASE_URL` 时跳过。
+//! Three things: the route answers 202, the job is queued, and the binding is written as the person decided; `GET /kbs/{id}/jobs/{job_id}` is readable in this database,
+//! and in another database answers 404; a Viewer can read the status but cannot decide. Without `UTOPIA_DATABASE_URL` the test is skipped.
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
@@ -62,7 +62,7 @@ impl Fx {
         ))
         .execute(&pool)
         .await?;
-        // 队列里的一条：代理判成 undecided，人来定
+        // One entry in the queue: the agent judged it undecided, and a person decides
         let sig = phrase_bindings::signatures(&pool, kb).await?.remove(0);
         phrase_bindings::decide(
             &pool,
@@ -174,7 +174,7 @@ async fn a_phrase_decision_is_accepted_with_its_job() -> anyhow::Result<()> {
         assert!(body.get("typed").is_none(), "no invented counts: {body}");
         let job_id = body["job_id"].as_i64().expect("job id");
 
-        // job 排着，载荷是这个库；绑定是人判的、bound
+        // Job queued, payload is this database; the binding is person-decided, bound
         let (kind, job_status, payload): (String, String, Value) =
             sqlx::query_as("SELECT kind, status, payload FROM jobs WHERE id=$1")
                 .bind(job_id)
@@ -188,10 +188,10 @@ async fn a_phrase_decision_is_accepted_with_its_job() -> anyhow::Result<()> {
             (b.status.as_str(), b.decided_by.as_str()),
             ("bound", "person")
         );
-        // 这次请求没有重算：投影要等 job
+        // This request did not recompute: the projection waits for the job
         assert_eq!(utopia_store::materialize::count(&f.pool, f.kb).await?, 0);
 
-        // 状态读：本库 200，换库 404，Viewer 也能读
+        // Status read: 200 in this database, 404 in another, Viewers can read too
         let (status, body) = f
             .call(
                 &f.editor,
@@ -225,7 +225,7 @@ async fn a_phrase_decision_is_accepted_with_its_job() -> anyhow::Result<()> {
             .await?;
         assert_eq!(status, StatusCode::OK);
 
-        // Viewer 不能判
+        // A Viewer cannot decide
         let (status, _) = f
             .call(
                 &f.viewer,
@@ -236,7 +236,7 @@ async fn a_phrase_decision_is_accepted_with_its_job() -> anyhow::Result<()> {
             .await?;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
-        // 让 job 该做的事在这里做一遍：读当前绑定，算出一条类型化行
+        // Do what the job should do, here once: read the current binding and compute one typed row
         let outcome = utopia_store::materialize::try_materialize(&f.pool, f.kb)
             .await?
             .expect("nobody holds the lock");
@@ -248,9 +248,9 @@ async fn a_phrase_decision_is_accepted_with_its_job() -> anyhow::Result<()> {
     run
 }
 
-/// 状态属性下，人定签名时说只带一个日期的陈述那个日期标什么（#966）。不说也收下，签名
-/// 留在对齐队列里等人补，属性与方向是现在绑的；说了就写下、出队。认不出的值，或给了不是
-/// 状态的属性（或没有属性），答 422，什么都不写
+/// Under a state property, when a person signs the signature, the date of a statement carrying only one date is labelled (#966). If not stated, accept it and the signature
+/// stays in the alignment queue for a person to fill in; the property and direction are the ones bound now. If stated, record it and dequeue. An unrecognized value, or a property that is
+/// not a state property (or no property), answers 422 and writes nothing
 #[tokio::test]
 async fn a_phrase_decision_under_a_state_says_what_a_single_date_marks() -> anyhow::Result<()> {
     let Some(f) = Fx::new().await? else {
@@ -374,7 +374,7 @@ async fn a_rule_decision_is_accepted_with_its_job() -> anyhow::Result<()> {
         .await?
         .expect("proposed");
         let path = format!("/api/v1/kbs/{}/review/alignment/rules/{}", f.kb, rule);
-        // Viewer 不能批
+        // Viewer cannot batch-approve
         let (status, _) = f
             .call(&f.viewer, "POST", &path, Some(json!({ "approve": true })))
             .await?;
@@ -400,7 +400,7 @@ async fn a_rule_decision_is_accepted_with_its_job() -> anyhow::Result<()> {
             (r.status.as_str(), r.decided_by.as_str()),
             ("approved", "person")
         );
-        // 换个库的 id 答 404
+        // An id from another database answers 404
         let (status, _) = f
             .call(
                 &f.editor,
@@ -417,7 +417,7 @@ async fn a_rule_decision_is_accepted_with_its_job() -> anyhow::Result<()> {
     run
 }
 
-/// 勘误队列（0044 决定 7）：人批闸门留下的一笔，动作执行、答 200；答过的再答 404；别的库 404；Viewer 403
+/// Errata queue (0044 decision 7): a person approves an entry the gate left; the action executes and answers 200; answering again gives 404; another database 404; Viewer 403
 #[tokio::test]
 async fn a_held_errata_action_is_decided_by_a_person() -> anyhow::Result<()> {
     let Some(f) = Fx::new().await? else {
@@ -467,7 +467,7 @@ async fn a_held_errata_action_is_decided_by_a_person() -> anyhow::Result<()> {
             .call(&f.editor, "POST", &other, Some(json!({ "approve": true })))
             .await?;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        // 队列里有它
+        // It is in the queue
         let (status, body) = f
             .call(&f.editor, "GET", &format!("/api/v1/kbs/{}/review?queue=errata&limit=10&offset=0", f.kb), None)
             .await?;

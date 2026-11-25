@@ -1,5 +1,5 @@
-//! 本体编辑器 API：类型/关系 CRUD + 未匹配统计 + LLM 扩展建议。
-//! 查看 = viewer；修改 = editor（本体直接影响后续抽取的白名单）。
+//! Ontology editor API: type/relation CRUD + unmatched-term statistics + LLM extension suggestions.
+//! Viewing = viewer; modifying = editor (the ontology directly affects the extraction whitelist that follows).
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -24,7 +24,7 @@ async fn require_kb(
     utopia_store::access::require_kb(&state.pool, user, kb_id, min).await
 }
 
-/// 令牌也读得到（0014 决定 7）：类别 key 要先换成类型 id，才能去查实例
+/// Tokens can read this too (0014 decision 7): a class key must first be turned into a type id before instances can be looked up
 pub async fn get(
     State(state): State<AppState>,
     reader: SessionOrToken,
@@ -47,10 +47,10 @@ pub struct InstancesQuery {
     pub page: i64,
     #[serde(default = "default_per")]
     pub per: i64,
-    /// 只列缺这条关系的成员：属性的 key，或一个开放短语（#1269）
+    /// Lists only members missing this relation: the key of a property, or an open phrase (#1269)
     #[serde(default)]
     pub missing_predicate: Option<String>,
-    /// out（缺省，成员是主语）| in（成员是宾语）| either
+    /// out (default, the member is the subject) | in (the member is the object) | either
     #[serde(default)]
     pub missing_direction: Option<String>,
 }
@@ -59,7 +59,7 @@ fn default_per() -> i64 {
     12
 }
 
-/// 「缺哪条关系、看哪一端」：没给谓词就是不筛；给了空谓词或认不得的方向是 422
+/// "Which relation is missing, and which end to look at": no predicate means no filter; an empty predicate or an unrecognized direction is 422
 fn missing_link(q: &InstancesQuery) -> Result<Option<(&str, LinkEnd)>, AppError> {
     let end = match q.missing_direction.as_deref() {
         None | Some("out") => LinkEnd::Out,
@@ -84,9 +84,9 @@ fn missing_link(q: &InstancesQuery) -> Result<Option<(&str, LinkEnd)>, AppError>
     Ok(Some((predicate.trim(), end)))
 }
 
-/// 某个类下的实体实例列表（详情区右侧，分页）。
-/// 带 `missing_predicate` 时只列缺那条关系的成员，并回显认作它的属性与短语。
-/// 令牌也读得到（0014 决定 7）。
+/// List of entity instances under a class (right side of the detail pane, paginated).
+/// With `missing_predicate`, lists only members missing that relation, and echoes back the properties and phrases recognized as it.
+/// Tokens can read this too (0014 decision 7).
 pub async fn list_entity_instances(
     State(state): State<AppState>,
     reader: SessionOrToken,
@@ -136,15 +136,15 @@ pub struct EntityTypeReq {
     /// circle | square
     #[serde(default)]
     pub shape: Option<String>,
-    /// 全部父类，**第一个当主父**（左栏画在那一支下）。
-    /// 界面上写明了这条，所以不额外给一个"选主父"的控件
+    /// All parent classes; **the first is the primary parent** (the left pane draws the tree under that branch).
+    /// The UI states this, so there is no extra "pick primary parent" control
     #[serde(default)]
     pub parents: Vec<Uuid>,
-    /// 与它互斥的类。**缺省 = 不动**——不管互斥的调用方（提案采纳、冷启动）
-    /// 不该因为一次建类就把已有的声明清空
+    /// Classes mutually exclusive with it. **Default = leave alone** -- regardless of callers that are mutually exclusive (proposal adoption, cold start),
+    /// must not clear existing declarations just because a class was created
     #[serde(default)]
     pub disjoint: Option<Vec<Uuid>>,
-    /// 语义指引，注入抽取 prompt
+    /// Semantic guidance, injected into the extraction prompt
     #[serde(default)]
     pub description: Option<String>,
     /// How the type is shown (RC-008): a flat object of string values. Absent = untouched
@@ -152,20 +152,20 @@ pub struct EntityTypeReq {
     pub display_hints: Option<serde_json::Value>,
 }
 
-/// 编辑器或导入改了本体之后：先补向量索引，再排对齐。
+/// After the editor or an import changes the ontology: first backfill the vector index, then queue alignment.
 ///
-/// **新元素要有向量，对齐的短名单才看得见它。** 候选多于短名单长度时按向量挑
-/// （`phrase_alignment::shortlist`），类别词的候选类也按向量检索
-/// （`type_alignment::candidates_for`）；没向量的元素永远进不了名单，形状的指纹就不变，
-/// 建了也不重判——第一次真跑 `bordered_by` 就是这样（0061 cut 1.1 的采纳路径已经补了，
-/// 这里是编辑器的四个入口与 OWL 导入）。描述改了也算：向量按「当时嵌的原文」判陈，改了描述的行
-/// 会被同一个任务重嵌。
+/// **New elements need vectors, or the alignment shortlist cannot see them.** When candidates outnumber the shortlist, pick by vector
+/// (`phrase_alignment::shortlist`); candidate classes for category words are also searched by vector
+/// (`type_alignment::candidates_for`); an element without a vector never makes the list, so its shape fingerprint does not change,
+/// and it is not re-judged after creation -- this is how `bordered_by` went the first time it really ran (the adoption path in 0061 cut 1.1 already backfills it;
+/// this covers the editor's four entry points and OWL import). A changed description counts too: vectors judge staleness by the "source text embedded at the time", and a row with a changed description
+/// is re-embedded by the same task.
 ///
-/// **排任务，不就地跑。** 就地嵌一次要付一趟嵌入请求的固定开销，本体页一口气建 28 条
-/// 属性就是 28 趟；排任务的话一批编辑只嵌一次。挡的只是排着的（`enqueue_unless_queued_after`），
-/// 不挡在跑的：在跑的那份已经读完待嵌集合，这条编辑它看不见，得再排一份。
-/// 去抖比对齐短，对齐任务开跑前还会看一眼这个任务有没有排着或跑着，排着就等
-/// （见 `align_phrases_reasking` / `align_types_reasking`）。
+/// **Queue a task, do not run inline.** Embedding inline costs a fixed overhead per embedding request; if the ontology page creates 28 properties at once, that is 28 round trips;
+/// with a queued task, one batch of edits embeds only once. It blocks only what is queued (`enqueue_unless_queued_after`), not what is running:
+/// a running one has already read the set awaiting embedding and cannot see this edit, so another must be queued.
+/// The debounce is shorter than alignment; before alignment starts it also checks whether this task is queued or running, and if so, waits
+/// (see `align_phrases_reasking` / `align_types_reasking`).
 async fn reindex_then_align(
     state: &AppState,
     kb_id: Uuid,
@@ -182,7 +182,7 @@ async fn reindex_then_align(
         &state.pool,
         align_kind,
         json!({ "kb_id": kb_id }),
-        // 去抖：一批编辑（导一个包、建一串属性）只排一次
+        // Debounce: one batch of edits (importing a package, creating a series of properties) queues only once
         std::time::Duration::from_secs(5),
     )
     .await?;
@@ -207,7 +207,7 @@ pub async fn create_entity_type(
         kb_id,
         key,
         req.label.trim(),
-        // 不给颜色就按 key 取一个，而不是所有类共用一个灰蓝
+        // With no color given, pick one by key, rather than every class sharing one blue-grey
         req.color
             .as_deref()
             .unwrap_or_else(|| utopia_store::palette::color_for_key(key)),
@@ -216,15 +216,15 @@ pub async fn create_entity_type(
         req.description.as_deref().unwrap_or("").trim(),
     )
     .await?;
-    // 互斥缺省 = 不动：不管它的调用方（提案采纳、冷启动）不该因为建一个类
-    // 就把已有的声明清空
+    // Mutually exclusive default = leave alone: its callers (proposal adoption, cold start) must not clear existing declarations
+    // just because a class was created
     if let Some(d) = req.disjoint.as_deref() {
         utopia_store::ontology::set_disjoint_for(&state.pool, kb_id, id, d).await?;
     }
     if let Some(h) = &req.display_hints {
         utopia_store::ontology::set_type_display_hints(&state.pool, kb_id, id, h).await?;
     }
-    // 审计只记不阻断
+    // Audit records only, never blocks
     let _ = utopia_store::audit::record(
         &state.pool,
         Some(kb_id),
@@ -235,8 +235,8 @@ pub async fn create_entity_type(
         json!({ "key": key, "label": req.label.trim() }),
     )
     .await;
-    // 本体多了一个类：类别词的绑定里那些「没有」和「没定」的要重判（0044 对齐第一片）。
-    // 先补它的向量，候选类的检索才找得到它
+    // The ontology gained a class: among the category words' bindings, the "no" and "undetermined" ones must be re-judged (0044 alignment slice one).
+    // Backfill its vector first, or the candidate-class search will not find it
     let _ = reindex_then_align(&state, kb_id, "align_types").await;
     Ok(Json(json!({ "id": id })))
 }
@@ -253,9 +253,9 @@ pub async fn update_entity_type(
         kb_id,
         id,
         req.label.trim(),
-        // **不给颜色 = 保持原色**，不是重置。这里按 id 改，压根拿不到 key；
-        // 而从前无条件写 "#8ea5bd" 意味着任何一次不带颜色的改名
-        // 都会把用户挑过的颜色抹掉
+        // **No color given = keep the original color**, not reset. This edits by id, so there is no key at all;
+        // and previously writing "#8ea5bd" unconditionally meant that any rename without a color
+        // would wipe out the color the user had picked
         req.color.as_deref(),
         req.shape.as_deref().unwrap_or("circle"),
         &req.parents,
@@ -279,9 +279,9 @@ pub async fn update_entity_type(
                 "description": req.description }),
     )
     .await;
-    // 类的定义改了：绑到它的类别词过期，重判。标签或描述改了向量也陈了，先重嵌
+    // The class definition changed: category words bound to it go stale and are re-judged. If the label or description changed, the vector is stale too, so re-embed first
     let _ = reindex_then_align(&state, kb_id, "align_types").await;
-    // 对账可能在同一事务里收/开过违规行——审核队列变了，说一声（0062）
+    // Reconciliation may have accepted or opened violation rows in the same transaction -- the review queue changed, so say so (0062)
     state.emit_review(kb_id);
     Ok(Json(json!({ "ok": true })))
 }
@@ -303,7 +303,7 @@ pub async fn delete_entity_type(
         json!({}),
     )
     .await;
-    // 对账可能在同一事务里收/开过违规行——审核队列变了，说一声（0062）
+    // Reconciliation may have accepted or opened violation rows in the same transaction -- the review queue changed, so say so (0062)
     state.emit_review(kb_id);
     Ok(Json(json!({ "ok": true })))
 }
@@ -318,12 +318,12 @@ pub struct RelationTypeReq {
     pub functional: bool,
     #[serde(default)]
     pub inverse_functional: bool,
-    /// 其余四条 OWL 公理。**必须能在界面上编**——推理机（0002）的判据全部
-    /// 来自这几位，而它们从前只能靠导入 OWL 文件带进来：一个在界面上手工建
-    /// 本体的用户，永远开不了那台机器。
+    /// The other four OWL axioms. **Must be editable in the UI**: the reasoner's (0002) criteria all
+    /// come from these, and until now they could only be brought in by importing an OWL file; a user who builds
+    /// the ontology by hand in the UI could never start that machine.
     ///
-    /// 与 `functional` / `inverse_functional` 并排，因为它们本来就是同一族，
-    /// 只是那两个先落库了
+    /// Alongside `functional` / `inverse_functional`, because they are the same family;
+    /// only those two were already persisted first
     #[serde(default)]
     pub is_transitive: bool,
     #[serde(default)]
@@ -332,33 +332,33 @@ pub struct RelationTypeReq {
     pub is_asymmetric: bool,
     #[serde(default)]
     pub is_irreflexive: bool,
-    /// 指向另一个关系的两条（`inverseOf` / `subPropertyOf`）。
+    /// Two that point at another relation (`inverseOf` / `subPropertyOf`).
     ///
-    /// **缺省 = 清空，与上面六位同一条规矩。** 它们是同一个表单一次提交的
-    /// 一组声明；一半覆盖一半保留，会让「我把逆去掉了」和「我没碰逆」
-    /// 长得一模一样。属性表单不填这两个，而属性本来就不许有——
-    /// store 层会拦，落库也照样是 NULL
+    /// **Default = clear, same rule as the six above.** They are one group of declarations
+    /// submitted together in one form submission; half overwritten and half kept would make "I removed the inverse" and "I did not touch the inverse"
+    /// look identical. The property form does not fill these two, and properties are not allowed to have them in the first place --
+    /// the store layer blocks it, and the stored value is NULL anyway
     #[serde(default)]
     pub inverse_of: Option<Uuid>,
     #[serde(default)]
     pub sub_property_of: Option<Uuid>,
     #[serde(default)]
     pub description: Option<String>,
-    /// relation | attribute（创建时定死，更新时忽略）
+    /// relation | attribute (fixed at creation, ignored on update)
     #[serde(default)]
     pub kind: Option<String>,
-    /// 可以当主语的类。attribute 至少一个；relation 留空 = 不限。
-    /// **两者都缺省才是不动**：签名是一组一起提交的——只送 ranges 会把
-    /// domains 清空，不是「ranges 动、domains 留」
+    /// Classes that may be the subject. An attribute needs at least one; for a relation, empty = unrestricted.
+    /// **Only when both are omitted is it left alone**: the signature is submitted as one group -- sending only ranges would clear
+    /// domains, not "ranges change, domains stay"
     #[serde(default)]
     pub domains: Option<Vec<Uuid>>,
-    /// 这条关系的边能带哪些属性（0037）：属性定义的 id。None = 不动
+    /// Which properties an edge of this relation can carry (0037): the ids of property definitions. None = leave alone
     #[serde(default)]
     pub qualifiers: Option<Vec<Uuid>>,
-    /// 可以当宾语的类。只对 relation 有意义；与 domains 同一条成组提交规矩
+    /// Classes that may be the object. Only meaningful for relations; same group-submission rule as domains
     #[serde(default)]
     pub ranges: Option<Vec<Uuid>>,
-    /// attribute 专用：text | number | date | bool
+    /// For attributes only: text | number | date | bool
     #[serde(default)]
     pub datatype: Option<String>,
     #[serde(default)]
@@ -369,8 +369,8 @@ pub struct RelationTypeReq {
 }
 
 impl RelationTypeReq {
-    /// 公理打包。**散着传迟早传错顺序**——六位都是 bool，编译器帮不上忙；
-    /// 后两位都是 `Option<Uuid>`，一样。
+    /// Axiom bundle. **Passing them separately sooner or later gets the order wrong** -- all six are bool, so the compiler cannot help;
+    /// the last two are both `Option<Uuid>`, likewise.
     fn axioms(&self) -> utopia_core::models::RelationAxioms {
         utopia_core::models::RelationAxioms {
             functional: self.functional,
@@ -424,8 +424,8 @@ pub async fn create_relation_type(
     if let Some(h) = &req.display_hints {
         utopia_store::ontology::set_relation_display_hints(&state.pool, kb_id, id, h).await?;
     }
-    // 多了一个属性：判成 none / undecided 的签名也许对得上了（0044 对齐第二片）。
-    // 先补它的向量，短名单才看得见它
+    // One more property: signatures judged none / undecided may now match (0044 alignment slice two).
+    // Backfill its vector first; the shortlist can only see it then
     reindex_then_align(&state, kb_id, "align_phrases").await?;
     let _ = utopia_store::audit::record(
         &state.pool,
@@ -457,7 +457,7 @@ pub async fn update_relation_type(
         req.description.as_deref().unwrap_or("").trim(),
         req.datatype.as_deref(),
         req.unit.as_deref().map(str::trim).filter(|s| !s.is_empty()),
-        // 请求里没带这两个字段就不动它们——属性表单不管 domain
+        // If the request does not include these two fields, leave them alone -- the attribute form does not manage domain
         req.domains.as_deref(),
         req.ranges.as_deref(),
     )
@@ -468,8 +468,8 @@ pub async fn update_relation_type(
     if let Some(h) = &req.display_hints {
         utopia_store::ontology::set_relation_display_hints(&state.pool, kb_id, id, h).await?;
     }
-    // 属性改了定义或域/值域：绑到它的签名过期，判成 none 的也许对得上了。
-    // 标签或描述改了向量也陈了，先重嵌（只改域/值域的话补齐任务一查就退）
+    // The property's definition or domain/range changed: signatures bound to it go stale, and ones judged none may now match.
+    // If the label or description changed, the vector is stale too; re-embed first (if only domain/range changed, the backfill task's check exits at once)
     reindex_then_align(&state, kb_id, "align_phrases").await?;
     let _ = utopia_store::audit::record(
         &state.pool,
@@ -483,7 +483,7 @@ pub async fn update_relation_type(
                 "description": req.description }),
     )
     .await;
-    // 对账可能在同一事务里收/开过违规行——审核队列变了，说一声（0062）
+    // Reconciliation may have accepted or opened violation rows in the same transaction -- the review queue changed, so say so (0062)
     state.emit_review(kb_id);
     Ok(Json(json!({ "ok": true })))
 }
@@ -505,18 +505,18 @@ pub async fn delete_relation_type(
         json!({}),
     )
     .await;
-    // 对账可能在同一事务里收/开过违规行——审核队列变了，说一声（0062）
+    // Reconciliation may have accepted or opened violation rows in the same transaction -- the review queue changed, so say so (0062)
     state.emit_review(kb_id);
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 一条谓词的一端挂着两个以上开放值的持有者（#341）。
+/// The holder of one end of a predicate with more than two open values (#341).
 ///
-/// 本体自己长出来的库里没人声明过唯一性，接任不会闭合前任，三个人同时在管
-/// 一个项目——而「谁在管」正是这个产品的题。引擎永不自动推断 functional
-/// （bootstrap_ontology.rs 写了为什么），所以它只能被**问**：这里把证据摆出来
-/// ——哪条谓词、哪一端、多少持有者、对账会闭合几条、几条要进人审——人决定。
-/// `declared` 为真的那些是声明了却还没对过账的（导入的、声明之前就在的）。
+/// In a library that grew out of the ontology itself, nobody declared uniqueness, so a successor does not close out a predecessor; three people manage
+/// one project at once -- and "who is managing" is the whole point of this product. The engine never infers functional automatically
+/// (bootstrap_ontology.rs says why), so it can only be **asked**: here the evidence is laid out --
+/// which predicate, which end, how many holders, how many rows reconciliation would close, how many would go to human review -- and a person decides.
+/// Those with `declared` true are declared but not yet reconciled against the ledger (imported ones, or ones that predate the declaration).
 pub async fn uniqueness_candidates(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -554,11 +554,11 @@ pub async fn uniqueness_candidates(
     Ok(Json(json!({ "candidates": items })))
 }
 
-/// 补上声明之后，把这条谓词已经在账上的开放行对一遍（#341）。
+/// After the declaration is in place, reconcile this predicate's open rows already on the ledger (#341).
 ///
-/// 与落库时同一条路：作废 + 改写，supersedes 链回旧行，记录轴倒回声明之前
-/// 仍看得见原来的行；拿不准的进人审。谓词没有唯一性声明时拒绝——
-/// 声明是人的事，这里只执行。响应里报闭合了几条、几条进了人审。
+/// Same path as at persist time: supersede and rewrite, the supersedes chain points back to the old row, and the record axis is rewound to before the declaration,
+/// so the original row stays visible; uncertain ones go to human review. When the predicate has no uniqueness declaration, refuse --
+/// declaring is a human's job, and here we only execute. The response reports how many were closed and how many went to human review.
 pub async fn reconcile_relation_type(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -583,9 +583,9 @@ pub async fn reconcile_relation_type(
     })))
 }
 
-/// 还等着人看的提案，按接口原来的形状拼回去。
+/// Proposals still awaiting a person's review, reassembled in the shape the endpoint originally had.
 ///
-/// 前端因此不必区分「刚算出来的」与「上次存下的」——两者同一个类型、同一套渲染。
+/// So the frontend need not distinguish "just computed" from "last time stored" -- both are the same type, with the same rendering.
 pub async fn stored_proposals(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -597,14 +597,14 @@ pub async fn stored_proposals(
         "entity_types": [], "relation_types": [], "attribute_types": [], "map_to": []
     });
     for p in stored {
-        // 只给代理提的（0061）。旧的 Suggest 那条路已经退役，它留在老库里的提案没有
-        // 采纳的入口了，摆出来只是一排点不动的按钮
+        // Only proposals made by the agent (0061). The old Suggest path has been retired, and proposals it left in old databases have no
+        // adoption entry point now; showing them would only display a row of buttons that do nothing
         if p.proposed_by != "agent" {
             continue;
         }
         if let Some(arr) = out.get_mut(&p.section).and_then(|v| v.as_array_mut()) {
             let mut item = p.payload;
-            // 多带三格：谁提的、服务哪些问题、会绑上哪些形状
+            // Three extra columns: who proposed it, which issues it serves, and which shapes it would bind to
             if let Some(o) = item.as_object_mut() {
                 o.insert("proposed_by".into(), json!("agent"));
                 o.insert("serves".into(), json!(p.serves));
@@ -620,17 +620,17 @@ pub async fn stored_proposals(
 pub struct DecideProposalReq {
     pub section: String,
     pub key: String,
-    /// 只收 rejected；采纳走 `/ontology/proposals/adopt`
+    /// Accepts only rejected; adoption goes through `/ontology/proposals/adopt`
     pub status: String,
-    /// 拒绝的理由（0061：下一轮代理读得到）
+    /// The reason for rejection (0061: the next round of the agent can read it)
     #[serde(default)]
     pub reason: Option<String>,
 }
 
-/// 拒绝一条提案。**改状态不删行**：拒绝留痕正是下一轮代理不再把它刷回待看的依据。
+/// Reject a proposal. **Change the status, do not delete the row**: the rejection record is exactly why the next agent round will not bring it back for review.
 ///
-/// 从前这里也收 adopted，只把状态改成采纳，元素、回归用例、对齐一样都没有。采纳要把
-/// 这些和状态一起提交，只有 `/ontology/proposals/adopt` 做得到（0061 决定 3）
+/// This used to also accept adopted, which only changed the status: no elements, regression cases, or alignment were created. Adoption must submit these
+/// together with the status, and only `/ontology/proposals/adopt` can do that (0061 decision 3)
 pub async fn decide_proposal(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -660,10 +660,10 @@ pub async fn decide_proposal(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// OWL 导入：先看会发生什么，确认了才落库。
+/// OWL import: first see what would happen; persist only after confirmation.
 ///
-/// **绝不让上传一个文件就不可逆地改掉本体**——预览与落库走同一个 plan，
-/// 两条独立路径迟早分叉，而分叉的后果是确认之后发生的事与刚看过的不一样。
+/// **Never let uploading a file irreversibly change the ontology** -- preview and persist go through the same plan;
+/// two independent paths sooner or later diverge, and divergence means what happens after confirmation is not what was just reviewed.
 pub async fn preview_import(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -676,7 +676,7 @@ pub async fn preview_import(
     Ok(Json(json!({ "filename": filename, "plan": plan })))
 }
 
-/// 写令牌也能导（0014 决定 6）：新库的本体与库一起由同一个客户端搭好
+/// A write token can also export (0014 decision 6): a new database's ontology is set up together with the database by the same client
 pub async fn apply_import(
     State(state): State<AppState>,
     caller: SessionOrToken,
@@ -688,11 +688,11 @@ pub async fn apply_import(
     let user = caller.user;
     require_kb(&state, &user, kb_id, Role::Editor).await?;
     let (filename, bytes) = read_upload(multipart).await?;
-    // 导入会改判据（公理链、domain/range、父边）：先把旧本体下会检出的违规
-    // 记下来（0062），apply 落库后按新本体对账——在旧判据下检出过的陈行以
-    // criterion_changed 收场，不是整批抹掉；对账失败如实报错，不假装干净
-    // 基线跑在同一条事务里：autocommit 连接上每条语句各看一个快照，
-    // 半途有别的提交进来会把两个时刻混成一份基线
+    // The import changes the criteria (axiom chain, domain/range, parent edges): first record the violations the old ontology would detect
+    // (0062), then after apply persists, reconcile against the new ontology -- stale rows detected under the old criteria end as criterion_changed,
+    // not wiped out in bulk; if reconciliation fails, report the error honestly, do not pretend it is clean
+    // The baseline runs in one transaction: on an autocommit connection each statement sees its own snapshot,
+    // and if another commit arrives midway it would mix two moments into one baseline
     let mut baseline_tx = state.pool.begin().await?;
     let was_detected = utopia_store::reasoning::detection_keys(&mut baseline_tx, kb_id).await?;
     baseline_tx.commit().await?;
@@ -700,9 +700,9 @@ pub async fn apply_import(
         match crate::owl_import::apply(&state, kb_id, user.id, token_id, &filename, &bytes).await {
             Ok(v) => v,
             Err(e) => {
-                // apply 是多笔提交：中途失败时一部分判据已经落了。尽力对账——
-                // 已提交的判据是「当前本体」，open 行不能带着旧判据过夜。对账
-                // 自身失败只记告警，原错误照样返回，不吞
+                // apply makes several commits: if it fails midway, some criteria are already persisted. Best-effort reconciliation --
+                // a committed criterion is the "current ontology", and open rows must not carry stale criteria overnight. Reconciliation
+                // failing on its own only logs a warning; the original error is still returned, not swallowed
                 match state.pool.begin().await {
                     Ok(mut tx) => {
                         if let Err(re) = utopia_store::reasoning::reconcile_ontology(
@@ -722,14 +722,14 @@ pub async fn apply_import(
                 return Err(e.into());
             }
         };
-    // apply 自己分多笔提交，这笔事务只做对账：`open` 的意思是对账于当前本体
+    // apply makes several commits on its own; this transaction only reconciles: `open` means reconciled against the current ontology
     let mut tx = state.pool.begin().await?;
     let violations =
         utopia_store::reasoning::reconcile_ontology(&mut tx, kb_id, &was_detected).await?;
     tx.commit().await?;
-    // 本体多了类和属性：没有类时判成「没有」的类别词、对不上属性的签名要重判（0044 对齐）。
-    // 与编辑器同一步：先补向量再排类别词对齐，它收尾时排短语对齐。补向量那份 apply 已经
-    // 排了，撞上排着的不再排；导入已经落库，排不上也不把它报成失败
+    // The ontology gained classes and properties: category words judged "no" without a class, and signatures that do not match a property, must be re-judged (0044 alignment)
+    // Same step as the editor: backfill vectors first, then queue category-word alignment, which queues phrase alignment when it finishes. The backfill apply already
+    // queued it, so a queued one is not queued again; the import has already persisted, and failing to queue it is not reported as failure
     let _ = reindex_then_align(&state, kb_id, "align_types").await;
     state.emit_review(kb_id);
     Ok(Json(
@@ -747,8 +747,8 @@ pub async fn list_imports(
     Ok(Json(json!({ "imports": imports })))
 }
 
-/// 取 multipart 里的第一个文件。上限 8 MB——FOAF 44 KB、DCTerms 48 KB，
-/// FIBO 那种大部头分模块也在几百 KB 量级；再大多半是传错了东西。
+/// Takes the first file from the multipart body. Limit: 8 MB -- FOAF is 44 KB, DCTerms 48 KB,
+/// and large modular ones like FIBO are in the hundreds of KB; anything bigger is usually the wrong file.
 const MAX_ONTOLOGY_BYTES: usize = 8 * 1024 * 1024;
 
 async fn read_upload(
@@ -781,11 +781,11 @@ async fn read_upload(
     Err(AppError::invalid("no_files", "No file in the upload"))
 }
 
-/// 类型消解的**只算不写**那一步：每个待精化实体的画像与候选类。
+/// The **compute-only, no-write** step of type resolution: the profile and candidate classes of each entity awaiting refinement.
 ///
-/// 跟本体导入同一个模式：先看计划，再决定落不落。在这里它还多一层用处——
-/// 检索找不着的时候，回执里带着"我们拿什么去找的"，第一眼就知道该改画像
-/// 还是该改类的描述。
+/// Same pattern as ontology import: look at the plan first, then decide whether to persist. Here it has one more use --
+/// when retrieval finds nothing, the receipt carries "what we searched with", so at a glance you know whether to change the profile
+/// or change the class description.
 pub async fn type_resolution_preview(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -796,11 +796,11 @@ pub async fn type_resolution_preview(
     Ok(Json(json!({ "items": items })))
 }
 
-/// 跑一遍类型消解并落库：检索候选 → 裁决 → 三档处置。
+/// Run type resolution once and persist: retrieve candidates -> adjudicate -> three-tier disposition.
 ///
-/// 与 preview 分开是本仓库既有的形状（本体导入也是先看计划再落库）。这里还多
-/// 一层理由：改类**不进时间轴**，所以它不像事实改写那样在实体历史里自己显形，
-/// 先看一眼再动是唯一能看见它的时机。
+/// Separating it from preview is this repo's existing shape (ontology import also looks at the plan before persisting). Here there is one more reason:
+/// changing a class **does not enter the timeline**, so unlike fact rewrites it does not surface on its own in entity history;
+/// looking before acting is the only moment it can be seen.
 pub async fn type_resolution_apply(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -822,7 +822,7 @@ pub async fn type_resolution_apply(
     Ok(Json(json!(outcome)))
 }
 
-/// 撤销一次类型消解：把那一批实体放回原来的类。
+/// Undo one type resolution: put that batch of entities back into their original classes.
 pub async fn type_resolution_undo(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -847,17 +847,17 @@ pub async fn type_resolution_undo(
 pub struct ApproveRefinementReq {
     pub from_type_id: Uuid,
     pub to_type_id: Uuid,
-    /// 这一次要一并改掉的实体。**认可的是类对，改的是实体**——
-    /// 两件事分开，所以调用方可以只认可规则而暂不动任何实体
+    /// Entities to change along with this one. **The approved thing is the class pair, the change is to entities** --
+    /// the two are separate, so the caller can approve the rule alone without touching any entity yet
     #[serde(default)]
     pub entity_ids: Vec<Uuid>,
 }
 
-/// 认可一个"粗类 → 细类"的配对，并把随请求带来的实体改过去。
+/// Approve a "coarse class -> fine class" pairing, and move the entities that came with the request into it.
 ///
-/// 待人工那一档由"跨没跨分类轴"触发，而实测那条判据测的往往是**种子类跟导入
-/// 词汇表连没连上**，不是风险——schema.org 的 Place 另起 key，于是每个城市都
-/// 要问一遍。配对认可一次就不再问：那是类与类之间的判断，实体只是碰巧撞上它。
+/// The human-review tier is triggered by "crosses a classification axis or not", and the real measurement shows that criterion mostly tests **whether the seed class connected to the imported vocabulary**,
+/// not risk -- schema.org's Place uses a different key, so every city would be asked about.
+/// Once the pairing is approved it is not asked again: that is a judgment between classes; the entities just happened to collide with it.
 pub async fn approve_refinement(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,

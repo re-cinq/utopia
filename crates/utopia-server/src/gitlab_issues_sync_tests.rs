@@ -1,5 +1,5 @@
-//! 用录下的真实 GitLab 响应跑工单同步（#1327）：一张工单一篇文档、历史来自 resource events、
-//! 读过的不再取详情、合并请求要打开开关才读、没有令牌就不发请求。
+//! Runs the ticket sync against recorded real GitLab responses (#1327): one document per ticket, history comes from resource events,
+//! tickets already read do not fetch details again, merge requests are read only when their switch is on, and without a token no request is sent.
 use super::sync_gitlab_issues_with_client;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -49,7 +49,7 @@ async fn a_gitlab_ticket_sync_takes_each_ticket_with_its_history_once() -> anyho
                 let Some(rest) = request.url.path().strip_prefix(PROJECT) else {
                     return ResponseTemplate::new(404);
                 };
-                // 列表是 `issues` / `merge_requests`，详情是 `issues/1/notes` 这样的三段
+                // The list is `issues` / `merge_requests`, and details are three segments such as `issues/1/notes`
                 let rows = match rest.rsplit_once('/') {
                     None => &fixture[rest],
                     Some((ticket, what)) => &fixture["details"][ticket][what],
@@ -65,7 +65,7 @@ async fn a_gitlab_ticket_sync_takes_each_ticket_with_its_history_once() -> anyho
         let with_config = |config: Value| {
             let pool = pool.clone();
             async move {
-                // 走界面保存时走的那条路
+                // Goes through the path the UI save takes
                 utopia_store::sources::update(&pool, sid, None, Some(&config), None, None, None).await?;
                 anyhow::Ok(utopia_store::sources::get(&pool, sid).await?)
             }
@@ -81,10 +81,10 @@ async fn a_gitlab_ticket_sync_takes_each_ticket_with_its_history_once() -> anyho
         let source = utopia_store::sources::get(&pool, sid).await?;
         let first = sync_gitlab_issues_with_client(&state, &source, None, &http, &uri).await?;
         anyhow::ensure!(first.created == 2, "第一轮建了 {}", first.created);
-        // checkpoint 留着毫秒：截掉的话，同一秒里更晚的那张下一轮又会被当成没读过
+        // Keep the checkpoint's milliseconds: if truncated, a later ticket in the same second would be treated as unread again next round
         anyhow::ensure!(first.checkpoint == Some(time("2026-11-14T21:36:10.304Z")));
         let issue = doc("#1").await?.expect("工单 #1 该收");
-        // 文档时刻截到秒
+        // Truncate the document timestamp to seconds
         anyhow::ensure!(issue.doc_time == Some(time("2026-11-14T21:36:07Z")));
         let body = String::from_utf8(state.blob.get(&issue.sha256).await?)?;
         anyhow::ensure!(
@@ -102,7 +102,7 @@ async fn a_gitlab_ticket_sync_takes_each_ticket_with_its_history_once() -> anyho
             "没开开关，合并请求的列表不该读"
         );
 
-        // 第二轮：列表把读过的又给了一遍（`updated_after` 含边界），不写、也不再取详情
+        // Second round: the list hands back what was already read (`updated_after` is inclusive at the boundary); write nothing and fetch no details again
         let seen = requests().await.len();
         let second =
             sync_gitlab_issues_with_client(&state, &source, first.checkpoint, &http, &uri).await?;
@@ -119,7 +119,7 @@ async fn a_gitlab_ticket_sync_takes_each_ticket_with_its_history_once() -> anyho
             .query_pairs()
             .any(|(k, v)| k == "updated_after" && time(&v) == time("2026-11-14T21:36:10.304Z"))));
 
-        // 只改名字，checkpoint 留着
+        // Only the name changed: keep the checkpoint
         let checkpoint = || async {
             anyhow::Ok(utopia_store::sources::sync_checkpoint(&pool, sid).await?)
         };
@@ -131,8 +131,8 @@ async fn a_gitlab_ticket_sync_takes_each_ticket_with_its_history_once() -> anyho
         utopia_store::sources::update(&pool, sid, Some("renamed"), None, None, None, None).await?;
         anyhow::ensure!(checkpoint().await? == first.checkpoint, "改名不该清 checkpoint");
 
-        // 打开开关：checkpoint 清掉，不然它之前的合并请求永远读不到。
-        // 合并请求进来，各有各的身份，工单没变不记新版本
+        // Switch turned on: clear the checkpoint, otherwise merge requests from before it could never be read.
+        // Merge requests come in, each with its own identity; if the ticket did not change, no new version is recorded
         let source = with_config(json!({
             "project": "QuintinBotes/utopia-gitlab-fixture",
             "auth_header": "Bearer fixture-token",
@@ -158,7 +158,7 @@ async fn a_gitlab_ticket_sync_takes_each_ticket_with_its_history_once() -> anyho
             .get("authorization")
             .is_some_and(|v| v == "Bearer fixture-token")));
 
-        // 没有令牌：说清楚要令牌，一个请求都不发
+        // No token: say clearly a token is needed, and send no requests at all
         let source = with_config(json!({"project": "QuintinBotes/utopia-gitlab-fixture"})).await?;
         let refused = sync_gitlab_issues_with_client(&state, &source, None, &http, &uri).await;
         anyhow::ensure!(
@@ -166,7 +166,7 @@ async fn a_gitlab_ticket_sync_takes_each_ticket_with_its_history_once() -> anyho
             "没有令牌该报出来"
         );
         anyhow::ensure!(requests().await.len() == sent.len(), "没有令牌还是发了请求");
-        // 换项目也清 checkpoint：新项目里更早的工单不然读不到
+        // Switching projects also clears the checkpoint: otherwise earlier tickets in the new project could not be read
         sqlx::query("UPDATE sources SET sync_checkpoint=$2 WHERE id=$1")
             .bind(sid)
             .bind(first.checkpoint)
@@ -176,8 +176,8 @@ async fn a_gitlab_ticket_sync_takes_each_ticket_with_its_history_once() -> anyho
             .await?;
         anyhow::ensure!(checkpoint().await?.is_none(), "换项目该清 checkpoint");
 
-        // 第一轮还在跑的时候换了配置：checkpoint 本来就空着，清空挡不住那一轮，
-        // 所以它提交不了，按旧配置算出来的 checkpoint 不落库
+        // The config was changed while the first round was still running: the checkpoint was already empty, so clearing cannot stop that round,
+        // so it cannot commit, and the checkpoint computed under the old config is not persisted
         let run = utopia_store::sources::start_run(&pool, sid).await?;
         with_config(json!({
             "project": "QuintinBotes/utopia-gitlab-fixture",

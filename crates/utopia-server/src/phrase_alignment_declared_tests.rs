@@ -1,13 +1,13 @@
-//! 推送来的短语正好是一条声明了的关系（#1242）：本体自己判，不问模型。只认键或标签
-//! 归一后相等、两端的类落在域与值域里、只有一条对得上的；人的判定不动；推送的文档抽完
-//! 排一份物化。真库、推送路径（0054），没有对话模型。
+//! A pushed phrase that is exactly a declared relation (#1242): the ontology decides it itself, without asking a model. Only matches on key
+//! or label after normalization count as equal, both ends' classes fall within the domain and range, and there is exactly one match; a person's verdict is left alone; after a pushed document is extracted,
+//! a materialization is queued. Real database, push path (0054), no chat model.
 use super::*;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use utopia_store::{materialize, phrase_bindings};
 
-/// 一个库：类 statement、test、other，三个类别词都已绑上；关系 validated_by 声明在
-/// statement → test；一个 `statements` 来源
+/// One database: classes statement, test, other, with all three category words already bound; relation validated_by declared on
+/// statement -> test; one `statements` source
 struct Rig {
     pool: sqlx::PgPool,
     state: AppState,
@@ -86,7 +86,7 @@ impl Rig {
         }))
     }
 
-    /// 推一篇文档并抽取：一条陈述，写成 [主语, 它的类别词, 短语, 宾语, 它的类别词]。返回文档
+    /// Push one document and extract it: one statement, written as [subject, its category word, phrase, object, its category word]. Returns the document
     async fn push(&self, external_id: &str, said: [&str; 5]) -> anyhow::Result<Uuid> {
         let [subject, subject_kind, phrase, object, object_kind] = said;
         let payload: Value = json!({
@@ -126,7 +126,7 @@ impl Rig {
         Ok(phrase_bindings::bindings(&self.pool, self.kb).await?)
     }
 
-    /// statement → test 这条签名
+    /// The signature for statement -> test
     fn signature(&self, phrase: &str) -> PhraseSignature {
         PhraseSignature {
             phrase: phrase.into(),
@@ -142,7 +142,7 @@ impl Rig {
         }
     }
 
-    /// 配上一个不通的对话端点：对齐照跑，真问了模型这一轮会记失败、再排
+    /// Configure a chat endpoint that does not work: alignment still runs, and when it truly asks the model this round records a failure and queues again
     async fn unreachable_model(&self) -> anyhow::Result<()> {
         utopia_store::settings::upsert(
             &self.pool,
@@ -228,8 +228,8 @@ async fn a_pushed_phrase_equal_to_a_declared_relation_binds_and_materializes_wit
     rig.cleanup().await
 }
 
-/// 像不算、两端不在域与值域里不算、两条关系叫同一个名字也不算：这些都留给对齐器。
-/// 同一个库里那条恰好对得上的照样绑上，否则「什么都没绑」什么也证明不了
+/// A near-match does not count, nor do ends outside the domain and range, nor do two relations sharing one name: those are left to the aligner.
+/// The one that matches exactly in the same database is still bound, otherwise "nothing was bound" proves nothing
 #[tokio::test]
 async fn only_a_phrase_naming_one_relation_that_fits_both_ends_binds() -> anyhow::Result<()> {
     let Some(rig) = Rig::new().await? else {
@@ -275,8 +275,8 @@ async fn only_a_phrase_naming_one_relation_that_fits_both_ends_binds() -> anyhow
     rig.cleanup().await
 }
 
-/// 签名都已判过的推送不数库里的签名（#1296）。一条连接的池上 sqlx 缓存它跑过的每条语句，
-/// 没跑的不在 `pg_prepared_statements` 里
+/// A push whose signatures have all been judged does not count the database's signatures (#1296). On a connection pool sqlx caches the statements it has run,
+/// and ones not run do not appear in `pg_prepared_statements`
 #[tokio::test]
 async fn a_push_whose_signatures_are_settled_skips_the_base_signatures() -> anyhow::Result<()> {
     let Some(rig) = Rig::new().await? else {
@@ -349,8 +349,8 @@ async fn pushed_documents_queue_one_materialization() -> anyhow::Result<()> {
     rig.cleanup().await
 }
 
-/// 配了对话模型的库照样跑对齐：本体判的签名不送模型，也不让这一轮以为它过期了再排一次。
-/// 端点是个不通的地址——真问了，这一轮会记失败、再排
+/// A database with a chat model configured still runs alignment: signatures judged by the ontology are not sent to the model, and this round does not think they went stale and queue again.
+/// The endpoint is an unreachable address -- if it were really asked, this round would record a failure and queue again
 #[tokio::test]
 async fn the_aligner_leaves_a_binding_the_ontology_decided_alone() -> anyhow::Result<()> {
     let Some(rig) = Rig::new().await? else {
@@ -372,8 +372,8 @@ async fn the_aligner_leaves_a_binding_the_ontology_decided_alone() -> anyhow::Re
     rig.cleanup().await
 }
 
-/// 关系改了名，本体判的行就像代理的一样重判：签名送去问模型。端点不通——这一轮记失败、再排；
-/// 本体还认的行不会走到这一步（上一条）
+/// A relation was renamed, so rows judged by the ontology are re-judged like the agent's: the signatures are sent to ask the model. An unreachable endpoint -- this round records a failure and queues again;
+/// rows the ontology still recognizes do not reach this step (the previous one)
 #[tokio::test]
 async fn a_renamed_relation_sends_the_ontology_binding_back_to_the_aligner() -> anyhow::Result<()> {
     let Some(rig) = Rig::new().await? else {
@@ -392,8 +392,8 @@ async fn a_renamed_relation_sends_the_ontology_binding_back_to_the_aligner() -> 
     rig.cleanup().await
 }
 
-/// 状态关系本体不判：绑上它还得说只带一个日期的陈述那个日期标哪一端，那是对齐器的题——
-/// 它绑上、顺带问这一格，问不到的进队列等人。同一个库里那条不是状态的照样绑上
+/// State relations are not judged by the ontology: binding one also needs to say which end the date of a statement carrying only one date is labelled, and that is an aligner question --
+/// it binds, and asks this slot along the way; what it cannot answer goes to the queue for a person. A non-state one in the same database is bound as usual
 #[tokio::test]
 async fn a_pushed_phrase_equal_to_a_declared_state_relation_is_left_to_the_aligner(
 ) -> anyhow::Result<()> {
@@ -429,8 +429,8 @@ async fn a_pushed_phrase_equal_to_a_declared_state_relation_is_left_to_the_align
     rig.cleanup().await
 }
 
-/// 本体判的绑定，关系不再声明它（这里是域收窄到别的类）就和代理的判定一样重判：这条签名
-/// 没了候选，对齐器不问模型就记成 none，物化收回那一行。端点不通——真问了，这一轮会记失败、再排
+/// A binding judged by the ontology, when the relation no longer declares it (here the domain was narrowed to another class), is re-judged just like the agent's: this signature
+/// has no candidates left, so the aligner records none without asking the model, and materialization retracts that row. Endpoint unreachable -- if asked, this round records a failure and queues again
 #[tokio::test]
 async fn an_ontology_binding_is_redecided_once_the_relation_stops_declaring_it(
 ) -> anyhow::Result<()> {
@@ -469,8 +469,8 @@ async fn an_ontology_binding_is_redecided_once_the_relation_stops_declaring_it(
     rig.cleanup().await
 }
 
-/// 推送完一篇，本体判过的签名就不再算「待判」（#1296）：后面每一篇推送都落在同几条签名上，
-/// 为它们数一遍全库的开放陈述是推送时数据库最贵的一笔。没有判定的那条照样待判
+/// After a document is pushed, signatures the ontology has judged no longer count as "pending" (#1296): every later push lands on the same few signatures,
+/// and counting open statements across the whole database for them is the most expensive thing a push does. A signature without a judgment still counts as pending
 #[tokio::test]
 async fn a_signature_the_ontology_already_bound_is_not_undecided() -> anyhow::Result<()> {
     let Some(rig) = Rig::new().await? else {
@@ -496,8 +496,8 @@ async fn a_signature_the_ontology_already_bound_is_not_undecided() -> anyhow::Re
     rig.cleanup().await
 }
 
-/// 本体判不了的签名也不算「待判」（#1296）：短语叫得出关系、两端的类却不在它的域与值域里，
-/// `bind_declared` 什么也写不下，为它数一遍全库的签名是白数。判不判得了只看签名的键
+/// Signatures the ontology cannot judge also do not count as "pending" (#1296): the phrase names a relation, but the classes at its ends are not in its domain and range,
+/// so `bind_declared` writes nothing; counting signatures across the whole database for them is wasted. Whether one can be judged depends only on the signature's key
 #[tokio::test]
 async fn a_signature_the_ontology_cannot_bind_is_not_undecided() -> anyhow::Result<()> {
     let Some(rig) = Rig::new().await? else {

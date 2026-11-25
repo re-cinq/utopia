@@ -1,5 +1,5 @@
-//! 提规则与读数走脚本化的模型端点：提案落到队列，读数落进缓存并解析成库里的实体，
-//! 然后排物化。没有 `UTOPIA_DATABASE_URL` 时跳过。
+//! Rule proposals and readings go through a scripted model endpoint: proposals land in the queue, readings land in the cache and resolve to entities in the KB,
+//! and then materialization is queued. Skipped when there is no `UTOPIA_DATABASE_URL`.
 use super::*;
 use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
 use serde_json::{json, Value};
@@ -160,7 +160,7 @@ async fn a_kind_word_is_offered_and_the_model_proposes_a_rule() -> anyhow::Resul
             ("kind_word", Some("country_of_nationality"))
         );
         assert_eq!(rules[0].conclude_property_id, f.country_of_origin);
-        // 队列里看得见
+        // Visible in the queue
         let items = utopia_store::alignment_queue::list(&f.pool, f.kb, 10, 0).await?;
         assert!(items
             .iter()
@@ -196,7 +196,7 @@ async fn read_phrases_fills_the_cache_names_a_thing_and_queues_the_materializati
         assert_eq!(name, "United Kingdom");
         let kinds: Vec<(String,)> = sqlx::query_as("SELECT kind FROM jobs WHERE payload->>'kb_id'=$1 AND status='queued'").bind(f.kb.to_string()).fetch_all(&f.pool).await?;
         assert_eq!(kinds, vec![(utopia_store::phrase_bindings::MATERIALIZE_KIND.to_string(),)]);
-        // 物化：一条隐含行
+        // Materialization: one implied row
         let o = utopia_store::materialize::materialize(&f.pool, f.kb).await?;
         assert_eq!(o.implied, 1);
         anyhow::Ok(())

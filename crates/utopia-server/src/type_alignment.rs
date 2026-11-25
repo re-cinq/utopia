@@ -1,21 +1,21 @@
-//! 类别词绑到类（0044 决定 3–4 的第一片：按签名绑定，签名 = 实体的类别词）。
+//! Binding category words to classes (first slice of 0044 decisions 3-4: binding by signature, where signature = the entity's category word).
 //!
-//! 开放抽取只记文档自己的类别词（`entities.specific_type`：company、person、「指标」），
-//! 不选类。类是本体的事，绑定是对齐的事：一个库里 distinct 的类别词就几十上百个，每个
-//! 只判一次——例句、它参与的关系短语、候选类的定义一起给模型，**两票一致**才绑，不一致
-//! 记成 undecided 留给审核（#725 队列 2），没有类对得上的记成 none 并按老流程提成
-//! 「建议加类」（`proposed_type` → 本体页采纳）。绑定存在 `type_bindings`，连同判定时给
-//! 模型看的候选类的指纹（`basis`：各自的 `updated_at` 与祖先闭包，0053 的类别词那一半）。
-//! 过期 = 按现在的类重算的指纹对不上，本体一改只重判对不上的。从前按时间戳判，看不见
-//! 两件事：模型答题期间改的定义（判定写在答完之后，时间戳说判定更新，#795），和不碰
-//! `updated_at` 的父边增删。绑上的类写到该类别词下每个实体的 `type_id`（`type_source =
-//! 'aligned'`，人定过类的不动），身份消解的按类圈范围随之恢复。
+//! Open extraction only records the document's own category words (`entities.specific_type`: company, person, "metric"),
+//! and does not pick classes. Classes are the ontology's business; binding is the alignment's: a KB has dozens or hundreds of distinct category words, each
+//! judged only once: example sentences, the relation phrases it takes part in, and the definitions of candidate classes go to the model together. A binding is made only when **both votes agree**; if they disagree,
+//! it is recorded as undecided for review (#725 queue 2); a word with no matching class is recorded as none and proposed as a new class by the old flow
+//! ("suggest adding a class", `proposed_type`, adopted from the ontology page). Bindings are stored in `type_bindings`, along with the fingerprint of the candidate classes
+//! shown to the model when it decided (`basis`: each one's `updated_at` and its ancestor closure, the category-word half of 0053).
+//! Expired = the fingerprint recomputed from the current classes does not match, so when the ontology changes only the mismatched ones are re-judged. Previously this was judged by timestamp, which could not see
+//! two things: a definition changed while the model was answering (the decision is written after the answer, and the timestamp says the decision is newer, #795), and
+//! parent-edge additions and removals, which do not touch `updated_at`. A bound class is written to each entity's `type_id` under that category word (`type_source =
+//! 'aligned'`; classes a person set are left alone), and identity resolution's class-scoped range is restored along with it.
 //!
-//! 输入在调模型之前从一个快照里读齐；写判定时在同一事务里按当前的类再算一遍指纹，对不上
-//! 就不收这份回复、再排一轮（`type_bindings::decide_and_apply_if_current`）。
+//! Inputs are all read from one snapshot before the model is called; when writing the decision, the fingerprint is recomputed in the same transaction against the current classes, and if it does not match
+//! the reply is not accepted and another round is queued (`type_bindings::decide_and_apply_if_current`).
 //!
-//! 候选类怎么来：库配了嵌入模型就按类别词加例名检索最近的类；没配就在类不多时整表给；
-//! 类太多又没嵌入时不判——瞎判比不判糟。
+//! Where candidate classes come from: if the KB has an embedding model, retrieve the nearest classes by category word plus example names; if not, give the whole table when there are few classes;
+//! when there are too many classes and no embeddings, do not judge at all: a bad guess is worse than no guess.
 
 use crate::extraction::chat_retrying_rate_limits_at;
 use crate::llm_util;
@@ -29,22 +29,22 @@ use utopia_extract::align::{
 use utopia_store::type_bindings::{self, Acceptance, Binding, KindWordSignature};
 use uuid::Uuid;
 
-/// 一次问多少个类别词。
+/// How many category words to ask about at once.
 const BATCH: usize = 20;
-/// 每个类别词给几个候选类。
+/// How many candidate classes to give each category word.
 const CANDIDATES: i64 = 10;
-/// 没有嵌入模型时，类不超过这个数就整表给。
+/// With no embedding model, the whole table is given when there are no more classes than this.
 const WHOLE_LIST_LIMIT: usize = 60;
 
-/// 一票：这个类别词选了哪个键（None = 没有类对得上）。
+/// One vote: which key this category word picked (None = no class matches).
 type Vote = Option<String>;
 
-/// 给一批类别词找候选类：有嵌入就检索，没有就整表（类少时）。返回每个签名的候选 id 列表。
+/// Find candidate classes for a batch of category words: retrieve by embedding if available, otherwise the whole table (when there are few classes). Returns each signature's candidate id list.
 ///
-/// 检索报错也退回整表，同短语那边：候选算在判定的指纹里，报错这一轮判的词恢复以后
-/// 指纹对不上、再问一轮。不退回的话，嵌入端点一直坏着时新来的词就永远没有类
+/// On a retrieval error, fall back to the whole table, same as for phrases: candidates are part of the judgment's fingerprint, and a word judged in an errored round
+/// has a mismatched fingerprint once recovered, so it is asked again next round. Without the fallback, while the embedding endpoint stayed broken, newly arrived words would never get a class
 ///
-/// 例外是余额用完：不退回整表，原样返回这个错，让这一轮失败一次并报警，而不是接着问、接着排队。
+/// The exception is an exhausted balance: do not fall back to the whole table; return this error as-is, so the round fails once and raises an alert, rather than continuing to ask and queue.
 async fn candidates_for(
     state: &AppState,
     kb_id: Uuid,
@@ -88,12 +88,12 @@ async fn candidates_for(
     Ok(out)
 }
 
-/// 两票是否一致：都选同一个键，或都说没有。
+/// Whether two votes agree: both pick the same key, or both say none.
 fn agree(a: &Vote, b: &Vote) -> bool {
     a == b
 }
 
-/// 日志里放得下的一段回复：空白折成一个空格，最多这么多字符。
+/// A snippet of the reply that fits in a log line: whitespace collapsed to one space, at most this many characters.
 const SNIPPET_CHARS: usize = 240;
 
 fn snippet(text: &str) -> String {
@@ -105,13 +105,13 @@ fn snippet(text: &str) -> String {
     out
 }
 
-/// 一轮里没判完的（调用失败、回复读不出、模型漏答）自己再排几次；超过这个数就等
-/// 下一篇文档或本体的改动再问。不设上限的话，温度为零下一段每次都读不出的回复会让
-/// 任务每隔几十秒把同一段提示词再送一遍，没有尽头
+/// Items in a round that were not decided (call failed, reply unreadable, model omitted them) are re-queued by the job itself up to this many times; past this count it waits
+/// for the next document or ontology change before asking again. Without a cap, a reply that is unreadable every time at temperature zero would have
+/// the job resend the same prompt every few dozen seconds, with no end
 const MAX_REASK: u32 = 3;
 
-/// 对一个库跑一遍：新出现的和过期的类别词各判一次，绑上的写类，没有的提成建议。
-/// `reask` 是这份任务已经是第几次自己排的（文档、建类排的是 0）。
+/// Runs once over a KB: category words that are new and those that have expired are each judged once; bound ones get their class written, and unbound ones are proposed as suggestions.
+/// `reask` is how many times this job has already queued itself (documents and class creation queue at 0).
 pub async fn align_types_reasking(state: &AppState, kb_id: Uuid, reask: u32) -> anyhow::Result<()> {
     let pool = &state.pool;
     let kb = utopia_store::kbs::get(pool, kb_id).await?;
@@ -120,9 +120,9 @@ pub async fn align_types_reasking(state: &AppState, kb_id: Uuid, reask: u32) -> 
         .ok_or_else(|| anyhow::anyhow!("Chat model not configured; cannot align kind words"))?;
     let client = llm_util::chat_client(&settings)
         .ok_or_else(|| anyhow::anyhow!("Chat model not configured; cannot align kind words"))?;
-    // 本体向量还在补：编辑器建了类先排 `embed_ontology` 再排这个任务，候选类按向量检索
-    // （`candidates_for`），没向量的类检索不到，现在判了它也不在候选里。等它收尾再来——
-    // 排一份半分钟后的，排着的至多一份。短语对齐等这个任务，所以顺序是向量 → 类别词 → 短语
+    // Ontology vectors are still being backfilled: the editor, on creating a class, queues `embed_ontology` before this job, and candidate classes are retrieved by vector
+    // (`candidates_for`); a class without a vector cannot be retrieved, so judging now would leave it out of the candidates. Come back once it finishes —
+    // queue one attempt half a minute later, at most one pending. Phrase alignment waits on this job, so the order is vectors → category words → phrases
     if utopia_store::jobs::pending_for_kb(pool, "embed_ontology", kb_id).await? {
         tracing::info!(%kb_id, "类别词对齐：本体向量还在补，半分钟后再看");
         let payload = if reask == 0 {
@@ -139,9 +139,9 @@ pub async fn align_types_reasking(state: &AppState, kb_id: Uuid, reask: u32) -> 
         .await?;
         return Ok(());
     }
-    // 一个库同时只跑一份：抽完每篇、建每个类都会排一次，排队去重只挡「排队中」的，
-    // 后一个开跑时前一个还在跑就并行了——实测种 14 个类跑出 14 份并行任务，把模型端点
-    // 打出 502。拿不到锁的直接退出，正在跑的那份会看到同一批词；本轮没判到的下一轮再来
+    // Only one run per KB at a time: it is queued every time a document is extracted or a class is created, and queue dedup only blocks "already queued",
+    // so if a run starts while the previous one is still running, they run in parallel. Measured: seeding 14 classes produced 14 parallel jobs, which
+    // hammered the model endpoint into 502s. A run that cannot get the lock exits; the one running will see the same batch of words; anything not judged this round comes up next round
     let mut guard = pool.acquire().await?;
     let locked: bool =
         sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtext('align_types'), hashtext($1))")
@@ -149,7 +149,7 @@ pub async fn align_types_reasking(state: &AppState, kb_id: Uuid, reask: u32) -> 
             .fetch_one(&mut *guard)
             .await?;
     if !locked {
-        // 正在跑的那份结束时会自己看一眼有没有新东西（见 align_types_locked 末尾）；这里不排
+        // The run in progress checks for new items itself when it ends (see the end of align_types_locked); no new run is queued here
         tracing::info!(%kb_id, "类别词对齐已有一份在跑，这次跳过");
         return Ok(());
     }
@@ -169,15 +169,15 @@ async fn align_types_locked(
     client: &utopia_llm::LlmClient,
 ) -> anyhow::Result<()> {
     let pool = &state.pool;
-    // 先把已绑上的类补到它的类别词下还没有类的实体上：判定落下时的投影只看得见那一刻
-    // 的实体，之后抽出来的（判定期间还在抽的那几篇）落成没有类的；这里每轮补一次，
-    // 短语对齐排在这之后，签名两端的类才是齐的
+    // First backfill bound classes onto entities under their category word that still have no class: the projection taken when a decision lands only sees the entities of that moment,
+    // and entities extracted afterward (the few documents still being extracted during the decision) land with no class; this refills them once per round,
+    // so phrase alignment, queued after this, sees classes on both ends of the signature
     let caught_up = type_bindings::apply_bound(pool, kb_id).await?;
     if caught_up > 0 {
         tracing::info!(%kb_id, entities = caught_up, "已绑上的类补到了后建的实体上");
     }
-    // 调模型之前在一个快照里读齐输入（#795）：类的定义、类的版本与父边、类别词、已有的
-    // 判定。分几次读的话，两次读之间提交的编辑会让提示词里的定义和指纹里的版本对不上
+    // Read all inputs from one snapshot before calling the model (#795): class definitions, class versions and parent edges, category words, and existing
+    // decisions. If read in several passes, an edit committed between two reads would leave the definition in the prompt and the version in the fingerprint out of step
     let (classes, snapshot, sigs, existing) = {
         let mut tx = pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -196,8 +196,8 @@ async fn align_types_locked(
     };
     let by_id: HashMap<Uuid, &EntityType> = classes.iter().map(|c| (c.id, c)).collect();
     let by_key: HashMap<&str, &EntityType> = classes.iter().map(|c| (c.key.as_str(), c)).collect();
-    // 每个活着的类别词此刻给模型看的候选与指纹。检索一轮只做一次：开跑时拿它决定判谁，
-    // 收尾时拿同一份候选、按重新读的类再算指纹，看跑着的时候有没有东西过期
+    // Candidates and fingerprints each live category word is shown to the model right now. Retrieval runs once per round: at the start it decides whom to judge,
+    // and at the end the same candidates are used to recompute the fingerprint against freshly read classes, to see whether anything expired while it was running
     let all: Vec<&KindWordSignature> = sigs.iter().collect();
     let considered: HashMap<String, (Vec<Uuid>, String)> = sigs
         .iter()
@@ -207,7 +207,7 @@ async fn align_types_locked(
             (s.kind_word.clone(), (c, basis))
         })
         .collect();
-    // 过期 = 存下的指纹和此刻的不一样（没有指纹的是这一列出现前判的，各重判一次）。人的判定不重判
+    // Expired = the stored fingerprint differs from the current one (rows with no fingerprint were decided before this column existed; each is judged again). Human decisions are not re-judged
     let todo: Vec<&KindWordSignature> = sigs
         .iter()
         .filter(|s| match existing.get(&s.kind_word) {
@@ -219,11 +219,11 @@ async fn align_types_locked(
         })
         .collect();
     let attempted: HashSet<String> = todo.iter().map(|s| s.kind_word.clone()).collect();
-    // 本轮写下的，或人已判过、代理不覆盖的。问了却没落下结论的不算，见收尾
+    // Written in this round, or already decided by a person and not overwritten by the agent. Asked but not concluded does not count; see the wrap-up
     let mut settled: HashSet<String> = HashSet::new();
     tracing::info!(%kb_id, kind_words = sigs.len(), to_decide = todo.len(), classes = classes.len(), "类别词对齐开始");
 
-    // 没有类可绑：每个词都是「没有」，并提成建议；类出现后候选变了，指纹对不上，它们会再交回来
+    // No class to bind to: every word is "none", and proposed as suggestions; once classes appear the candidates change and the fingerprint mismatches, so they come back again
     if classes.is_empty() {
         for s in &todo {
             let (candidates, basis) = &considered[&s.kind_word];
@@ -253,18 +253,18 @@ async fn align_types_locked(
     }
 
     let (mut bound, mut none, mut undecided, mut skipped) = (0usize, 0usize, 0usize, 0usize);
-    // 调用或解析失败的批次：这轮跳过，结束时自己再排一次，不等下一篇文档来排
+    // Batches that failed on call or parse: skipped this round, and queued again by the job itself at the end, not waiting for the next document to queue it
     let mut failed = 0usize;
-    // 问了、模型也答了、却没答到的词：两票缺一票就不下结论
+    // Words that were asked, and the model did answer, but did not answer both votes: with one vote missing, no conclusion is drawn
     let mut unanswered = 0usize;
-    // 模型答题期间候选类变了、回复没收下的词：它们答的是旧输入，收尾时再排一轮拿新的问
+    // Words whose candidate classes changed while the model was answering, so the reply was not accepted: they answered the old input, and at wrap-up another round is queued to ask again with the new one
     let mut moved = 0usize;
     for batch in todo.chunks(BATCH) {
         let cands: Vec<&[Uuid]> = batch
             .iter()
             .map(|s| considered[&s.kind_word].0.as_slice())
             .collect();
-        // 两票：第二票把候选倒过来给，防止「选第一个」这种顺序偏好冒充一致
+        // Two votes: the second one is given the candidates in reverse order, to keep an order preference like "pick the first" from passing as agreement
         let mut votes: Vec<(Vote, Vote)> = vec![(None, None); batch.len()];
         let mut answered = vec![(false, false); batch.len()];
         for pass in 0..2 {
@@ -304,7 +304,7 @@ async fn align_types_locked(
                     .await
                 {
                     Ok(r) => r,
-                    // 欠费让整轮失败一次、告警响起，不按 failed 记了再排（同短语对齐，#1360）
+                    // An overdue balance fails the whole round once and raises the alert; it is not recorded as failed and queued again (same as phrase alignment, #1360)
                     Err(e) if utopia_llm::out_of_credit(&e).is_some() => return Err(e),
                     Err(e) => {
                         tracing::warn!(%kb_id, error = %e, "类别词对齐调用失败，这一批留到下次");
@@ -322,9 +322,9 @@ async fn align_types_locked(
             };
             skipped += malformed;
             if choices.is_empty() {
-                // 解出来了却一对都没读到：回复的形状不是我们认得的。这和解析失败是一回事，
-                // 按失败算、留到下次。从前这里什么都不说，一个库连着十几轮一个词都没绑上，
-                // 日志里只有一串「完成 bound=0」——回复的开头要进日志，下次才知道它长什么样
+                // Parsed out, but not one pair was read: the reply's shape is not one we recognize. This is the same as a parse failure, so it counts as failed and is left for next time.
+                // Before, nothing was said here, and a KB went through a dozen-plus rounds without binding a single word; the log held only a string of "done bound=0".
+                // The start of the reply must go into the log, so next time it is known what it looks like
                 tracing::warn!(
                     %kb_id,
                     pass,
@@ -362,7 +362,7 @@ async fn align_types_locked(
             let (a, b) = &votes[i];
             let (ans_a, ans_b) = answered[i];
             if !ans_a || !ans_b {
-                // 有一票没答到：不下结论，下次再问
+                // One vote unanswered: draw no conclusion, ask again next time
                 unanswered += 1;
                 continue;
             }
@@ -423,11 +423,11 @@ async fn align_types_locked(
     if bound + none + undecided > 0 {
         state.emit_graph(kb_id);
     }
-    // 同短语对齐：来了没试过的新词、本轮判完的又过期了，就再排一次（从头算一份，
-    // 新词换了提示词）。「过期」不限本轮判的，跑着时改的类也要让老绑定再判一次——比的
-    // 是按**重新读**的类算出来的指纹（候选沿用开跑时检索的那份）。本轮问了却没落下结论
-    // 的词不在这里算：调用失败、读不出、漏答、没有候选的走下面有上限的再问；算进来的话，
-    // 一个永久报错的端点会让任务一轮接一轮立刻重排
+    // Same as phrase alignment: if new words that were never tried arrive, or words judged this round have expired, queue another round (built from scratch,
+    // the new words get a new prompt). "Expired" is not limited to what was judged this round: classes changed while it was running must also make the old bindings be judged again. The comparison
+    // is against the fingerprint computed from the **re-read** classes (candidates reuse the set retrieved when the run started). Words asked this round without reaching a conclusion
+    // are not counted here: call failure, unreadable, omitted, or no candidates go through the capped retry below; if counted in,
+    // a permanently erroring endpoint would have the job re-queue round after round at once
     let changed = moved > 0 || {
         let now = type_bindings::class_snapshot(pool, kb_id).await?;
         let decided: HashMap<String, Binding> = type_bindings::bindings(pool, kb_id)
@@ -452,8 +452,8 @@ async fn align_types_locked(
     finish(state, kb_id, reask, changed, failed, unanswered).await
 }
 
-/// 一轮的收尾：有新活就立刻再排一轮；没判完的延时再问，次数有上限；不再排自己时才排
-/// 短语对齐。
+/// Wrap-up of a round: if there is new work, queue another round at once; those not yet judged are asked again after a delay, with a capped number of times; queue
+/// phrase alignment only when it does not queue itself.
 async fn finish(
     state: &AppState,
     kb_id: Uuid,
@@ -463,14 +463,14 @@ async fn finish(
     unanswered: usize,
 ) -> anyhow::Result<()> {
     let pool = &state.pool;
-    // 本轮没判完的（调用失败、回复读不出、模型漏答了几个 id）自己再排，最多 MAX_REASK 次，
-    // 每次多等一会。从前只有失败的批次会再排，漏答的词就只能等下一篇文档来排——最后
-    // 一篇之后没有下一篇，它们就永远没有结论；而漏答不写任何行，本体页也看不见
+    // Whatever was not judged this round (call failed, reply unreadable, model omitted some ids) is queued again by itself, at most MAX_REASK times,
+    // waiting a bit longer each time. Before, only failed batches were re-queued, and omitted words could only wait for the next document to queue them, so after the last
+    // document there was no next one, and they never reached a conclusion; an omission writes no row, so the ontology page could not see it either
     let unfinished = failed > 0 || unanswered > 0;
-    // 还有下一轮（来了新词、有过期的，或没判完要再问）就先不排短语对齐：两端的类还在变，
-    // 这时判的签名指纹一变就得重判——100 篇的一次跑里，短语对齐第一轮判的 1010 条签名
-    // 里有 713 条因为类别词第二轮改了类而重判。最后一轮（不再排自己）才排它；再问的
-    // 次数用尽那一支也排：判定不会再变了
+    // If there is another round (new words arrived, something has expired, or undecided ones must be asked again), do not queue phrase alignment yet: the two ends' classes are still changing,
+    // and a phrase signature judged now would have to be judged again once they change. In one 100-document run, 1010 phrase signatures judged in round one
+    // included 713 re-judged because a category word changed class in round two. Only the last round (when it does not queue itself) queues it; and the branch where
+    // the re-ask count is exhausted also queues it: the decisions will not change any more
     let mut another_round = false;
     if changed {
         utopia_store::jobs::enqueue_unless_queued(
@@ -494,7 +494,7 @@ async fn finish(
     } else if unfinished {
         tracing::warn!(%kb_id, failed, unanswered, reask, "类别词对齐问了几轮仍没判完，等下一篇文档或本体改动再问");
     }
-    // 两端的类定了，短语的签名才定：短语对齐排在类别词对齐**收尾**之后
+    // Phrase signatures are only fixed once the classes at both ends are fixed: phrase alignment is queued after category-word alignment **finishes**
     if !another_round {
         utopia_store::jobs::enqueue_unless_queued(
             pool,

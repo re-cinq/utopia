@@ -1,7 +1,7 @@
-//! Databricks SQL Statement Execution API（`/api/2.0/sql/statements`）。
-//! 一个 SQL warehouse 后面是 Unity Catalog 的整个湖仓（Delta 为主），
-//! 令牌是 personal access token。结果要 INLINE + JSON_ARRAY：值全是字符串，
-//! 按 manifest 里的列类型还原成数与布尔。
+//! Databricks SQL Statement Execution API (`/api/2.0/sql/statements`).
+//! Behind a SQL warehouse sits the whole Unity Catalog lakehouse (mainly Delta),
+//! and the token is a personal access token. Results are fetched as INLINE + JSON_ARRAY: every value is a string,
+//! restored to numbers and booleans per the column types in the manifest.
 
 use super::conn::DatabricksConn;
 use super::{
@@ -39,11 +39,11 @@ struct StatusError {
 #[derive(Deserialize)]
 struct Manifest {
     schema: Option<Schema>,
-    /// INLINE disposition with a `row_limit` set：true 表示结果按行截断。
-    /// schema 读不传 row_limit，理论上不会触发；留着做显式 fail-fast 而不是静默返回
-    /// 不全的数据
+    /// INLINE disposition with a `row_limit` set: true means the result was cut off by rows.
+    /// The schema read passes no row_limit, so in theory this never fires; it is kept as an explicit fail-fast rather than silently returning
+    /// incomplete data
     truncated: Option<bool>,
-    /// 整个结果集的总行数（chunked INLINE 时也有）。schema 读完后用来校验
+    /// Total row count of the whole result set (also present for chunked INLINE). Used after the schema read to validate
     /// `rows.len() == total_row_count`
     total_row_count: Option<u64>,
 }
@@ -62,8 +62,8 @@ struct ColumnInfo {
 #[derive(Deserialize)]
 struct ResultData {
     data_array: Option<Vec<Vec<serde_json::Value>>>,
-    /// 首块在 StatementResponse.result 里，后续 GET 直接返回这个对象。
-    /// 链接由服务端给出，路径与查询串都要原样带到下一次请求。
+    /// The first chunk is in StatementResponse.result; later GETs return this object directly.
+    /// The server supplies the link, and both the path and the query string must be carried to the next request unchanged.
     next_chunk_internal_link: Option<String>,
 }
 
@@ -72,8 +72,8 @@ impl DatabricksEngine {
         Self { conn }
     }
 
-    /// information_schema.columns 的候选写法 `(说明, SQL)`，说明只用来报错。
-    /// 没有 catalog 时只剩一条：会话默认那份。
+    /// Candidate forms of the information_schema.columns query `(description, SQL)`; the description is used only for error messages.
+    /// With no catalog only one remains: the session default one.
     fn schema_queries(&self) -> Vec<(&'static str, String)> {
         let schema_filter = self
             .conn
@@ -111,18 +111,18 @@ impl DatabricksEngine {
         }
     }
 
-    /// 提交一条语句，轮询到 SUCCEEDED，把结果拼成 (列名, 行值)。所有列值都按
-    /// manifest 的 `type_text` 还原成数或布尔。
+    /// Submits one statement, polls until SUCCEEDED, and assembles the result into (column names, row values). All column values are
+    /// restored to numbers or booleans per the manifest's `type_text`.
     ///
-    /// `row_limit`：传 `None` 表示不限行（schema 读用）。INLINE 的 JSON_ARRAY
-    /// 结果可能分成多块；首块之后通过 `next_chunk_internal_link`
-    /// 继续 GET，循环到 result 没有给出下一页为止。schema 读完后用
-    /// `manifest.total_row_count` 做一次 `rows.len()` 校验——少了就当结果不全
-    /// （docs 说 truncated=true 时另有标记，schema 读不该见到）
+    /// `row_limit`: pass `None` for no row limit (used by schema reads). An INLINE JSON_ARRAY
+    /// result may be split into chunks; after the first chunk, keep GETting through `next_chunk_internal_link`,
+    /// looping until the result gives no next page. After a schema read, do one `rows.len()` check against
+    /// `manifest.total_row_count`: if rows are missing, the result counts as incomplete
+    /// (docs mark truncated=true with another flag, which a schema read should never see)
     ///
-    /// 之前对所有语句都传 `row_limit: ROW_CAP + 1`（#703）：chat 查询需要这个
-    /// 安全阀，schema 读不需要；information_schema.columns 每行是一列，宽 catalog
-    /// 上的 schema 文档会被悄悄截到 201 行
+    /// Previously `row_limit: ROW_CAP + 1` was passed for every statement (#703): chat queries need it as a
+    /// safety valve, schema reads do not; information_schema.columns has one row per column, so schema docs on a wide catalog
+    /// were silently truncated at 201 rows
     async fn run(
         &self,
         sql: &str,
@@ -218,8 +218,8 @@ impl DatabricksEngine {
                     .collect()
             })
             .collect();
-        // manifest 描述整个结果集，下一块的链接却在 result 里。后续 GET 返回的
-        // 是 ResultData 本身，没有 statement/status/manifest 外壳。
+        // The manifest describes the whole result set, but the link to the next chunk is in result. Later GETs return
+        // ResultData itself, with no statement/status/manifest wrapper.
         let manifest = resp.manifest.as_ref();
         let truncated = manifest.and_then(|m| m.truncated).unwrap_or(false);
         if truncated {
@@ -233,8 +233,8 @@ impl DatabricksEngine {
             .and_then(|r| r.next_chunk_internal_link.clone());
         let base = reqwest::Url::parse(&self.conn.base)?;
         while let Some(link) = next_link.take() {
-            // internal_link 是相对于 workspace 的路径，不是可直接发给 reqwest 的
-            // URL。解析后还要留在同一 workspace，才可带着它的 bearer token 请求。
+            // internal_link is a path relative to the workspace, not a URL reqwest can send directly.
+            // After resolving it, it must stay on the same workspace so it can be requested with its bearer token.
             let url = base.join(&link)?;
             anyhow::ensure!(
                 url.origin() == base.origin(),
@@ -265,9 +265,9 @@ impl DatabricksEngine {
             }));
             next_link = chunk.next_chunk_internal_link;
         }
-        // schema 读按 docs 说不该见到 truncated=true；total_row_count 是每次都给的，
-        // 校验要放在所有 chunk 都收齐之后：第一次响应给的 total 是整个结果集的总数，
-        // 不是第一个 chunk 的总数
+        // Schema reads should not see truncated=true per the docs; total_row_count is given every time,
+        // so the check goes after all chunks are collected: the total in the first response is the count of the whole result set,
+        // not the count of the first chunk
         if let (Some(manifest), None) = (manifest, row_limit) {
             let expected = manifest.total_row_count;
             if let Some(expected) = expected {
@@ -283,8 +283,8 @@ impl DatabricksEngine {
     }
 }
 
-/// 引擎说的是「这个 catalog / 表不存在（或看不见）」。认的是 Databricks 的错误类名，
-/// 它们是协议的一部分（`[TABLE_OR_VIEW_NOT_FOUND] …`），不是措辞
+/// The engine says "this catalog / table does not exist (or is not visible)". It recognises Databricks' error class names, since they
+/// are part of the protocol (`[TABLE_OR_VIEW_NOT_FOUND] …`), not wording
 fn is_not_found(e: &anyhow::Error) -> bool {
     const CLASSES: [&str; 4] = [
         "TABLE_OR_VIEW_NOT_FOUND",
@@ -303,18 +303,18 @@ impl QueryEngine for DatabricksEngine {
     }
 
     async fn fetch_schema(&self) -> anyhow::Result<Vec<SchemaColumn>> {
-        // 两条候选，先准后全。真实集群上 `main`.information_schema.columns 回过
-        // TABLE_OR_VIEW_NOT_FOUND（#241），所以第一条**说找不到**时退到 system 那份。
+        // Two candidates, precise first and broad second. On a real cluster, `main`.information_schema.columns returned
+        // TABLE_OR_VIEW_NOT_FOUND (#241), so when the first one says **not found**, fall back to the system one.
         //
-        // 只有「找不到」才退：令牌不对、仓库停着、超时，换一条语句也还是这样，再跑一遍
-        // 只是让点按钮的人多等半分钟。退过去读到 0 行也算失败——两份 information_schema
-        // 都只列令牌看得见的对象，system 那份还不含 hive_metastore，看不见的 catalog
-        // 在那里是「成功地没有行」；当成功的话，结构文档会被一份空的覆盖掉。
-        // 失败时每条试过的写法连同引擎的原话都带上
+        // Fall back only on "not found": a wrong token, a stopped warehouse, or a timeout would fail the same way with another statement, and rerunning
+        // would only make the person who clicked the button wait another half minute. Reading 0 rows after falling back also counts as failure: both information_schema
+        // views list only objects the token can see, and the system one does not yet include hive_metastore, so an invisible catalog
+        // there reads as "successfully, no rows"; treating that as success would overwrite the structure document with an empty one.
+        // On failure, each form tried is included together with the engine's own words
         //
-        // row_limit 不传（#703）：information_schema.columns 每行是一列，宽 catalog
-        // 上的 schema 文档会被悄悄截到 201 行；现在 `run` 自己跟 `next_chunk_internal_link`
-        // 一直拉到 `manifest.total_row_count` 行，多分块也收齐
+        // row_limit is not passed (#703): information_schema.columns has one row per column, so on a wide catalog
+        // schema docs were silently truncated at 201 rows; now `run` itself follows `next_chunk_internal_link`
+        // until it reaches `manifest.total_row_count` rows, so multi-chunk results are collected in full
         let queries = self.schema_queries();
         let mut tried: Vec<String> = Vec::new();
         for (i, (label, sql)) in queries.iter().enumerate() {
@@ -431,7 +431,7 @@ mod tests {
         assert!(err.contains("TABLE_OR_VIEW_NOT_FOUND"), "{err}");
     }
 
-    /// catalog 级那份读不到（真实集群回过 TABLE_OR_VIEW_NOT_FOUND）时退到 system 那份。
+    /// If the catalog-level read fails (a real cluster returned TABLE_OR_VIEW_NOT_FOUND), fall back to the system one.
     #[tokio::test]
     async fn the_schema_read_falls_back_to_the_system_information_schema() {
         let server = MockServer::start().await;
@@ -487,7 +487,7 @@ mod tests {
         }))
     }
 
-    /// 两条都不通时，错误带上每一条试过的写法和它自己的原话。
+    /// When both fail, the error carries each form tried and its own wording.
     #[tokio::test]
     async fn two_dead_ends_say_which_ones_were_tried() {
         let server = MockServer::start().await;
@@ -518,7 +518,7 @@ mod tests {
         assert!(err.contains("second words"), "{err}");
     }
 
-    /// 令牌不对、仓库停着这类错误不是「找不到」：换一条语句也一样，只发一次
+    /// A wrong token or a stopped warehouse is not "not found": another statement would fail the same way, so send only once
     #[tokio::test]
     async fn an_error_that_is_not_a_missing_table_is_not_retried() {
         let server = MockServer::start().await;
@@ -538,8 +538,8 @@ mod tests {
         assert!(!err.contains("system information_schema"), "{err}");
     }
 
-    /// 退到 system 那份读到 0 行：看不见这个 catalog，或它不归 Unity Catalog 管。
-    /// 这是失败，不是一份空的结构——否则刷新会把原来的结构文档覆盖成空的
+    /// The fallback to the system one reads 0 rows: this catalog is not visible, or it is not managed by Unity Catalog.
+    /// This is a failure, not an empty structure, since otherwise a refresh would overwrite the existing structure document with an empty one
     #[tokio::test]
     async fn a_fallback_that_reads_no_columns_is_a_failure() {
         let server = MockServer::start().await;
@@ -575,11 +575,11 @@ mod tests {
         assert!(err.contains("cannot be found"), "{err}");
     }
 
-    /// 宽 catalog 上的 schema 读按 docs 走 INLINE 多分块：第一个 chunk 给
-    /// `next_chunk_internal_link`，按它 GET 到第二个 chunk，没有下一页就停。
-    /// 之前对所有语句都传 row_limit=201（#703），宽 catalog 上 information_schema.columns
-    /// 一行一列，每张表第一个 200 列之后的列就被丢掉了；现在 `fetch_schema` 不传
-    /// row_limit，分块之间按 link 拉齐
+    /// A schema read on a wide catalog uses INLINE multi-chunk per the docs: the first chunk gives
+    /// `next_chunk_internal_link`; GET it to reach the second chunk, and stop when there is no next page.
+    /// Previously row_limit=201 was passed for every statement (#703), so on a wide catalog information_schema.columns
+    /// has one row per column, and each table's columns after the first 200 were dropped; now `fetch_schema` passes no
+    /// row_limit and pulls all chunks following the link
     #[tokio::test]
     async fn a_schema_read_follows_chunks_until_exhausted() {
         let server = MockServer::start().await;
@@ -778,8 +778,8 @@ mod tests {
         assert!(foreign.received_requests().await.unwrap().is_empty());
     }
 
-    /// 跑 chat 查询时（带 row_limit），服务端真的把行砍了：manifest.truncated=true
-    /// 应当直接失败，而不是带着 < ROW_CAP 行假装「查询成功」
+    /// When a chat query runs (with row_limit), the server really cuts rows: manifest.truncated=true
+    /// should fail directly, rather than pretending "query succeeded" with fewer than ROW_CAP rows
     #[tokio::test]
     async fn a_chat_query_bails_loudly_when_the_service_says_truncated() {
         let server = MockServer::start().await;
@@ -810,8 +810,8 @@ mod tests {
         assert!(err.contains("row_limit"), "{err}");
     }
 
-    /// schema 读 manifest 报的 total_row_count 跟实际收到的行数对不上——服务端
-    /// 偷偷改 protocol，或中途丢包：fail-fast，免得把残缺的 schema 灌进结构文档
+    /// The schema read's total_row_count from the manifest does not match the rows actually received: the server
+    /// silently changed the protocol, or dropped packets midway. Fail fast, so an incomplete schema is not fed into the structure document
     #[tokio::test]
     async fn a_schema_read_fails_when_total_row_count_does_not_match() {
         let server = MockServer::start().await;
@@ -848,9 +848,9 @@ mod tests {
         assert!(err.contains("99"), "{err}");
     }
 
-    /// 401/403 一类：token 失效或 PAT 撤销。`error_for_status()` 会把非 2xx
-    /// 抛成 reqwest 错误——表现上等价「连接失败 / 鉴权失败」。把这层向上层送
-    /// 调用者时仍可分辨：「reqwest」还是业务 message 的边界
+    /// 401/403 class: the token has expired or the PAT was revoked. `error_for_status()` turns non-2xx
+    /// into a reqwest error, which looks like "connection failed / auth failed". Passing this layer up to the caller
+    /// while still telling "reqwest" apart from a business message is the boundary
     #[tokio::test]
     async fn an_unauthorized_http_status_is_surfaced_as_a_connection_error() {
         let server = MockServer::start().await;
@@ -864,13 +864,13 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        // reqwest 的 error_for_status 把 status 包成 builder 错误；我们要确保
-        // 调用者看到的是 HTTP 401 字样，不是「Snowflake: …」的错形态
+        // reqwest's error_for_status wraps the status in a builder error; make sure
+        // the caller sees "HTTP 401", not the malformed "Snowflake: …" shape
         assert!(err.contains("401"), "{err}");
     }
 
-    /// 5xx 一类（warehouse suspended / cluster down）走同一条 error_for_status
-    /// 路径——表面上仍是 reqwest 错误，需要可识别的 status code
+    /// 5xx class (warehouse suspended / cluster down) goes through the same error_for_status
+    /// path: on the surface it is still a reqwest error, and it needs a recognizable status code
     #[tokio::test]
     async fn a_5xx_response_is_surfaced_with_status_code() {
         let server = MockServer::start().await;
@@ -890,9 +890,9 @@ mod tests {
         assert!(err.contains("503"), "{err}");
     }
 
-    /// 用户主动取消（cancel button 或 stmt cancellation）是 Databricks 的合法
-    /// 状态：`CANCELED`。业务错误带 message 后应能让上层识别这是「取消」
-    /// 而不是「失败」，所以 message 应完整透传
+    /// A user-initiated cancel (cancel button or statement cancellation) is a legitimate Databricks
+    /// state: `CANCELED`. Once the business error carries a message, the caller should be able to tell it is "cancelled"
+    /// rather than "failed", so the message must be passed through in full
     #[tokio::test]
     async fn a_canceled_statement_carries_a_distinct_message() {
         let server = MockServer::start().await;
@@ -913,8 +913,8 @@ mod tests {
         assert!(err.contains("canceled by user"), "{err}");
     }
 
-    /// PENDING 响应里若缺失 `statement_id`，现有逻辑会以「Databricks returned
-    /// no statement_id」抛出——把这条兜底钉住，免得一改 polling 就把它吞掉
+    /// If `statement_id` is missing from a PENDING response, the existing logic throws "Databricks returned
+    /// no statement_id"; pin that fallback so that changing polling does not swallow it
     #[tokio::test]
     async fn pending_state_without_statement_id_is_surfaced() {
         let server = MockServer::start().await;
@@ -936,8 +936,8 @@ mod tests {
         );
     }
 
-    /// `SUCCEEDED` 但 `result.data_array` 是空（0 行查询 / DDL 走过 execute 路径），
-    /// rows 取 []、columns 也取空向量——`rows_to_json_lines` 仍要返回空集、不崩
+    /// `SUCCEEDED` but `result.data_array` is empty (a 0-row query / DDL taking the execute path),
+    /// rows are [] and columns is an empty vector too: `rows_to_json_lines` must still return an empty set without crashing
     #[tokio::test]
     async fn a_succeeded_statement_with_no_rows_returns_empty() {
         let server = MockServer::start().await;

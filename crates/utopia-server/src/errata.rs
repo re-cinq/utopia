@@ -1,12 +1,12 @@
-//! 勘误 agent（0044 决定 7，第六刀）：抽取之后按文档复审类型化图谱。
+//! Errata agent (0044 decision 7, sixth slice): after extraction, re-review the typed graph against the document.
 //!
-//! 一份文档一次：结构报了的事实先送去看，其余抽样；一次请求最多 [`FACTS_PER_REQUEST`] 条，
-//! 一份文档最多 [`REQUESTS_PER_DOCUMENT`] 次——这就是「按文档的预算」。模型走 JSON 动作
-//! 协议（`utopia_extract::errata`），每一笔在库里记成动作（`utopia_store::errata`），撤、改、
-//! 加带着文档的原话；会牵动图外东西的留给人（0027 的闸门）。
+//! Per document, once: facts the structure flagged are sent for review first, and the rest are sampled; one request carries at most [`FACTS_PER_REQUEST`] facts,
+//! and a document gets at most [`REQUESTS_PER_DOCUMENT`] requests. This is the "per-document budget". The model uses the JSON action
+//! protocol (`utopia_extract::errata`), and each decision is recorded in the store as an action (`utopia_store::errata`). Retract, change,
+//! and add carry the document's own wording; anything that affects things outside the graph is left to a person (the gate of 0027).
 //!
-//! 度量记在 `errata_runs` 上：看了几条、问了几次、端点报的 token。精度换了多少、撤错了多少，
-//! 由 typed 基准拿这些数与评判比出来。
+//! Metrics are recorded on `errata_runs`: how many facts were looked at, how many questions were asked, and the tokens the endpoint reported. How much precision
+//! was gained and how many wrong retractions were made is worked out by the typed benchmark from these numbers and the judgments.
 
 use std::collections::HashMap;
 use utopia_extract::errata::{
@@ -20,20 +20,20 @@ use crate::extraction::chat_retrying_rate_limits_at;
 use crate::llm_util;
 use crate::state::AppState;
 
-/// 一次任务最多看几份文档；还有剩的再排一次
+/// Maximum documents a job looks at; any left over are queued again
 pub const DOCS_PER_JOB: i64 = 20;
-/// 一份文档最多送去看几条：结构报的先占，抽样的补到这个数
+/// Maximum facts sent for one document: those the structure flagged take the slots first, and the sample fills up to this number
 pub const FACTS_PER_DOCUMENT: usize = 40;
-/// 抽样最多几条（没报的）
+/// Maximum number of sampled facts (those not flagged)
 pub const SAMPLE: usize = 10;
-/// 一次请求最多几条
+/// Maximum facts per request
 pub const FACTS_PER_REQUEST: usize = 20;
-/// 一份文档最多问几次（撤改的第二票另算，每批至多一次）
+/// Maximum questions asked per document (the second vote on retract/change is counted separately, at most once per batch)
 pub const REQUESTS_PER_DOCUMENT: usize = 2;
-/// 正文最多带多少字；再长的文档截断，截掉的部分这一轮看不到
+/// Maximum characters of body text carried; longer documents are truncated, and the cut-off part is not visible in this round
 pub const DOC_CHARS: usize = 16_000;
 
-/// 一份文档看完的账
+/// The tally for a document once reviewed
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DocumentOutcome {
     pub reviewed: usize,
@@ -43,7 +43,7 @@ pub struct DocumentOutcome {
     pub requests: usize,
 }
 
-/// `errata_review` 任务：有类型化行还没看过的文档，一份一份看；看不完再排一次
+/// `errata_review` job: documents with typed rows not yet reviewed are reviewed one at a time; if not all are done, it is queued again
 pub async fn review(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
     let pool = &state.pool;
     let due = errata::documents_due(pool, kb_id, DOCS_PER_JOB).await?;
@@ -122,7 +122,7 @@ pub async fn review(state: &AppState, kb_id: Uuid) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 一份文档：挑要看的，按预算问，每一票记一笔
+/// One document: pick what to look at, ask within budget, and record each vote
 pub async fn review_document(
     state: &AppState,
     settings: &utopia_core::models::LlmSettings,
@@ -135,7 +135,7 @@ pub async fn review_document(
     let all = errata::candidates(pool, kb_id, document_id).await?;
     let chosen = choose(&all);
     let mut outcome = DocumentOutcome::default();
-    // 没有可看的行：第一次见这份文档就送一份空清单去（agent 只能加）；看过的不再送
+    // No rows to look at: the first time a document is seen, send an empty list (the agent can only add); documents already reviewed are not sent again
     if chosen.is_empty() && errata::runs_of(pool, document_id).await? > 0 {
         return Ok(outcome);
     }
@@ -150,8 +150,8 @@ pub async fn review_document(
     .await?;
     let text = errata::document_text(pool, document_id).await?;
     let document = truncate(&text, DOC_CHARS);
-    // 属性表按这份文档裁：整份本体每次都带是勘误一次请求 4.7k token 里的 4k（bench README，
-    // 2026-09-24）。文档的向量取最近的几十条，再并上清单里事实已用的属性；没有向量就带全部
+    // The property table is trimmed to this document: carrying the whole ontology each time is 4k of the 4.7k tokens in an errata request (bench README,
+    // 2026-09-24). The document's vectors pick the nearest few dozen, plus the properties already used by facts in the list; with no vectors, all are carried
     let glossary = shortlist_glossary(state, settings, kb_id, document, glossary, &chosen).await;
     let glossary = &glossary[..];
     let (mut prompt_tokens, mut completion_tokens, mut saw_usage) = (0u64, 0u64, false);
@@ -206,8 +206,8 @@ pub async fn review_document(
             tracing::info!(%kb_id, %document_id, malformed = parsed.malformed,
                 additions_refused = parsed.additions_refused, "勘误回复里有坏项");
         }
-        // 第二票：结构报了的、agent 要撤或改的，再问一遍文档说了没有；没拿到 not_stated 的
-        // 改成 keep（没报的那些由库留给人，不用问）
+        // Second vote: for facts the structure flagged that the agent wants to retract or change, ask again whether the document says so; any that did not get not_stated
+        // are changed to keep (the ones not flagged are left to a person by the library, so they are not asked about)
         let mut verdicts = parsed.verdicts;
         let doubted: Vec<ErrataFact<'_>> = verdicts
             .iter()
@@ -318,11 +318,11 @@ pub async fn review_document(
     }
 }
 
-/// 勘误一次请求带多少条属性（有向量时）
+/// Number of properties carried per errata request (when vectors are present)
 const GLOSSARY_NEAREST: i64 = 24;
 
-/// 这份文档看得到的属性：向量最近的 [`GLOSSARY_NEAREST`] 条，加上清单里事实已经用的。
-/// 没配嵌入模型、属性没向量、嵌入失败：全部
+/// Properties this document can see: the nearest [`GLOSSARY_NEAREST`] by vector, plus those already used by facts in the list.
+/// With no embedding model, no vectors on the properties, or embedding failure: all of them
 async fn shortlist_glossary<'a>(
     state: &AppState,
     settings: &utopia_core::models::LlmSettings,
@@ -364,7 +364,7 @@ async fn shortlist_glossary<'a>(
         .collect()
 }
 
-/// keep 落地不算「动了图」；撤改加落地算
+/// A keep being applied does not count as "touching the graph"; retract, change and add being applied does
 fn count(o: &mut DocumentOutcome, status: &str, verdict: &Verdict) {
     match status {
         "applied" if *verdict != Verdict::Keep => o.applied += 1,
@@ -374,7 +374,7 @@ fn count(o: &mut DocumentOutcome, status: &str, verdict: &Verdict) {
     }
 }
 
-/// 结构报了的全要（到上限为止），没报的抽前几条补上
+/// All that the structure flagged (up to the cap), then the first few not flagged to fill the rest
 fn choose(all: &[Candidate]) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = all
         .iter()

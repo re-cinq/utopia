@@ -1,18 +1,18 @@
-//! 混合检索：BM25（Tantivy）+ 向量（pgvector）→ RRF 融合。
-//! embedding 未配置或请求失败时静默降级为纯 BM25。
+//! Hybrid retrieval: BM25 (Tantivy) + vectors (pgvector), fused by RRF.
+//! When embedding is not configured or the request fails, it silently degrades to pure BM25.
 //!
-//! **`as_of` 只在向量与取块这两处是完整的**（0019 开放问题②）。Tantivy 的索引
-//! 只有"现在"一个版本：重解析会把文档的块整批换掉，旧版本不在索引里。所以
-//! 带时刻检索时，BM25 找回来的东西**是对的**（随后按当时的活性过滤），但它
-//! 找不回当时有、如今已被顶掉的那些块——召回缺一角，命中不会出错。
-//! 要补那一角得给全文索引也建版本，那是另一件事，不在这一刀里。
+//! **`as_of` is complete only for the vector and chunk-fetch steps** (0019 open question ②). The Tantivy index
+//! holds only one version, "now": re-parsing replaces a document's chunks in one batch, and old versions are not in the index. So
+//! when retrieving at a moment, what BM25 finds back **is correct** (then filtered by the liveness at that time), but it
+//! cannot find the chunks that existed at that time and have since been pushed out: recall is missing a corner, and hits are never wrong.
+//! Filling that corner means versioning the full-text index too, which is a separate job and not part of this change.
 //!
-//! **两路并行，BM25 在阻塞线程池上跑**（#515）。`SearchIndex::search` 是同步的：
-//! 切词、走 mmap 段、逐条取文档，跑多久就占一条 runtime 线程多久；仓库里另外六处
-//! Tantivy 调用都包了 `spawn_blocking`，这里是每次提问都走的最热一处，从前没包，
-//! 两核机器上两个人同时提问就把 SSE、健康检查一起卡住。两路从前还串着：BM25 跑完
-//! 才去调嵌入端点，嵌入回来才查向量，而嵌入是一次网络往返、整个函数最贵的一项，
-//! 跟 BM25 毫无依赖。并起来之后延迟是两路取大，不是相加。
+//! **The two channels run in parallel, with BM25 on the blocking thread pool** (#515). `SearchIndex::search` is synchronous:
+//! tokenising, walking mmap segments, fetching documents one by one, it holds a runtime thread for as long as it runs. The other six
+//! Tantivy calls in the repo are wrapped in `spawn_blocking`, and this is the hottest one, run on every question. Previously it was not wrapped, and
+//! on a two-core machine two people asking at once would stall SSE and health checks together. The two channels used to be chained in series: BM25 finished
+//! before calling the embedding endpoint, and only after the embedding came back was the vector queried. Yet embedding is a network round-trip and the most expensive item in the function,
+//! and it has no dependency on BM25. Running them together, latency is the larger of the two rather than their sum.
 
 use crate::llm_util;
 use crate::state::AppState;
@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 const RECALL_PER_CHANNEL: usize = 24;
 
-/// 翻页最深到第几条（#1271）：再深就是在拿检索当导出用
+/// How deep paging goes, to which result (#1271): any deeper and retrieval is being used as an export
 pub const MAX_DEPTH: usize = 100;
 
 pub struct SearchOpts {
@@ -34,24 +34,24 @@ pub struct SearchOpts {
     pub filter: Option<SourceFilter>,
 }
 
-/// 只检索一个来源的文档，给了 `key_prefix` 就只要 `external_key` 以它开头的（#1271）。
-/// 两路各在召回**之内**过滤：融合完再筛，库里别的命中早占满了每路的名额，页就短了
+/// Retrieve only documents from one source; if `key_prefix` is given, only those whose `external_key` starts with it (#1271).
+/// Each channel filters **within** recall: filtering after fusion means other hits in the library have already filled each channel's quota, so the page comes out short
 pub struct SourceFilter {
     pub source_id: Uuid,
     pub key_prefix: Option<String>,
 }
 
-/// 一条命中连同它的分数（#1271）。`score` 是 RRF 总分，只在同一次查询里能排先后，
-/// 跨查询不可比；两个名次从 1 数，没进那一路是 None
+/// One hit together with its score (#1271). `score` is the RRF total, which only orders results within the same query;
+/// it is not comparable across queries. Ranks count from 1; None means the hit did not appear in that channel
 #[derive(Debug, Serialize)]
 pub struct ScoredChunk {
     #[serde(flatten)]
     pub chunk: SourcedChunk,
-    /// 推送来源的文档才有：推送方给的那个 id，好让它拿回去对自己的记录
+    /// Only present for documents from a push source: the id the pushing party gave, so it can match its own record
     pub external_id: Option<String>,
     pub score: f64,
-    /// 来自一个会衰减的源、且久没被检索：分已经乘过 [`utopia_store::decay::STALE_SEARCH_WEIGHT`]。
-    /// 不衰减的库这一格永远是 false，不进响应
+    /// From a source that decays and has not been searched for a long time: its score has already been multiplied by [`utopia_store::decay::STALE_SEARCH_WEIGHT`].
+    /// For libraries without decay this cell is always false and is not in the response
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stale: bool,
     pub bm25_rank: Option<u32>,
@@ -62,7 +62,7 @@ pub struct ScoredChunk {
 pub struct SearchPage {
     pub results: Vec<ScoredChunk>,
     pub has_more: bool,
-    /// 向量那一路跑了没有；false 就是模块头说的静默降级
+    /// Whether the vector channel ran at all; false is the silent degradation the module header describes
     pub vector_used: bool,
 }
 
@@ -95,9 +95,9 @@ pub async fn hybrid(
         .collect())
 }
 
-/// 一页命中（#1271）。每一页都向每路要同样的 `MAX_DEPTH` 条，所以各页切的是
-/// 同一张融合表：页与页不重不漏。到了 `MAX_DEPTH` 的那一页没有下一页（再翻就是 422），
-/// `has_more` 是 false
+/// One page of hits (#1271). Every page asks each channel for the same `MAX_DEPTH` items, so the pages slice
+/// the same fused table: no repeats and no gaps between pages. The page that reaches `MAX_DEPTH` has no next page (paging further is a 422),
+/// so `has_more` is false
 pub async fn hybrid_scored(
     state: &AppState,
     kb_id: Uuid,
@@ -146,7 +146,7 @@ pub async fn hybrid_scored(
     })
 }
 
-/// 每一路怎么召回：取几条、按哪一刻、只在哪些文档里（None 即全库）
+/// How each channel recalls: how many items it takes, at which moment, and only from which documents (None means the whole library)
 #[derive(Clone, Copy)]
 struct Recall<'a> {
     per_channel: usize,
@@ -154,7 +154,7 @@ struct Recall<'a> {
     documents: Option<&'a [Uuid]>,
 }
 
-/// 两路按 `recall` 各取一份、RRF 融合、按记录轴过滤后的整张表，连同向量那一路跑了没有
+/// The whole table after the two channels each take their share per `recall`, are fused by RRF, and are filtered by the record axis, together with whether the vector channel ran
 async fn fused_hits(
     state: &AppState,
     kb_id: Uuid,
@@ -173,8 +173,8 @@ async fn fused_hits(
         let limit = recall.per_channel;
         tokio::task::spawn_blocking(move || search.search(&kb, &query, limit, documents.as_deref()))
     };
-    // `join!` 不是 `try_join!`：向量那一路失败是降级不是错误（见 vector_channel），
-    // `try_join!` 会把模型故障变成检索报错
+    // `join!` is not `try_join!`: a failure in the vector channel is a degradation, not an error (see vector_channel),
+    // while `try_join!` would turn a model failure into a retrieval error
     let (bm25, vector) = tokio::join!(
         bm25,
         vector_channel(state, kb_id, workspace_id, query, recall, embeddings)
@@ -218,15 +218,15 @@ async fn fused_hits(
             })
         })
         .collect();
-    // 陈旧的先降分再翻页：久没人读的文档才可能被挤出这一页，而不是只在页内挪位置
+    // Stale ones are demoted before paging: only documents nobody has read for a long time can be pushed off this page, rather than merely moving within the page
     let document_ids: Vec<Uuid> = hits.iter().map(|hit| hit.chunk.chunk.document_id).collect();
     let stale = utopia_store::decay::stale_documents(&state.pool, &document_ids).await?;
     demote_stale(&mut hits, &stale);
     Ok((hits, vector_used))
 }
 
-/// 一次检索交出去的文档记一笔（RC-003）。放到后台写：失败只记日志，不拖慢也不打断这次读。
-/// 只有打开了衰减的源的文档会真的落行。
+/// Record one document handed out by a retrieval (RC-003). Written in the background: failures only log, and neither slows nor interrupts this read.
+/// Only documents from a source with decay switched on actually get a row.
 pub fn record_retrievals(state: &AppState, mut document_ids: Vec<Uuid>) {
     document_ids.sort_unstable();
     document_ids.dedup();
@@ -238,8 +238,8 @@ pub fn record_retrievals(state: &AppState, mut document_ids: Vec<Uuid>) {
     });
 }
 
-/// 陈旧文档的命中乘 [`utopia_store::decay::STALE_SEARCH_WEIGHT`] 后重排。没有陈旧的就不动，
-/// 排序稳定，同分仍按原来的先后。
+/// Hits of stale documents are multiplied by [`utopia_store::decay::STALE_SEARCH_WEIGHT`] and then re-sorted. If none are stale nothing is changed,
+/// and the sort is stable, so equal scores keep their original order
 fn demote_stale(hits: &mut [ScoredChunk], stale: &std::collections::HashSet<Uuid>) {
     if stale.is_empty() {
         return;
@@ -253,7 +253,7 @@ fn demote_stale(hits: &mut [ScoredChunk], stale: &std::collections::HashSet<Uuid
     hits.sort_by(|a, b| b.score.total_cmp(&a.score));
 }
 
-/// 第 `channel` 路里的名次，从 1 数
+/// The rank within channel `channel`, counted from 1
 fn position(ranks: &[Option<usize>], channel: usize) -> Option<u32> {
     ranks
         .get(channel)
@@ -262,12 +262,12 @@ fn position(ranks: &[Option<usize>], channel: usize) -> Option<u32> {
         .map(|rank| rank as u32 + 1)
 }
 
-/// 向量那一路。没配嵌入模型、嵌入请求失败、回了空，都是 `Ok(None)`：检索照常，
-/// 只剩 BM25——这就是模块头说的静默降级。向量查询本身失败仍是 `Err`：那是库的事，
-/// 不是模型的事，吞掉会把坏库伪装成没配模型。
+/// The vector channel. With no embedding model configured, an embedding request that fails, or an empty reply, all give `Ok(None)`: retrieval carries on
+/// with BM25 only, which is the silent degradation the module header describes. A failure of the vector query itself is still `Err`: that is the library's problem,
+/// not the model's, and swallowing it would disguise a broken library as "no model configured"
 ///
-/// 这一轮已经嵌过这句话（挑口径、按名字查实体都会嵌问题）就直接用那个向量，不再读
-/// 设置、不再调一次嵌入端点（#971 的后续）；新嵌成功的记进去给后面的用
+/// If this turn has already embedded this sentence (picking metric definitions and by-name entity lookups both embed the question), that vector is used directly: no settings are
+/// read again and the embedding endpoint is not called again (#971 follow-up); a newly embedded one that succeeds is recorded for the later steps
 async fn vector_channel(
     state: &AppState,
     kb_id: Uuid,
@@ -312,8 +312,8 @@ async fn vector_channel(
     Ok(Some(ids.into_iter().map(|id| id.to_string()).collect()))
 }
 
-/// 送进 RRF 的列表：BM25 恒在第一位，向量有就在第二位。顺序钉死、不看谁先回来——
-/// 今天的 RRF 不看顺序，将来若给通道加权就看了，不能让它取决于哪路网络快。
+/// The list fed into RRF: BM25 always first, the vector second if present. The order is fixed and does not depend on which returns first:
+/// today's RRF ignores order, but if channels are ever weighted it would matter, and it must not depend on which network path was faster
 fn channel_lists(bm25: Vec<String>, vector: Option<Vec<String>>) -> Vec<Vec<String>> {
     let mut lists = vec![bm25];
     if let Some(vector) = vector {
