@@ -646,7 +646,7 @@ pub async fn decide_proposal(
         .into());
     }
     if req.status != "rejected" {
-        return Err(AppError::invalid("bad_status", "status 只能是 rejected").into());
+        return Err(AppError::invalid("bad_status", "status can only be rejected").into());
     }
     utopia_store::ontology::reject_proposal(
         &state.pool,

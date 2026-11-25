@@ -817,7 +817,7 @@ pub async fn decide_violation(
     ) {
         return Err(utopia_core::AppError::invalid(
             "bad_resolution",
-            "resolution 只能是 fact_retracted、fact_closed、axiom_relaxed 或 accepted",
+            "resolution can only be fact_retracted, fact_closed, axiom_relaxed or accepted",
         )
         .into());
     }
@@ -843,7 +843,7 @@ pub async fn decide_violation(
             else {
                 return Err(utopia_core::AppError::invalid(
                     "fact_required",
-                    "这处违规涉及多条事实，要说撤哪一条，且只能是它列出的那几条",
+                    "this violation involves several facts: say which one to retract, and it must be one of those listed",
                 )
                 .into());
             };
@@ -874,7 +874,7 @@ pub async fn decide_violation(
             let Some(at) = req.close_at else {
                 return Err(utopia_core::AppError::invalid(
                     "close_at_required",
-                    "fact_closed 要给出结束日期",
+                    "fact_closed needs an end date",
                 )
                 .into());
             };
@@ -889,7 +889,7 @@ pub async fn decide_violation(
             if open.is_none() {
                 return Err(utopia_core::AppError::invalid(
                     "not_open",
-                    "这条断言已有结束日期，或已被撤",
+                    "this assertion already has an end date, or has been retracted",
                 )
                 .into());
             }
@@ -914,7 +914,7 @@ pub async fn decide_violation(
         (false, "fact_closed") => {
             return Err(utopia_core::AppError::invalid(
                 "bad_resolution",
-                "fact_closed 只用于 derived_contradiction",
+                "fact_closed is only for derived_contradiction",
             )
             .into());
         }
@@ -1020,7 +1020,7 @@ pub async fn decide_defect(
     if !matches!(req.resolution.as_str(), "fixed" | "accepted") {
         return Err(utopia_core::AppError::invalid(
             "bad_resolution",
-            "resolution 只能是 fixed 或 accepted",
+            "resolution can only be fixed or accepted",
         )
         .into());
     }

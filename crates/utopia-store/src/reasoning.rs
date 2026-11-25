@@ -966,7 +966,7 @@ pub async fn retract_from_violation(
     let Some(target) = pick_retraction(left, right, &path, requested) else {
         return Err(utopia_core::AppError::invalid(
             "fact_required",
-            "这处违规涉及多条事实，要说撤哪一条，且只能是它列出的那几条",
+            "this violation involves several facts: say which one to retract, and it must be one of those listed",
         ));
     };
     crate::graph::reject_fact(pool, kb_id, target).await?;

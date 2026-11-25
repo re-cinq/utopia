@@ -170,7 +170,9 @@ pub async fn install(
     let packs: Vec<&ScenarioPack> = ids
         .iter()
         .map(|id| {
-            get(id).ok_or_else(|| AppError::invalid("unknown_pack", format!("未知的场景包：{id}")))
+            get(id).ok_or_else(|| {
+                AppError::invalid("unknown_pack", format!("unknown scenario pack: {id}"))
+            })
         })
         .collect::<AppResult<_>>()?;
     let pool = &state.pool;
