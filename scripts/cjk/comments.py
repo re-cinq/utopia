@@ -8,6 +8,8 @@ RUST_SUFFIXES = (".rs",)
 TS_SUFFIXES = (".ts", ".tsx", ".mjs", ".js")
 ANCHOR = re.compile(r"#\d+|\d{2,}(?:\.\d+)?|[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z0-9_]+)+|[A-Za-z]+_[A-Za-z0-9_]+|[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+")
 MIN_COPY_LENGTH = 40
+MIN_REPEATED_CODE_LENGTH = 6
+LINE_COMMENT_ONLY = re.compile(r"^\s*//[/!]?( *)\S")
 COMMENT_MARKER = re.compile(r"^(?://[/!]?|/\*[*!]?|\*/?)")
 REWRITTEN_NUMBER_WORDS = re.compile(r"[万亿千百年月日]")
 RAW_STRING_OPENER = re.compile(r'(?<![A-Za-z0-9_])b?r(#*)"')
@@ -73,6 +75,34 @@ def reindented(before_lines: list[str], after_lines: list[str]) -> list[int]:
 
 def _leading_whitespace(line: str) -> str:
     return line[: len(line) - len(line.lstrip())]
+
+
+def marker_spacing_changed(before_lines: list[str], after_lines: list[str]) -> list[int]:
+    """Comment-only lines whose spaces after the marker changed: markdown list items depend on them."""
+    return [
+        number
+        for number, (old, new) in enumerate(zip(before_lines, after_lines), start=1)
+        if old != new
+        and (old_spacing := _spacing_after_marker(old)) is not None
+        and old_spacing != _spacing_after_marker(new)
+    ]
+
+
+def _spacing_after_marker(line: str):
+    found = LINE_COMMENT_ONLY.match(line)
+    return found.group(1) if found else None
+
+
+def code_repeated_in_comment(before_lines: list[str], after_lines: list[str], is_rust: bool) -> list[int]:
+    """Changed lines whose trailing comment contains the code written before it."""
+    flagged = []
+    for number, (old, new, segments) in enumerate(
+        zip(before_lines, after_lines, split_lines(after_lines, is_rust)), start=1
+    ):
+        code, comment = code_text(segments).strip(), comment_text(segments).strip()
+        if old != new and len(code) >= MIN_REPEATED_CODE_LENGTH and code in comment[2:]:
+            flagged.append(number)
+    return flagged
 
 
 def blanked_comments(before_comments: list[str], after_comments: list[str]) -> list[int]:
