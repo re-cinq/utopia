@@ -21,7 +21,7 @@ pub async fn resolve_review_conflict(
     resolve(pool, kb_id, conflict_id, decision, Some(actor_id)).await
 }
 
-/// 不记操作者的入口：只有 store 的测试在用，人工审核走 [`resolve_review_conflict`]。
+/// Entry point that records no operator: only store's tests use it; manual review goes through [`resolve_review_conflict`].
 pub async fn resolve_conflict(
     pool: &PgPool,
     kb_id: Uuid,
@@ -120,9 +120,9 @@ async fn resolve(
     ).bind(old).bind(new).fetch_one(&mut *tx).await?;
     let stored = match action {
         "close_old" => {
-            // 闭合点带着它的精度走：人给了日期就用人给的精度，没给就闭合在新事实的
-            // 起点——那个起点是几月还是几号，闭合点就是几月还是几号。从前一律写 day，
-            // 「2023 年 6 月接任」把前任闭合成了 6 月 1 日
+            // The closing point carries its own precision: if the person gave a date, their precision is used; if not, it closes at the start
+            // of the new fact -- whether that start is a month or a specific day, the closing point is that same month or day. Previously it always wrote a day, so
+            // "took over in June 2023" closed the predecessor on June 1.
             let (at, precision) = match decision.close_at {
                 Some(at) => (at, decision.close_precision),
                 None => (

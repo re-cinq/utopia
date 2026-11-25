@@ -1,9 +1,9 @@
-//! 口径检索的存储面——打在真库上（#574）。
+//! Storage side of definition-scoped retrieval — run against a real store (#574).
 //!
-//! 三条性质：
-//! 1. **该嵌的才嵌**：没向量的、模型换了的、文本改了的要重嵌；嵌过且没变的不要。
-//! 2. **向量一路按距离排**，维度对不上的行跳过。
-//! 3. **按 id 取回保持给定顺序**——顺序是检索排出来的。
+//! Three properties:
+//! 1. **Embed only what needs it**: rows with no vector, rows whose model changed, and rows whose text changed get re-embedded; those already embedded and unchanged do not.
+//! 2. **Vectors are ranked by distance throughout**, and rows whose dimension does not match are skipped.
+//! 3. **Fetching by id keeps the given order** — the order is what retrieval ranked.
 
 use sqlx::PgPool;
 use utopia_store::mappings as m;
@@ -71,13 +71,13 @@ async fn only_what_changed_gets_embedded_and_neighbours_come_back_in_order() -> 
         let net = definition(&pool, kb, "Net sales", "GMV minus refunds").await?;
         let freight = definition(&pool, kb, "Freight", "freight collected").await?;
 
-        // 一开始三条都要嵌
+        // All three need embedding at the start
         let stale = m::needing_embedding(&pool, kb, "bge-m3", 100).await?;
         assert_eq!(stale.len(), 3);
         let text_of = |id: Uuid| stale.iter().find(|t| t.id == id).unwrap().clone();
         assert_eq!(text_of(gmv).embed_text(), "GMV: paid, non-test, yuan");
 
-        // 嵌进去（三维就够测排序）
+        // Embedded in (three dimensions is enough to test the ordering)
         m::set_embeddings(
             &pool,
             "bge-m3",
@@ -95,14 +95,14 @@ async fn only_what_changed_gets_embedded_and_neighbours_come_back_in_order() -> 
             "嵌过且没变的不该再嵌"
         );
 
-        // 换模型：全部要重嵌；改文本：只有那一条要重嵌
+        // Change the model: everything must be re-embedded; change the text: only that one row must be re-embedded
         assert_eq!(
             m::needing_embedding(&pool, kb, "other-model", 100)
                 .await?
                 .len(),
             3
         );
-        // 补嵌有上限：一问只嵌这么多，剩下的下一问接着补
+        // Backfilling embeddings is capped: one question embeds only this many, and the rest are backfilled by the next question
         assert_eq!(
             m::needing_embedding(&pool, kb, "other-model", 2)
                 .await?
@@ -122,21 +122,21 @@ async fn only_what_changed_gets_embedded_and_neighbours_come_back_in_order() -> 
             "改了说明的那条要重嵌"
         );
 
-        // 向量一路：离 (1,0,0) 最近的是 GMV，其次 Net sales；Freight 最远
+        // Vector ranking: nearest to (1,0,0) is GMV, then Net sales; Freight is furthest
         let near = m::vector_search(&pool, kb, "bge-m3", &[1.0, 0.0, 0.0], 3).await?;
         assert_eq!(near, vec![gmv, net, freight]);
-        // 维度对不上的查询一条都不回（换过模型还没重嵌的那种状态）
+        // A query whose dimension does not match returns nothing (the state after switching models, before re-embedding)
         assert!(m::vector_search(&pool, kb, "bge-m3", &[1.0, 0.0], 3)
             .await?
             .is_empty());
-        // 换了模型、还没重嵌的行不参与：维度一样也不比
+        // Rows under a switched model that have not been re-embedded do not take part: even at equal dimension they are not compared
         assert!(
             m::vector_search(&pool, kb, "other-model", &[1.0, 0.0, 0.0], 3)
                 .await?
                 .is_empty()
         );
 
-        // 按 id 取回保持给定顺序
+        // Fetching by id keeps the given order
         let got = m::by_ids(&pool, kb, &[freight, gmv]).await?;
         assert_eq!(
             got.iter().map(|x| x.id).collect::<Vec<_>>(),
@@ -147,7 +147,7 @@ async fn only_what_changed_gets_embedded_and_neighbours_come_back_in_order() -> 
     }
     .await;
 
-    // 只删知识库，不删 org——用户是软删除的，测试也不该造一个产品里不存在的动作
+    // Delete only the knowledge base, not the org — users are soft-deleted, and the test should not invent an action the product does not have
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(kb)
         .execute(&pool)

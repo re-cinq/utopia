@@ -1,5 +1,5 @@
-//! 一个库同一时刻只有一个治理任务（会话级咨询锁）。第二个任务抢不到锁就退出并晚点再排，
-//! 而不是和第一个一起读同一个队头、把同一簇裁两遍。
+//! A knowledge base has only one governance task at a time (a session-level advisory lock). A second task that cannot get the lock exits and is queued again later,
+//! instead of reading the same queue head as the first one and trimming the same cluster twice.
 
 use sqlx::PgPool;
 use utopia_store::governance;

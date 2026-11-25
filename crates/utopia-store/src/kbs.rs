@@ -12,7 +12,7 @@ pub async fn list(pool: &PgPool, workspace_id: Uuid) -> AppResult<Vec<KnowledgeB
     Ok(rows)
 }
 
-/// 用户可见的 KB：系统管理员全见；其余 = open 库 + 自己在矩阵里的 restricted 库。
+/// KBs visible to a user: a system admin sees all of them; everyone else = open KBs + the restricted KBs they are in the matrix for.
 pub async fn list_visible(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -43,10 +43,10 @@ pub async fn create(
     kind: &str,
     description: Option<&str>,
 ) -> AppResult<KnowledgeBase> {
-    // 部署的第一个库自动成为默认库：公共空间,永远 open、不可删（API 强制 + DB CHECK）
+    // The first KB in a deployment automatically becomes the default KB: the public space, always open, not deletable (enforced by the API + DB CHECK)
     //
-    // ontology_lang 取部署默认值：中文部署不该每建一个库就手动选一次。
-    // 之后按库可改——同一个部署里完全可能一个库读中文合同、另一个读英文论文
+    // ontology_lang takes the deployment default: a Chinese deployment should not have to pick it by hand every time a KB is created.
+    // It can be changed per KB afterwards — one deployment may well have one KB reading Chinese contracts and another reading English papers
     let kb = sqlx::query_as(
         "INSERT INTO knowledge_bases
              (id, workspace_id, name, kind, description, is_default, ontology_lang)
@@ -73,10 +73,10 @@ pub async fn get(pool: &PgPool, id: Uuid) -> AppResult<KnowledgeBase> {
         .ok_or(AppError::NotFound)
 }
 
-/// 探索写的数据描述与它拿不准的问题（#570）。
+/// The data description and open questions that exploration writes (#570).
 ///
-/// **不碰 `data_conventions`。** 那是人写的；探索每跑一次都重写描述，两样混在
-/// 一个字段里，下一次探索就把人的答案盖了。所以是两列、两条写入路径。
+/// **Does not touch `data_conventions`.** That is written by people; exploration rewrites the description on every run, and if the two shared
+/// one field, the next exploration would overwrite the people's answers. So there are two columns and two write paths.
 pub async fn set_data_description(
     pool: &PgPool,
     id: Uuid,
@@ -111,8 +111,8 @@ pub async fn update(
     governance: Option<bool>,
     data_conventions: Option<&str>,
 ) -> AppResult<KnowledgeBase> {
-    // 改语言不回头重写已有的类——它们已经是这个库的数据，可能有人手工调过。
-    // 这一列往后管的是**新**描述（自动扩本体、AI 建议）写成什么语言
+    // Changing the language does not retroactively rewrite existing classes — they are already this KB's data, and may have been hand-tuned.
+    // From now on this column governs the language that **new** descriptions (automatic ontology expansion, AI suggestions) are written in
     if let Some(l) = ontology_lang {
         if !matches!(l, "en" | "zh") {
             return Err(AppError::invalid("bad_lang", "language must be en or zh"));
@@ -124,7 +124,7 @@ pub async fn update(
                 "visibility must be open or restricted".into(),
             ));
         }
-        // 默认库永远 open：公共空间语义可依赖（改名/改描述不受限）
+        // The default KB is always open: the public space's semantics can be relied on (renaming/redescribing is not restricted)
         if v == "restricted" {
             let current = get(pool, id).await?;
             if current.is_default {
@@ -171,7 +171,7 @@ pub async fn update(
 }
 
 pub async fn readiness(pool: &PgPool, kb_id: Uuid) -> AppResult<Readiness> {
-    // 一次查询拿全，四个页面各发一次请求也只是一次点查
+    // One query fetches everything; four pages each sending a request would still be just four point lookups
     let r: Readiness = sqlx::query_as(
         "SELECT
            EXISTS (

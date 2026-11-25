@@ -1,14 +1,14 @@
-//! 新版本写下了、还没被读：它引用的事实不算过期，也不进审核队列。
-//! 新版本被读过而没再提这条事实，才算它不再被陈述。
-//! 没人会去读的新版本（抽取关着、跳过或失败）不让事实等：等下去就是永远。
-//! 回放不问这一句：分块哪天被读没有历史，重抽会把它挪走。
+//! A new version has been written but not yet read: the facts it references are not treated as stale, and do not enter the review queue.
+//! A fact is considered no longer stated only once the new version has been read and did not mention that fact again.
+//! A new version that no one will read (extraction off, skipped, or failed) must not make facts wait: waiting would be forever.
+//! The replay does not ask this sentence: there is no history of when a chunk was read, and re-extraction would move it.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use utopia_store::{documents, graph, review};
 use uuid::Uuid;
 
-/// 新版本写下的那一刻：旧分块在这时被取代
+/// The moment the new version is written: the old chunks are superseded at this point
 const REPUSHED: &str = "2025-06-01T12:34:56Z";
 
 struct Seeded {

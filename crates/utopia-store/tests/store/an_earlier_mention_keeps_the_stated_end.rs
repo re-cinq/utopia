@@ -1,12 +1,12 @@
-//! 一条「结束了，不知哪天」的行（0022 / #393）：终点锚在说出结束的那份文档的日期上。之后才到、
-//! 日期更早、说它**成立**的一次观察并进这一行时，起点锚往早挪是对的——那是它成立的更早证据；
-//! 终点锚不该跟着挪——那份文档说的是成立，不是结束。两个锚点一起挪，区间缩成 [t0, t0)：
-//! 读出来这件事从来没成立过，挂在它上面的派生也跟着没了。
+//! A row that "ended, date unknown" (0022 / #393): the end is anchored to the date of the document that states the ending. When a later-arriving,
+//! earlier-dated observation that says it **holds** merges into this row, moving the start anchor earlier is right — that is earlier evidence that it held;
+//! the end anchor should not move with it — that document says it held, not that it ended. If both anchors move, the interval shrinks to [t0, t0):
+//! the reading then says it never held, and the derivations hanging on it go too.
 //!
-//! #875 的回放里撞上的：物品先在桌上，对账把桌面那一段关在搬走那份观察的日期上（锚点），
-//! 一条更早的「在桌上」晚到，桌面那一段就读成了空的。
+//! Hit during replay for #875: the item was on the table first, reconciliation closed the table-top span at the date of the observation where it was moved away (the anchor),
+//! and an earlier "on the table" arriving late made the table-top span read as empty.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset. Creates and tears down its own; never touches an existing database.
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
@@ -68,7 +68,7 @@ async fn an_earlier_mention_that_it_held_keeps_the_stated_end() -> anyhow::Resul
             t("2026-09-23T08:10:00Z")?,
         );
         let desk = json!({ "value": "desk" });
-        // t1：在桌上。没有起点，从这份证据起成立
+        // t1: on the table. No start point, so it holds from this evidence
         graph::insert_value_fact(
             &pool,
             kb,
@@ -79,7 +79,7 @@ async fn an_earlier_mention_that_it_held_keeps_the_stated_end() -> anyhow::Resul
             1.0,
         )
         .await?;
-        // t2：它结束了，不知哪天——终点锚在这份文档上
+        // t2: it ended, date unknown — the end anchor is on this document
         let (closed, _) = graph::insert_value_fact(
             &pool,
             kb,
@@ -90,7 +90,7 @@ async fn an_earlier_mention_that_it_held_keeps_the_stated_end() -> anyhow::Resul
             1.0,
         )
         .await?;
-        // t0 < t1：一次更早的「在桌上」晚到。同一断言并进已经关上的那一行
+        // t0 < t1: an earlier "on the table" arrives late. The same assertion merges into the row that is already closed
         let merged = graph::insert_value_fact(
             &pool,
             kb,
@@ -116,7 +116,7 @@ async fn an_earlier_mention_that_it_held_keeps_the_stated_end() -> anyhow::Resul
             Some(t2),
             "a mention that it held is no evidence that it ended earlier"
         );
-        // 另一条路径仍要前移：这份更早的证据确实说它已结束，而不是只说它成立。
+        // The other path still has to move: this earlier evidence does say it has ended, not merely that it holds.
         let ended = graph::insert_value_fact(
             &pool,
             kb,

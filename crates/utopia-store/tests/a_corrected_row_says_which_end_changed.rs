@@ -1,19 +1,19 @@
-//! 迁移 0099：这一列之前人改过区间的行，从审计里算出改的是哪一端。
+//! Migration 0099: for rows whose interval a person edited before this column existed, work out from the audit which end changed.
 //!
-//! 照修正路由的来路造：`correct_interval` 改区间，审计记在被改的那一行上，`detail` 带改前
-//! （`from`）与改后（`to`）的区间；再把这一列抹掉——那正是这一列出现之前写下的样子。
+//! Built the way the correction route does it: `correct_interval` changes an interval, the audit is recorded on the row that was changed, and `detail` carries the before
+//! (`from`) and after (`to`) intervals; then wipe this column, which is exactly how it looked before the column appeared.
 //!
-//! - 张三：改了起点 → start；之后人手关上（一次改写）仍是 start
-//! - 李四：先改起点、再改终点 → both
-//! - 王五：改了终点 → end
-//! - 赵六：只是人手关上，没有改区间的审计 → 空
-//! - 钱七：审计没记改前改后 → both（说不清改了哪端，两端都不归原句）
-//! - 孙八：只改了起点，可原来的终点是时间线推出来的 → both（人把那个终点钉住了）
+//! - Zhang San: changed the start → start; later closed by hand (one rewrite) still start
+//! - Li Si: changed the start, then the end → both
+//! - Wang Wu: changed the end → end
+//! - Zhao Liu: only closed by hand, no interval-change audit → empty
+//! - Qian Qi: the audit did not record before and after → both (cannot tell which end changed; neither end is from the original sentence)
+//! - Sun Ba: changed only the start, but the original end was derived from the timeline → both (the person pinned that end)
 //!
-//! 只填还空着的：已经有标记的行，审计说什么都不改它。再跑一遍迁移，一样不动。
+//! Only fills the blanks: a row that already has a marker is left alone whatever the audit says. Running the migration again changes nothing.
 //!
-//! 迁移的语句不按 kb 过滤，改的是全库的行，所以这个测试在 tests/ 顶层自成一个二进制
-//! （与 0096 同理）。没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! The migration statements do not filter by kb; they change rows across the whole database, so this test is its own binary at the top of tests/
+//! (same reasoning as 0096). Without `UTOPIA_DATABASE_URL` it skips rather than fails. It sets up and tears down its own data and never touches an existing database.
 
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -40,7 +40,7 @@ fn between(from: &str, to: Option<&str>) -> Validity<'static> {
     }
 }
 
-/// 修正路由记下的一端：与它一样用 RFC 3339 写日期
+/// The end recorded by the correction route: written with the same RFC 3339 date format
 fn side(v: &Validity<'_>) -> Value {
     json!({
         "valid_from": v.from.map(|t| t.to_rfc3339()),
@@ -50,7 +50,7 @@ fn side(v: &Validity<'_>) -> Value {
     })
 }
 
-/// 一行活着的那一版的标记
+/// The marker for the one live version of a row
 async fn ends(pool: &PgPool, kb: Uuid, subject: Uuid) -> anyhow::Result<Option<String>> {
     Ok(sqlx::query_scalar(
         "SELECT corrected_ends FROM facts
@@ -119,7 +119,7 @@ async fn a_row_corrected_before_the_column_gets_its_ends_back() -> anyhow::Resul
                 )
             }
         };
-        // 人改一次区间：修正行，加上修正路由记在被改的那一行上的审计
+        // A person changes an interval once: a correction row, plus the audit the correction route recorded on the changed row
         let correct =
             |fact: Uuid, before: Validity<'static>, after: Validity<'static>, detail: bool| {
                 let pool = pool.clone();
@@ -166,7 +166,7 @@ async fn a_row_corrected_before_the_column_gets_its_ends_back() -> anyhow::Resul
         let q = row(qian, first).await?;
         correct(q, first, between("2023-03-01", Some("2024-07-05")), false).await?;
 
-        // 时间线推出来的终点（这里直接标上），人只改起点、终点照抄
+        // The end the timeline derived (set directly here); the person changes only the start, and the end is copied as is
         let s = row(sun, first).await?;
         sqlx::query("UPDATE facts SET end_derived = TRUE WHERE id = $1")
             .bind(s)
@@ -195,8 +195,8 @@ async fn a_row_corrected_before_the_column_gets_its_ends_back() -> anyhow::Resul
             "what correct_interval wrote"
         );
 
-        // 这一列出现之前的样子：没有标记。王五那一行已经有一个（与审计说的不一样）的标记，
-        // 回填不动它
+        // The state before this column existed: no marker. Wang Wu's row already has one (which disagrees with the audit),
+        // and backfill leaves it alone
         sqlx::query("UPDATE facts SET corrected_ends = NULL WHERE kb_id = $1 AND subject_id <> $2")
             .bind(kb)
             .bind(wang)
@@ -231,7 +231,7 @@ async fn a_row_corrected_before_the_column_gets_its_ends_back() -> anyhow::Resul
             "the derived end the person kept"
         );
 
-        // 再跑一遍，一样不动
+        // Run again: still unchanged
         sqlx::raw_sql(MIGRATION).execute(&pool).await?;
         assert_eq!(ends(&pool, kb, zhang).await?.as_deref(), Some("start"));
         assert_eq!(ends(&pool, kb, li).await?.as_deref(), Some("both"));

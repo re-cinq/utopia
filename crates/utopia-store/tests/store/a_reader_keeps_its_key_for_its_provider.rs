@@ -1,5 +1,5 @@
-//! 读字服务的密钥跟着供应商走（0065 决定 2）：同一供应商留空保留，换供应商留空清掉。
-//! 比较和写在同一条 SQL 里，所以两次保存并发也带不过去。
+//! The text-reading service's key follows its provider (0065 decision 2): leaving it empty for the same provider keeps it; leaving it empty after switching provider clears it.
+//! The comparison and the write happen in the same SQL statement, so two concurrent saves cannot slip past each other.
 
 use sqlx::PgPool;
 use utopia_core::secrets;
@@ -47,12 +47,12 @@ async fn a_reader_keeps_its_key_for_its_provider() -> anyhow::Result<()> {
         let s = save("mineru", Some("mineru-key")).await?;
         assert_eq!(s.ocr_provider, "mineru");
         assert_eq!(s.ocr_api_key.as_deref(), Some("mineru-key"));
-        // 同一供应商留空：保留
+        // Same provider, key left empty: kept
         assert_eq!(
             save("mineru", None).await?.ocr_api_key.as_deref(),
             Some("mineru-key")
         );
-        // 换供应商留空：清掉，方舟拿不到 MinerU 的密钥
+        // Switched provider, key left empty: cleared, so Ark does not get MinerU's key
         let switched = save("ark", None).await?;
         assert_eq!(
             (
@@ -62,11 +62,11 @@ async fn a_reader_keeps_its_key_for_its_provider() -> anyhow::Result<()> {
             ("ark", None)
         );
         assert!(!switched.ocr_ready(), "ark without a key is not ready");
-        // 换供应商带新密钥：用新的
+        // Switched provider with a new key: the new one is used
         let keyed = save("ark", Some("ark-key")).await?;
         assert_eq!(keyed.ocr_api_key.as_deref(), Some("ark-key"));
         assert!(keyed.ocr_ready());
-        // 老客户端只改地址：缺席的供应商和模型不能把已配好的方舟清掉。
+        // An old client that only changes the address: a provider and model that are absent must not clear an Ark setup that is already configured.
         let legacy = settings::upsert_ocr(
             &pool,
             ws,
@@ -81,7 +81,7 @@ async fn a_reader_keeps_its_key_for_its_provider() -> anyhow::Result<()> {
         assert_eq!(legacy.ocr_model.as_deref(), Some("m"));
         assert_eq!(legacy.ocr_api_key.as_deref(), Some("ark-key"));
         assert!(legacy.ocr_ready());
-        // 新客户端显式选供应商仍能清空模型；留空密钥只保留这一家的密钥。
+        // A new client that explicitly chooses a provider can still clear the model; an empty key keeps only that provider's key.
         let cleared = settings::upsert_ocr(
             &pool,
             ws,
@@ -95,14 +95,14 @@ async fn a_reader_keeps_its_key_for_its_provider() -> anyhow::Result<()> {
         assert_eq!(cleared.ocr_model, None);
         assert_eq!(cleared.ocr_api_key.as_deref(), Some("ark-key"));
         assert!(!cleared.ocr_ready());
-        // 库里存的是封印过的
+        // What is stored is sealed
         let stored: Option<String> =
             sqlx::query_scalar("SELECT ocr_api_key FROM llm_settings WHERE workspace_id = $1")
                 .bind(ws)
                 .fetch_one(&pool)
                 .await?;
         assert!(secrets::is_sealed(stored.as_deref().unwrap_or_default()));
-        // 换回 MinerU 一样清
+        // Switching back to MinerU clears it the same way
         assert_eq!(save("mineru", None).await?.ocr_api_key, None);
         anyhow::Ok(())
     }

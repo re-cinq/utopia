@@ -1,5 +1,5 @@
-//! 否决一条开放陈述会排一次类型化重算（#1366）：陈述全没了的类型化行退掉，
-//! 还有别的活陈述撑着的行留着。排不进去时否决照样成功：作废已经提交，下一次对齐会重算。
+//! Rejecting an open statement queues a typed recomputation (#1366): typed rows whose statements are all gone are retired,
+//! and rows still supported by other live statements stay. When the queueing fails, rejection still succeeds: the voiding is already committed, and the next alignment recomputes.
 
 use sqlx::PgPool;
 use utopia_store::{graph, materialize, phrase_bindings};
@@ -95,8 +95,8 @@ async fn rejecting_a_statement_queues_the_recompute_and_retires_only_unsupported
     run
 }
 
-/// 重算排不进队列时否决仍然成功：陈述作废了，队列里没有重算任务，调用方拿到的是 Ok 而不是 500。
-/// 用 `jobs` 上的 BEFORE INSERT 触发器只拒本测试这个库的物化任务来制造入队失败。
+/// If the recomputation cannot be queued, rejection still succeeds: the statement is voided, no recompute task is in the queue, and the caller gets Ok rather than a 500.
+/// The enqueue failure is produced by a BEFORE INSERT trigger on `jobs` that refuses only this test database's materialization tasks.
 #[tokio::test]
 async fn rejecting_still_succeeds_when_the_recompute_cannot_be_queued() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {

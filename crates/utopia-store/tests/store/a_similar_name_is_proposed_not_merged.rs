@@ -1,12 +1,12 @@
-//! 名字向量召回（0041 决定 3 通道 2，第 2 刀）：**相近的名字来报到，但只提议，不归并。**
+//! Name-vector recall (0041 decision 3, channel 2, slice 2): **similar names come and report in, but are only proposed, never merged.**
 //!
-//! 库里有 海洋探测器1号，一篇新文档只写 海探1。字面召回（通道 1）碰不上它——不相等、
-//! 又短于 containment 的四字门槛——从前这里静默长出第二个实体（#709）。现在 mention 的
-//! 名字向量在同库的名字向量里取最近邻，够近就给裁决器排一对 `name_vector|<余弦>`；
-//! mention 自己照常按字面路径走（这里是新建）。是不是一个，裁决器拿两份画像判。
+//! The store has 海洋探测器1号 (Ocean Probe 1), and a new document writes only 海探1. Literal recall (channel 1) does not reach it — it is neither equal,
+//! nor shorter than the four-character containment threshold — so before this it silently grew a second entity (#709). Now the mention's
+//! name vector takes its nearest neighbour among the store's name vectors; if close enough, it queues a pair `name_vector|<cosine>` for the arbiter;
+//! the mention itself still takes the literal path as usual (here, a new entity). Whether they are one thing is judged by the arbiter on two profiles.
 //!
-//! 连库才测得到：近邻是 SQL 里的 `<=>`。没有 `UTOPIA_DATABASE_URL` 时跳过，自建自拆。
-//! 向量都是手摆的三维——测的是召回和提议的规矩，不是某个嵌入模型的远近观。
+//! Only testable against a database: the nearest neighbour is `<=>` in SQL. Skipped when there is no `UTOPIA_DATABASE_URL`; sets up and tears down its own data.
+//! The vectors are all hand-placed in three dimensions — it tests the rules of recall and proposal, not how near any embedding model considers things.
 
 use sqlx::PgPool;
 use utopia_store::resolution::ReviewStage;
@@ -43,7 +43,7 @@ async fn seed(pool: &PgPool, tag: &str) -> anyhow::Result<Fx> {
         .bind(tag)
         .execute(pool)
         .await?;
-    // 两个大类：设备（type_family 认不出，None）与人（Person）
+    // Two major classes: device (type_family does not recognize it, None) and person (Person)
     for (id, key, label) in [(device, "device", "Device"), (person, "person", "Person")] {
         sqlx::query("INSERT INTO entity_types (id, kb_id, key, label) VALUES ($1, $2, $3, $4)")
             .bind(id)
@@ -69,7 +69,7 @@ async fn seed(pool: &PgPool, tag: &str) -> anyhow::Result<Fx> {
         let fact = names::record(pool, kb, id, name, None, None)
             .await?
             .expect("a named entity gets a name fact");
-        // 两个名字的向量故意一样：只有大类能把它们分开
+        // The two names' vectors are deliberately the same: only the major class can tell them apart
         name_vectors::set(pool, kb, &[(fact, id, vec![1.0, 0.0, 0.0])]).await?;
     }
     Ok(Fx {
@@ -110,7 +110,7 @@ fn contained(r: &utopia_store::resolution::Resolution) -> Vec<Uuid> {
         .collect()
 }
 
-/// 相近的名字：新建实体，给裁决器排一对，绝不静默归并
+/// Similar names: create a new entity, queue a pair for the arbiter, never silently merge
 #[tokio::test]
 async fn a_near_name_creates_an_entity_and_proposes_a_pair() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -142,8 +142,8 @@ async fn a_near_name_creates_an_entity_and_proposes_a_pair() -> anyhow::Result<(
             "海洋探测器1号 该被提议：{:?}",
             r.reviews
         );
-        // 夹具里两个名字的向量一样，而 Device 认不出大类、不拦 Person：海洋探测队长 也进来。
-        // 这不是漏，是规矩——分不出大类时宁可多问；大类分得出时的拦截见下一条测试
+        // In the fixture the two names have the same vector, and Device cannot recognize the major class so it does not block Person: 海洋探测队长 also comes in.
+        // This is not a leak, it is the rule — when the major class cannot be told apart, it is better to ask more; the blocking when it can be told apart is in the next test
         assert_eq!(
             proposed.len(),
             2,
@@ -167,7 +167,7 @@ async fn a_near_name_creates_an_entity_and_proposes_a_pair() -> anyhow::Result<(
     run
 }
 
-/// 大类对不上的不提议：设备的名字再像，也不是那个人
+/// Not proposed when the major classes differ: however similar a device's name is, it is not that person
 #[tokio::test]
 async fn a_near_name_of_another_family_is_not_proposed() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -176,9 +176,9 @@ async fn a_near_name_of_another_family_is_not_proposed() -> anyhow::Result<()> {
     let pool = PgPool::connect(&url).await?;
     let f = seed(&pool, "name-vector-family").await?;
     let run = async {
-        // mention 是个人；海洋探测器1号 的类 Device 认不出大类（None），照规矩不拦；
-        // 海洋探测队长 是 Person，同类，拦不住——所以两条都会进来。换成 Organization
-        // 的 mention 才能看到 Person 被拦：
+        // The mention is a person; 海洋探测器1号's class Device does not recognize the major class (None), so by the rule it is not blocked;
+        // 海洋探测队长 is a Person, same class, which cannot block it — so both come in. Only with an Organization
+        // mention can one see the Person being blocked:
         let organization = Uuid::now_v7();
         sqlx::query("INSERT INTO entity_types (id, kb_id, key, label) VALUES ($1, $2, 'organization', 'Organization')")
             .bind(organization)
@@ -216,7 +216,7 @@ async fn a_near_name_of_another_family_is_not_proposed() -> anyhow::Result<()> {
     run
 }
 
-/// 不够近的不提议；没给向量的照旧
+/// Not close enough, not proposed; those given no vector keep as before
 #[tokio::test]
 async fn a_far_name_or_no_vector_proposes_nothing() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -265,7 +265,7 @@ async fn a_far_name_or_no_vector_proposes_nothing() -> anyhow::Result<()> {
     run
 }
 
-/// 字面命中的候选是通道 1 的事：同一个名字不再经通道 2 复议
+/// Literal hits among candidates are channel 1's business: the same name is not reconsidered through channel 2
 #[tokio::test]
 async fn the_same_literal_name_is_not_proposed_twice() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -316,8 +316,8 @@ async fn the_same_literal_name_is_not_proposed_twice() -> anyhow::Result<()> {
     run
 }
 
-/// 补向量的往返：新记的名字事实在 `pending` 里，写了向量就不在了。端到端跑出来的窟窿——
-/// 之前 `pending` 按一个不存在的列排序，每篇文档的补向量都静默失败，通道 2 从未触发
+/// Vector backfill round trip: a newly recorded name fact is in `pending`, and once a vector is written it is gone from there. A hole found by an end-to-end run —
+/// previously `pending` sorted by a column that does not exist, so every document's vector backfill silently failed, and channel 2 never fired
 #[tokio::test]
 async fn a_new_name_is_pending_until_its_vector_is_set() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -343,7 +343,7 @@ async fn a_new_name_is_pending_until_its_vector_is_set() -> anyhow::Result<()> {
             pending.iter().any(|(fid, eid, name)| *fid == fact && *eid == fresh && name == "远洋重工"),
             "新记的名字该在待补清单里：{pending:?}"
         );
-        // 夹具里两个已有向量的名字不在清单里
+        // The two names with existing vectors in the fixture are not on the list
         assert!(pending.iter().all(|(_, eid, _)| *eid != f.probe && *eid != f.captain));
         name_vectors::set(&pool, f.kb, &[(fact, fresh, vec![0.0, 0.0, 1.0])]).await?;
         let after = name_vectors::pending(&pool, f.kb, 100).await?;
@@ -355,8 +355,8 @@ async fn a_new_name_is_pending_until_its_vector_is_set() -> anyhow::Result<()> {
     run
 }
 
-/// 上一篇文档没补上的名字，下一篇照样补：`pending` 取整个库里没有向量的名字，先记的在前，
-/// 不只是这篇刚记的。有向量的名字不在里面（#1296 改这条查询时守住这次重试）
+/// A name the previous document did not backfill is backfilled by the next one as well: `pending` takes every name in the whole store with no vector, earliest recorded first,
+/// not just the one recorded by this document. Names that already have a vector are not in it (#1296 kept this retry when it changed this query)
 #[tokio::test]
 async fn a_name_left_without_a_vector_earlier_is_pending_before_a_new_one() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -391,9 +391,9 @@ async fn a_name_left_without_a_vector_earlier_is_pending_before_a_new_one() -> a
     run
 }
 
-/// 判过「不是一个」的一对，实体再被提到时不再排（#1104）。名字向量通道每次提到都跑，
-/// 而审核表只对 pending 的行去重：从前裁决器分开过的一对，下一篇文档一提到就又是一条
-/// 新的 pending。还没判的那一对不受影响，照常提议
+/// A pair the arbiter has judged "not the same" is not queued again when an entity is mentioned again (#1104). The name-vector channel runs on every mention,
+/// while the review table deduplicates only rows that are pending: a pair the arbiter once kept apart would become a new pending row every time the next document mentioned it.
+/// A pair not yet judged is unaffected and is still proposed as usual
 #[tokio::test]
 async fn a_pair_kept_apart_is_not_proposed_again() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -429,7 +429,7 @@ async fn a_pair_kept_apart_is_not_proposed_again() -> anyhow::Result<()> {
             )
             .await?;
         }
-        // 裁决器判 海探1 与 海洋探测器1号 不是一个；跟 海洋探测队长 的那一对还没判
+        // The arbiter judges that 海探1 and 海洋探测器1号 are not the same; the pair with 海洋探测队长 has not been judged yet
         let (review,): (Uuid,) = sqlx::query_as(
             "SELECT id FROM resolution_reviews WHERE kb_id = $1 AND status = 'pending'
               AND $2 IN (left_id, right_id)",
@@ -465,8 +465,8 @@ async fn a_pair_kept_apart_is_not_proposed_again() -> anyhow::Result<()> {
     run
 }
 
-/// 只差一个数的名字不配对（#1104）：向量上几乎重合、字面上互相包含，却不是同一个东西。
-/// 两条通道各守一次；一边没有数字的简称照常提议
+/// Names differing by only one number do not pair (#1104): nearly coincident as vectors, mutually contained as literals, yet not the same thing.
+/// Each of the two channels guards it once; a short name with no number on one side is still proposed as usual
 #[tokio::test]
 async fn names_that_carry_different_numbers_are_not_proposed() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -487,7 +487,7 @@ async fn names_that_carry_different_numbers_are_not_proposed() -> anyhow::Result
                 &[],
             )
         };
-        // 名字向量：2号 的向量跟 1号 一模一样，照样不提议；没有数字的 队长 不受影响
+        // Name vector: the vector of 2号 is identical to that of 1号, and it still is not proposed; 队长 with no number is unaffected
         let second = resolve("海洋探测器2号", Some(&[1.0, 0.0, 0.0])).await?;
         let proposed: Vec<Uuid> = vector_reviews(&second)
             .into_iter()
@@ -504,7 +504,7 @@ async fn names_that_carry_different_numbers_are_not_proposed() -> anyhow::Result
             second.reviews
         );
 
-        // 包含关系：`migration 39` 是 `migration 395` 的子串，但不是它的简称
+        // Containment: `migration 39` is a substring of `migration 395`, but not its short name
         let long = resolve("migration 395", None).await?;
         let short = resolve("migration 39", None).await?;
         assert!(short.created);
@@ -513,7 +513,7 @@ async fn names_that_carry_different_numbers_are_not_proposed() -> anyhow::Result
             "数字不同的包含不配对：{:?}",
             short.reviews
         );
-        // 一边没有数字：简称对全称，正是这条通道要接住的
+        // No number on one side: a short name against its full name is exactly what this channel should catch
         let full = resolve("星云推理平台 2.0", None).await?;
         let brief = resolve("星云推理平台", None).await?;
         assert!(
@@ -528,8 +528,8 @@ async fn names_that_carry_different_numbers_are_not_proposed() -> anyhow::Result
     run
 }
 
-/// 名字里的 `_` 按字面比，不当通配符（#1293）：`src/a_b.ts` 不包含在 `src/axb.ts::adds` 里，
-/// 反过来 `a_b.ts` 也不在后者里；真包含的 `src/a_b.ts` 照常配对
+/// `_` in a name is compared literally, not treated as a wildcard (#1293): `src/a_b.ts` is not contained in `src/axb.ts::adds`,
+/// and conversely `a_b.ts` is not in the latter either; the truly contained `src/a_b.ts` pairs as usual
 #[tokio::test]
 async fn an_underscore_in_a_name_is_not_a_wildcard() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -571,8 +571,8 @@ async fn an_underscore_in_a_name_is_not_a_wildcard() -> anyhow::Result<()> {
     run
 }
 
-/// 别名也是召回的桥：`Holmes` 是 `Sherlock Holmes` 的别名，`Mr. Holmes` 含 `Holmes`，
-/// 却不含本名 `Sherlock Holmes`，也不被它包含
+/// An alias is also a bridge for recall: `Holmes` is an alias of `Sherlock Holmes`, and `Mr. Holmes` contains `Holmes`,
+/// but does not contain the primary name `Sherlock Holmes`, nor is it contained by it
 #[tokio::test]
 async fn mr_holmes_is_paired_with_sherlock_holmes_through_its_alias_holmes() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -609,8 +609,8 @@ async fn mr_holmes_is_paired_with_sherlock_holmes_through_its_alias_holmes() -> 
     run
 }
 
-/// 按描述建的实体没有名字事实（0044），描述文字不是召回的桥；
-/// 同样的文字落在普通实体的 `known_as` 上照常配对
+/// An entity created from a description has no name facts (0044), so the description text is not a bridge for recall;
+/// the same text on the `known_as` of an ordinary entity pairs as usual
 #[tokio::test]
 async fn a_described_entity_is_not_paired_by_containment() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -661,7 +661,7 @@ async fn a_described_entity_is_not_paired_by_containment() -> anyhow::Result<()>
     run
 }
 
-/// 拉丁名字只在词边界上算包含（#1104）；汉字照旧按子串匹配
+/// Latin names count containment only at word boundaries (#1104); Han characters still match as substrings
 #[tokio::test]
 async fn a_latin_name_is_contained_only_at_word_edges() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -682,7 +682,7 @@ async fn a_latin_name_is_contained_only_at_word_edges() -> anyhow::Result<()> {
                 &[],
             )
         };
-        // (库里的名字, 它的别名, 新名字, 是否排成一对)
+        // (name in the store, its alias, the new name, whether it is paired)
         for (stored, alias, new, want) in [
             ("SERVICE_TOKEN", None, "token", false),
             ("install_scheduled_task.ps1", None, "task", false),

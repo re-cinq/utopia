@@ -1,10 +1,10 @@
-//! 人从零写的口径——打在真库上（#562）。
+//! A definition written by a person from scratch -- tested against a real database (#562).
 //!
-//! 三条性质：
-//! 1. **写下来就是确认的**，且记得是谁写的（`written_by`），探索提的那些为空。
-//! 2. **同一个 (概念, 源) 不悄悄覆盖**：已经有一条时报冲突，改要走 `revise`。
-//! 3. **探索盖不掉人写的**：`propose` 只刷新 `proposed` 的行——与它不刷回一条
-//!    拒绝是同一条规则。
+//! Three properties:
+//! 1. **Written means confirmed**, and it records who wrote it (`written_by`); those that exploration proposed have it empty.
+//! 2. **The same (concept, source) is not silently overwritten**: if one already exists, a conflict is reported; changing it goes through `revise`.
+//! 3. **Exploration cannot overwrite what a person wrote**: `propose` only refreshes rows that are `proposed` -- the same rule as its refusal to reset a
+//!    rejection back to pending.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -73,7 +73,7 @@ async fn a_written_definition_is_confirmed_and_signed() -> anyhow::Result<()> {
         )
         .await?;
 
-        // 落下来就是确认的：问数下一句就读得到，不用再过审
+        // Written this way means confirmed: the next question can read it without going through review again
         let confirmed = utopia_store::mappings::confirmed(&pool, kb, 100).await?;
         assert_eq!(confirmed.len(), 1);
         assert_eq!(confirmed[0].id, id);
@@ -85,7 +85,7 @@ async fn a_written_definition_is_confirmed_and_signed() -> anyhow::Result<()> {
             "不该出现在待审队列里"
         );
 
-        // 同一个 (概念, 源) 再写一条：冲突，而不是悄悄盖掉已有的那条
+        // Write another one for the same (concept, source): a conflict, rather than silently overwriting the one that exists
         let again = utopia_store::mappings::create(
             &pool,
             kb,
@@ -105,7 +105,7 @@ async fn a_written_definition_is_confirmed_and_signed() -> anyhow::Result<()> {
             "同键第二条该是 Conflict，得到 {again:?}"
         );
 
-        // 探索盖不掉人写的：propose 同键 → 行原样不动、仍是 confirmed
+        // Exploration cannot overwrite what a person wrote: propose with the same key → the row is left as it is, still confirmed
         utopia_store::mappings::propose(
             &pool,
             kb,
@@ -123,7 +123,7 @@ async fn a_written_definition_is_confirmed_and_signed() -> anyhow::Result<()> {
         assert_eq!(confirmed.len(), 1);
         assert_eq!(confirmed[0].table_name.as_deref(), Some("dw.dwd_ord_dtl"));
         assert_eq!(confirmed[0].written_by, Some(user));
-        // 探索自己提的那些 written_by 为空——页面靠这个分「人写」与「探索提的」
+        // Those proposed by exploration itself have an empty written_by -- the page uses this to tell "written by a person" from "proposed by exploration"
         let ent2 = Uuid::now_v7();
         sqlx::query("INSERT INTO entities (id, kb_id, canonical_name) VALUES ($1, $2, 'Orders')")
             .bind(ent2)
@@ -150,7 +150,7 @@ async fn a_written_definition_is_confirmed_and_signed() -> anyhow::Result<()> {
     }
     .await;
 
-    // 只删知识库，不删 org/user——用户是软删除的，测试也不该造一个产品里不存在的动作
+    // Only the knowledge base is deleted, not the org or user -- users are soft-deleted, and the test should not invent an action that does not exist in the product
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(kb)
         .execute(&pool)

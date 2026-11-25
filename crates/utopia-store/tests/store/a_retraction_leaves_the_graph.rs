@@ -1,16 +1,16 @@
-//! #202：「数据错了」要真的把事实撤掉，队列也得诚实。
+//! #202: "the data is wrong" must actually retract the fact, and the queue must also be honest.
 //!
-//! 此前 `decide` 只改 `axiom_violations`，事实还活在图里；重跑检查撞上 resolved 行
-//! 又 `DO NOTHING`，违规既没消失也不再出现。这里守四件事：
+//! Previously `decide` only changed `axiom_violations`, and the fact stayed alive in the graph; a re-run of the check hit the resolved row
+//! and did `DO NOTHING` again, so the violation neither disappeared nor reappeared. Four things are guarded here:
 //!
-//! 1. **撤指定的那一条。** 双事实的违规（asymmetry）要说撤哪条，撤完事实 `invalidated_at`
-//!    非空、违规 resolved、重跑不再报。
-//! 2. **不在违规里的事实撤不了。**
-//! 3. **单事实的违规不用说。** 自环只有一条，直接撤 left。
-//! 4. **承诺没兑现就重开。** `axiom_relaxed` 说要去改本体，本体没改、违规又算出来，
-//!    那行回到 open；`accepted` 是有意并存，重跑照旧沉默。
+//! 1. **Retract the specified one.** For a two-fact violation (asymmetry), one must say which fact to retract; after retraction the fact's `invalidated_at`
+//!    is set, the violation is resolved, and a re-run no longer reports it.
+//! 2. **A fact not in the violation cannot be retracted.**
+//! 3. **A single-fact violation does not need to be specified.** A self-loop has only one fact, so retract left directly.
+//! 4. **An unfulfilled promise reopens.** `axiom_relaxed` says the ontology is to be changed; the ontology is not changed and the violation is computed again,
+//!    so that row goes back to open; `accepted` coexists on purpose, and a re-run remains silent.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is not set. It builds and tears down its own data and never touches an existing DB.
 
 use sqlx::PgPool;
 use utopia_store::reasoning;
@@ -63,7 +63,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fx> {
     .bind(kb)
     .execute(pool)
     .await?;
-    // 反对称且非自反：双向断言是矛盾，自环也是
+    // Antisymmetric and not reflexive: a two-way assertion is a contradiction, and so is a self-loop
     sqlx::query(
         "INSERT INTO relation_types (id, kb_id, key, label, is_asymmetric, is_irreflexive)
          VALUES ($1, $2, 'reports_to', 'reports to', TRUE, TRUE)",
@@ -111,7 +111,7 @@ async fn fact(pool: &PgPool, f: &Fx, s: Uuid, o: Uuid) -> anyhow::Result<Uuid> {
     Ok(id)
 }
 
-/// (id, kind, status, resolution, left, right) 按检出时间
+/// (id, kind, status, resolution, left, right), ordered by detection time
 async fn violations(
     pool: &PgPool,
     f: &Fx,
@@ -152,7 +152,7 @@ async fn a_retraction_leaves_the_graph() -> anyhow::Result<()> {
         let (vid, kind, ..) = &rows[0];
         assert_eq!(kind, "asymmetry");
 
-        // 2. 不在违规里的撤不了；双事实的不说撤哪条也不行
+        // 2. A fact not in the violation cannot be retracted; nor can one of a two-fact pair be retracted without saying which
         let stranger = fact(&pool, &f, a, entity(&pool, &f, "Z").await?).await?;
         assert!(
             reasoning::retract_from_violation(&pool, f.kb, *vid, Some(stranger), f.user)
@@ -165,7 +165,7 @@ async fn a_retraction_leaves_the_graph() -> anyhow::Result<()> {
                 .is_err()
         );
 
-        // 1. 撤 B→A：事实作废、违规 resolved、重跑不再报
+        // 1. Retract B→A: the fact is invalidated, the violation is resolved, and a re-run no longer reports it
         let gone = reasoning::retract_from_violation(&pool, f.kb, *vid, Some(ba), f.user).await?;
         assert_eq!(gone, ba);
         assert!(retracted(&pool, ba).await?, "the button does what it says");
@@ -177,7 +177,7 @@ async fn a_retraction_leaves_the_graph() -> anyhow::Result<()> {
         assert_eq!(rows[0].2, "resolved");
         assert_eq!(rows[0].3.as_deref(), Some("fact_retracted"));
 
-        // 3. 自环只有一条事实，不用说撤哪条
+        // 3. A self-loop has only one fact, so there is no need to say which one to retract
         let e = entity(&pool, &f, "E").await?;
         let ee = fact(&pool, &f, e, e).await?;
         reasoning::run(&pool, f.kb).await?;
@@ -192,7 +192,7 @@ async fn a_retraction_leaves_the_graph() -> anyhow::Result<()> {
         );
         assert!(retracted(&pool, ee).await?);
 
-        // 4. 承诺没兑现就重开：axiom_relaxed 后本体没改，重跑回到 open；accepted 沉默
+        // 4. An unfulfilled promise reopens: after axiom_relaxed the ontology is unchanged, and a re-run returns it to open; accepted stays silent
         let (c, d) = (entity(&pool, &f, "C").await?, entity(&pool, &f, "D").await?);
         fact(&pool, &f, c, d).await?;
         fact(&pool, &f, d, c).await?;

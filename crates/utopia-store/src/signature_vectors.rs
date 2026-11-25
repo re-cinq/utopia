@@ -1,13 +1,13 @@
-//! 短语签名的向量（#1097，0110）。
+//! Vectors for phrase signatures (#1097, 0110).
 //!
-//! 短语对齐给候选多的签名开短名单，要把签名的文本（短语、一条例句、一段引文）嵌入。
-//! 签名的文本在两轮之间几乎不变，从前每轮全部重嵌：库里一万七千条候选多的签名，每轮
-//! 一万七千次嵌入，判的可能只是新来的几十条。这里按 (库, 嵌入模型, 文本的哈希) 存下
-//! 算过的向量，一轮只嵌没见过的文本。
+//! Phrase alignment gives a short list to signatures with many candidates, so their text (the phrase, one example sentence, a quote) must be embedded.
+//! The text of a signature barely changes between rounds, but previously every round re-embedded everything: with seventeen thousand signatures that have many candidates in the store, each round did
+//! seventeen thousand embeddings, when the judgment might only concern a few dozen newcomers. Here vectors are stored by (store, embedding model, hash of the text)
+//! once computed, and a round embeds only the text it has not seen.
 //!
-//! 只按键读，不做近邻查询，所以不建 HNSW、不登记 `vector_index`；`embedding` 不定维，
-//! 随所选嵌入模型（与 `chunks.embedding` 同一条规矩）。这是缓存不是账本：删了下一轮
-//! 重嵌，结果一样。
+//! Read by key only, with no nearest-neighbour query, so no HNSW is built and nothing is registered in `vector_index`; `embedding` has no fixed dimension,
+//! following the chosen embedding model (the same rule as `chunks.embedding`). This is a cache, not a ledger: if it is deleted, the next round
+//! re-embeds, and the result is the same.
 
 use pgvector::Vector;
 use sqlx::PgPool;
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use utopia_core::AppResult;
 use uuid::Uuid;
 
-/// 这些哈希里已经存了向量的那些，哈希 → 向量
+/// Among these hashes, those that already have a stored vector: hash → vector
 pub async fn get(
     pool: &PgPool,
     kb_id: Uuid,
@@ -40,8 +40,8 @@ pub async fn get(
         .collect())
 }
 
-/// 存一批新嵌的向量。一个事务一次提交：逐条自动提交是一行一次 fsync。撞键（同一段文本
-/// 两轮之间被别处写过）不覆盖：同一模型同一段文字，向量是同一个
+/// Stores a batch of newly embedded vectors. Committed in one transaction: committing each one separately is one fsync per row. A key collision (the same text
+/// written elsewhere between two rounds) is not overwritten: same model and same text give the same vector
 pub async fn put(
     pool: &PgPool,
     kb_id: Uuid,
@@ -69,9 +69,9 @@ pub async fn put(
     Ok(())
 }
 
-/// 删掉这个库里不再用得上的向量：哈希不在 `keep` 里的，以及别的模型嵌的（换了模型，
-/// 旧向量与新属性向量不在一个空间里，留着只占地方）。`keep` 要是这一轮**全部**签名的
-/// 哈希，不只是这一轮嵌了的——否则一批嵌入失败，上一轮存好的那批跟着被删。返回删了几行
+/// Deletes vectors in this store that are no longer used: those whose hash is not in `keep`, and those embedded by another model (after a model change,
+/// the old vectors are in a different space from the new attribute vectors, so keeping them only takes up room). `keep` must be the hashes of **all** signatures in this round,
+/// not just those embedded this round — otherwise, if one batch's embedding fails, the batch stored in the previous round would be deleted as well. Returns how many rows were deleted
 pub async fn prune(pool: &PgPool, kb_id: Uuid, model: &str, keep: &[Vec<u8>]) -> AppResult<u64> {
     Ok(sqlx::query(
         "DELETE FROM signature_vectors

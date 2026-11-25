@@ -387,8 +387,8 @@ async fn source_list_exposes_scoped_rss_summary() -> anyhow::Result<()> {
             .iter()
             .find(|source| source.id == id)
             .ok_or_else(|| anyhow::anyhow!("{kind} source is missing"))?;
-        // **不是 RSS 的来源整块都不在。**从前这八列里三列是 NULL、五列是 0，
-        // 于是一个文件夹来源会报 `queued_count: 0`——在谈一个它没有的队列
+        // **Non-RSS sources are absent from the whole block.** Previously three of these eight columns were NULL and five were 0,
+        // so a folder source reported `queued_count: 0` -- talking about a queue it does not have
         assert!(
             source.rss_full_content.is_none(),
             "{kind} 不是 RSS 全文来源，不该有这一块"
@@ -525,8 +525,8 @@ async fn source_list_exposes_scoped_rss_summary() -> anyhow::Result<()> {
         .iter()
         .find(|source| source.id == source_id)
         .ok_or_else(|| anyhow::anyhow!("RSS source is missing after disabling"))?;
-    // 关掉全文的 RSS 来源**这一块仍然在**：它还是 RSS，只是这一档关着，
-    // 而那些观察还在库里。不适用的是"根本不是 RSS"，不是"没开全文"
+    // An RSS source with full text turned off **is still in this block**: it is still RSS, only this level is off,
+    // and those observations are still in the database. What does not apply is "not RSS at all", not "full text not turned on"
     let block = rss.rss_full_content.as_ref().expect("还是 RSS，块还在");
     assert_eq!(block.state, "disabled");
     assert_eq!(block.terminal, 1, "disabled current rows are superseded");

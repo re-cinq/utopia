@@ -1,6 +1,6 @@
-//! re:cinq fork：`embed_names` 只调嵌入模型，常规名额被抽取占满时保留通道照样认领它（迁移 9003）。
+//! re:cinq fork: `embed_names` only calls the embedding model; even when the regular slots are full of extraction, the reserved lane still claims it (migration 9003).
 //!
-//! 起真实的 `run_worker`，所以自成一个二进制。处理器只认带本测试标记的任务。
+//! starts the real `run_worker`, so it is its own binary. The handler only accepts tasks carrying this test's marker.
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;

@@ -1,18 +1,18 @@
-//! #268：删除文档是认知轴上的一个事件，不是减法。
+//! #268: deleting a document is an event on the epistemic axis, not a subtraction.
 //!
-//! 此前 `documents::delete` 一句 DELETE，外键把分块与证据一并级联掉：事实留在图里、
-//! 活着、却没了出处。现在文档打墓碑，分块打标，**什么内容都不清**，只作废「每条出处
-//! 都已删除」的事实。这里守五件事：
+//! Until now `documents::delete` ran a single DELETE, and the foreign keys cascaded the chunks and evidence away with it: the facts stayed in the graph,
+//! alive, but lost their provenance. Now the document gets a tombstone and its chunks are marked, **no content is cleared**, and only facts where "every source has been deleted" are voided.
+//! Five things are guarded here:
 //!
-//! 1. **只作废没有别的出处的。** 甲乙两篇都作证的事实，删甲不动它；只有甲作证的作废。
-//!    分块打了标但正文还在；文档不再出现在列表里。
-//! 2. **删两次报错。**
-//! 3. **撤销原路回来。** 文档、这次打标的分块、这次作废的事实复活；删之前就已作废的
-//!    事实不在名单上，不会被误救。撤销一篇没删的报错。
-//! 4. **同内容重传复活墓碑**：同一个 id 回来，而不是撞唯一索引报「已存在」。
-//! 5. **判据看文档，不看分块。** 停在旧版分块上的证据是 stale，不是没了源——不作废。
+//! 1. **Only facts with no other source are voided.** A fact attested by both documents A and B is left alone when A is deleted; a fact attested only by A is voided.
+//!    The chunks are marked but the body text remains; the document no longer appears in the list.
+//! 2. **Deleting twice raises an error.**
+//! 3. **Undo returns everything to where it was.** The document, the chunks marked by this deletion, and the facts voided by this deletion come back; facts that were already voided before the deletion
+//!    are not on the list, so they are not wrongly rescued. Undoing a deletion that never happened is an error.
+//! 4. **Re-uploading the same content revives the tombstone**: the same id comes back, rather than hitting the unique index with "already exists".
+//! 5. **The check looks at the document, not the chunks.** Evidence stuck on an old version of the chunks is stale, not gone -- it is not voided.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_store::documents;
@@ -133,7 +133,7 @@ async fn entity(pool: &PgPool, f: &Fx, name: &str) -> anyhow::Result<Uuid> {
     Ok(id)
 }
 
-/// 一条事实，出处是给定的几个分块
+/// A fact whose sources are the given chunks
 async fn fact(pool: &PgPool, f: &Fx, s: Uuid, o: Uuid, evidence: &[Uuid]) -> anyhow::Result<Uuid> {
     let id = Uuid::now_v7();
     sqlx::query(
@@ -209,7 +209,7 @@ async fn a_deletion_is_an_event() -> anyhow::Result<()> {
             entity(&pool, &f, "Z").await?,
             entity(&pool, &f, "W").await?,
         );
-        // 只有甲作证；甲乙都作证；甲作证但删之前就作废了
+        // Only A attests; A and B both attest; A attests but was already voided before the deletion
         let only_a = fact(&pool, &f, x, y, &[a1]).await?;
         let both = fact(&pool, &f, x, z, &[a1, b1]).await?;
         let already_gone = fact(&pool, &f, x, w, &[a1]).await?;
@@ -218,7 +218,7 @@ async fn a_deletion_is_an_event() -> anyhow::Result<()> {
             .execute(&pool)
             .await?;
 
-        // 1. 删甲
+        // 1. Delete A
         let report = documents::delete(&pool, f.kb, a, Some(f.user)).await?;
         assert_eq!(
             report.invalidated_facts, 1,
@@ -251,12 +251,12 @@ async fn a_deletion_is_an_event() -> anyhow::Result<()> {
         assert_eq!(chunks, vec![a1]);
         assert!(reverted.is_none());
 
-        // 2. 删两次
+        // 2. Delete twice
         assert!(documents::delete(&pool, f.kb, a, Some(f.user))
             .await
             .is_err());
 
-        // 3. 撤销原路回来；删之前就作废的不被误救
+        // 3. Undo returns everything to where it was; facts voided before the deletion are not wrongly rescued
         let doc = documents::restore(&pool, f.kb, a).await?;
         assert!(doc.deleted_at.is_none());
         assert!(live(&pool, only_a).await?);
@@ -275,7 +275,7 @@ async fn a_deletion_is_an_event() -> anyhow::Result<()> {
         assert!(reverted.is_some());
         assert!(documents::restore(&pool, f.kb, a).await.is_err());
 
-        // 4. 删掉再传同一份内容：同一个 id 回来
+        // 4. Delete, then upload the same content again: the same id comes back
         documents::delete(&pool, f.kb, a, Some(f.user)).await?;
         assert!(!live(&pool, only_a).await?);
         let back = documents::create(
@@ -295,7 +295,7 @@ async fn a_deletion_is_an_event() -> anyhow::Result<()> {
         assert!(live(&pool, only_a).await?);
         assert!(chunk_live(&pool, a1).await?.0);
 
-        // 5. 判据看文档：乙的证据停在旧版分块上，删甲时乙还活着，事实不作废
+        // 5. The check looks at the document: B's evidence is stuck on old chunks; when A is deleted B is still alive, so the fact is not voided
         let b0 = chunk(&pool, &f, b, 0).await?;
         let stale_but_sourced = fact(&pool, &f, y, z, &[a1, b0]).await?;
         let report = documents::delete(&pool, f.kb, a, Some(f.user)).await?;
@@ -311,7 +311,7 @@ async fn a_deletion_is_an_event() -> anyhow::Result<()> {
     }
     .await;
 
-    // 组织删除不级联到库：库自己删，别在共用的测试库里留墓碑
+    // Org deletion does not cascade to the library: delete the library ourselves, and do not leave tombstones in the shared test database
     let _ = sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(f.kb)
         .execute(&pool)

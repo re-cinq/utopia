@@ -1,11 +1,11 @@
-//! 对齐队列（#725 的「Alignment」一档）：对齐器两票不一致、拿不定的签名与类别词，等人来定。
+//! Alignment queue (the "Alignment" tier of #725): signatures and category words that the aligner's two votes disagree on, or cannot settle, wait here for a person to decide.
 //!
-//! 两种条目走同一档：一条短语签名（短语 × 两端的类，几条例句，两票各选了什么）要人定
-//! 属性和方向或「没有」；一个类别词（词、写法、例名、两票）要人定类或「没有」。人定了写回
-//! `phrase_bindings` / `type_bindings`，`decided_by = 'person'`，代理此后不再改它；短语定了
-//! 类型化图谱按新绑定重算，类别词定了它名下的实体换类、短语签名跟着变。
+//! Both kinds of entry share this tier: a phrase signature (phrase × the classes at both ends, a few example sentences, what each vote chose) needs a person to decide
+//! the attribute and direction, or "none"; a category word (the word, its spellings, example names, both votes) needs a person to decide its class or "none". Once decided, the answer is written back
+//! to `phrase_bindings` / `type_bindings` with `decided_by = 'person'`, and the agent does not change it afterwards; once a phrase is decided,
+//! the typed graph is recomputed with the new binding; once a category word is decided, the entities under it change class and phrase signatures follow.
 //!
-//! 卡片由账本拼：这里只读两张绑定表和类别词签名，不调模型。
+//! Cards are assembled from the ledger: this only reads the two binding tables and the category-word signatures, and does not call a model.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -13,7 +13,7 @@ use sqlx::PgPool;
 use utopia_core::AppResult;
 use uuid::Uuid;
 
-/// 队列里的一条：短语签名或类别词。
+/// One queue entry: a phrase signature or a category word.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AlignmentItem {
@@ -24,14 +24,14 @@ pub enum AlignmentItem {
         object_class: Option<String>,
         object_is_value: bool,
         statement_count: i32,
-        /// 判定时记下的例句（「主语 —短语→ 宾语」）
+        /// Example sentence recorded at judgment time ("subject —phrase→ object")
         examples: Vec<String>,
-        /// 两票各选了什么：`{"first": {...} | null, "second": {...} | null}`
+        /// What each vote chose: `{"first": {...} | null, "second": {...} | null}`
         votes: Option<serde_json::Value>,
         decided_at: DateTime<Utc>,
-        /// 绑上了、却没说一刻标哪一端的签名（#966）：人绑的，或对齐器问过、两票没说出同一个
-        /// 值的。现在绑到的属性与方向，界面按它预选、只等人补上 marks。undecided 的条目两个
-        /// 都是 None
+        /// Signatures that are bound but never marked which end holds at a moment (#966): bound by a person, or the aligner asked and the two votes did not agree on the same
+        /// value. The attribute and direction bound now are pre-selected by the UI, waiting only for a person to fill in the marks. For undecided entries both
+        /// are None
         bound_to: Option<String>,
         direction: Option<String>,
     },
@@ -44,7 +44,7 @@ pub enum AlignmentItem {
         votes: Option<serde_json::Value>,
         decided_at: DateTime<Utc>,
     },
-    /// 对齐器提的一条蕴含规则（0044 决定 3 第五片）：这种形状蕴含哪条属性、宾语怎么读
+    /// An implication rule proposed by the aligner (0044 decision 3, slice 5): which attribute this shape implies, and how its object is read
     Rule {
         id: Uuid,
         trigger: String,
@@ -94,10 +94,10 @@ struct PhraseRow {
     direction: Option<String>,
 }
 
-/// 等人定的短语签名：两票不一致的，加上绑到状态属性、却没说一刻标哪一端的（#966）——人绑的
-/// （代理不改人的判定），和对齐器问过、两票没说出同一个值的（只问一次，0053 修订）。不列
-/// 出来，它们名下只说了一刻的陈述就一直不算。这一列之前代理绑上、还没问过的不列：对齐器
-/// 下一轮先问
+/// Phrase signatures awaiting a person's decision: those where the two votes disagree, plus those bound to a state attribute that never marked which end holds at a moment (#966), including those bound by a person
+/// (the agent does not change a person's judgment), and those the aligner asked about where the two votes did not agree on the same value (asked once, 0053 revision). Not listed
+/// here, statements under them that only state a moment never count. Entries the agent bound earlier that have not been asked about yet are not listed: the aligner
+/// asks them first in the next round
 pub(crate) const WAITING_PHRASE: &str = "(b.status = 'undecided'
        OR (b.status = 'bound' AND b.marks IS NULL
            AND (b.decided_by = 'person' OR b.marks_asked_at IS NOT NULL)
@@ -112,7 +112,7 @@ struct KindWordRow {
     decided_at: DateTime<Utc>,
 }
 
-/// 等人定的条目，先来的在前，两种混排。
+/// Entries awaiting a person's decision, oldest first, both kinds mixed.
 pub async fn list(
     pool: &PgPool,
     kb_id: Uuid,
@@ -153,7 +153,7 @@ pub async fn list(
     .bind(kb_id)
     .fetch_all(pool)
     .await?;
-    // 类别词的例名和短语来自签名（活着的实体数出来的），按词对上
+    // Example names and phrases for a category word come from the signatures (counted from live entities), matched by word
     let sigs = if words.is_empty() {
         Vec::new()
     } else {
@@ -224,7 +224,7 @@ pub async fn list(
         .collect())
 }
 
-/// 等人定的条目数，以及最老的一条从什么时候起在等。
+/// Number of entries awaiting a person's decision, and since when the oldest one has been waiting.
 pub async fn waiting(pool: &PgPool, kb_id: Uuid) -> AppResult<(i64, Option<DateTime<Utc>>)> {
     Ok(sqlx::query_as(&format!(
         "SELECT count(*), min(decided_at) FROM (

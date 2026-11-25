@@ -1,14 +1,14 @@
-//! 检索也倒得回去（0019 开放问题②），打在真库上。
+//! Retrieval also rewinds (0019 open question ②), run against a real database.
 //!
-//! 两件事在这里被钉住：
+//! Two things are pinned here:
 //!
-//! 1. **重解析不再丢掉旧块的向量。** 从前落选的块 `embedding = NULL`，省掉的是
-//!    两者里更小的一半——正文本来就留着——而代价是历史整段搜不出来。
-//! 2. **带时刻的检索按当时的活性走**：当时活着的块、当时还没被删的文档。
-//!    删除留墓碑（#268），所以"上周删掉的文档"在上上周的检索里照常命中。
+//! 1. **Re-parsing no longer drops the old chunk's vector.** Previously a losing chunk had `embedding = NULL`, which saved
+//!    the smaller of the two halves — the body was kept anyway — at the cost of the whole history becoming unsearchable.
+//! 2. **Retrieval with a moment follows the liveness at that time**: the chunks alive then, the documents not yet deleted then.
+//!    Deletion leaves a tombstone (#268), so a "document deleted last week" still hits in retrieval from two weeks ago.
 //!
-//! 全文那一路不在这里：Tantivy 的索引只有"现在"一个版本，带时刻检索时它
-//! 找回来的是对的、但找不全（模块头里写了）。这个测试打的是向量与取块两路。
+//! The full-text path is not here: the Tantivy index has only one "now" version, so with a moment, what it finds is correct
+//! but not complete (as stated in the module header). This test exercises the vector and chunk-fetch paths.
 
 use pgvector::Vector;
 use sqlx::PgPool;
@@ -22,13 +22,13 @@ fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
 struct Fixture {
     org: Uuid,
     kb: Uuid,
-    /// 现行那篇文档
+    /// The document currently in force
     doc: Uuid,
-    /// 五月被重解析顶掉的旧块
+    /// The old chunk overwritten by re-parsing in May
     old_chunk: Uuid,
-    /// 顶替它的新块
+    /// The new chunk replacing it
     new_chunk: Uuid,
-    /// 属于一篇六月被删掉的文档
+    /// Belongs to a document deleted in June
     deleted_doc_chunk: Uuid,
 }
 
@@ -102,7 +102,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         .await?;
     }
 
-    // 五月：重解析。旧块落选被软删，新块顶上——**旧块的向量必须还在**
+    // May: re-parse. The old chunk loses out and is soft-deleted, the new chunk takes its place — **the old chunk's vector must still be there**
     let pieces = vec![ChunkPiece {
         seq: 0,
         text: "The 2026 handbook says the office moved to Shenzhen.".into(),
@@ -118,7 +118,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     .bind(doc)
     .fetch_one(pool)
     .await?;
-    // 新块的向量由摄入管道后补，这里直接给一个，好让它进得了向量召回
+    // The new chunk's vector is filled in afterwards by the ingestion pipeline; give one here directly so it can enter vector recall
     sqlx::query("UPDATE chunks SET embedding = $2, created_at = $3 WHERE id = $1")
         .bind(new_chunk.0)
         .bind(embed([0.0, 1.0, 0.0]))
@@ -149,7 +149,7 @@ async fn a_superseded_chunk_keeps_its_vector_and_answers_as_of_then() -> anyhow:
     let pool = PgPool::connect(&url).await?;
     let f = seed(&pool).await?;
 
-    // 1. 顶掉的块还带着向量。丢了向量，下面每一条都无从谈起
+    // 1. The chunk that was overwritten still carries its vector. Without the vector, everything below would be meaningless
     let kept: (bool,) = sqlx::query_as("SELECT embedding IS NOT NULL FROM chunks WHERE id = $1")
         .bind(f.old_chunk)
         .fetch_one(&pool)
@@ -159,14 +159,14 @@ async fn a_superseded_chunk_keeps_its_vector_and_answers_as_of_then() -> anyhow:
         "重解析不该顺手丢掉旧块的向量——历史就是靠它才搜得出来"
     );
 
-    // 2. 现在：向量召回给出新块，给不出被顶掉的旧块
+    // 2. Now: vector recall gives the new chunk, and cannot give the overwritten old one
     let query = vec![1.0_f32, 0.0, 0.0];
     let now_hits =
         utopia_store::documents::vector_search(&pool, f.kb, &query, 10, None, None).await?;
     assert!(!now_hits.contains(&f.old_chunk), "现行检索不该翻出旧版本");
     assert!(now_hits.contains(&f.new_chunk));
 
-    // 3. 三月：那时旧块是现行的，新块还不存在
+    // 3. March: then the old chunk was current and the new chunk did not yet exist
     let then = Some(t("2026-03-01T00:00:00Z"));
     let then_hits =
         utopia_store::documents::vector_search(&pool, f.kb, &query, 10, then, None).await?;
@@ -179,7 +179,7 @@ async fn a_superseded_chunk_keeps_its_vector_and_answers_as_of_then() -> anyhow:
         "五月才有的块不该出现在三月"
     );
 
-    // 4. 取块也倒：六月删掉的文档，在五月的检索里照常带回来（#268 留了墓碑）
+    // 4. Fetching chunks also rewinds: a document deleted in June is still returned by a search in May (#268 left a tombstone)
     let live_now = utopia_store::documents::chunks_by_ids(
         &pool,
         f.kb,
@@ -214,8 +214,8 @@ async fn a_superseded_chunk_keeps_its_vector_and_answers_as_of_then() -> anyhow:
     cleanup(&pool, &f).await
 }
 
-/// 只取一条时，最近的是那篇删掉的文档的块；限定在现行文档里，名额就归它的块——
-/// 过滤在 `LIMIT` 之前，不是取完一条再筛成零条
+/// When fetching just one, the nearest is the chunk of the deleted document; restricted to current documents, the slot goes to its chunk —
+/// the filter applies before `LIMIT`, not after taking one and filtering down to zero.
 #[tokio::test]
 async fn a_document_filter_spends_the_limit_on_its_own_chunks() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {

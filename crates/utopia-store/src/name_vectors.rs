@@ -1,14 +1,14 @@
-//! 名字向量：召回的第二条通道（0041 决定 3，第 2 刀）。
+//! Name vectors: the second recall channel (0041 decision 3, slice 2).
 //!
-//! 通道 1 是字面相等：mention 的名字与某条名字事实 `normalize_name` 之后一样。它找不到
-//! 简称（海探1 ↔ 海洋探测器1号）、找不到另一种文字写的同一个名字（#709），而这两种
-//! 恰恰是「多名」被错拆成两个实体的主因。这里给每条名字事实存名字字符串本身的向量，
-//! 查询时在同一个库里取最近的几条；**只提议，不决定**——最近的名字是不是同一个东西，
-//! 由消解那头按既有规矩（画像、裁决器，往后是第 3 刀的证据）去判。
+//! Channel 1 is literal equality: a mention's name equals some name fact's after `normalize_name`. It cannot find
+//! abbreviations ("Haitan 1" ↔ "Ocean Probe No. 1"), nor the same name written in another script (#709), and those two
+//! are precisely the main reason a "multi-name" gets wrongly split into two entities. Here each name fact stores a vector of the name string itself,
+//! and at query time the nearest few within the same KB are taken; **it only proposes, it does not decide** — whether the nearest name is the same thing
+//! is judged by the resolution side under the existing rules (profiles, the arbiter, and later slice 3's evidence).
 //!
-//! 向量随嵌入模型走，不定维（与 `chunks.embedding` 同）。查询照 0035 的两条规矩写：
-//! `<=>` 两侧 cast 到字面维度、谓词里带 `vector_dims(...) = N`，HNSW 建好了就走索引，
-//! 没建走精确路径，结果一样。
+//! Vectors follow the embedding model and have no fixed dimension (same as `chunks.embedding`). Queries follow the two rules from 0035:
+//! cast both sides of `<=>` to the literal dimension, and put `vector_dims(...) = N` in the predicate; once the HNSW index is built it is used,
+//! and without it the exact path is taken, with the same results.
 
 use pgvector::Vector;
 use sqlx::PgPool;
@@ -17,17 +17,17 @@ use uuid::Uuid;
 
 use crate::vector_index::{self, Target};
 
-/// 一次最多提议几条。名字向量的近邻里真正相关的很少超过前几个；再多只是给裁决器
-/// 添噪音。数值待 `identity.mjs` 定，先取一个不会刷爆队列的
+/// At most how many to propose at once. Only a few of the truly relevant nearest neighbours of a name vector ever exceed the first few; more just gives the arbiter
+/// noise. The value is to be settled by `identity.mjs`; for now take one that will not flood the queue
 pub const TOP_K: usize = 8;
 
-/// 余弦下限。名字字符串的向量比整段文本的向量「紧」——两个不相干的名字也能有
-/// 0.4 上下的余弦——所以这条线比画像的 `SIM_ATTACH` 高。同样是待测量的临时值
+/// Cosine floor. A name string's vector is "tighter" than a whole passage's vector — two unrelated names can still have
+/// a cosine around 0.4 — so this threshold sits above the profile's `SIM_ATTACH`. Likewise a provisional value to be measured
 pub const SIM_FLOOR: f32 = 0.60;
 
-/// 名字事实 `$fact` 有身份来源的证据（0071 决定 4、5）：这样的名字不留向量。
-/// `$kb` 是事实所在库：证据文档与事实必在同一个库（0070 的 (kb_id, document_id) 外键），
-/// 只在本库找；不带它，反连接会铺到每个库的身份证据上（内部集群 64 个名字 143 秒、930 万缓冲）
+/// Name fact `$fact` has identity-source evidence (0071 decisions 4, 5): such a name stores no vector.
+/// `$kb` is the KB the fact lives in: the evidence document and the fact must be in the same KB (the (kb_id, document_id) foreign key of 0070),
+/// so search only within this KB; without it the anti-join spreads over every KB's identity evidence (the internal cluster: 64 names took 143 seconds, 9.3 million buffers)
 macro_rules! has_identity_evidence {
     ($fact:literal, $kb:literal) => {
         concat!(
@@ -43,12 +43,12 @@ macro_rules! has_identity_evidence {
     };
 }
 
-/// `known_as` 的 id 用子查询取，不要改回 JOIN：子查询先算出一个值，`predicate_id = 它` 才成了
-/// `facts_live_predicate_idx`（0115）的索引条件，扫描只碰这个库的名字事实，且仍按 id 走，
-/// `ORDER BY ... LIMIT` 不用排序。写成 JOIN，规划器沿 `facts_kb_id_key` 把整个库按 id 读一遍，
-/// 谓词只能逐行筛（#1296：20 万条事实的库上读 20 万行，这样读 2 万行）
+/// Take the `known_as` id via a subquery, do not change it back to a JOIN: the subquery computes a value first, so `predicate_id = it` becomes the index
+/// condition of `facts_live_predicate_idx` (0115); the scan touches only this KB's name facts, and still walks by id, and
+/// `ORDER BY ... LIMIT` does no sort. Written as a JOIN, the planner walks the whole KB in id order along `facts_kb_id_key`,
+/// and the predicate can only filter row by row (#1296: on a KB with 200,000 facts it read 200,000 rows; this reads 20,000)
 ///
-/// 有身份来源证据的名字不补向量，哪怕散文也提到它（0071 决定 4、5）
+/// A name with identity-source evidence is not backfilled with a vector, even if prose mentions it (0071 decisions 4, 5)
 const PENDING_SQL: &str = concat!(
     "SELECT f.id, f.subject_id, f.object_value->>'value'
        FROM facts f
@@ -65,10 +65,10 @@ const PENDING_SQL: &str = concat!(
       LIMIT $3"
 );
 
-/// 还没有向量的名字事实：现行的、`known_as` 上的、`name_vectors` 里没有它的、
-/// 没有身份来源证据的。
-/// 按写入先后取（`facts.id` 是 uuid v7，按它排即按写入排；这张表没有 created_at——
-/// 端到端跑出来的：按一个不存在的列排，补向量每篇都静默失败），一次取一批
+/// Name facts with no vector yet: the current ones, on `known_as`, with no entry in `name_vectors`, and
+/// without identity-source evidence.
+/// Taken in write order (`facts.id` is a uuid v7, so ordering by it is ordering by write time; this table has no created_at —
+/// found by running end to end: ordering by a column that does not exist made backfill fail silently on every document), one batch at a time
 pub async fn pending(
     pool: &PgPool,
     kb_id: Uuid,
@@ -90,7 +90,7 @@ const DROP_FOR_SOURCE_SQL: &str = "DELETE FROM name_vectors v
 const DROP_FOR_DOCUMENT_SQL: &str = "DELETE FROM name_vectors v USING fact_evidence fe
           WHERE fe.fact_id = v.fact_id AND fe.document_id = $1";
 
-/// 来源刚开了身份名（0071 决定 6）：删掉有它文档证据的名字向量，与改配置同一个事务
+/// The source has just enabled identity names (0071 decision 6): delete name vectors that have document evidence for it, in the same transaction as the config change
 pub async fn drop_for_source(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     source_id: Uuid,
@@ -102,7 +102,7 @@ pub async fn drop_for_source(
     Ok(())
 }
 
-/// 身份来源的文档抽完（0071 决定 5）：散文先写下的名字向量，这篇给了它身份证据就删
+/// Identity-source documents have finished extraction (0071 decision 5): a name vector that prose wrote first is deleted once this document provides identity evidence
 pub async fn drop_for_document(pool: &PgPool, document_id: Uuid) -> AppResult<()> {
     sqlx::query(DROP_FOR_DOCUMENT_SQL)
         .bind(document_id)
@@ -111,7 +111,7 @@ pub async fn drop_for_document(pool: &PgPool, document_id: Uuid) -> AppResult<()
     Ok(())
 }
 
-/// 合并把重复名字的证据抄到了存活的名字上（#1426）：其中有了身份证据的，删掉向量
+/// A merge copied duplicate names' evidence onto the surviving name (#1426): where that gave it identity evidence, delete the vector
 pub async fn drop_with_identity_evidence(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     facts: &[Uuid],
@@ -129,10 +129,10 @@ pub async fn drop_with_identity_evidence(
     Ok(())
 }
 
-/// 写一批名字向量：`(fact_id, entity_id, embedding)`。同一条事实重写就覆盖（换了模型
-/// 重算）。第一次写下这个维度的向量，索引就该排上了（0035）。
-/// 写的时候再查一次身份证据：补向量算到一半，来源开了身份名或身份文档抽完删过一轮，
-/// 这里不能把它写回去
+/// Writes a batch of name vectors: `(fact_id, entity_id, embedding)`. Rewriting the same fact overwrites (after a model change it is
+/// recomputed). The first time a vector of this dimension is written, the index should kick in (0035).
+/// Re-check the identity evidence at write time: if backfill was midway when the source enabled identity names, or identity documents finished extraction and a deletion round ran,
+/// this must not write it back
 pub async fn set(pool: &PgPool, kb_id: Uuid, items: &[(Uuid, Uuid, Vec<f32>)]) -> AppResult<()> {
     if items.is_empty() {
         return Ok(());
@@ -159,7 +159,7 @@ pub async fn set(pool: &PgPool, kb_id: Uuid, items: &[(Uuid, Uuid, Vec<f32>)]) -
     Ok(())
 }
 
-/// 一条被召回的名字：它挂在哪个实体上、那个实体是什么类、名字本身、与查询的余弦
+/// One recalled name: which entity it hangs on, what class that entity is, the name itself, and its cosine to the query
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Near {
     pub entity_id: Uuid,
@@ -170,13 +170,13 @@ pub struct Near {
     pub similarity: f32,
 }
 
-/// 同库里与查询向量最近的 `k` 条名字，按相似度降序。只看现行的名字事实、没被合并掉
-/// 的实体。不按 `description` 过滤：被描述的东西没有名字事实（0044），JOIN facts 已经
-/// 把它排除了；万一将来一个有名字的东西也带上描述，它的名字照样该被召回（#877 评审）。
+/// The `k` names in the same KB nearest to the query vector, in descending similarity. Only considers current name facts and entities not merged away.
+/// It does not filter on `description`: a described thing has no name fact (0044), and the JOIN to facts already
+/// excludes it; should a named thing later also carry a description, its name should still be recalled (#877 review).
 ///
-/// 里层按索引能接住的形状取 `k * 4` 条最近的，外层再用事实与实体的状态过滤——过滤
-/// 放在里层会让索引用不上（0035）；取四倍是给过滤留余量，名字事实作废和实体合并
-/// 都不常见，通常一条都不会被滤掉
+/// The inner layer takes the `k * 4` nearest in a shape the index can serve, and the outer layer then filters on the state of the fact and entity — filtering
+/// inside would stop the index being used (0035); taking four times as many leaves headroom for the filter, and name-fact invalidation and entity merges
+/// are both uncommon, so usually not a single one gets filtered out
 pub async fn nearest(pool: &PgPool, kb_id: Uuid, query: &[f32], k: usize) -> AppResult<Vec<Near>> {
     let dims = query.len();
     if dims == 0 || k == 0 {
@@ -186,8 +186,8 @@ pub async fn nearest(pool: &PgPool, kb_id: Uuid, query: &[f32], k: usize) -> App
     let order = vector_index::index_order("v.embedding", 2, dims);
     let same_dims = vector_index::same_dims("v.embedding", dims);
     let sql = format!(
-        // 外层次序照 `vector_index::RESORT` 的规矩（`distance + 0, id`），列名限定到 CTE：
-        // 外层还联着 facts / entities / entity_types，裸写 `id` 会二义
+        // The outer ordering follows the `vector_index::RESORT` rule (`distance + 0, id`), and column names are qualified to the CTE:
+        // the outer query also joins facts / entities / entity_types, so a bare `id` would be ambiguous
         "WITH near AS MATERIALIZED (
              SELECT v.fact_id AS id, v.entity_id, ({distance}) AS distance
                FROM name_vectors v
@@ -207,7 +207,7 @@ pub async fn nearest(pool: &PgPool, kb_id: Uuid, query: &[f32], k: usize) -> App
           ORDER BY n.distance + 0, n.id
           LIMIT $4",
     );
-    // 规矩 3：有了索引，小库在共享表上不开 iterative_scan 会回不满
+    // Rule 3: with the index in place, a small KB on a shared table will not fill up without iterative_scan turned on
     let mut tx = pool.begin().await?;
     vector_index::relaxed_order(pool, &mut tx).await?;
     let rows: Vec<Near> = sqlx::query_as(&sql)

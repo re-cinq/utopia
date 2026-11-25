@@ -1,14 +1,14 @@
-//! 审核台的总览（#377），打在真库上。
+//! The review desk overview (#377), run against a real database.
 //!
-//! 三段都是 SQL 聚合，`cargo check` 一个字看不见；要钉住的是口径：
+//! All three sections are SQL aggregates, and `cargo check` cannot see a single character of them; what is pinned is the counting rules:
 //!
-//! - **等着办的**与左栏的计数同一套 WHERE，多出来的「最老」取的是各表自己的
-//!   时钟（冲突是 created_at，事实队列是 recorded_at）
-//! - **办过的**只认 review 域的四族动作，7 天窗口是 30 天窗口的子集，
-//!   没有 actor 的算自裁，按天补齐到 14 条
-//! - **成色**只数在世的事实；「有争议」是挂在开着的冲突任一端
+//! - **Waiting to be handled** uses the same WHERE as the left-column count, and the extra "oldest" is taken from each table's own
+//!   clock (conflicts use created_at, the fact queue uses recorded_at)
+//! - **Handled** only counts the four families of actions in the review domain; the 7-day window is a subset of the 30-day window,
+//!   and a row with no actor counts as self-retirement, and days are padded out to 14 entries
+//! - **Quality** counts only living facts; "contested" means hanging on either end of an open conflict
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset. Creates and tears down its own; never touches an existing database.
 
 use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
@@ -71,7 +71,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Seed> {
         .execute(pool)
         .await?;
     }
-    // 三条在世的事实：f2 低置信（0.5 < 0.75），f1 与 f3 之间挂一条开着的冲突
+    // Three living facts: f2 is low-confidence (0.5 < 0.75), and an open conflict sits between f1 and f3
     for (id, s, o, conf) in [(f1, a, b, 0.9f32), (f2, a, c, 0.5), (f3, b, c, 0.9)] {
         sqlx::query(
             "INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_id, confidence)
@@ -111,8 +111,8 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Seed> {
     .execute(pool)
     .await?;
 
-    // 台账：Ada 两条在 7 天内，一条自裁在 7 天内，Bo 一条在 20 天前（30 天内），
-    // Ada 还有一条 40 天前（窗口外）；再夹一条不是 review 域的动作，不该被数
+    // Ledger: Ada has two within 7 days, one self-retirement within 7 days, Bo has one 20 days ago (within 30 days),
+    // Ada also has one 40 days ago (outside the window); add one more action outside the review domain, which must not be counted
     let events: [(Option<Uuid>, Option<&str>, &str, i64); 6] = [
         (Some(ada), Some("Ada"), "review.merge", 1),
         (Some(ada), Some("Ada"), "fact.confirm", 2),
@@ -146,8 +146,8 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Seed> {
 }
 
 async fn teardown(pool: &PgPool, s: &Seed) -> anyhow::Result<()> {
-    // 台账只增不删（触发器挡着 DELETE），这几行留在库里，挂着一个已经不存在
-    // 的 kb_id，谁也读不到；组织不级联到库，两个都要删
+    // The ledger only grows and never deletes (a trigger blocks DELETE), so these rows stay in the database, pointing at a kb_id that no longer exists
+    // that nobody can read; the organization does not cascade to the KB, so both must be deleted
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(s.kb)
         .execute(pool)
@@ -268,7 +268,7 @@ async fn the_summary_reads_the_three_ledgers_with_one_yardstick() -> anyhow::Res
     let sum = got?;
     let counts = counts?;
 
-    // 等着办的：与左栏同一套数，多了最老的一条从何时起等
+    // Waiting to be handled: same numbers as the left column, plus since when the oldest one has been waiting
     let w = &sum.waiting;
     assert_eq!(w.conflicts.count, 1);
     assert!(
@@ -303,14 +303,14 @@ async fn the_summary_reads_the_three_ledgers_with_one_yardstick() -> anyhow::Res
         "总览与左栏计数是同一套口径"
     );
 
-    // 成色：三条在世的事实，一条低置信，两条挂在开着的冲突上
+    // Quality: three living facts, one low-confidence, two hanging on open conflicts
     assert_eq!(sum.health.facts, 3);
     assert_eq!(sum.health.low_confidence, 1);
     assert_eq!(sum.health.contested, 2);
     assert_eq!(sum.health.unconfirmed, 0);
 
-    // 办过的：7 天窗口三条（两条 Ada、一条自裁），30 天窗口再加 Bo 的一条；
-    // 40 天前的与非 review 域的动作都不算
+    // Handled: 7-day window three (two Ada, one self-retirement), 30-day window plus Bo's one;
+    // the one 40 days ago and the non-review-domain actions do not count
     let d7 = &sum.decided.last_7d;
     assert_eq!(d7.total, 3);
     assert_eq!(d7.automatic, 1);
@@ -343,7 +343,7 @@ async fn the_summary_reads_the_three_ledgers_with_one_yardstick() -> anyhow::Res
         "20 天前的那条进 30 天窗口"
     );
 
-    // 按天：固定 14 条、今天在最后、加起来就是近 14 天的三条
+    // By day: fixed at 14 entries, today last; the sum is exactly the three from the last 14 days
     let daily = &sum.decided.daily;
     assert_eq!(daily.len() as i64, utopia_store::review_summary::DAILY_DAYS);
     assert_eq!(daily.last().map(|d| d.day), Some(Utc::now().date_naive()));

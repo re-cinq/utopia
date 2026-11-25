@@ -1,25 +1,25 @@
-//! 审核队列的**真实条数**。
+//! The **real count** of the review queue.
 //!
-//! 从前左栏的徽标读的是接口返回的数组长度，而接口固定只回 100 条——于是一个
-//! 有 164 条低置信事实的库，界面写着 100。清完那 100 条，剩下的 64 条会再冒
-//! 出来，看起来像凭空长的。
+//! Previously the left-column badge read the length of the array the API returned, but the API always returned at most 100 items, so a
+//! database with 164 low-confidence facts showed 100. Once those 100 were cleared, the remaining 64 would surface again
+//! and look as if they had appeared out of nowhere.
 //!
-//! **数数和取数是两件事，得分开做。** 取数有上限（一页十条，翻页拿下一页），
-//! 数数没有：`count(*)` 走的是与列表同一套 WHERE，索引也是同一条。
+//! **Counting and fetching are two different things, and must be done separately.** Fetching has a cap (ten per page, paging for the next),
+//! counting does not: `count(*)` uses the same WHERE as the list, and the same index.
 //!
-//! 八个 COUNT 合成一条查询而不是发八次：它们都在同一个 kb 上，一次往返把
-//! 左栏一次性填满，而分开发会让切换知识库时左栏一档一档地跳出来。
+//! The eight COUNTs are combined into one query rather than sent eight times: they all hit the same kb, and one round trip fills
+//! the left column all at once, whereas sending them separately would make the left column jump in steps when switching knowledge bases.
 
 use sqlx::PgPool;
 use utopia_core::models::ReviewCounts;
 use utopia_core::AppResult;
 use uuid::Uuid;
 
-/// 低置信的阈值。**与 `review_routes` 共用一个常量**——两处各写一个数，
-/// 迟早分叉成「徽标说 12 条，点进去 9 条」。
+/// The low-confidence threshold. **Shares one constant with `review_routes`**: writing one number in each place
+/// would eventually fork into "the badge says 12, click through and find 9".
 pub const LOW_CONFIDENCE_BELOW: f32 = 0.75;
 
-/// 类型化行跟它的陈述同判（RC-005），见 [`unconfirmed_fact`]。
+/// A typed row is judged the same as its statement (RC-005), see [`unconfirmed_fact`].
 pub const FOLLOWS_ITS_STATEMENT: &str = "EXISTS (SELECT 1 FROM typed_fact_sources ts
                    JOIN facts st ON st.id = ts.statement_id
                   WHERE ts.fact_id = f.id
@@ -30,15 +30,15 @@ pub const FOLLOWS_ITS_STATEMENT: &str = "EXISTS (SELECT 1 FROM typed_fact_source
                                  WHERE se.fact_id = st.id
                                    AND sc.superseded_at IS NULL))";
 
-/// 事实引用的某个文档有一块现行分块还没人读：新版本写下了、还没抽取。它开口之前，
-/// 它可能没再提的东西还谈不上「没了」。只等还会被读的版本：还在摄入，或排着队、正在抽取。
-/// 抽取关着、跳过或失败的版本没人会读，等它就是永远等。别名固定用 `f`。
+/// A document a fact cites has a current chunk that no one has read yet: a new version was written, not yet extracted. Before it speaks,
+/// what it might have dropped cannot be called "gone". Only wait for versions that will still be read: still ingesting, or queued and being extracted.
+/// Versions where extraction is off, skipped or failed will never be read, so waiting on them would wait forever. The alias is fixed to `f`.
 ///
-/// 文档从证据的分块找（`fe.chunk_id`），不从 `fe.document_id`：后者可以为空。
+/// The document is found from the evidence's chunk (`fe.chunk_id`), not `fe.document_id`: the latter may be empty.
 ///
-/// **只说当下。** `extracted_at` 没有历史：强制重抽把它清空再写成现在，一个分块
-/// 「T 时刻读过没有」事后无从得知。所以回放（0019）不问这一句，只看证据分块那时
-/// 是否已被取代，那是重抽动不了的。
+/// **Only the present.** `extracted_at` has no history: a forced re-extraction clears it and writes it as now, so whether a chunk
+/// had been read at time T cannot be known after the fact. So replay (0019) does not ask this, and only checks whether the evidence chunk
+/// had been superseded by then, which re-extraction cannot undo.
 pub fn awaits_a_new_version() -> &'static str {
     "EXISTS (SELECT 1 FROM fact_evidence fe
                JOIN chunks cited ON cited.id = fe.chunk_id
@@ -49,18 +49,18 @@ pub fn awaits_a_new_version() -> &'static str {
                      OR d.status IN ('pending', 'parsing', 'indexing', 'embedding')))"
 }
 
-/// 「待确认」的判据，写成 SQL 片段，`counts` 与总览（`review_summary`）共用：
-/// 有证据、但证据所在的分块全被新版本取代了，**而且这条事实至今仍成立**。别名固定用 `f`。
+/// The criterion for "awaiting confirmation", written as an SQL fragment, shared by `counts` and the overview (`review_summary`):
+/// evidence exists, but every chunk it sits in was replaced by a new version, **and this fact still holds**. The alias is fixed to `f`.
 ///
-/// 上界那一句是「闭合」这个出路的前提：闭合是作废+改写，修正行把证据一起复制下来
-/// （`temporal::close_superseded`），少了它，刚闭合的行照样满足判据——队列永远清不掉，
-/// 再点一次只会撞上「区间已闭合」。判据与 0022 说同一句话：「结束不知哪天」不是开放。
+/// The upper-bound clause is the precondition for the "close" exit: closing is void + rewrite, and the correction row copies the evidence along
+/// (`temporal::close_superseded`); without it, the just-closed row still satisfies the criterion, so the queue could never be cleared,
+/// and clicking again would just hit "interval already closed". The criterion says the same thing as 0022: "end date unknown" is not open.
 ///
-/// 最后一句：新版本写下了、还没被读，就不算待确认（见 [`awaits_a_new_version`]）。
+/// Last point: a new version written but not yet read does not count as awaiting confirmation (see [`awaits_a_new_version`]).
 ///
-/// 再一句是类型化行的（RC-005）：它的证据是物化那一刻从陈述抄来的，陈述后来在新分块上
-/// 再被说出，抄本不跟着长。所以有陈述来源的行与它的陈述同判：哪条来源陈述现行、开放、
-/// 证据落在活分块上，它就不算待确认。走 `typed_fact_sources` 与 `fact_evidence` 的主键。
+/// One more: for typed rows (RC-005), the evidence was copied from the statement at the moment of materialization; if the statement is later said again on a new chunk,
+/// the copy does not grow with it. So rows with a statement source are judged the same as their statement: if the source statement is current, open,
+/// and its evidence sits on a live chunk, the row does not count as awaiting confirmation. Goes via `typed_fact_sources` and the `fact_evidence` primary key.
 pub fn unconfirmed_fact() -> String {
     format!(
         "f.valid_to IS NULL AND f.valid_to_precision IS NULL

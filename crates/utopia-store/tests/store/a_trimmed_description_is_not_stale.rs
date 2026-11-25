@@ -1,16 +1,16 @@
-//! 嵌过的本体行不因为描述首尾的换行就永远判成陈的（#672），打在真库上。
+//! An embedded ontology row must not be judged stale forever just because its description has trailing newlines (#672), tested against a real database.
 //!
-//! 陈不陈看「当时嵌的原文」与「现在要嵌的原文」是否一致。从前后者在 SQL 里用 `btrim`
-//! 重拼，而原文由 Rust 的 `trim` 生成：`btrim` 只去空格，`trim` 连换行、制表符一起去。
-//! schema.org 的描述结尾是 "\n      "，这些行嵌完仍旧判陈——补齐任务一遍遍重嵌，抽取
-//! 门控等一个永远补不齐的索引，文档到期判失败。钉三样：
+//! Staleness is judged by whether the text embedded at the time matches the text to embed now. Previously the latter was rebuilt in SQL with `btrim`,
+//! while the former was produced by Rust's `trim`: `btrim` removes only spaces, but `trim` also removes newlines and tabs.
+//! schema.org descriptions end in "\n      ", so these rows stayed stale even after embedding -- the backfill task re-embedded them over and over, extraction
+//! gated on an index that could never be filled, and documents eventually failed on deadline. Three things are pinned:
 //!
-//! 1. **嵌过一轮就不陈**：描述结尾带换行和空格、label 首尾带制表符的类（整段与 label
-//!    两份）和关系，`set_type_embeddings` 写回之后，`types_needing_embedding` 为空
-//! 2. **改了描述照样重嵌**：判据没有因此变松
-//! 3. **换了模型全部重嵌**
+//! 1. **Once embedded, not stale**: classes whose description ends in a newline and spaces, and whose label has tabs at both ends (the whole text and the label
+//!    both), and relations; after `set_type_embeddings` writes back, `types_needing_embedding` is empty
+//! 2. **Changing the description still re-embeds**: the criterion was not loosened by this
+//! 3. **Changing the model re-embeds everything**
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_store::ontology::{self, EmbedField, TypeKind};
@@ -42,7 +42,7 @@ async fn an_embedded_row_with_surrounding_whitespace_stays_embedded() -> anyhow:
     .await?;
 
     let result = async {
-        // schema.org 导进来的样子：描述结尾一个换行加一串空格；label 首尾再夹个制表符
+        // What schema.org imports looks like: the description ends with a newline plus a run of spaces; the label has a tab at both ends
         sqlx::query(
             "INSERT INTO entity_types (id, kb_id, key, label, description)
              VALUES ($1, $2, 'place', E'\\tPlace\\t', E'Entities that have a somewhat fixed, physical extension.\\n      ')",
@@ -70,7 +70,7 @@ async fn an_embedded_row_with_surrounding_whitespace_stays_embedded() -> anyhow:
             }
         };
 
-        // ---- 一、第一轮三份都要嵌：类的整段与 label，关系的整段
+        // ---- Part 1: on the first round all three texts must be embedded: the class's whole text and label, and the relation's whole text
         let first = embed_all("model-a").await?;
         let mut shape: Vec<(Uuid, &str, &str)> = first
             .iter()
@@ -102,11 +102,11 @@ async fn an_embedded_row_with_surrounding_whitespace_stays_embedded() -> anyhow:
             .map(|t| t.text.clone());
         assert_eq!(label.as_deref(), Some("Place"), "送去嵌的是去掉首尾空白的 label");
 
-        // 嵌过就不陈：从前这里会把三份原样再端回来，一轮一轮永远补不齐
+        // Embedded, so not stale: before this fix, these three were handed back unchanged every round, and the backfill never caught up
         let again = ontology::types_needing_embedding(&pool, kb, "model-a", None).await?;
         assert!(again.is_empty(), "嵌过的行又判成陈的：{again:?}");
 
-        // ---- 二、改了描述，只那一份重嵌
+        // ---- Part 2: the description changed, so only that one is re-embedded
         sqlx::query("UPDATE relation_types SET description = 'Where something is.' WHERE id = $1")
             .bind(located)
             .execute(&pool)
@@ -119,7 +119,7 @@ async fn an_embedded_row_with_surrounding_whitespace_stays_embedded() -> anyhow:
         );
         embed_all("model-a").await?;
 
-        // ---- 三、换了模型，三份全部重嵌
+        // ---- Part 3: the model changed, so all three are re-embedded
         let switched = ontology::types_needing_embedding(&pool, kb, "model-b", None).await?;
         assert_eq!(switched.len(), 3);
         Ok::<_, anyhow::Error>(())

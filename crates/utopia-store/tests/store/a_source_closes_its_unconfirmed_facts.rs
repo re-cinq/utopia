@@ -1,6 +1,6 @@
-//! 一个来源关上自己不再陈述的事实（RC-004）：证据全停在被取代的分块上、证据全出自这个
-//! 来源的现行事实，按最后一条证据被取代的那一刻闭合，走作废+改写，历史留着。
-//! 还有活证据的、带着别的来源证据的、名字事实、起点在那一刻之后的，都不动。
+//! A source closes the facts it no longer states (RC-004): all evidence stops on superseded chunks, and all of it comes from this
+//! source's current facts; they close at the moment their last evidence was superseded, via void + rewrite, with history kept.
+//! Facts that still have live evidence, carry evidence from another source, are name facts, or start after that moment are left alone.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -66,7 +66,7 @@ async fn a_source_closes_only_the_facts_it_alone_stopped_stating() -> anyhow::Re
         ))
         .execute(&pool)
         .await?;
-        // 陈述先物化出类型化行：它跟着陈述走，不由这里关
+        // A statement is first materialized into typed rows: they follow the statement, and are not closed here
         materialize::materialize(&pool, kb).await?;
 
         let first = unconfirmed::close_of_source(&pool, kb, source, 1).await?;

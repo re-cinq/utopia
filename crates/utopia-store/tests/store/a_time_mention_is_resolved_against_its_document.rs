@@ -1,11 +1,11 @@
-//! 一条时间提及按它的文档来读（0045 第一、二刀的账本侧）。
+//! A time mention is read against its document (the ledger side of 0045 slices 1 and 2).
 //!
-//! 一条开放陈述的 `when` 与 `ended` 各是一条提及；按文档取回时带着它在证据里的那句话，
-//! 按分块顺序、块内位置排；模型的解释与代码的解算各自落在提及上、取得回来；解算结果由
-//! `set_open_validity` 写到开放行的世界轴上——只写开放行，类型化的行一行不动；
-//! 结束了不知哪天的解算存得下；值与精度不一致的由库挡下。
+//! The `when` and `ended` of an open statement are each one mention; fetching by document returns them with the sentence they sit in as evidence,
+//! ordered by chunk order and then position within the chunk; the model's interpretation and the code's resolution each land on the mention and can be read back; the resolution result is
+//! written to the open row's world axis by `set_open_validity` — only open rows are written, typed rows are not touched at all;
+//! an end resolved as "ended, date unknown" can be stored; a value and precision that disagree are rejected by the database.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
@@ -98,7 +98,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     })
 }
 
-/// 服务端在块里搜出来的字符起点（这里的文本是 ASCII，字节即字符）
+/// The character start the server found by search within the chunk (the text here is ASCII, so bytes are characters)
 fn start_of(text: &str, words: &str) -> i32 {
     let byte = text.find(words).expect("words are in the chunk");
     text[..byte].chars().count() as i32
@@ -139,7 +139,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
     let f = seed(&pool).await?;
 
     let run = async {
-        // 一条开放陈述，证据带引文；起与止各一条提及
+        // An open statement, with evidence carrying quotes; one mention each for start and end
         let (fact, _) = graph::insert_open_statement(
             &pool,
             f.kb,
@@ -175,7 +175,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
             time_mentions::record(&pool, f.kb, fact, f.chunk_a, "2019", ended_start, "ended")
                 .await?;
 
-        // 1. 按文档取回：两条，带证据里的那句话，按位置排
+        // 1. Fetch by document: two, with the sentence in the evidence, ordered by position
         let todo = time_mentions::for_document(&pool, f.doc).await?;
         assert_eq!(todo.len(), 2, "{todo:?}");
         assert_eq!(
@@ -200,7 +200,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
             .iter()
             .all(|m| m.sentence == TEXT_A && m.fact_id == fact && m.chunk_id == f.chunk_a));
 
-        // 第二块上的陈述排在后面；证据没留引文的退回整块的字
+        // The statement on the second chunk sorts later; evidence without a stored quote falls back to the whole chunk's text
         let (founded, _) = graph::insert_open_statement(
             &pool,
             f.kb,
@@ -234,7 +234,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
             "no quote on the evidence: the chunk's text"
         );
 
-        // 作废的陈述不在等着读的名单里
+        // A voided statement is not on the list waiting to be read
         sqlx::query("UPDATE facts SET invalidated_at = now() WHERE id = $1")
             .bind(founded)
             .execute(&pool)
@@ -242,7 +242,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
         let todo = time_mentions::for_document(&pool, f.doc).await?;
         assert_eq!(todo.iter().map(|m| m.id).collect::<Vec<_>>(), [when, ended]);
 
-        // 2. 解释与解算各自落在提及上，取得回来
+        // 2. Interpretation and resolution each land on the mention, and can be fetched back
         time_mentions::set_interpretation(
             &pool,
             when,
@@ -251,7 +251,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
             "day",
         )
         .await?;
-        // 解算给的值截到精度：15 点落成那一天的 0 点
+        // The resolved value is truncated to precision: 15:00 becomes midnight of that day
         time_mentions::set_resolution(
             &pool,
             when,
@@ -317,7 +317,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
                 .await?;
         assert!(resolved_at.iter().all(Option::is_some));
 
-        // 结束了不知哪天：存得下
+        // "Ended, date unknown" can be stored
         time_mentions::set_resolution(&pool, ended, "B", None, None, None, Some("unknown")).await?;
         let e = &time_mentions::for_facts(&pool, &[fact]).await?[&fact]
             .iter()
@@ -332,7 +332,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
             ),
             (Some("B"), None, Some("unknown"))
         );
-        // 没算出来：四列全空
+        // Not computed: all four columns empty
         time_mentions::set_resolution(&pool, ended, "C", None, None, None, None).await?;
         let e = &time_mentions::for_facts(&pool, &[fact]).await?[&fact]
             .iter()
@@ -346,7 +346,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
                 && e.resolved_to.is_none()
                 && e.resolved_to_precision.is_none()
         );
-        // 值与精度不一致的由库挡下：有日期的结束端不能说 unknown，等级只有 A / B / C
+        // A value and precision that disagree are rejected by the database: an end with a date cannot say unknown, and the level is only A / B / C
         assert!(time_mentions::set_resolution(
             &pool,
             ended,
@@ -364,7 +364,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
                 .is_err()
         );
 
-        // 3. 解算写到开放行的世界轴上，按精度截断
+        // 3. The resolution is written to the open row's world axis, truncated to precision
         graph::set_open_validity(
             &pool,
             fact,
@@ -384,7 +384,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
                 valid_to_precision: Some("year".into()),
             }
         );
-        // 结束了不知哪天
+        // Ended, date unknown
         graph::set_open_validity(
             &pool,
             fact,
@@ -404,8 +404,8 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
                 valid_to_precision: Some("unknown".into()),
             }
         );
-        // 结束了不知哪天的有自己的锚点：说出结束的就是这条陈述自己的文档（#393）。
-        // 这篇文档没说自己是哪天的，陈述没有见证（0064 决定 5），锚点取账本记下它的那一刻
+        // "Ended, date unknown" has its own anchor: the document that states the end is this statement's own document (#393).
+        // This document did not say what day it is, so the statement has no attestation (0064 decision 5); the anchor is the moment the ledger recorded it
         let anchored: (bool,) = sqlx::query_as(
             "SELECT attested_to IS NOT NULL AND attested_to = COALESCE(attested_from, recorded_at)
              FROM facts WHERE id = $1",
@@ -417,7 +417,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
             anchored.0,
             "an unknown ending is anchored on its own document"
         );
-        // 又算不出来了：清空，锚点也跟着走
+        // Once it cannot be computed again: cleared, and the anchor goes with it
         graph::set_open_validity(&pool, fact, None, None, None, None, None).await?;
         assert_eq!(
             span_of(&pool, fact).await?,
@@ -435,7 +435,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
                 .await?;
         assert!(!anchored.0);
 
-        // 4. 类型化的行不归它写：一行不改
+        // 4. Typed rows are not written by it: none changed
         let typed = Uuid::now_v7();
         sqlx::query("INSERT INTO facts (id, kb_id, subject_id, object_id) VALUES ($1, $2, $3, $4)")
             .bind(typed)
@@ -464,7 +464,7 @@ async fn a_mention_is_read_then_computed_then_written_to_the_open_row() -> anyho
                 valid_to_precision: None,
             }
         );
-        // 作废的开放行是历史，也不改
+        // A voided open row is history, and is not changed either
         assert!(graph::set_open_validity(
             &pool,
             founded,

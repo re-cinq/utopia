@@ -1,9 +1,9 @@
-//! 陈旧的文档（RC-003），打在真库上。
+//! Stale documents (RC-003), run against a real database.
 //!
-//! 要钉住的行为：只有打开了衰减的源的文档才可能陈旧；久没被检索（没被检索过就看创建）
-//! 超过源里的 `stale_after_days` 才算；检索一次就不陈旧了。
+//! Behavior pinned: only a document that opened a decaying source can be stale; one not retrieved for a long time (if never retrieved, counted from creation)
+//! exceeds the source's `stale_after_days` before it counts; one retrieval makes it not stale again.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset. Creates and tears down its own database, never touching an existing one.
 
 use sqlx::PgPool;
 use utopia_store::decay::{record_retrievals, stale_documents};

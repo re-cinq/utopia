@@ -1,23 +1,23 @@
-//! 向量召回的答案不随计划变（0035 / #512），打在真库上。
+//! The vector recall answer does not change with the plan (0035 / #512), run against a real database.
 //!
-//! 索引对使用者是看不见的：契约是召回和记录轴。所以这里每一问都问两遍——
-//! 没有索引时一遍，`vector_index::build` 之后再一遍——两遍必须一致。走不走索引
-//! 由规划器定，这个测试不假装能替它选；它钉的是**答案**，改了答案就红，只改计划就静。
+//! The index is invisible to its users: the contract is recall and the record axis. So every question here is asked twice —
+//! once without an index, and again after `vector_index::build` — the two must agree. Whether the index is used
+//! is decided by the planner; this test does not pretend it can choose for it. It pins the **answer**: change the answer and it goes red; change only the plan and it stays silent.
 //!
-//! 六个问题各自会以不同的方式坏：
-//! - 最近的那一条要回来（表达式索引与 `ORDER BY` 写得不一样，索引就悄悄不生效）
-//! - 大库旁边的小库 `LIMIT 10` 要回满（HNSW 后置过滤会把小库回成零行，`relaxed_order` 救的正是它）
-//! - 不串库（租户，不是性能）
-//! - 另一维度的分块不是候选，也不报错（换过嵌入模型的库两种维度并存）
-//! - 顶掉的分块不是命中
-//! - 带时刻的检索看到的是当时活着的（0019 对着索引再说一遍）
+//! Six questions each break in their own way:
+//! - The nearest one must come back (if the expression index and `ORDER BY` are written differently, the index quietly stops applying)
+//! - In a small KB next to a big one, `LIMIT 10` must come back full (HNSW post-filtering turns a small KB into zero rows; `relaxed_order` is what rescues it)
+//! - No cross-KB leakage (tenancy, not performance)
+//! - A chunk of another dimension is neither a candidate nor an error (in a KB that switched embedding models, both dimensions coexist)
+//! - A superseded chunk is not a hit
+//! - Retrieval with a moment sees what was alive at that time (0019, restated against the index)
 
 use pgvector::Vector;
 use sqlx::PgPool;
 use utopia_store::vector_index::{self, Target};
 use uuid::Uuid;
 
-/// 这个测试独占的维度：其它连库测试用 3 维，索引按维度分开，互不打扰
+/// The dimension this test owns alone: other database tests use 3 dimensions; indexes are split by dimension, so they do not interfere
 const DIMS: usize = 7;
 const CROWD: usize = 2000;
 
@@ -25,7 +25,7 @@ fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
     s.parse().unwrap()
 }
 
-/// 可复现的伪随机向量：同一粒种子同一批向量，失败了能重放
+/// Reproducible pseudo-random vectors: the same seed gives the same batch of vectors, so a failure can be replayed
 fn lcg(seed: &mut u64) -> f32 {
     *seed = seed
         .wrapping_mul(6364136223846793005)
@@ -37,13 +37,13 @@ struct Fixture {
     org: Uuid,
     big: Uuid,
     small: Uuid,
-    /// 大库里与查询向量重合的那一条
+    /// In the big KB, the one that coincides with the query vector
     planted: Uuid,
-    /// 与查询重合但五月被顶掉的
+    /// Coincides with the query but was superseded in May
     superseded: Uuid,
-    /// 小库里唯一的一条
+    /// The only one in the small KB
     only: Uuid,
-    /// 大库里一条 5 维的（换过模型）
+    /// One 5-dimensional one in the big KB (from a model that was swapped)
     other_dims: Uuid,
 }
 
@@ -110,7 +110,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         .execute(&mut *tx)
         .await?;
     }
-    // 与查询重合的一条：活着的、五月被顶掉的各一
+    // One that coincides with the query: one alive, one superseded in May
     for (id, seq, text, superseded_at) in [
         (planted, CROWD as i32, "the planted one", None),
         (
@@ -136,7 +136,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         .execute(&mut *tx)
         .await?;
     }
-    // 换过模型留下的 5 维一条
+    // A 5-dimensional one left over from a model swap
     sqlx::query(
         "INSERT INTO chunks (id, kb_id, document_id, seq, text, embedding, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -150,7 +150,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     .bind(t("2026-02-01T00:00:00Z"))
     .execute(&mut *tx)
     .await?;
-    // 小库：一条，离查询不近不远
+    // Small KB: one, neither near nor far from the query
     sqlx::query(
         "INSERT INTO chunks (id, kb_id, document_id, seq, text, embedding, created_at)
          VALUES ($1, $2, $3, 0, 'the only one', $4, $5)",
@@ -179,7 +179,7 @@ fn query() -> Vec<f32> {
     vec![0.11, -0.42, 0.37, 0.05, -0.28, 0.19, 0.33]
 }
 
-/// 六个问题的答案，一次问完；两种计划下各取一份来比
+/// The answers to six questions, asked in one go; one set is taken under each of the two plans to compare
 #[derive(Debug, PartialEq)]
 struct Answers {
     nearest_in_big: Option<Uuid>,
@@ -223,7 +223,7 @@ async fn the_answers_agree_with_and_without_the_index() -> anyhow::Result<()> {
     let f = seed(&pool).await?;
 
     let run = async {
-        // ---- 一、没有索引：精确路径给出的答案
+        // ---- 1. No index: the answer the exact path gives
         vector_index::drop(&pool, Target::Chunks, DIMS).await?;
         assert_eq!(
             vector_index::status(&pool, Target::Chunks, DIMS).await?,
@@ -243,8 +243,8 @@ async fn the_answers_agree_with_and_without_the_index() -> anyhow::Result<()> {
         );
         assert!(!exact.big_top_10_has_superseded, "顶掉的不是命中");
         assert!(!exact.big_top_10_has_other_dims, "7 维的查询看不见 5 维的");
-        // 三月一日：顶掉的那条还活着，它与查询重合——两条向量一样，距离并列，由 id 定。
-        // 不定的话精确路径和 HNSW 各排各的，下面「索引改了答案」就会时红时绿（#652）
+        // March 1: the chunk that was superseded is still alive, and it coincides with the query — two identical vectors, distances tie, settled by id.
+        // If undetermined, the exact path and HNSW each sort their own way, and the "index changed the answer" check below would flip between red and green (#652)
         assert_eq!(
             exact.as_of_march_first,
             Some(f.planted.min(f.superseded)),
@@ -264,7 +264,7 @@ async fn the_answers_agree_with_and_without_the_index() -> anyhow::Result<()> {
             "三月一日它还活着，带时刻的检索该看见它"
         );
 
-        // ---- 二、建索引：任务本体，事务外，两次幂等
+        // ---- 2. Build the index: the task body, outside a transaction, idempotent twice
         let built = vector_index::build(&pool, Target::Chunks, DIMS).await?;
         assert!(built.created, "第一次建");
         assert_eq!(built.name, "chunks_embedding_hnsw_7");
@@ -288,7 +288,7 @@ async fn the_answers_agree_with_and_without_the_index() -> anyhow::Result<()> {
             def.0
         );
 
-        // ---- 三、有索引：同样六问，答案必须一样
+        // ---- 3. With the index: the same six questions, the answers must be identical
         let indexed = ask(&pool, &f).await?;
         assert_eq!(indexed, exact, "索引改了答案");
         Ok::<_, anyhow::Error>(())

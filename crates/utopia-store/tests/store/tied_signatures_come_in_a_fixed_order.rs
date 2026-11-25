@@ -1,11 +1,11 @@
-//! 签名与类别词的扫描一趟聚完（#1096）：多于三条的组只取最早的三条例句，引文跟着自己的
-//! 例句走；计数与短语都相同、两端的类不同的签名按类的 id 定序，每次一样。
+//! The signature and category-word scan is aggregated in one pass (#1096): groups with more than three entries keep only the earliest three example sentences, and each citation goes with its own
+//! example sentence; signatures with equal count and phrase but different classes at either end are ordered by class id, the same way every time.
 use sqlx::PgPool;
 use utopia_store::graph::{self, FactObject};
 use utopia_store::{phrase_bindings, type_bindings};
 use uuid::Uuid;
 
-/// 一条签名的键与计数：短语、主语的类、宾语的类、宾语是不是字面值、陈述数
+/// A signature's key and count: the phrase, the subject's class, the object's class, whether the object is a literal, and the number of statements
 type Shape = (String, Option<Uuid>, Option<Uuid>, bool, i64);
 
 #[tokio::test]
@@ -16,7 +16,7 @@ async fn tied_signatures_come_in_a_fixed_order() -> anyhow::Result<()> {
     let pool = PgPool::connect(&url).await?;
     utopia_store::db::migrate(&pool).await?;
     let (org, ws, kb) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-    // v7 按生成先后递增：a 类的 id 小于 b 类
+    // v7 increments in generation order: class a has a smaller id than class b
     let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
     sqlx::raw_sql(&format!(
         "INSERT INTO organizations(id,name) VALUES ('{org}','tied-signatures');
@@ -28,7 +28,7 @@ async fn tied_signatures_come_in_a_fixed_order() -> anyhow::Result<()> {
     .execute(&pool)
     .await?;
     let result = async {
-        // 类别词 company 下四种写法，各 4、3、2、1 个实体：写法只留前三
+        // Under the category word "company", four spellings with 4, 3, 2, 1 entities each: only the first three spellings are kept
         let mut subjects = Vec::new();
         for (spelling, n) in [
             ("Company", 4),
@@ -42,7 +42,7 @@ async fn tied_signatures_come_in_a_fixed_order() -> anyhow::Result<()> {
         }
         let target = entity(&pool, kb, "target", b, "place").await?;
 
-        // 一组五条：例句取最早的三条，引文跟着各自的陈述（第一条没有证据，引文为空）
+        // A group of five: example sentences take the earliest three, and each citation goes with its own statement (the first has no evidence, so its citation is empty)
         let mut supplies = Vec::new();
         for s in &subjects[..5] {
             supplies.push(say(&pool, kb, *s, "supplies", FactObject::Entity(target)).await?);
@@ -68,7 +68,7 @@ async fn tied_signatures_come_in_a_fixed_order() -> anyhow::Result<()> {
                 .await?;
         }
 
-        // 三组「owns」各两条，计数与短语都相同，只差两端的类与宾语是不是字面值
+        // Three "owns" groups with two each, same count and phrase, differing only in whether the classes at either end and the object are literal
         let (x, y) = (
             serde_json::json!({ "value": "x" }),
             serde_json::json!({ "value": "y" }),
@@ -77,7 +77,7 @@ async fn tied_signatures_come_in_a_fixed_order() -> anyhow::Result<()> {
             say(&pool, kb, target, "owns", FactObject::Entity(*s)).await?; // b → a
             say(&pool, kb, *s, "owns", FactObject::Entity(target)).await?; // a → b
         }
-        say(&pool, kb, subjects[0], "owns", FactObject::Value(&x)).await?; // a → 字面值
+        say(&pool, kb, subjects[0], "owns", FactObject::Value(&x)).await?; // a → literal value
         say(&pool, kb, subjects[1], "owns", FactObject::Value(&y)).await?;
 
         let sigs = phrase_bindings::signatures(&pool, kb).await?;
@@ -97,7 +97,7 @@ async fn tied_signatures_come_in_a_fixed_order() -> anyhow::Result<()> {
             shape
                 == vec![
                     ("supplies".into(), Some(a), Some(b), false, 5),
-                    // 平手按主语的类、宾语的类（空的在后）、宾语是不是字面值
+                    // Ties are ordered by the subject's class, then the object's class (empty comes last), then whether the object is a literal
                     ("owns".into(), Some(a), Some(b), false, 2),
                     ("owns".into(), Some(a), None, true, 2),
                     ("owns".into(), Some(b), Some(a), false, 2),

@@ -1,18 +1,18 @@
-//! 规则接规则（0030 / #477）。
+//! Rules reading rules (0030 / #477).
 //!
-//! 0021 的规则只读断言，只跑一趟，所以 `A → B → C` 得压成一条规则重写一遍。
-//! 现在一轮的结论进下一轮的输入，这里钉的是那件事在真库上的四个后果：
+//! The read-only assertions of 0021 rules run in a single pass, so `A → B → C` has to be flattened into one rule rewritten all at once.
+//! Now one round's conclusions feed the next round's inputs; what is pinned here are four consequences of that on a real database:
 //!
-//! - **链接得上**：第二条规则读第一条的结论，前提里一条是断言、一条是派生，
-//!   两列各存各的
-//! - **派生归类带区间**：它是当条件进的，不是当筛子——2020–2021 是 A 的实体，
-//!   2022 的读数不该满足一条 A 上的规则
-//! - **叶子变了整条链退场**：抬高第一条规则的阈值，第二条推出来的那行跟着
-//!   作废。这不是谁去追的，是「全量重算 + 对账」的自然结果
-//! - **自反馈停得下来**：规则推出自己主类的类，第二轮推出的是同一个键，
-//!   不动点在那里收敛
+//! - **The links connect**: the second rule reads the first rule's conclusion; one premise is an assertion, the other a derivation,
+//!   each stored in its own column
+//! - **A derived classification carries its interval**: it enters as a condition, not a sieve — 2020–2021 are A entities,
+//!   and a 2022 reading should not satisfy a rule on A
+//! - **A changed leaf retires the whole chain**: raising the first rule's threshold voids the row the second rule derived along with it.
+//!   Nothing chases it; it is the natural result of "full recomputation + reconciliation"
+//! - **Self-feedback stops**: a rule that derives a class which is its own subject class gets the same key in the second round,
+//!   and the fixed point converges there
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset. Creates and tears down its own; never touches an existing database.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -81,7 +81,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         .execute(pool)
         .await?;
     }
-    // 实体断言的类是 Well。GasBearingWell 只能是推出来的——这正是要钉的那条路
+    // The entity's assertion is of class Well. GasBearingWell can only be derived — this is exactly the path being pinned
     sqlx::query(
         "INSERT INTO entities (id, kb_id, type_id, canonical_name) VALUES ($1, $2, $3, 'W-1')",
     )
@@ -102,7 +102,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     })
 }
 
-/// 一条属性事实，区间两端都给死——链上的区间是交出来的，端点含糊就看不出交没交
+/// An attribute fact with both interval ends set — the interval on the chain is handed over, and with fuzzy endpoints you cannot tell whether it was handed over
 async fn attr(
     pool: &PgPool,
     f: &Fixture,
@@ -134,8 +134,8 @@ async fn attr(
     Ok(id)
 }
 
-/// 一条归类规则：主类上的一个属性条件 → 结论类。条件三格捆成一个参数——
-/// 它们本来就是一句话
+/// A classification rule: one attribute condition on the subject class → conclusion class. The three cells of the condition are bundled into one parameter —
+/// they are one sentence to begin with
 async fn rule(
     pool: &PgPool,
     f: &Fixture,
@@ -190,11 +190,11 @@ async fn derived(pool: &PgPool, f: &Fixture) -> anyhow::Result<Vec<Derived>> {
     .await?)
 }
 
-/// `Well → GasBearingWell → Producer`：第二条规则读的是第一条的结论。
+/// `Well → GasBearingWell → Producer`: the second rule reads the first rule's conclusion.
 ///
-/// 钉的是链上那一行的**前提长什么样**：一条断言（完井）、一条派生（归类），
-/// 分别落在 `premise_fact_id` 与 `premise_derived_id` 上。合成一列的话，
-/// 「这一步还要不要再往下问」在库里就答不出来。
+/// What is pinned is **what that row's premises look like on the chain**: one assertion (completion), one derivation (classification),
+/// landing in `premise_fact_id` and `premise_derived_id` respectively. If folded into one column,
+/// "whether this step needs to ask further down" could not be answered in the database.
 #[tokio::test]
 async fn a_conclusion_is_a_premise_for_the_next_rule() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -262,7 +262,7 @@ async fn a_conclusion_is_a_premise_for_the_next_rule() -> anyhow::Result<()> {
             .find(|d| d.class.as_deref() == Some("producer"))
             .expect("在产井那一行");
 
-        // 含气井：两条前提都是断言
+        // Gas-bearing well: both premises are assertions
         let leaf: Vec<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
             "SELECT premise_fact_id, premise_derived_id
                FROM fact_derivations WHERE derived_fact_id = $1 ORDER BY seq",
@@ -272,7 +272,7 @@ async fn a_conclusion_is_a_premise_for_the_next_rule() -> anyhow::Result<()> {
         .await?;
         assert_eq!(leaf, vec![(Some(thc_fact), None)], "含气井只凭那条全烃读数");
 
-        // 在产井：一条断言 + 一条派生。**这一条就是链**
+        // Producing well: one assertion + one derivation. **This one is the chain**
         let chained: Vec<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
             "SELECT premise_fact_id, premise_derived_id
                FROM fact_derivations WHERE derived_fact_id = $1 ORDER BY seq",
@@ -290,7 +290,7 @@ async fn a_conclusion_is_a_premise_for_the_next_rule() -> anyhow::Result<()> {
             "派生前提落在 premise_derived_id 上，指的是含气井那一行"
         );
 
-        // 证明顺着链往下走一层：在产井 → 含气井 → 全烃那句话
+        // Proof that one level is walked down the chain: producing well → gas-bearing well → the whole-hydrocarbon statement
         let proof = utopia_store::reasoning::proof(&pool, f.kb, prod.id)
             .await?
             .expect("在产井有证明");
@@ -302,8 +302,8 @@ async fn a_conclusion_is_a_premise_for_the_next_rule() -> anyhow::Result<()> {
         assert_eq!(step.premises.len(), 1, "那一步自己也有前提，再往下一层");
         assert!(!step.premises[0].derived, "再下一层是断言，链到此为止");
 
-        // 重跑不该多出行，也不该把自己判成陈旧——链上那一行认的是上一轮留下的
-        // 那个行 id，认错了这里会看见「作废一条、插入一条」
+        // A rerun should add no rows, and should not judge it stale either — the row on the chain identifies the row id left by the previous round.
+        // If it identified the wrong one, you would see "void one, insert one" here
         let again = utopia_store::reasoning::materialize(&pool, f.kb).await?;
         assert_eq!(again.inserted, 0, "同一条链重跑不再插");
         assert_eq!(again.invalidated, 0, "也不该把自己判成陈旧");
@@ -319,11 +319,11 @@ async fn a_conclusion_is_a_premise_for_the_next_rule() -> anyhow::Result<()> {
     run
 }
 
-/// 推出来的类**带着区间**：它是当条件进的，不是当筛子。
+/// The derived class **carries an interval**: it enters as a condition, not a sieve.
 ///
-/// 一口井 2020–2021 是含气井，完井那条读数在 2022——两段不相交，就不该有
-/// 在产井。范围若还是个无区间的筛子，这里会多推出一行，而且那一行的区间
-/// 说不出它凭什么成立。
+/// A well that was gas-bearing in 2020–2021 and whose completion reading is in 2022 — the two spans do not intersect, so there should be no
+/// producing well. If the range were still a sieve with no interval, one extra row would be derived here, and that row's interval
+/// could not say why it holds.
 #[tokio::test]
 async fn a_concluded_class_only_holds_where_it_was_concluded() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -394,10 +394,10 @@ async fn a_concluded_class_only_holds_where_it_was_concluded() -> anyhow::Result
     run
 }
 
-/// 叶子变了，整条链退场——**而且没有一行代码是为这件事写的**。
+/// Change the leaf and the whole chain retires — **and not one line of code was written for this**.
 ///
-/// 抬高第一条规则的阈值，含气井不再成立；在产井站在它上面，这一轮压根没被
-/// 重新算出来，于是从 `wanted` 里掉出去，跟含气井在同一条语句里作废。
+/// Raise the first rule's threshold and the gas-bearing well no longer holds; the producing well stands on top of it, and this round it was never
+/// recomputed, so it drops out of `wanted` and is voided in the same statement as the gas-bearing well.
 #[tokio::test]
 async fn a_chain_retires_with_the_reading_it_stood_on() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -446,7 +446,7 @@ async fn a_chain_retires_with_the_reading_it_stood_on() -> anyhow::Result<()> {
         utopia_store::reasoning::materialize(&pool, f.kb).await?;
         assert_eq!(derived(&pool, &f).await?.len(), 2);
 
-        // 抬到 20：那条 12.3 的读数不再满足第一条规则
+        // Raise to 20: that 12.3 reading no longer satisfies the first rule
         sqlx::query("UPDATE attribute_rule_conditions SET operand = '20.0' WHERE rule_id = $1")
             .bind(first)
             .execute(&pool)
@@ -472,11 +472,11 @@ async fn a_chain_retires_with_the_reading_it_stood_on() -> anyhow::Result<()> {
     run
 }
 
-/// 一条规则读自己推出来的类，不动点照样收敛。
+/// A rule reads the class it derived itself; the fixed point still converges.
 ///
-/// 第一条把井推成含气井；第二条写在含气井上，推出的还是含气井。第二轮算出来的
-/// 是同一个键——主语、谓词、值、区间都一样——于是不再进池子，第三轮无事可做。
-/// **上限是兜底，不是靠它停的**：这里 `rule_rounds` 远小于 `MAX_DEPTH`。
+/// The first rule pushes the well to gas-bearing; the second is written on gas-bearing and derives gas-bearing again. The second round computes
+/// the same key — same subject, predicate, value and interval — so it no longer enters the pool, and the third round has nothing to do.
+/// **The cap is a fallback, not what stops it**: here `rule_rounds` is far below `MAX_DEPTH`.
 #[tokio::test]
 async fn a_rule_that_feeds_itself_settles() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -504,7 +504,7 @@ async fn a_rule_that_feeds_itself_settles() -> anyhow::Result<()> {
             f.gas_bearing,
         )
         .await?;
-        // 主类是含气井，结论也是含气井：它读的正是自己推出来的那条
+        // Subject class is gas-bearing well, and the conclusion is gas-bearing well too: it reads exactly the one it derived itself
         rule(
             &pool,
             &f,
@@ -535,11 +535,11 @@ async fn a_rule_that_feeds_itself_settles() -> anyhow::Result<()> {
     run
 }
 
-/// 结论没变，理由变了：那一行留着，**证明跟着换**。
+/// The conclusion is unchanged, the reason changed: that row stays, **and the proof follows the change**.
 ///
-/// 对账的键是主宾谓加区间，前提不在里面——同一句话换一条读数支撑，行不动。
-/// 不重写的话，它会一直挂着上一轮那条已经撤了的读数，而链让这件事更容易撞上：
-/// 站在它上面的那条前提可能刚刚作废。
+/// The reconciliation key is subject, predicate and interval; the premises are not in it — the same sentence supported by a different reading leaves the row untouched.
+/// If not rewritten, it would keep hanging on the reading from the previous round that has since been withdrawn, and the chain makes this more likely to collide:
+/// the premise standing on it may have just been voided.
 #[tokio::test]
 async fn a_conclusion_that_stands_on_a_new_reading_gets_a_new_proof() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -572,8 +572,8 @@ async fn a_conclusion_that_stands_on_a_new_reading_gets_a_new_proof() -> anyhow:
         assert_eq!(rows.len(), 1);
         let row = rows[0].id;
 
-        // 撤掉那条读数，换一条区间一样、值也过阈值的：结论一字不差，凭的却是
-        // 另一句话
+        // Withdraw that reading and substitute one with the same interval and a value that also clears the threshold: the conclusion is word for word the same, but is supported by
+        // another sentence
         sqlx::query("UPDATE facts SET invalidated_at = now() WHERE id = $1")
             .bind(first)
             .execute(&pool)

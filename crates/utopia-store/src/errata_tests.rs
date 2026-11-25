@@ -1,5 +1,5 @@
-//! 勘误（0044 决定 7）：结构先报、撤销经得住物化、闸门留给人、改与加带着原话。
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过。
+//! Errata (0044 decision 7): structure is reported first, retractions survive materialization, the gate is left to people, edits and additions carry the original quote.
+//! Skipped when `UTOPIA_DATABASE_URL` is not set.
 use super::*;
 use crate::materialize;
 use sqlx::PgPool;
@@ -21,16 +21,16 @@ struct Fx {
     paris: Uuid,
     jane: Uuid,
     nobody: Uuid,
-    /// 答留给人那几笔的人
+    /// The person who answers the entries left for a human
     user: Uuid,
     text: &'static str,
 }
 
 const TEXT: &str = "Acme is based in London. Jane Roe runs Acme. Acme was founded in 1999. Zeta Corp is based in London.";
 
-/// 一个库：organization / place / person；based_in（organization → place）、ceo（organization →
-/// person，只许一个）、founded（日期属性）；一份文档一块正文；Acme、London、Paris、Jane Roe、
-/// Nobody 五样东西
+/// One database: organization / place / person; based_in (organization -> place), ceo (organization ->
+/// person, only one allowed), founded (a date attribute); one document with one body; Acme, London, Paris, Jane Roe,
+/// Nobody: five things
 async fn seed(pool: &PgPool) -> anyhow::Result<Fx> {
     let ids: Vec<Uuid> = (0..17).map(|_| Uuid::now_v7()).collect();
     let (org, ws, kb, doc, chunk, organization, place, person, based_in, ceo, founded) = (
@@ -97,7 +97,7 @@ async fn cleanup(pool: &PgPool, f: &Fx) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 一条开放陈述加一条从它算出的类型化行，证据落在这份文档上。返回 (陈述, 类型化行)
+/// An open statement plus a typed row computed from it, with the evidence on this document. Returns (statement, typed row)
 async fn typed(
     pool: &PgPool,
     f: &Fx,
@@ -259,7 +259,7 @@ async fn structure_flags_facts_and_the_flagged_come_first() -> anyhow::Result<()
         assert_eq!(flags[&range].as_deref(), Some("range"));
         assert_eq!(flags[&no_date].as_deref(), Some("no_date"));
         assert_eq!(flags[&nobody].as_deref(), Some("name_absent"));
-        // 报了的在前，没报的在后
+        // Reported ones first, unreported ones after
         let order: Vec<bool> = c.iter().map(|c| c.flag.is_some()).collect();
         assert_eq!(order, vec![true, true, true, true, true, false, false]);
         let first = &c[0];
@@ -269,7 +269,7 @@ async fn structure_flags_facts_and_the_flagged_come_first() -> anyhow::Result<()
         );
         assert_eq!(first.quote.as_deref(), Some("based in"));
         assert!(first.statement_id.is_some());
-        // 这份文档待看；看过一条（keep）之后它还待看，全看完才不
+        // This document is still due for review; after one entry is kept it is still due, and only once everything is reviewed does it drop out
         assert_eq!(documents_due(&pool, f.kb, 10).await?, vec![f.doc]);
         let run = start_run(&pool, f.kb, f.doc, 5, 2).await?;
         let r = record(
@@ -281,7 +281,7 @@ async fn structure_flags_facts_and_the_flagged_come_first() -> anyhow::Result<()
         assert_eq!(r.status, "applied");
         assert_eq!(candidates(&pool, f.kb, f.doc).await?.len(), 6);
         assert_eq!(documents_due(&pool, f.kb, 10).await?, vec![f.doc]);
-        // 抽完了、一条类型化行都没有的文档也该看一次（agent 只能加）；看过一次就不再排
+        // A document that was drained with no typed rows still gets looked at once (the agent can only add); once looked at, it is not queued again
         let empty_doc = Uuid::now_v7();
         sqlx::query("INSERT INTO documents(id,kb_id,filename,sha256,graph_status) VALUES ($1,$2,'empty.txt','y','done')")
             .bind(empty_doc)
@@ -316,7 +316,7 @@ async fn a_retraction_sticks_through_materialisation() -> anyhow::Result<()> {
     crate::db::migrate(&pool).await?;
     let f = seed(&pool).await?;
     let run = async {
-        // 一条陈述 Acme —based in→ Paris，签名绑到 based_in；物化算出类型化行
+        // One statement Acme -based in-> Paris, signature bound to based_in; materialization computes the typed row
         let s = Uuid::now_v7();
         sqlx::query("INSERT INTO facts(id,kb_id,subject_id,object_id,layer,phrase) VALUES ($1,$2,$3,$4,'open','based in')")
             .bind(s).bind(f.kb).bind(f.acme).bind(f.paris).execute(&pool).await?;
@@ -340,7 +340,7 @@ async fn a_retraction_sticks_through_materialisation() -> anyhow::Result<()> {
         let r = record(&pool, f.kb, input(&f, run, Some(&c[0]), Proposed::Retract, Some("Acme is based in London"))).await?;
         assert_eq!((r.status, r.detail), ("applied", None));
         assert!(!live(&pool, typed_row).await?);
-        // 陈述还活着、绑定还在：物化再跑，那一对不再算出来
+        // The statement is still alive and the binding still holds: materialization runs again and no longer computes that pair
         let o = materialize::materialize(&pool, f.kb).await?;
         assert_eq!((o.added, o.merged, o.retired), (0, 0, 0));
         let live_typed: i64 = sqlx::query_scalar(
@@ -351,7 +351,7 @@ async fn a_retraction_sticks_through_materialisation() -> anyhow::Result<()> {
         .await?;
         assert_eq!(live_typed, 0);
         assert!(documents_due(&pool, f.kb, 10).await?.is_empty(), "nothing left to look at");
-        // 引文不是原话的撤：记下来，不执行
+        // A retraction whose quote is not the original wording: record it, do not execute
         let (_, other) = typed(&pool, &f, f.acme, "based in", f.based_in, Some(f.london), None).await?;
         let c = candidates(&pool, f.kb, f.doc).await?;
         let r = record(&pool, f.kb, input(&f, run, Some(&c[0]), Proposed::Retract, Some("Acme is based in Paris"))).await?;
@@ -376,7 +376,7 @@ async fn a_retraction_something_rests_on_is_held_until_a_person_decides() -> any
     let run = async {
         let (_, t1) = typed(&pool, &f, f.acme, "based in", f.based_in, Some(f.paris), None).await?;
         let (_, t2) = typed(&pool, &f, f.acme, "run by", f.ceo, Some(f.nobody), None).await?;
-        // 两条各有一条派生靠着
+        // Each of the two rests on one derivation
         let rule = Uuid::now_v7();
         sqlx::query("INSERT INTO rules(id,kb_id,predicate_id,kind) VALUES ($1,$2,$3,'transitive')")
             .bind(rule).bind(f.kb).bind(f.based_in).execute(&pool).await?;
@@ -403,7 +403,7 @@ async fn a_retraction_something_rests_on_is_held_until_a_person_decides() -> any
         assert_eq!(queue[0].detail.as_deref(), Some("derived 1"));
         assert_eq!(queue[0].proposed.as_ref().unwrap()["subject"], "Acme");
         assert_eq!(waiting(&pool, f.kb).await?.0, 2);
-        // 人否第一笔：事实还在；批第二笔：撤了
+        // Person rejects the first: the fact survives; batch the second: retracted
         let actor = f.user;
         assert!(decide_held(&pool, f.kb, held_ids[0], false, actor).await?);
         assert!(decide_held(&pool, f.kb, held_ids[1], true, actor).await?);
@@ -483,7 +483,7 @@ async fn a_revision_and_an_addition_write_typed_facts_with_the_documents_words(
         let c = candidates(&pool, f.kb, f.doc).await?;
         assert_eq!(c[0].flag.as_deref(), Some("range"));
         let run = start_run(&pool, f.kb, f.doc, 1, 0).await?;
-        // 改宾语：London → Jane Roe。旧行撤了，新行活着、带引文
+        // Edit the object: London -> Jane Roe. The old row is retracted, the new row is alive and carries the quote
         let r = record(
             &pool,
             f.kb,
@@ -506,7 +506,7 @@ async fn a_revision_and_an_addition_write_typed_facts_with_the_documents_words(
                 .fetch_one(&pool)
                 .await?;
         assert_eq!(quote, (f.chunk, Some("Jane Roe runs Acme".into())));
-        // 加一条日期属性：值落下
+        // Add a date attribute: the value lands
         let r = record(
             &pool,
             f.kb,
@@ -520,7 +520,7 @@ async fn a_revision_and_an_addition_write_typed_facts_with_the_documents_words(
                 .fetch_one(&pool)
                 .await?;
         assert_eq!(value, Some(serde_json::json!({ "value": "1999" })));
-        // 名字不在库里：勘误不造东西
+        // Name not in the database: the erratum creates nothing
         let r = record(
             &pool,
             f.kb,
@@ -532,7 +532,7 @@ async fn a_revision_and_an_addition_write_typed_facts_with_the_documents_words(
             r.detail.as_deref(),
             Some("no thing named \"Bob\" and the document does not name it")
         );
-        // 文档提到的新东西：建一个带名字的实体，事实落下
+        // A new thing the document mentions: create a named entity, the fact lands
         let r = record(
             &pool,
             f.kb,
@@ -547,7 +547,7 @@ async fn a_revision_and_an_addition_write_typed_facts_with_the_documents_words(
         .fetch_one(&pool)
         .await?;
         assert_eq!(zeta, ("Zeta Corp".into(), Some(f.london)));
-        // 只许一个值的谓词已经有 Jane：再加一个 London 会开出违规，留给人
+        // The predicate that allows only one value already has Jane: adding a second, London, would raise a violation, left for a person
         let r = record(
             &pool,
             f.kb,
@@ -556,7 +556,7 @@ async fn a_revision_and_an_addition_write_typed_facts_with_the_documents_words(
         .await?;
         assert_eq!(r.status, "held");
         assert_eq!(r.detail.as_deref(), Some("contradiction chief executive"));
-        // 属性不存在
+        // Attribute does not exist
         let r = record(
             &pool,
             f.kb,
@@ -573,9 +573,9 @@ async fn a_revision_and_an_addition_write_typed_facts_with_the_documents_words(
     run
 }
 
-/// 推送来的文档不送勘误（RC-001）：勘误拿类型化行去对文档的原话，推送的陈述没有原话
-/// （`quote` 必须为空，0054），看了也无从对起，只是每份文档一次全表扫描、一次对话请求。
-/// 同一个库里上传的文档照样待看
+/// Documents that arrive by push get no errata (RC-001): errata match typed rows against the document's original quote, and pushed statements have no quote
+/// (`quote` must be empty, 0054), so there is nothing to match against; looking would only cost a full-table scan and one chat request per document.
+/// Documents uploaded into the same database still wait for review
 #[tokio::test]
 async fn a_pushed_document_is_never_due_for_errata() -> anyhow::Result<()> {
     let Some(url) = crate::test_db::url() else {

@@ -1,37 +1,37 @@
-//! store 的集成测试合成**一个**测试二进制，而不是每个文件一个。
+//! The store's integration tests compile into **one** test binary, rather than one per file.
 //!
-//! 从前 `tests/` 下 120 个文件就是 120 个二进制：每个都要单独编译、单独把整个依赖图
-//! 链接一遍（CI 上占 test job 编译时间的大头），跑起来又是一个接一个串行执行，
-//! 多数二进制只有一两个测试，机器大部分时间在等下一个进程起来。合成一个之后
-//! 编一次、链一次，测试之间照常并行：本地 274 个测试从 128 秒到 13 秒。
+//! Previously the 120 files under `tests/` were 120 binaries: each had to be compiled separately, with the whole dependency graph
+//! linked once more (a large share of the test job's compile time on CI), and they ran one after another in series,
+//! with most binaries holding only one or two tests, so the machine spent most of its time waiting for the next process to start. After merging into one
+//! it is compiled once and linked once, and tests still run in parallel among themselves: locally, 274 tests went from 128 seconds to 13 seconds.
 //!
-//! 代价是这里的测试**真的会同时跑**，而从前不同文件的测试从不同时运行。绝大多数
-//! 测试自建自拆一个 kb，天然互不相干。碰**kb 之外**的状态的测试留在 `tests/` 顶层、
-//! 各自仍是独立二进制（cargo 按顺序跑二进制，它们跑的时候没有别人）：
+//! The cost is that the tests here **really do run at the same time**, whereas before, tests in different files never ran concurrently. Most
+//! tests build and tear down one KB of their own, so they are naturally unrelated to each other. Tests that touch state **outside a KB** stay at the top level of `tests/`,
+//! and each remains a separate binary (cargo runs binaries one at a time, so nobody else is running while they do):
 //!
-//! - `a_queued_job_wakes_an_idle_worker`：守 `utopia_jobs` 通知频道，别的测试一入队就会把它叫醒。
-//! - `a_vector_index_is_built_by_a_job`、`a_vector_build_uses_one_connection`：在 `chunks` 上
-//!   `CREATE INDEX CONCURRENTLY`。两条 CONCURRENTLY 同时建必然互相等死（Postgres 的规矩，
-//!   `vector_index::build` 的注释写了为什么设计上就是串行的），前者还数全库的构建任务。
-//! - `human_phrase_materialization_delivery`：起真实的 `run_worker`，会认领库里**任何**排队
-//!   任务，遇到不是自己那种 kind 的就报错标失败。
-//! - `the_engine_redraws_only_what_it_drew`：把迁移 0057 的回填语句原样跑一遍，那条
-//!   `UPDATE facts` 不按 kb 过滤，锁住全库的行，和正在重算时间线的测试互相等死——
-//!   合并二进制的实验里 30% 的运行栽在这里。
-//! - `a_rewritten_row_gets_its_statements_back`：把迁移 0096 原样跑一遍，它同样不按 kb
-//!   过滤——修正行、重复行都按全库找，会改到别的测试正在物化、改写的行。
-//! - `a_row_a_rule_implied_follows_its_statements`：把迁移 0101 原样跑一遍，同样不按 kb
-//!   过滤——它按来源重算全库类型化行的见证，会改到别的测试正在物化的行。
-//! - `a_document_waits_for_one_extraction`：把迁移 9011 原样跑一遍，它删全库排着的重复抽取，
-//!   不按 kb 过滤，会删掉别的测试正排着的抽取。
-//! - `a_due_base_is_queued_once`：`queue_due_inferences` 扫全库到期的库。0050 起新建的库开着
-//!   推理又从没推过，别的测试刚建的库全算到期，会被它排上推理任务——数自己库任务的测试
-//!   （比如 lib 单元测试里的 `phrase_bindings_delivery_tests`）就会多数出一个。
-//! - `intake_runs_while_model_work_holds_every_slot`：同样起真实的 `run_worker`，同样会认领
-//!   库里任何排队任务，不是自己的就报错。
-//! - `a_name_embedding_runs_while_model_work_holds_every_slot`：同上，换成 `embed_names`。
+//! - `a_queued_job_wakes_an_idle_worker`: guards the `utopia_jobs` notification channel, which any other test's enqueue would wake.
+//! - `a_vector_index_is_built_by_a_job`, `a_vector_build_uses_one_connection`: run `CREATE INDEX CONCURRENTLY` on `chunks`.
+//!   Two CONCURRENTLY builds at the same time will inevitably deadlock each other (the Postgres rule; the comment on
+//!   `vector_index::build` explains why it is serial by design), and the former also counts the build jobs of the whole DB.
+//! - `human_phrase_materialization_delivery`: starts a real `run_worker`, which claims **any** queued job in the DB,
+//!   and on meeting one of a kind that is not its own, errors and marks it failed.
+//! - `the_engine_redraws_only_what_it_drew`: runs migration 0057's backfill statement verbatim; that `UPDATE facts` does not filter by kb and locks rows across the whole DB,
+//!   deadlocking against the test that is recomputing a timeline at the same time —
+//!   30% of runs in the experiment with the merged binary fell over here.
+//! - `a_rewritten_row_gets_its_statements_back`: runs migration 0096 verbatim; it likewise does not filter by kb —
+//!   the corrected and duplicate rows are found across the whole DB, and it can change rows that another test is materialising or rewriting.
+//! - `a_row_a_rule_implied_follows_its_statements`: runs migration 0101 verbatim; likewise does not filter by kb —
+//!   it recomputes the witnesses of typed rows across the whole DB by source, and can change rows that another test is materialising.
+//! - `a_document_waits_for_one_extraction`: runs migration 9011 verbatim; it deletes the duplicate extractions queued across the whole DB,
+//!   without filtering by kb, and would delete extractions another test has queued.
+//! - `a_due_base_is_queued_once`: `queue_due_inferences` scans every KB that is due across the whole DB. KBs created since 0050 have inference switched on
+//!   and have never run one, so every KB another test just created counts as due and gets an inference job queued by it — a test counting its own KB's jobs
+//!   (for example `phrase_bindings_delivery_tests` in the lib unit tests) would then get one too many.
+//! - `intake_runs_while_model_work_holds_every_slot`: likewise starts a real `run_worker`, and likewise claims
+//!   any queued job in the DB, erroring on ones that are not its own.
+//! - `a_name_embedding_runs_while_model_work_holds_every_slot`: as above, with `embed_names` instead.
 //!
-//! 新加测试默认放这个目录；只有碰上面那类全局状态时才放顶层，并在这里补一行为什么。
+//! New tests belong in this directory by default; only those touching the kind of global state above go at the top level, and a line here should explain why.
 mod a_batch_decides_like_a_person;
 mod a_batch_gathers_its_neighbours_in_order;
 mod a_bound_statement_becomes_a_typed_fact;

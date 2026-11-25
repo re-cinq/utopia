@@ -1,15 +1,15 @@
-//! #246：来源列表不带任何凭据。
+//! #246: the source list carries no credentials at all.
 //!
-//! 列表接口给 Viewer 看，此前只剔了 `auth_header`；对象存储、WebDAV、Notion 各自的
-//! 密钥原样下发。现在凭据键列在 `SOURCE_SECRET_KEYS` 一张表上，列表 SQL 按表剔。
-//! 这里守两件事：
+//! The list endpoint shown to Viewers used to strip only `auth_header`; object storage, WebDAV and Notion each sent their
+//! secrets through as-is. Now the credential keys are listed in one table, `SOURCE_SECRET_KEYS`, and the list SQL strips by that table.
+//! Two things are guarded here:
 //!
-//! 1. **列表里一个凭据键都没有**，每一种连接器都试一遍。
-//! 2. **身份标识留着**（bucket、username、account_name），界面要显示得出「这是哪个账号」；
-//!    而同步那条路（`sources::get`）拿到的仍是完整配置——凭据只是不出去，不是没了。
+//! 1. **No credential key appears in the list**, tried for every connector kind.
+//! 2. **Identifiers remain** (bucket, username, account_name), so the UI can show which account this is;
+//!    while the sync path (`sources::get`) still gets the full config — credentials are kept from leaving, not removed.
 //!
-//! 直接插表而不走 `sources::create`：`KINDS` 少了五种（#247），那是另一个修复。
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Inserts the table directly rather than through `sources::create`: `KINDS` is missing five kinds (#247), a separate fix.
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset. Creates and tears down its own database, never touching an existing one.
 
 use sqlx::PgPool;
 use utopia_core::models::SOURCE_SECRET_KEYS;
@@ -46,7 +46,7 @@ async fn a_viewer_never_sees_a_credential() -> anyhow::Result<()> {
     let (org, kb) = seed(&pool).await?;
 
     let run = async {
-        // 每种连接器一条，配置按各自界面真正会写的键
+        // One per connector kind, with config keys exactly as each one's UI really writes them
         let fixtures: Vec<(&str, serde_json::Value)> = vec![
             (
                 "custom",
@@ -117,7 +117,7 @@ async fn a_viewer_never_sees_a_credential() -> anyhow::Result<()> {
                 );
             }
         }
-        // 身份标识留着
+        // Identifiers remain
         let by_kind = |k: &str| {
             listed
                 .iter()
@@ -132,7 +132,7 @@ async fn a_viewer_never_sees_a_credential() -> anyhow::Result<()> {
         assert_eq!(by_kind("custom")["endpoint"], "https://x.test/items");
         assert_eq!(by_kind("notion")["query"], "q");
 
-        // 同步那条路仍拿完整配置：凭据只是不出去，不是没了
+        // The sync path still gets the full config: credentials only do not leave, they are not gone
         for s in &listed {
             let full = sources::get(&pool, s.id).await?;
             let want = &fixtures.iter().find(|(k, _)| *k == s.kind).unwrap().1;

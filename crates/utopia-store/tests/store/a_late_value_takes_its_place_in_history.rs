@@ -1,14 +1,14 @@
-//! 单值属性的新值乱序到达，年表仍然一段接一段。
+//! A new value for a single-valued attribute arrives out of order, and the timeline still forms one segment after another.
 //!
-//! Blackbaud 总部租约的二期行权截止日在 2020 年上半年被补充协议改了四次。十几份补充协议
-//! 并行抽取，谁先落库全看分块多少：第五份（2 月 18 日起）先到，第九份（6 月 8 日起）
-//! 第二个到，第七份、第六份最后才到。时态引擎从前只拿新值去比「仍在成立」的那一条，
-//! 于是晚到的两份都关在 6 月 8 日，而第五份那段 [2 月 18 日, 6 月 8 日) 没人去切——
-//! 问 5 月 1 日的截止日，查出三个。
+//! The option-exercise deadline of the Blackbaud headquarters lease was amended four times in the first half of 2020 by supplemental agreements. A dozen or so supplemental agreements
+//! are extracted in parallel, and which one lands first depends entirely on how many chunks each has: the fifth (in effect from 18 February) arrives first, the ninth (in effect from 8 June)
+//! arrives second, and the seventh and sixth arrive last. The temporal engine used to take the new value and compare it only with the one still "holding", so
+//! the two that arrived late were both closed at 8 June, while the fifth's span [18 February, 8 June) was never cut —
+//! asked for the deadline on 1 May, it returned three.
 //!
-//! 这里钉两件事：乱序到达最后排成正确的年表；原文自己写明的终点不被切。
+//! This pins two things: out-of-order arrival finally forms the correct timeline; a span the source itself states as ending is not cut.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use serde_json::json;
 use sqlx::PgPool;
@@ -75,7 +75,7 @@ fn t(day: &str) -> chrono::DateTime<chrono::Utc> {
     format!("{day}T00:00:00Z").parse().unwrap()
 }
 
-/// 落一条值，然后照抽取的做法对账
+/// Stores one value, then reconciles it the way extraction does
 async fn arrive(
     pool: &PgPool,
     f: &Fixture,
@@ -115,7 +115,7 @@ async fn arrive(
     Ok(id)
 }
 
-/// 现存的各段：(值, 起点, 终点)，按起点排
+/// The existing segments: (value, start, end), sorted by start
 async fn timeline(
     pool: &PgPool,
     f: &Fixture,
@@ -149,7 +149,7 @@ async fn amendments_that_arrive_out_of_order_still_hand_over_one_to_the_next() -
     let f = seed(&pool).await?;
 
     let run = async {
-        // 第五、第九、第七、第六份，按它们真实的落库顺序
+        // The fifth, ninth, seventh and sixth, in their real order of storage
         arrive(&pool, &f, "2020-03-17", "2020-02-18", None).await?;
         arrive(&pool, &f, "2020-06-23", "2020-06-08", None).await?;
         arrive(&pool, &f, "2020-05-26", "2020-04-14", None).await?;
@@ -176,8 +176,8 @@ async fn amendments_that_arrive_out_of_order_still_hand_over_one_to_the_next() -
     run
 }
 
-/// 原文写明「到 12 月 31 日为止」的一段，不是接替留下的边界：年中来的新值不切它。
-/// 那种重叠是两份原文说法相左，不该由引擎替人挑一个
+/// A span the source states as "until 31 December" is not a boundary left by a succession: a value arriving mid-year does not cut it.
+/// That kind of overlap is two sources disagreeing, which the engine should not pick one of on a person's behalf
 #[tokio::test]
 async fn an_end_the_text_states_is_not_cut_by_a_later_value() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -206,7 +206,7 @@ async fn an_end_the_text_states_is_not_cut_by_a_later_value() -> anyhow::Result<
     run
 }
 
-/// 从一份带日期的文件里读到的值：起点可以没有，证据文件的日期总是有的
+/// A value read from a dated document: the start may be absent, but the evidence document's date is always present
 async fn arrive_from_document(
     pool: &PgPool,
     f: &Fixture,
@@ -277,8 +277,8 @@ async fn arrive_object_from_document(
     Ok(id)
 }
 
-/// 第五份补充协议没抽出起点，它先进了人审；第八份来时，从前把它和 3 月 17 日起的
-/// 第六份一起关在 5 月 26 日，两段叠了两个多月。它的后任是它之后最近的已知起点
+/// The fifth supplemental agreement had no start extracted, so it went to human review first; when the eighth arrived, previously it and the sixth
+/// (starting 17 March) were closed together at 26 May, with two spans overlapping for over two months. Its successor is the nearest known start after it
 #[tokio::test]
 async fn a_value_with_no_start_ends_where_the_next_known_value_begins() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -327,10 +327,10 @@ async fn a_value_with_no_start_ends_where_the_next_known_value_begins() -> anyho
     run
 }
 
-/// 第十一份补充协议（8 月 13 日）说房东是 BBHQ1，没说从哪天起；另一份说 HPBB1 从 2016 年起
-/// 是房东。BBHQ1 在 8 月 13 日成立，所以它排在 HPBB1 之后：HPBB1 写成「结束了，不知哪天」，
-/// 锚在 8 月 13 日（#681 §1，0022 的形状）。日期不写进日期列，读回来 HPBB1 到 8 月 13 日为止、
-/// BBHQ1 从 8 月 13 日起，首尾相接不重叠
+/// The eleventh supplemental agreement (13 August) says the landlord is BBHQ1, without saying from when; another says HPBB1 has been the landlord since 2016.
+/// BBHQ1 holds from 13 August, so it sorts after HPBB1: HPBB1 is written as "ended, date unknown",
+/// anchored on 13 August (#681 §1, the 0022 shape). The date is not written into the date column; read back, HPBB1 runs up to 13 August, and
+/// BBHQ1 holds from 13 August onward, touching end to start with no overlap
 #[tokio::test]
 async fn a_dated_value_with_no_start_takes_over_from_its_date() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -393,9 +393,9 @@ async fn a_dated_value_with_no_start_takes_over_from_its_date() -> anyhow::Resul
     run
 }
 
-/// 第十份补充协议（6 月 26 日）把截止日改成「触发日后 45 天」：没有日历日期，抽取标成 relative
-/// 照原文存下（#681 §4）。它仍是这份租约新的截止日，所以 6 月 23 日那个到它为止——
-/// 它没有起点，前一个就写成「结束了，不知哪天」，锚在 6 月 26 日这份文件上（§1）
+/// The tenth supplemental agreement (26 June) changes the deadline to "45 days after the trigger date": there is no calendar date, so extraction marks it relative
+/// and stores it as stated in the source (#681 §4). It is still the lease's new deadline, so the one ending 23 June stops at it —
+/// it has no start, so the previous one is written as "ended, date unknown", anchored on the 26 June document (§1)
 #[tokio::test]
 async fn a_deadline_stated_relative_to_an_event_still_ends_the_dated_one_before_it(
 ) -> anyhow::Result<()> {

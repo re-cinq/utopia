@@ -1,11 +1,11 @@
-//! 一轮映射探索留下的账——打在真库上（#503）。
+//! The ledger left by one mapping-exploration round — run against a real DB (#503).
 //!
-//! 两条都是从前做不到的：
+//! Both of these were impossible before:
 //!
-//! 1. **覆盖率答得出来。** 从前一轮探索只留下 `concept_mappings` 里若干行，
-//!    十一条提议对着八十列的宽表与十一条覆盖完一个小库看起来一模一样。
-//! 2. **跑挂了的那一轮也有账。** 从前失败与「跑了但一条都没提」在页面上
-//!    都是「没有新提议」，而该做的事完全不同。
+//! 1. **Coverage can be answered.** Previously a round of exploration left only a few rows in `concept_mappings`,
+//!    and eleven proposals against a wide eighty-column table looked exactly the same as eleven covering a small KB.
+//! 2. **A round that failed also has a ledger.** Previously, failure and "ran but proposed nothing" both showed as "no new proposals" on the page,
+//!    while the things to do were entirely different.
 
 use sqlx::PgPool;
 use utopia_store::exploration_runs as runs;
@@ -66,8 +66,8 @@ async fn a_run_says_what_it_scanned_and_what_it_dropped() -> anyhow::Result<()> 
         assert_eq!(got.len(), 1);
         let r = &got[0];
         assert_eq!((r.tables_scanned, r.columns_scanned, r.cap), (8, 61, 24));
-        // **回了 12 条、落库 9 条**：两者之差就是被丢掉的，明细在 dropped。
-        // 从前这三个数一个都没有，页面上只看得见落库的那 9 条
+        // **Returned 12, stored 9**: the difference between them is what was dropped; the details are in dropped.
+        // Previously none of these three numbers existed, and the page only showed the 9 stored
         assert_eq!((r.returned, r.accepted), (12, 9));
         assert_eq!(r.dropped[runs::drop_reason::SOURCE]["n"], 3);
         assert!(
@@ -83,7 +83,7 @@ async fn a_run_says_what_it_scanned_and_what_it_dropped() -> anyhow::Result<()> 
     }
     .await;
 
-    // 只删知识库，不删 org——用户是软删除的，测试也不该造一个产品里不存在的动作
+    // Delete only the KB, not the org — users are soft-deleted, and the test should not construct an action that does not exist in the product
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(kb)
         .execute(&pool)
@@ -105,8 +105,8 @@ async fn a_failed_run_is_not_an_empty_one() -> anyhow::Result<()> {
 
         let got = runs::recent(&pool, kb, 10).await?;
         assert_eq!(got.len(), 1, "跑挂了的那一轮也该留下一行");
-        // 这一行与「跑完了但 accepted = 0」的区别就在这里。两者在页面上
-        // 从前都是「没有新提议」，而一个要去配模型，一个要去给列加注释
+        // The difference between this row and "ran to completion but accepted = 0" lies here. On the page both
+        // used to show as "no new proposals", while one has to go and configure the model and the other has to go and annotate the columns
         assert_eq!(got[0].accepted, 0);
         assert!(got[0]
             .error

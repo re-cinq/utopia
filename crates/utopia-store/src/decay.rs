@@ -1,7 +1,7 @@
-//! 源级衰减（RC-003）：Lore 的 `scoreImportance` 逐条移植，同样的输入给出同样的分。
+//! Source-level decay (RC-003): a line-by-line port of Lore's `scoreImportance`; the same input gives the same score.
 //!
-//! 一个文档的分是 0–10 的整数：`round(10 · 0.5^(年龄/半衰期))` 加上几项修正。
-//! 年龄从最近一次被检索算起，没被检索过就从创建算起。强度与分都不存，读的时候算。
+//! A document's score is an integer from 0 to 10: `round(10 · 0.5^(age/half-life))` plus a few adjustments.
+//! Age is counted from the last retrieval, or from creation if it was never retrieved. Strength and score are not stored; they are computed on read.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,21 +11,21 @@ use uuid::Uuid;
 
 pub const DEFAULT_HALF_LIFE_DAYS: f64 = 60.0;
 pub const MAX_HALF_LIFE_DAYS: f64 = 365.0;
-/// 每次被检索，半衰期加的天数（到 [`MAX_HALF_LIFE_DAYS`] 封顶）。
+/// Days added to the half-life on each retrieval (capped at [`MAX_HALF_LIFE_DAYS`]).
 pub const RETRIEVAL_HALF_LIFE_GAIN_DAYS: f64 = 2.0;
 
 const MILLIS_PER_DAY: f64 = 86_400_000.0;
 
-/// `sources.decay`：缺的字段取 Lore 的默认值，所以 `{}` 就是 Lore 今天的行为。
+/// `sources.decay`: missing fields take Lore's defaults, so `{}` is Lore's behavior today.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DecaySettings {
-    /// 源里文档超过这个数，每天的扫描才淘汰多出来的。
+    /// Only when a source holds more documents than this does the daily scan evict the excess.
     pub max_items: u32,
     pub half_life_days: u32,
-    /// 这么多天没被检索就算陈旧。
+    /// Not retrieved for this many days counts as stale.
     pub stale_after_days: u32,
-    /// 比这新的文档不参与淘汰。
+    /// Documents newer than this are not eligible for eviction.
     pub min_age_days: u32,
 }
 
@@ -41,7 +41,7 @@ impl Default for DecaySettings {
 }
 
 impl DecaySettings {
-    /// 数据库不拦的范围：半衰期 1 到 365 天，容量和陈旧天数至少 1。
+    /// Range the database does not enforce: half-life 1 to 365 days, capacity and stale days at least 1.
     pub fn validate(&self) -> Result<(), AppError> {
         let half_life_ok = (1..=MAX_HALF_LIFE_DAYS as u32).contains(&self.half_life_days);
         if !half_life_ok || self.max_items == 0 || self.stale_after_days == 0 {
@@ -54,9 +54,9 @@ impl DecaySettings {
     }
 }
 
-/// 这些文档刚被一次检索交了出去：属于打开了衰减的源的，计数加一、最近检索时间记成现在、
-/// 半衰期加 [`RETRIEVAL_HALF_LIFE_GAIN_DAYS`] 天（封顶 [`MAX_HALF_LIFE_DAYS`]）。别的源的文档
-/// 一行也不写。一条语句写完所有文档；第一次被检索的文档从源里的半衰期起算。
+/// These documents were just handed out by one retrieval: for those in a source with decay on, the count goes up by one, the last-retrieved time is set to now,
+/// and the half-life grows by [`RETRIEVAL_HALF_LIFE_GAIN_DAYS`] days (capped at [`MAX_HALF_LIFE_DAYS`]). Documents from other sources
+/// get no write at all. One statement writes all the documents; a document retrieved for the first time starts from the source's half-life.
 pub async fn record_retrievals(pool: &PgPool, document_ids: &[Uuid]) -> AppResult<u64> {
     if document_ids.is_empty() {
         return Ok(0);
@@ -81,14 +81,14 @@ pub async fn record_retrievals(pool: &PgPool, document_ids: &[Uuid]) -> AppResul
     Ok(written.rows_affected())
 }
 
-/// 打分用到的一个文档：`key` 是文档名，`value_len` 是它的文字有多长（UTF-16 码元数，
-/// 和 Lore 的 JS 字符串长度一致；库里按字符数，非基本平面的字符会少算，只差在边界上）。
+/// A document used for scoring: `key` is the document name, `value_len` is the length of its text (in UTF-16 code units,
+/// matching Lore's JS string length; the store counts characters, so non-BMP characters are undercounted, a difference only at the boundary).
 pub struct Memory {
     pub key: String,
     pub value_len: usize,
     pub created_at: DateTime<Utc>,
     pub last_retrieved_at: Option<DateTime<Utc>>,
-    /// 0 或没有都取 [`DEFAULT_HALF_LIFE_DAYS`]。
+    /// 0 or missing both take [`DEFAULT_HALF_LIFE_DAYS`].
     pub half_life_days: Option<f64>,
     pub retrieval_count: u32,
     pub stale: bool,
@@ -126,7 +126,7 @@ fn value_length_adjustment(value_len: usize) -> i64 {
     }
 }
 
-/// 一段文字的 UTF-16 码元数，Lore 里的 `string.length`：表情符号算两个。
+/// UTF-16 code unit count of a text, Lore's `string.length`: an emoji counts as two.
 pub fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
 }
@@ -149,16 +149,16 @@ fn retrieval_adjustment(retrievals: u32) -> i64 {
     }
 }
 
-/// 一直没被检索：最近一次检索（没有就创建）距今超过 `stale_after_days` 天。陈旧是读的时候
-/// 算的，不写进库，也不碰事实的 `confidence`。
+/// Not retrieved recently: the last retrieval (or creation, if none) was more than `stale_after_days` days ago. Staleness is computed on read
+/// and is not written to the store, and does not touch a fact's `confidence`.
 pub fn is_stale(last_touched: DateTime<Utc>, stale_after_days: u32, now: DateTime<Utc>) -> bool {
     now - last_touched > chrono::Duration::days(i64::from(stale_after_days))
 }
 
-/// 陈旧文档的检索分乘这个数，和 Lore 对陈旧事实的权重一样。
+/// A stale document's retrieval score is multiplied by this factor, the same weight Lore gives stale facts.
 pub const STALE_SEARCH_WEIGHT: f64 = 0.6;
 
-/// 这些文档里，属于打开了衰减的源、并且陈旧的那些（[`is_stale`] 的判据，在库里算）。
+/// Among these documents, those in a source with decay on that are stale (the [`is_stale`] criterion, computed in the store).
 pub async fn stale_documents(
     pool: &PgPool,
     document_ids: &[Uuid],
@@ -179,7 +179,7 @@ pub async fn stale_documents(
     Ok(ids.into_iter().map(|(id,)| id).collect())
 }
 
-/// 这篇文档是衰减扫描淘汰的：之后推送方再推同样的内容，不把它恢复出来。
+/// This document was evicted by the decay scan: if the sender pushes the same content again later, it is not restored.
 pub async fn mark_evicted(pool: &PgPool, document_id: Uuid) -> AppResult<()> {
     sqlx::query(
         "INSERT INTO decay_evictions (document_id) VALUES ($1)
@@ -191,7 +191,7 @@ pub async fn mark_evicted(pool: &PgPool, document_id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
-/// 衰减扫描淘汰了它，且之后没人恢复过（恢复会清掉这一笔）。
+/// The decay scan evicted it, and nobody has restored it since (a restore clears this entry).
 pub async fn was_evicted(pool: &PgPool, document_id: Uuid) -> AppResult<bool> {
     Ok(
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM decay_evictions WHERE document_id = $1)")
@@ -201,13 +201,13 @@ pub async fn was_evicted(pool: &PgPool, document_id: Uuid) -> AppResult<bool> {
     )
 }
 
-/// 淘汰候选：一个文档和给它打分用的材料。
+/// Eviction candidate: a document and the material used to score it.
 pub struct Candidate {
     pub document_id: Uuid,
     pub memory: Memory,
 }
 
-/// 分最低的 `count` 个，分相同的保持候选的先后（候选按创建时间从旧到新给）。
+/// The `count` lowest-scoring ones; ties keep the candidates' order (candidates are given from oldest to newest by creation time).
 pub fn lowest_scoring(
     candidates: &[Candidate],
     now: DateTime<Utc>,
@@ -254,14 +254,14 @@ impl CandidateRow {
     }
 }
 
-/// 淘汰的计划：哪个源、哪些文档、其中最低的分。
+/// Eviction plan: which source, which documents, and the lowest score among them.
 pub struct Eviction {
     pub kb_id: Uuid,
     pub documents: Vec<Uuid>,
     pub lowest_score: u8,
 }
 
-/// 打开了衰减、活文档数超过 `max_items` 的源。
+/// Sources with decay on whose live document count exceeds `max_items`.
 pub async fn sources_over_cap(pool: &PgPool) -> AppResult<Vec<Uuid>> {
     let ids: Vec<(Uuid,)> = sqlx::query_as(
         "SELECT s.id FROM sources s
@@ -276,9 +276,9 @@ pub async fn sources_over_cap(pool: &PgPool) -> AppResult<Vec<Uuid>> {
     Ok(ids.into_iter().map(|(id,)| id).collect())
 }
 
-/// 把一个源淘汰回 `max_items`：在比 `min_age_days` 老的文档里取最旧的 `2 × 多出来的数`，
-/// 打分，其中最低的 `多出来的数` 个。多取一倍是为了让分有挑的余地，而不是只拿最旧的。
-/// 源没开衰减或没超出，返回 None。
+/// Evicts a source back down to `max_items`: among documents older than `min_age_days`, take the oldest `2 × excess`,
+/// score them, and evict the `excess` lowest. Taking double gives the scores room to choose, rather than taking only the oldest.
+/// If the source has decay off or is not over the limit, returns None.
 pub async fn plan_eviction(
     pool: &PgPool,
     source_id: Uuid,
@@ -355,8 +355,8 @@ mod tests {
         }
     }
 
-    /// 期望值由 Lore 的 `scoreImportance`（libs/shared/src/domain/memory-ranking.ts）在同一个
-    /// `now` 下算出，不是照这里的实现推的。
+    /// The expected values are computed by Lore's `scoreImportance` (libs/shared/src/domain/memory-ranking.ts) at the same
+    /// `now`, not derived from this implementation.
     #[test]
     fn a_score_matches_lores_for_every_vector() {
         let mid = "x".repeat(100);

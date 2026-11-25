@@ -1,7 +1,7 @@
-//! 类型化行的见证只认来源里活着的陈述，取最早的那条连同它的名字（0064 决定 5）：
-//! 作废的陈述不作证，类别词规则的实体来源没有见证，别的库的行不动。
+//! A typed row's attestation counts only the live statements in its source, taking the earliest one together with its name (0064 decision 5):
+//! a voided statement does not attest, an entity source of a category-word rule has no attestation, and rows of another library are left alone.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
@@ -81,7 +81,7 @@ async fn entity(pool: &PgPool, base: &Base) -> anyhow::Result<Uuid> {
     Ok(id)
 }
 
-/// 一条开放陈述；`witness` 是它所在那一节的日期和名字，没有就是没说
+/// One open statement; `witness` is the date and name of the section it sits in, and if there is none, it was not stated
 async fn statement(
     pool: &PgPool,
     base: &Base,
@@ -112,7 +112,7 @@ async fn invalidate(pool: &PgPool, fact: Uuid) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 一行类型化事实，`stale` 是它眼下记着的见证（同步要把它改掉）
+/// One typed fact row; `stale` is the attestation it currently records (the sync is going to change it)
 async fn typed_row(
     pool: &PgPool,
     base: &Base,
@@ -150,7 +150,7 @@ async fn materialized_from(pool: &PgPool, base: &Base, sources: &[Uuid]) -> anyh
     Ok(row)
 }
 
-/// 一条批准了的规则：`trigger` 是 `phrase` 或 `kind_word`
+/// One approved rule: `trigger` is `phrase` or `kind_word`
 async fn rule(pool: &PgPool, base: &Base, trigger: &str) -> anyhow::Result<Uuid> {
     let id = Uuid::now_v7();
     sqlx::query(

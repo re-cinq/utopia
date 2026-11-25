@@ -1,12 +1,12 @@
-//! 一个类别词绑到一个类（0044 决定 3–4 的第一片，账本侧，见 0065）。
+//! One category word bound to one class (the first slice of 0044 decisions 3-4, ledger side, see 0065).
 //!
-//! 开放抽取只记文档自己的类别词，不选类。库要能数出每个类别词的签名（"Company" 与
-//! "company" 是一个词：两个写法、两个实体、它们参与的关系短语）；绑定判了之后写到该
-//! 类别词下每个实体的 `type_id`（`type_source = 'aligned'`），人定过的不动；绑定按类的
-//! `updated_at` 与库里最新的类判过期；人的判定不被代理覆盖，反过来可以；解绑只动
-//! `aligned` 的行；没有类对得上的按老流程提成「建议加类」。
+//! Open extraction records only the document's own category words, and does not choose a class. The library must be able to count each category word's signature ("Company" and
+//! "company" are one word: two spellings, two entities, and the relation phrases they take part in). Once a binding is judged, it is written to the `type_id` of every
+//! entity under that category word (`type_source = 'aligned'`); anything a person decided is left alone. A binding goes stale when the class's
+//! `updated_at` is compared against the newest class in the library. A person's judgment is never overwritten by an agent, though the reverse is allowed. Unbinding only touches
+//! `aligned` rows. Words with no matching class fall through to the old flow and become a "suggest adding a class".
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use std::collections::HashSet;
@@ -68,7 +68,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
             .execute(pool)
             .await?;
     }
-    // 有名字的：类别词照文档的写法，类空着
+    // Named ones: the category word as the document writes it, class left empty
     for (id, name, kind) in [
         (acme, "Acme", "Company"),
         (beta, "Beta", "company"),
@@ -85,7 +85,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         .execute(pool)
         .await?;
     }
-    // 人看过、说没有合适的类：type_id 空、type_source = human
+    // A person looked at it and said no suitable class: type_id empty, type_source = human
     sqlx::query(
         "INSERT INTO entities (id, kb_id, canonical_name, specific_type, type_source)
          VALUES ($1, $2, 'Dave', 'person', 'human')",
@@ -94,7 +94,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     .bind(kb)
     .execute(pool)
     .await?;
-    // 一个被描述、没有名字的东西
+    // A described thing with no name
     sqlx::query(
         "INSERT INTO entities (id, kb_id, canonical_name, description, specific_type)
          VALUES ($1, $2, $3, $3, 'stockholder proposal')",
@@ -104,7 +104,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     .bind(PROPOSAL)
     .execute(pool)
     .await?;
-    // 几条开放陈述：主语是公司的
+    // Several open statements: the subject is the company's
     for (subject, phrase, object) in [
         (acme, "acquired", FactObject::Entity(beta)),
         (
@@ -148,7 +148,7 @@ async fn typed(pool: &PgPool, id: Uuid) -> anyhow::Result<Typed> {
     )
 }
 
-/// 两次 `now()` 要分得开：过期靠时间戳的先后
+/// The two `now()` calls must be told apart: staleness goes by which timestamp is later
 async fn tick() {
     tokio::time::sleep(Duration::from_millis(5)).await;
 }
@@ -167,7 +167,7 @@ async fn a_kind_word_is_counted_once_bound_once_and_applied_to_its_entities() ->
     let f = seed(&pool).await?;
 
     let run = async {
-        // 1. 签名："Company" 与 "company" 是一个词
+        // 1. Signature: "Company" and "company" are one word
         let sigs = type_bindings::signatures(&pool, f.kb).await?;
         let words: Vec<&str> = sigs.iter().map(|s| s.kind_word.as_str()).collect();
         assert_eq!(
@@ -198,7 +198,7 @@ async fn a_kind_word_is_counted_once_bound_once_and_applied_to_its_entities() ->
         assert!(proposal.phrases.is_empty());
         assert_eq!(sigs[1].count, 2, "Carol 与 Dave");
 
-        // 2. 绑上并写到实体上：两个公司都成了 organization，人定过的不动
+        // 2. Bind and write onto the entities: both companies become organization; what a person decided is left alone
         assert!(
             type_bindings::decide(
                 &pool,
@@ -261,13 +261,13 @@ async fn a_kind_word_is_counted_once_bound_once_and_applied_to_its_entities() ->
             "人说没有类，就没有类"
         );
 
-        // 3. 抽取时用的表
+        // 3. The table used during extraction
         let bound = type_bindings::bound_map(&pool, f.kb).await?;
         assert_eq!(bound.get("company"), Some(&f.organization));
         assert_eq!(bound.get("person"), Some(&f.person));
         assert_eq!(bound.len(), 2);
 
-        // 4. 过期：绑到的类改了
+        // 4. Staleness: the class it is bound to has changed
         assert!(type_bindings::stale(&pool, f.kb).await?.is_empty());
         tick().await;
         ontology::update_entity_type(
@@ -299,7 +299,7 @@ async fn a_kind_word_is_counted_once_bound_once_and_applied_to_its_entities() ->
         );
         assert!(type_bindings::stale(&pool, f.kb).await?.is_empty());
 
-        // 5. 没有类对得上：记 none，按老流程提成建议加类
+        // 5. No class matches: record none, and go down the old flow to suggest adding a class
         assert!(
             type_bindings::decide(
                 &pool,
@@ -328,7 +328,7 @@ async fn a_kind_word_is_counted_once_bound_once_and_applied_to_its_entities() ->
             0,
             "只写第一次，与 set_proposed_type 同一条"
         );
-        // 绑定的形状：绑上了就得有类
+        // Shape of a binding: once bound, it must have a class
         assert!(type_bindings::decide(
             &pool,
             f.kb,
@@ -342,7 +342,7 @@ async fn a_kind_word_is_counted_once_bound_once_and_applied_to_its_entities() ->
         .await
         .is_err());
 
-        // 6. 过期：判成 none 之后库里长出了新类
+        // 6. Staleness: after judging none, a new class has appeared in the library
         assert!(type_bindings::stale(&pool, f.kb).await?.is_empty());
         tick().await;
         sqlx::query(
@@ -373,7 +373,7 @@ async fn a_kind_word_is_counted_once_bound_once_and_applied_to_its_entities() ->
         );
         assert!(type_bindings::stale(&pool, f.kb).await?.is_empty());
 
-        // 7. 人的判定不被代理覆盖，反过来可以
+        // 7. A person's judgment is never overwritten by an agent, though the reverse is allowed
         assert!(
             type_bindings::decide(
                 &pool,
@@ -432,7 +432,7 @@ async fn a_kind_word_is_counted_once_bound_once_and_applied_to_its_entities() ->
             .await?
             .contains_key("company"));
 
-        // 8. 解绑只动 aligned 的行
+        // 8. Unbinding only touches aligned rows
         sqlx::query("UPDATE entities SET type_source = 'human' WHERE id = $1")
             .bind(f.beta)
             .execute(&pool)
@@ -453,14 +453,14 @@ async fn a_kind_word_is_counted_once_bound_once_and_applied_to_its_entities() ->
         assert_eq!(typed(&pool, f.beta).await?.type_id, Some(f.organization));
         assert_eq!(typed(&pool, f.carol).await?.type_id, Some(f.person));
         assert_eq!(type_bindings::unapply(&pool, f.kb, "company").await?, 0);
-        // 绑上的类之后有了 → 对齐时把建议清掉
+        // A class appears on the bound word later → on alignment, clear the suggestion
         assert_eq!(
             type_bindings::apply(&pool, f.kb, "stockholder proposal", f.organization).await?,
             1
         );
         assert_eq!(typed(&pool, f.proposal).await?.proposed_type, None);
 
-        // 9. 类删了，绑定跟着走
+        // 9. The class is deleted, and the binding follows it
         assert_eq!(type_bindings::unapply(&pool, f.kb, "person").await?, 1);
         sqlx::query("DELETE FROM entity_types WHERE id = $1")
             .bind(f.person)
@@ -480,11 +480,11 @@ async fn a_kind_word_is_counted_once_bound_once_and_applied_to_its_entities() ->
     run
 }
 
-/// 自己的组织名：上面那个测试开跑时按名字清场，共用名字会互相删掉对方的数据
+/// The organization's own name: the test above clears the field by name when it starts, and a shared name would delete the other test's data
 const BASIS_ORG: &str = "kind-word-basis-test";
 
-/// 代理的判定只在它读到的输入还成立时才收（#795）；人的判定不带指纹，代理不覆盖；
-/// 人定的判定与它的短语对齐任务同一事务提交
+/// An agent's judgment is accepted only while the inputs it read still hold (#795); a person's judgment carries no fingerprint, and an agent does not overwrite it;
+/// a person's judgment is committed in the same transaction as its phrase-alignment job
 #[tokio::test]
 async fn an_agent_decision_is_accepted_only_for_the_inputs_it_read() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -542,7 +542,7 @@ async fn an_agent_decision_is_accepted_only_for_the_inputs_it_read() -> anyhow::
             .await?
             .basis(&shown);
 
-        // 模型答题期间定义改了：这份回复答的是旧定义，不收，什么都不写
+        // The definition changed while the model was answering: this reply answers the old definition, so it is not accepted, and nothing is written
         sqlx::query(
             "UPDATE entity_types SET description = 'NEW definition', updated_at = clock_timestamp()
               WHERE id = $1",
@@ -569,7 +569,7 @@ async fn an_agent_decision_is_accepted_only_for_the_inputs_it_read() -> anyhow::
         assert!(type_bindings::bindings(&pool, kb).await?.is_empty());
         assert_eq!(typed(&pool, acme).await?.type_id, None);
 
-        // 按新输入问出来的：收下，指纹一起存
+        // Asked with the new inputs: accepted, and the fingerprint is stored with it
         let current = type_bindings::class_snapshot(&pool, kb)
             .await?
             .basis(&shown);
@@ -593,7 +593,7 @@ async fn an_agent_decision_is_accepted_only_for_the_inputs_it_read() -> anyhow::
         assert_eq!(b.basis.as_deref(), Some(current.as_str()));
         assert_eq!(typed(&pool, acme).await?.type_id, Some(class));
 
-        // 人判的：不带指纹；它的短语对齐任务与判定一起提交
+        // Judged by a person: no fingerprint; its phrase-alignment job is committed together with the judgment
         assert!(type_bindings::decide_and_apply_human(&pool, kb, "company", None, &votes).await?);
         let b = type_bindings::bindings(&pool, kb).await?.remove(0);
         assert_eq!((b.decided_by.as_str(), b.basis), ("person", None));
@@ -606,7 +606,7 @@ async fn an_agent_decision_is_accepted_only_for_the_inputs_it_read() -> anyhow::
         .await?;
         assert_eq!(queued, 1);
 
-        // 代理晚到的回复不覆盖人
+        // A late agent reply does not overwrite a person
         assert_eq!(
             type_bindings::decide_and_apply_if_current(
                 &pool,
@@ -644,9 +644,9 @@ async fn an_agent_decision_is_accepted_only_for_the_inputs_it_read() -> anyhow::
     run
 }
 
-/// 锁顺序的两个测试用：一个类、一个带类别词的实体、一行绑在这个类上的代理判定。
-/// 判定不投影——`entities.type_id` 删类时是 RESTRICT，实体一指着这个类，删类本身就会失败，
-/// 测的就不是锁了。返回 (库, 类)
+/// Used by two lock-order tests: one class, one entity carrying a category word, and one agent judgment bound to this class.
+/// The judgment is not projected -- when a class is deleted, `entities.type_id` is RESTRICT, so once an entity points at the class the delete itself fails,
+/// and the test would not be testing the lock. Returns (library, class)
 async fn seed_lock_order(pool: &PgPool, name: &str) -> anyhow::Result<(Uuid, Uuid)> {
     let (org, ws, kb, class) = (
         Uuid::now_v7(),
@@ -700,8 +700,8 @@ async fn seed_lock_order(pool: &PgPool, name: &str) -> anyhow::Result<(Uuid, Uui
     Ok((kb, class))
 }
 
-/// 等到有人排在 `pid` 后面等锁。`chain` 时等的是更长的一串：有人排在一个正排在 `pid`
-/// 后面的人后面
+/// Wait until someone is queued behind `pid` for the lock. With `chain`, wait for a longer run: someone queued behind
+/// a person who is queued behind `pid`
 async fn wait_behind(pool: &PgPool, pid: i32, chain: bool) -> anyhow::Result<()> {
     let sql = if chain {
         "SELECT EXISTS (SELECT 1 FROM pg_stat_activity p
@@ -722,9 +722,9 @@ async fn wait_behind(pool: &PgPool, pid: i32, chain: bool) -> anyhow::Result<()>
     .await?
 }
 
-/// 代理收判定时先锁候选类、再写判定行，与删类的顺序一致（删类先拿类的行，再级联到判定行）。
-/// 反过来就是死锁：代理拿着判定行等类，删类拿着类等判定行。这里让代理停在两步之间，
-/// 删类排到它后面，再放行：两边都得走完，谁也不报 40P01
+/// When an agent records a judgment it locks the candidate class first, then writes the judgment row, in the same order as class deletion (deletion takes the class row first, then cascades to the judgment row).
+/// The reverse order deadlocks: the agent holds the judgment row and waits for the class, while the delete holds the class and waits for the judgment row. Here the agent is paused between the two steps,
+/// the class delete queues up behind it, and then it is released: both sides must run to completion, and neither reports 40P01
 #[tokio::test]
 async fn an_acceptance_and_a_class_delete_wait_for_each_other_instead_of_deadlocking(
 ) -> anyhow::Result<()> {
@@ -744,7 +744,7 @@ async fn an_acceptance_and_a_class_delete_wait_for_each_other_instead_of_deadloc
         let basis = type_bindings::class_snapshot(&pool, kb)
             .await?
             .basis(&shown);
-        // 闸门拿着判定行：代理锁完候选类、算完指纹，停在写判定这一步
+        // The gate holds the judgment row: the agent has locked the candidate class and computed the fingerprint, and it stops at the step of writing the judgment
         let mut gate = pool.begin().await?;
         let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *gate)
@@ -780,7 +780,7 @@ async fn an_acceptance_and_a_class_delete_wait_for_each_other_instead_of_deadloc
                     .await
             })
         };
-        // 删类排在代理后面（代理拿着类的共享锁），代理排在闸门后面
+        // The class delete is queued behind the agent (the agent holds a shared lock on the class), and the agent is queued behind the gate
         wait_behind(&pool, gate_pid, true).await?;
         gate.rollback().await?;
         let accepted = tokio::time::timeout(Duration::from_secs(10), agent).await???;
@@ -812,8 +812,8 @@ async fn an_acceptance_and_a_class_delete_wait_for_each_other_instead_of_deadloc
     run
 }
 
-/// 候选类在收判定之前被删了：代理等删类提交，读到的类已经不在，指纹对不上，这份回复
-/// 不收；判定行随级联走了，代理也不把它写回来
+/// The candidate class is deleted before the judgment is accepted: the agent waits for the class delete to commit, reads a class that is gone, the fingerprint no longer matches, and the reply
+/// is not accepted; the judgment row went with the cascade, and the agent does not write it back either
 #[tokio::test]
 async fn a_candidate_deleted_while_the_reply_waits_moves_it() -> anyhow::Result<()> {
     const NAME: &str = "kind-word-deleted-candidate-test";

@@ -273,7 +273,7 @@ async fn turning_the_flag_on_drops_the_sources_name_vectors_and_off_makes_them_p
     .await
 }
 
-/// `entity` 现行的名字事实。
+/// The current name fact of `entity`.
 async fn live_name(pool: &PgPool, entity: Uuid) -> anyhow::Result<Uuid> {
     Ok(sqlx::query_scalar(
         "SELECT f.id FROM facts f JOIN relation_types r ON r.id = f.predicate_id
@@ -285,8 +285,8 @@ async fn live_name(pool: &PgPool, entity: Uuid) -> anyhow::Result<Uuid> {
     .await?)
 }
 
-/// #1426：人把身份来源的实体并进一个早就从散文里记下同名的实体。存活的名字留住身份证据，
-/// 它仍是身份实体；撤回合并只收回抄过去的那些。
+/// #1426: a person merges an entity with an identity source into an entity that long before had the same name recorded from prose. The surviving name keeps the identity evidence,
+/// so it remains the identity entity; undoing the merge retracts only the ones that were copied across.
 #[tokio::test]
 async fn a_merge_keeps_the_identity_evidence_of_the_name_it_dedupes() -> anyhow::Result<()> {
     use utopia_store::execution_gate::{hold_for_merge, Hold};
@@ -340,7 +340,7 @@ async fn a_merge_keeps_the_identity_evidence_of_the_name_it_dedupes() -> anyhow:
     .await
 }
 
-/// 存活行原本就有的同一分块证据是它自己的，撤回合并不动。
+/// The same chunk evidence the surviving row already had is its own, and undoing the merge does not touch it.
 #[tokio::test]
 async fn undoing_a_merge_leaves_the_survivors_own_evidence() -> anyhow::Result<()> {
     use utopia_store::resolution::{merge_entities, revert_merge};
@@ -363,8 +363,8 @@ async fn undoing_a_merge_leaves_the_survivors_own_evidence() -> anyhow::Result<(
     .await
 }
 
-/// 合并之后存活的名字可能被改写：人改了区间，证据随行到新行上。撤回合并要从现在持有它的
-/// 那一行收回，不管存活行原本属于哪一边。
+/// After the merge the surviving name may be rewritten: a person changed the interval, and the evidence moved with the row to the new row. Undoing the merge must reclaim it from
+/// whichever row holds it now, regardless of which side the surviving row originally belonged to.
 #[tokio::test]
 async fn undoing_a_merge_takes_the_copied_evidence_off_a_rewritten_name() -> anyhow::Result<()> {
     use utopia_store::graph::Validity;
@@ -372,7 +372,7 @@ async fn undoing_a_merge_takes_the_copied_evidence_off_a_rewritten_name() -> any
     in_kb(|pool, kb, project, _| async move {
         let (_, identity) = chunk(&pool, kb, Some(json!({"names": "identity"}))).await?;
         let (_, prose) = chunk(&pool, kb, None).await?;
-        // 散文的名字先记，无论往哪边并都是它存活
+        // The prose name is recorded first; whichever way the merge goes, it is the one that survives
         for prose_moves in [false, true] {
             let name = format!("acme/{prose_moves}.ts");
             let prose_holder = holder(&pool, kb, Some(project), &name).await?;

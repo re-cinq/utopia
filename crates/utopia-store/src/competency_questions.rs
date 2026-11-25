@@ -1,5 +1,5 @@
-//! 能力问题（0061 决定 1）：一个库该回答什么，写成行。本体的元素凭它们判：一条属性
-//! 值不值得批，看它服务哪个问题。人写的直接 accepted；代理从开放图谱里提的先 proposed。
+//! Competency questions (0061 decision 1): what a library should be able to answer, written as lines. Ontology elements are judged by them: whether an attribute
+//! value is worth approving depends on which question it serves. Human-written ones are accepted directly; ones the agent proposes from the open graph start as proposed.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -45,7 +45,7 @@ fn validate(question: &str) -> AppResult<&str> {
     Ok(q)
 }
 
-/// 库里全部问题，新的在前
+/// All questions in the library, newest first
 pub async fn list(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Question>> {
     Ok(sqlx::query_as(&format!(
         "SELECT {COLS} FROM competency_questions WHERE kb_id = $1 ORDER BY created_at DESC, id"
@@ -55,7 +55,7 @@ pub async fn list(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Question>> {
     .await?)
 }
 
-/// 认下的问题：代理提案对着的是这些
+/// Questions that were accepted: agent proposals are matched against these
 pub async fn accepted(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Question>> {
     Ok(sqlx::query_as(&format!(
         "SELECT {COLS} FROM competency_questions WHERE kb_id = $1 AND status = 'accepted'
@@ -104,7 +104,7 @@ pub async fn create(pool: &PgPool, kb_id: Uuid, q: NewQuestion<'_>) -> AppResult
     Ok(id)
 }
 
-/// 改问题的文字、期望答案或形状。没给的不动；期望答案给空串是清掉
+/// Changes the question's text, expected answer or shape. Omitted fields stay as they are; an empty string as the expected answer clears it
 pub async fn update(
     pool: &PgPool,
     kb_id: Uuid,
@@ -136,7 +136,7 @@ pub async fn update(
     Ok(())
 }
 
-/// 人对一条问题表态：认（accepted）、拒（rejected）、退役（retired）
+/// A human's verdict on a question: accepted, rejected, or retired
 pub async fn set_status(pool: &PgPool, kb_id: Uuid, id: Uuid, status: &str) -> AppResult<()> {
     if !matches!(status, "accepted" | "rejected" | "retired") {
         return Err(AppError::invalid(
@@ -171,7 +171,7 @@ pub async fn delete(pool: &PgPool, kb_id: Uuid, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
-/// 一条问题问过了：什么时候、答成了什么（0061 决定 5）。`result` 至少带 `answered: bool`
+/// A question was asked: when, and what it was answered with (0061 decision 5). `result` carries at least `answered: bool`
 pub async fn record_result(
     pool: &PgPool,
     kb_id: Uuid,
@@ -190,7 +190,7 @@ pub async fn record_result(
     Ok(res.rows_affected() > 0)
 }
 
-/// 同一句话（不分大小写、去首尾空白）已经在库里了吗——代理提问题不重复人的
+/// Whether the same sentence (ignoring case and surrounding whitespace) is already in the library: an agent proposing questions must not duplicate a human's
 pub async fn exists_text(pool: &PgPool, kb_id: Uuid, question: &str) -> AppResult<bool> {
     Ok(sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM competency_questions
@@ -202,16 +202,16 @@ pub async fn exists_text(pool: &PgPool, kb_id: Uuid, question: &str) -> AppResul
     .await?)
 }
 
-/// 两个数里的第一个：接受了的问题里，问过的、答对的各几条
+/// The first of two numbers: among accepted questions, how many were asked and how many were answered correctly, respectively
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct QuestionReport {
     pub accepted: i64,
     pub proposed: i64,
     pub checked: i64,
     pub answered: i64,
-    /// 答上了、而且回答途中从图谱工具拿到过事实（via graph 或 both）
+    /// Answered, and facts were fetched from the graph tool along the way (via graph or both)
     pub answered_with_graph: i64,
-    /// 答上了、而且只走了图谱没读正文：本体本身答的
+    /// Answered, and only walked the graph without reading the body: the ontology answered it itself
     pub answered_graph_only: i64,
 }
 

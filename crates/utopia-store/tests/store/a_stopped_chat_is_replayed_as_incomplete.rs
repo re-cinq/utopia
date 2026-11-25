@@ -1,4 +1,4 @@
-//! 停止标记随原文回放，模型上下文另外说明回答未完成（#934）。
+//! A stop marker is replayed along with the original text, while the model context separately notes that the answer was incomplete (#934).
 use serde_json::json;
 use sqlx::PgPool;
 use utopia_store::conversations::{self, TurnRecord};

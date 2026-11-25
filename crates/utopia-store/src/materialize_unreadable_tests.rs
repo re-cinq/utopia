@@ -1,5 +1,5 @@
-//! 绑上了却按 datatype 读不出的值记成 `attr_datatype` 丢弃行，而不是无声地不写；
-//! 属性改成读得出之后那一行退掉、类型化行写下。没有 `UTOPIA_DATABASE_URL` 时跳过。
+//! A value bound but unreadable under its datatype is recorded as an `attr_datatype` drop row, not silently skipped;
+//! once the attribute becomes readable, that row is retracted and the typed row is written. Skipped when `UTOPIA_DATABASE_URL` is not set.
 
 use super::materialize_in_tx;
 use crate::{extraction_drops, phrase_bindings};
@@ -144,12 +144,12 @@ async fn a_value_the_datatype_cannot_read_is_a_drop_row_until_it_can() -> anyhow
         assert_eq!(drops[0].detail, "employee_count");
         assert_eq!(drops[0].count, 1);
         assert_eq!(drops[0].example.as_deref(), Some("启明半导体 → 超过2000人"));
-        // 再算一遍不翻倍：按集合重写
+        // Recomputing does not double: rewrite as a set
         recompute(&pool, f.kb).await?;
         let drops = extraction_drops::for_kb(&pool, f.kb).await?;
         assert_eq!(drops.len(), 1);
         assert_eq!(drops[0].count, 1);
-        // 属性改成文本：值读得出了，行写下，丢弃退掉
+        // Attribute changed to text: the value is now readable, the row is written, the drop is retracted
         sqlx::query("UPDATE relation_types SET datatype='text' WHERE id=$1")
             .bind(f.property)
             .execute(&pool)

@@ -1,20 +1,20 @@
-//! 未知的日期不是开放的日期（0022 / #345 / #352），打在真库上。
+//! An unknown date is not an open date (0022 / #345 / #352), hit against a real database.
 //!
-//! 为什么非要连库：这道防御整个活在 SQL 字符串里（`world_axis`），与 0019 的记录轴
-//! 同一种危险——`cargo check` 看不见一个写反的 CASE，漏掉一处读点也没有人报错。
+//! Why it must hit a database: this defence lives entirely inside SQL strings (`world_axis`), the same kind of danger as the record axis in 0019:
+//! `cargo check` cannot see a reversed CASE, and no one reports a missed read point.
 //!
-//! 表里的四种行，两个方向都断言：
-//! - 没有起点的事实，在它的文档日期**之前不出现**、**当天出现**（读成「自古如此」
-//!   会让 2023 年 1 月看见一张 2024 年的调薪单）
-//! - 结束了不知哪天的事实，在它的文档日期**之前出现**、**当天起不出现**（读成
-//!   「至今仍是」会让 2026 年还挂着一个原文说已经不担任的头衔）
-//! - 原文给了两端的事实，两端照旧——这条改动不碰有日期的行
-//! - 两端都不知道的行，**任何时刻都不成立**，但实体的时间线上仍列着它
+//! Asserts the four kinds of rows in the table, in both directions:
+//! - A fact with no start is **absent before its document's date** and **present on that day** (reading it as "always has been" would
+//!   show a 2024 pay-rise slip to someone looking at January 2023)
+//! - A fact that ended on an unknown day is **present before its document's date** and **absent from that day on** (reading it as
+//!   "still is" would leave a title the original text says has already been given up still shown in 2026)
+//! - A fact with both ends given in the original keeps both ends as before: this change does not touch rows with dates
+//! - A row unknown at both ends **holds at no moment**, but the entity's timeline still lists it
 //!
-//! 再钉两条写入侧的约定：同一断言被更早的文档再观察到一次，锚点往早挪；
-//! 修正行从被替代的行继承锚点，而不是重新锚在修正的那一刻。
+//! Two more write-side conventions are pinned: when the same assertion is observed again in an earlier document, the anchor moves earlier;
+//! a correction row inherits the anchor from the row it replaces, rather than being re-anchored at the moment of the correction.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` it skips rather than fails. It sets up and tears down its own data and never touches an existing database.
 
 use std::collections::HashSet;
 
@@ -22,7 +22,7 @@ use sqlx::PgPool;
 use utopia_store::graph::Validity;
 use uuid::Uuid;
 
-/// 裸行关上之后那一行：起点、终点精度、两个锚点
+/// The row after a bare row is closed: start, end precision, two anchors
 type BareClosedRow = (
     Option<chrono::DateTime<chrono::Utc>>,
     Option<String>,
@@ -30,7 +30,7 @@ type BareClosedRow = (
     Option<chrono::DateTime<chrono::Utc>>,
 );
 
-/// 关上之后那一行：起点、终点、终点精度、supersedes、锚点
+/// The row after closing: start, end, end precision, supersedes, anchor
 type ClosedRow = (
     Option<chrono::DateTime<chrono::Utc>>,
     Option<chrono::DateTime<chrono::Utc>>,
@@ -156,7 +156,7 @@ async fn fact(
     .await?)
 }
 
-/// T 时刻林昭一跳邻域里的边（按事实 id）。`None` = 每一刻。
+/// Edges in Lin Zhao's one-hop neighborhood at moment T (by fact id). `None` = every moment.
 async fn edges_at(pool: &PgPool, f: &Fixture, at: Option<&str>) -> anyhow::Result<HashSet<Uuid>> {
     let (_, edges) =
         utopia_store::graph::neighborhood(pool, f.kb, f.lin, 1, at.map(t), None).await?;
@@ -181,7 +181,7 @@ async fn an_unknown_bound_reaches_as_far_as_the_evidence() -> anyhow::Result<()>
     let f = seed(&pool).await?;
 
     let run = async {
-        // A：offer letter，2023-06-01 起，仍在继续——两端原文都给了（起点）
+        // A: offer letter, from 2023-06-01, still continuing: both ends given in the original (the start)
         let (a, _) = fact(
             &pool,
             &f,
@@ -192,7 +192,7 @@ async fn an_unknown_bound_reaches_as_far_as_the_evidence() -> anyhow::Result<()>
                 .attested(Some(t("2023-06-01T00:00:00Z"))),
         )
         .await?;
-        // B：2024-02-20 的调薪单说「加薪由平台组批准」——没有起点
+        // B: the 2024-02-20 pay-rise slip says "raise approved by the platform team": no start
         let (b, _) = fact(
             &pool,
             &f,
@@ -202,7 +202,7 @@ async fn an_unknown_bound_reaches_as_far_as_the_evidence() -> anyhow::Result<()>
             Validity::default().attested(Some(t("2024-02-20T00:00:00Z"))),
         )
         .await?;
-        // C：2025-10-15 的角色说明说「不再担任 Staff Engineer，日期未记录」——两端都不知道
+        // C: the 2025-10-15 role note says "no longer serving as Staff Engineer, date not recorded": both ends unknown
         let (c, _) = fact(
             &pool,
             &f,
@@ -214,7 +214,7 @@ async fn an_unknown_bound_reaches_as_far_as_the_evidence() -> anyhow::Result<()>
                 .attested(Some(t("2025-10-15T00:00:00Z"))),
         )
         .await?;
-        // D：2023-06-01 起任 Tech Lead，同一份 2025-10-15 的说明说已不再担任——起点有，终点不知哪天
+        // D: serving as Tech Lead from 2023-06-01; the same 2025-10-15 note says no longer serving: start known, end on an unknown day
         let (d, _) = fact(
             &pool,
             &f,
@@ -227,18 +227,18 @@ async fn an_unknown_bound_reaches_as_far_as_the_evidence() -> anyhow::Result<()>
         )
         .await?;
 
-        // 2023 年 1 月：什么都还没有。B 的证据在 2024 年——「自古如此」读法会让它出现
+        // January 2023: nothing yet. B's evidence is in 2024: the "always been so" reading would make it appear
         let jan_2023 = edges_at(&pool, &f, Some("2023-01-01T00:00:00Z")).await?;
         assert!(
             jan_2023.is_empty(),
             "证据出现之前的时刻，一条也不该成立：{jan_2023:?}"
         );
 
-        // 2023-06-01：有起点的两条当天起成立；B 还没有证据；C 从不成立
+        // 2023-06-01: the two with starts hold from that day; B has no evidence yet; C never holds
         let jun_2023 = edges_at(&pool, &f, Some("2023-06-01T00:00:00Z")).await?;
         assert_eq!(jun_2023, HashSet::from([a, d]));
 
-        // 2024-02-20：B 从它的文档日期起成立
+        // 2024-02-20: B holds from its document's date
         let feb_2024 = edges_at(&pool, &f, Some("2024-02-20T00:00:00Z")).await?;
         assert_eq!(feb_2024, HashSet::from([a, b, d]));
         let day_before = edges_at(&pool, &f, Some("2024-02-19T00:00:00Z")).await?;
@@ -247,7 +247,7 @@ async fn an_unknown_bound_reaches_as_far_as_the_evidence() -> anyhow::Result<()>
             "文档日期前一天，没起点的事实还不成立"
         );
 
-        // 2025-10-15：D 到说出它结束的那份文档为止；前一天还在
+        // 2025-10-15: D holds until the document that says it ended; the day before, it still does
         let oct_2025 = edges_at(&pool, &f, Some("2025-10-15T00:00:00Z")).await?;
         assert_eq!(
             oct_2025,
@@ -260,7 +260,7 @@ async fn an_unknown_bound_reaches_as_far_as_the_evidence() -> anyhow::Result<()>
             "文档日期前一天它还成立——保守包含到证据为止"
         );
 
-        // 2026-01-01：#345 那道题——头衔不该还挂着
+        // 2026-01-01: the #345 question: the title should no longer be attached
         let jan_2026 = edges_at(&pool, &f, Some("2026-01-01T00:00:00Z")).await?;
         assert!(
             !jan_2026.contains(&c) && !jan_2026.contains(&d),
@@ -268,7 +268,7 @@ async fn an_unknown_bound_reaches_as_far_as_the_evidence() -> anyhow::Result<()>
         );
         assert_eq!(jan_2026, HashSet::from([a, b]));
 
-        // 两端都不知道的 C：任何时刻都不成立；但不给时刻时它在（画布画的是历史）
+        // C, unknown at both ends: holds at no moment; but without a moment given it is present (the canvas draws history)
         let every = edges_at(&pool, &f, None).await?;
         assert_eq!(
             every,
@@ -276,7 +276,7 @@ async fn an_unknown_bound_reaches_as_far_as_the_evidence() -> anyhow::Result<()>
             "at = None 是每一刻，四条都在"
         );
 
-        // 边上带着读出来的区间，前端按它过滤，不自己解释 NULL
+        // Edges carry the interval read out; the frontend filters by it and does not interpret NULL itself
         let (_, edges) =
             utopia_store::graph::neighborhood(&pool, f.kb, f.lin, 1, None, None).await?;
         let by_id = |id: Uuid| edges.iter().find(|e| e.id == id).unwrap();
@@ -296,7 +296,7 @@ async fn an_unknown_bound_reaches_as_far_as_the_evidence() -> anyhow::Result<()>
             "两端都不知道：区间为空"
         );
 
-        // 实体面板：不给时刻时整条时间线都在（C 也列着，标着结束）；给时刻时按规则筛
+        // Entity panel: without a moment the whole timeline is there (C is listed too, marked as ended); with a moment it is filtered by the rules
         let (_, all) = utopia_store::graph::entity_detail(&pool, f.kb, f.lin, None, None).await?;
         assert_eq!(all.len(), 4);
         let (_, now_ish) = utopia_store::graph::entity_detail(
@@ -324,7 +324,7 @@ async fn an_unknown_bound_reaches_as_far_as_the_evidence() -> anyhow::Result<()>
     run
 }
 
-/// 锚点只往早挪：更早的文档是更早的证据。修正行继承锚点：改区间是重述同一份证据。
+/// The anchor only moves earlier: an earlier document is earlier evidence. A correction row inherits the anchor: changing the interval is restating the same evidence.
 #[tokio::test]
 async fn the_anchor_moves_earlier_and_is_inherited() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -348,7 +348,7 @@ async fn the_anchor_moves_earlier_and_is_inherited() -> anyhow::Result<()> {
             .await?
             .contains(&b));
 
-        // 同一断言，出自一份更早的文档（回填语料乱序进来是常态）：同一行，锚点前移
+        // Same assertion, from an earlier document (out-of-order backfill of the corpus is normal): the same row, the anchor moves earlier
         let (again, created) = fact(
             &pool,
             &f,
@@ -365,7 +365,7 @@ async fn the_anchor_moves_earlier_and_is_inherited() -> anyhow::Result<()> {
             .await?
             .contains(&b));
 
-        // 更晚的文档再提一次：什么也不动
+        // A later document mentions it again: nothing changes
         fact(
             &pool,
             &f,
@@ -381,7 +381,7 @@ async fn the_anchor_moves_earlier_and_is_inherited() -> anyhow::Result<()> {
             "只往早挪"
         );
 
-        // 人给它一个结束：修正行继承锚点，而不是锚在修正的此刻
+        // A person gives it an end: the correction row inherits the anchor, rather than being anchored at the moment of the correction
         let corrected = utopia_store::temporal::correct_interval(
             &pool,
             b,
@@ -425,9 +425,9 @@ async fn the_anchor_moves_earlier_and_is_inherited() -> anyhow::Result<()> {
     run
 }
 
-/// 「不再担任，日期未记录」撞上「2023-06-01 起担任」的开放行：关上它，而不是另立
-/// 一行让两条各说各话。#345 那道题挂的正是这个——结束的那行读对了，开放的那行
-/// 照旧说「至今仍是」。
+/// "No longer serving, date not recorded" collides with an open row "serving since 2023-06-01": close it, rather than creating
+/// a separate row so the two talk past each other. This is what the #345 question hinged on: the row with the end read correctly, but the open row
+/// still said "still is".
 #[tokio::test]
 async fn an_ending_without_a_date_closes_the_dated_row_it_ends() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -437,7 +437,7 @@ async fn an_ending_without_a_date_closes_the_dated_row_it_ends() -> anyhow::Resu
     let f = seed(&pool).await?;
 
     let run = async {
-        // 2023-06-01 的 offer：Staff Engineer，仍在继续
+        // The 2023-06-01 offer: Staff Engineer, still continuing
         let (open, _) = fact(
             &pool,
             &f,
@@ -452,7 +452,7 @@ async fn an_ending_without_a_date_closes_the_dated_row_it_ends() -> anyhow::Resu
             .await?
             .contains(&open));
 
-        // 2025-10-15 的角色说明：不再担任，日期未记录——同一断言，没起点
+        // The 2025-10-15 role note: no longer serving, date not recorded: the same assertion, with no start
         let (closed, created) = fact(
             &pool,
             &f,
@@ -467,7 +467,7 @@ async fn an_ending_without_a_date_closes_the_dated_row_it_ends() -> anyhow::Resu
         assert!(created, "关上是一条修正行，不是并进去");
         assert_ne!(closed, open);
 
-        // 旧行作废、修正行链上：起点是原文给的，终点空、精度 unknown，锚在结束的那份文档
+        // The old row is voided and the correction row chains on: start from the original text, end empty, precision unknown, anchored to the document that says it ended
         let (invalidated, supersedes): (Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>) =
             sqlx::query_as("SELECT invalidated_at, supersedes FROM facts WHERE id = $1")
                 .bind(open)
@@ -492,7 +492,7 @@ async fn an_ending_without_a_date_closes_the_dated_row_it_ends() -> anyhow::Resu
             "结束端锚在说出结束的那份文档"
         );
 
-        // #345 那道题：2026 年 1 月不该再有 Staff Engineer；2024 年 6 月还有
+        // The #345 question: January 2026 should no longer have Staff Engineer; June 2024 still does
         assert!(!edges_at(&pool, &f, Some("2026-01-01T00:00:00Z"))
             .await?
             .contains(&closed));
@@ -509,7 +509,7 @@ async fn an_ending_without_a_date_closes_the_dated_row_it_ends() -> anyhow::Resu
         .await?;
         assert!(panel.is_empty(), "面板在 2026 年也不再列它：{panel:?}");
 
-        // 同一断言再说一次「结束了」：已经关上的行不再被关，也不另立
+        // The same assertion says "ended" again: an already-closed row is not closed again, and no new one is created
         let (again, created) = fact(
             &pool,
             &f,
@@ -538,9 +538,9 @@ async fn an_ending_without_a_date_closes_the_dated_row_it_ends() -> anyhow::Resu
     run
 }
 
-/// 派生读前提**读出来的**区间（0022 第 4 条）：一条 part_of 链里，没起点的那一环从它
-/// 的证据日期起算，结束了不知哪天的那一环到说出它的那份文档为止。派生行的两端因此
-/// 是前提共同支撑的那一段；来自锚点的那一端没有精度。
+/// The interval a derivation's premise **reads out** (0022 point 4): in a part_of chain, a link with no start counts from its
+/// evidence date, and a link ended on an unknown day runs up to the document that says it. The derived row's ends are therefore
+/// the stretch jointly supported by the premises; an end that comes from an anchor has no precision.
 #[tokio::test]
 async fn a_derivation_reads_no_further_than_its_premises() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -550,7 +550,7 @@ async fn a_derivation_reads_no_further_than_its_premises() -> anyhow::Result<()>
     let f = seed(&pool).await?;
 
     let run = async {
-        // part_of 传递；四个组织 a ⊂ b ⊂ c ⊂ d
+        // part_of is transitive; four organizations a ⊂ b ⊂ c ⊂ d
         let part_of = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO relation_types (id, kb_id, key, label, is_transitive)
@@ -579,7 +579,7 @@ async fn a_derivation_reads_no_further_than_its_premises() -> anyhow::Result<()>
             ids.push(id);
         }
         let (a, b, c, d) = (ids[0], ids[1], ids[2], ids[3]);
-        // a ⊂ b：原文给了起点 2022-01-01
+        // a ⊂ b: the original gives the start 2022-01-01
         fact(
             &pool,
             &f,
@@ -590,7 +590,7 @@ async fn a_derivation_reads_no_further_than_its_premises() -> anyhow::Result<()>
                 .attested(Some(t("2022-01-01T00:00:00Z"))),
         )
         .await?;
-        // b ⊂ c：没起点，出自 2024-02-20 的文档
+        // b ⊂ c: no start, from the 2024-02-20 document
         fact(
             &pool,
             &f,
@@ -600,7 +600,7 @@ async fn a_derivation_reads_no_further_than_its_premises() -> anyhow::Result<()>
             Validity::default().attested(Some(t("2024-02-20T00:00:00Z"))),
         )
         .await?;
-        // c ⊂ d：2020-01-01 起，2025-10-15 的文档说已不再（日期未记录）
+        // c ⊂ d: from 2020-01-01, the 2025-10-15 document says it no longer holds (date not recorded)
         fact(
             &pool,
             &f,
@@ -639,7 +639,7 @@ async fn a_derivation_reads_no_further_than_its_premises() -> anyhow::Result<()>
             }
         };
 
-        // a ⊂ c：起点是 b ⊂ c 的证据日期（锚点），没有精度；终点开放
+        // a ⊂ c: the start is the b ⊂ c evidence date (an anchor), no precision; the end is open
         let ac = derived(a, c).await?.expect("a ⊂ c 推得出");
         assert_eq!(
             ac.0,
@@ -649,7 +649,7 @@ async fn a_derivation_reads_no_further_than_its_premises() -> anyhow::Result<()>
         assert_eq!(ac.1, None, "来自锚点的一端没有精度");
         assert_eq!(ac.2, None);
 
-        // a ⊂ d：起点同上；终点是 c ⊂ d 的锚点（说出结束的那份文档），也没有精度
+        // a ⊂ d: the start as above; the end is the c ⊂ d anchor (the document that says it ended), also no precision
         let ad = derived(a, d).await?.expect("a ⊂ d 推得出");
         assert_eq!(ad.0, Some(t("2024-02-20T00:00:00Z")));
         assert_eq!(ad.1, None);
@@ -660,7 +660,7 @@ async fn a_derivation_reads_no_further_than_its_premises() -> anyhow::Result<()>
         );
         assert_eq!(ad.3, None, "'unknown' 不是粒度，锚点顶上来的一端没有精度");
 
-        // b ⊂ d：起点是 b ⊂ c 的锚点、终点是 c ⊂ d 的锚点——两端都没有精度
+        // b ⊂ d: the start is b ⊂ c's anchor, the end is c ⊂ d's anchor: both ends lack precision
         let bd = derived(b, d).await?.expect("b ⊂ d 推得出");
         assert_eq!(
             (bd.0, bd.2),
@@ -671,8 +671,8 @@ async fn a_derivation_reads_no_further_than_its_premises() -> anyhow::Result<()>
         );
         assert_eq!((bd.1, bd.3), (None, None));
 
-        // 图上按读出来的区间亮灭：2023 年 a ⊂ c 还不存在；2024 年中在；2026 年 a ⊂ d 已灭
-        // 从 b 看两跳：a ⊂ b 与 c ⊂ d 把 a、d 都收进来，派生边才都在「这些节点之间」
+        // On the graph, lit and dark by the read-out interval: in 2023 a ⊂ c does not yet exist; in mid-2024 it does; in 2026 a ⊂ d has gone out
+        // From b two hops out: a ⊂ b and c ⊂ d pull a and d in, so the derived edges are all "between these nodes"
         let at = |when: &str| {
             let pool = pool.clone();
             let when = when.to_string();
@@ -715,8 +715,8 @@ async fn a_derivation_reads_no_further_than_its_premises() -> anyhow::Result<()>
     run
 }
 
-/// #393：没起点的裸行也关得上——起点留着第一份证据的锚点，终点锚在说出结束的那份文档。
-/// 从前去重把这句结束并进裸行，「它结束了」丢掉，那行继续读成「至今仍是」。
+/// #393: a bare row with no start can still be closed: the start keeps the anchor of the first evidence, the end is anchored to the document that says it ended.
+/// Previously dedup merged this ended-sentence into the bare row, so "it ended" was lost and the row kept reading "still is".
 #[tokio::test]
 async fn a_bare_row_closes_with_an_anchor_at_each_end() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -726,7 +726,7 @@ async fn a_bare_row_closes_with_an_anchor_at_each_end() -> anyhow::Result<()> {
     let f = seed(&pool).await?;
 
     let run = async {
-        // 2024-02-20 的便签：担任 Staff Engineer，没写从哪天起
+        // A 2024-02-20 note: serving as Staff Engineer, no start date written
         let (bare, _) = fact(
             &pool,
             &f,
@@ -736,7 +736,7 @@ async fn a_bare_row_closes_with_an_anchor_at_each_end() -> anyhow::Result<()> {
             Validity::default().attested(Some(t("2024-02-20T00:00:00Z"))),
         )
         .await?;
-        // 2025-10-15 的角色说明：不再担任，日期未记录——同一断言，也没起点
+        // The 2025-10-15 role note: no longer serving, date not recorded: the same assertion, also no start
         let (closed, created) = fact(
             &pool,
             &f,
@@ -771,7 +771,7 @@ async fn a_bare_row_closes_with_an_anchor_at_each_end() -> anyhow::Result<()> {
             "终点的锚点是说出结束的那份文档"
         );
 
-        // 读出来：[第一份证据, 说结束的文档)
+        // Read out: [first evidence, the document that says it ended)
         assert!(!edges_at(&pool, &f, Some("2023-12-01T00:00:00Z"))
             .await?
             .contains(&closed));

@@ -1,12 +1,12 @@
-//! 凭据静态加密：库里是密文，店里拿到的是明文。
+//! Credentials sealed at rest: the database holds ciphertext, the store hands back plaintext.
 //!
-//! 四处凭据——`llm_settings` 的两把 key、`data_sources.conn_string`、来源配置里的
-//! 凭据键、api 来源的推送密钥——各守两件事：**写进去是封印的**（裸 SQL 读出来带
-//! `enc:v1:` 前缀），**读出来是开封的**（store 函数返回原文）。外加两件：
-//! 升级前落库的明文行照常读得出来，补封（`sealing::seal_*`，启动时 `backfill` 扫全部）之后它也封上了；
-//! 只传 None 的 upsert 保留旧值、不把它变回明文。
+//! Four places hold credentials (the two keys of `llm_settings`, `data_sources.conn_string`, the credential keys in source config,
+//! and the push secret of an api source), each guarding two things: **what is written is sealed** (raw SQL reads it back with an
+//! `enc:v1:` prefix), and **what is read is unsealed** (store functions return the original text). Plus two more:
+//! plaintext rows written before the upgrade still read fine, and after backfill sealing (`sealing::seal_*`, the `backfill` at startup scans everything) they are sealed too;
+//! an upsert that passes only None keeps the old value and does not turn it back into plaintext.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` it skips rather than fails. It sets up and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_core::secrets;
@@ -63,14 +63,14 @@ async fn a_secret_is_sealed_at_rest() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
         return Ok(());
     };
-    // 这个测试二进制自己装一把钥匙；服务里由 main 装
+    // This test binary installs its own key; in the server, main installs it
     secrets::init(secrets::generate_key());
     let pool = PgPool::connect(&url).await?;
     let f = seed(&pool).await?;
     let mut ds: Option<Uuid> = None;
 
     let run = async {
-        // 1. LLM key：写进去是密文，读出来是原文；只传 None 保留旧值
+        // 1. LLM key: written as ciphertext, read back as original; passing only None keeps the old value
         let s = settings::upsert(
             &pool,
             f.ws,
@@ -115,7 +115,7 @@ async fn a_secret_is_sealed_at_rest() -> anyhow::Result<()> {
             "None keeps the old key"
         );
 
-        // 2. 连接串（名字全局唯一，带上随机后缀别和残留撞上）
+        // 2. Connection string (names are globally unique, so add a random suffix to avoid colliding with leftovers)
         let ds_name = format!("warehouse-{}", Uuid::now_v7().simple());
         let id = datasources::create(
             &pool,
@@ -148,7 +148,7 @@ async fn a_secret_is_sealed_at_rest() -> anyhow::Result<()> {
             "the summary opens first"
         );
 
-        // 3. 来源配置里的凭据键 + 推送密钥
+        // 3. Credential keys in source config + push secret
         let src = sources::create(
             &pool,
             f.kb,
@@ -173,7 +173,7 @@ async fn a_secret_is_sealed_at_rest() -> anyhow::Result<()> {
             sources::get(&pool, src.id).await?.config["auth_header"],
             "Bearer t0k"
         );
-        // 只改几个键的那条路（Google Drive 的连接）照样封印，别的键原样留着
+        // The path that changes only a few keys (the Google Drive connection) is still sealed, and other keys stay as they were
         let patched = sources::patch_config(
             &pool,
             src.id,
@@ -213,7 +213,7 @@ async fn a_secret_is_sealed_at_rest() -> anyhow::Result<()> {
             Some("utp_push_1")
         );
 
-        // 4. 旧行：明文照常读，补封之后是密文、读出来还是原文
+        // 4. Old rows: plaintext still reads; after backfill it is ciphertext, and reading gives the original back
         sqlx::query(
             "UPDATE llm_settings SET chat_api_key = 'legacy-plain' WHERE workspace_id = $1",
         )
@@ -232,8 +232,8 @@ async fn a_secret_is_sealed_at_rest() -> anyhow::Result<()> {
                 .as_deref(),
             Some("legacy-plain")
         );
-        // **只补自己的行**：全局 backfill 会拿这把一次性钥匙把共用测试库里别人的
-        // 凭据也封上——那些行从此谁也打不开
+        // **Only backfill its own rows**: a global backfill would use this one-shot key to seal other tests' credentials in the shared test database too,
+        // and those rows would then be unopenable by anyone from then on
         let n = sealing::seal_llm_settings(&pool, Some(f.ws)).await?
             + sealing::seal_sources(&pool, Some(src.id)).await?;
         assert_eq!(n, 2, "both legacy rows were sealed");

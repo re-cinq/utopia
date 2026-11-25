@@ -1,36 +1,36 @@
-//! 执行闸门（0027，#357）：一次自动合并能不能不经人就落地，看它**撤得回什么**，
-//! 不只看把握。
+//! Execution gate (0027, #357): whether an automatic merge can land without a person depends on **what it can be reverted from**,
+//! not only on confidence.
 //!
-//! 合并在图里撤得回：`revert_merge` 把事实搬回去，0019 之后连合并前的图都读得出。
-//! 撤不回的是它活着那几天离开图的东西——推理据它推出的派生、据它开出的违规与告警、
-//! 进了导出的三元组、带引用给出去的答案。撤销还原的是图，不是图被读进去的那个世界。
+//! A merge in the graph can be reverted: `revert_merge` moves the facts back, and since 0019 even the pre-merge graph can be read.
+//! What cannot be reverted is what left the graph during the days it was live: derivations inferred from it, violations and alerts it raised,
+//! triples it sent out in exports, and answers it gave with citations. Reverting restores the graph, not the world the graph was read into.
 //!
-//! **这一次合并会不会立刻把什么送出图外**。会，就留给人，把握再高也不动手。
-//! 来源已声明名字是身份标识时，也要由人决定合并（0071），不能让模型推翻来源的声明。
-//! 只管合并：分开撤起来不费什么，下一次合并就是撤销。
+//! **Whether this merge would immediately send anything out of the graph**. If so, it is left to a person, however confident the decision.
+//! When a source declares that a name is an identity, a merge is also decided by a person (0071); the model may not overturn the source's declaration.
+//! Only merges are handled: undoing them separately costs little, and the next merge is itself the undo.
 //!
-//! `hold` 是纯函数，`impact_of` 只取数；`hold_for_merge` 先看身份来源，再看影响。
-//! 攒批裁决器与治理 agent 走同一个闸门；
-//! 路线图上那道「执行闸门」（检查 agent 的调用）以后也接这一个，不长第二个。
+//! `hold` is a pure function, `impact_of` only fetches data; `hold_for_merge` checks the identity source first, then the impact.
+//! The batch arbiter and the governance agent go through the same gate;
+//! the "execution gate" on the roadmap (which checks the agent's calls) will also use this one, rather than a second one.
 
 use sqlx::PgPool;
 use utopia_core::AppResult;
 use uuid::Uuid;
 
-/// 一次合并会立刻牵动的东西
+/// What a merge immediately affects
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Impact {
-    /// 两边各持一条同一个 functional 谓词的事实、指向不同的实体，合了之后按时间也排不开：
-    /// `functional` 违规，一致性检查下一次跑就会开出来——那是离开图的第一站。
-    /// 记谓词标签；`inverse_functional` 对称地算
+    /// Two facts on each side hold the same functional predicate and point to different entities; after the merge they cannot be ordered by time either:
+    /// a `functional` violation, which the consistency check will raise on its next run — that is the first stop outside the graph.
+    /// Records the predicate label; `inverse_functional` is computed symmetrically
     pub contradictions: Vec<String>,
-    /// 任一边参与的、还成立的派生事实数：合并改了前提，这些派生会被重写
+    /// Number of still-valid derived facts involving either side: the merge changes the premise, so these derivations get rewritten
     pub derived: i64,
-    /// 任一边在对话里被认过的回答数：这个实体是人在问的，错合并就进下一个答案
+    /// Number of answers on either side that were recognized in a conversation: this entity is one people ask about, so a wrong merge carries into the next answer
     pub answered: i64,
 }
 
-/// 留给人的理由。`review_reason` 写卡片的 code，`explain` 写决策台账的句子。
+/// Reason left for a person. `review_reason` writes the card's code, `explain` writes the sentence for the decision ledger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hold {
     Identity,
@@ -58,7 +58,7 @@ impl Hold {
         }
     }
 
-    /// 写给 `agent_decisions.reason` 的一句：人在 Agent 队列里看到 agent 为什么没动手
+    /// One sentence written to `agent_decisions.reason`: why the agent did not act, as seen by a person in the Agent queue
     pub fn explain(&self) -> String {
         match self {
             Hold::Identity => "a source treats one side's names as identifiers".into(),
@@ -72,7 +72,7 @@ impl Hold {
 }
 
 impl Impact {
-    /// 给第二层的工具看的一段（0028）：合并会牵动什么，一行一件；什么都不牵动也说出来
+    /// Text shown to the second-tier tool (0028): what the merge would affect, one item per line; if nothing is affected, say so too
     pub fn describe(&self) -> String {
         let mut lines = Vec::new();
         for p in &self.contradictions {
@@ -103,8 +103,8 @@ impl Impact {
     }
 }
 
-/// 这一次合并该不该留给人。矛盾最先说——它会立刻开出违规；其次派生，其次答案。
-/// 什么都不牵动就是 None：把握够就照旧自动
+/// Whether this merge should be left to a person. Contradictions come first — they would raise violations immediately; then derivations, then answers.
+/// Nothing affected means None: if confidence is high enough, proceed automatically as before
 pub fn hold(impact: &Impact) -> Option<Hold> {
     if let Some(p) = impact.contradictions.first() {
         return Some(Hold::Contradiction(p.clone()));
@@ -118,8 +118,8 @@ pub fn hold(impact: &Impact) -> Option<Hold> {
     None
 }
 
-/// 身份来源的名字证据属于实体，不只属于它现在显示的本名；混有散文证据也不撤销声明。
-/// 每次要自动合并时重读来源的开关，包括缓存判决和同簇里已合过一侧的后继判决。
+/// Name evidence from an identity source belongs to the entity, not only to the name it currently displays; mixed-in prose evidence does not revoke the declaration either.
+/// Re-reads the source's switch every time an automatic merge is about to happen, including cached verdicts and the successor verdict for a side already merged in the same cluster.
 pub async fn hold_for_merge(
     pool: &PgPool,
     kb_id: Uuid,
@@ -150,14 +150,14 @@ pub async fn hold_for_merge(
     Ok(hold(&impact_of(pool, kb_id, a, b).await?))
 }
 
-/// 取一对实体合并会牵动什么。三条查询，只在裁决器有把握要合的时候才跑。
+/// Computes what merging a pair of entities would affect. Three queries, run only when the arbiter is confident enough to merge.
 ///
-/// 写路径的守卫看的是「当前那一行」（`invalidated_at IS NULL`），与 `resolve_mention`
-/// 数度数一个写法；不走记录轴谓词——修正永远发生在现在（0019）
+/// The write path's guard looks at the "current row" (`invalidated_at IS NULL`), and `resolve_mention`
+/// counts a spelling as one; it does not use record-axis predicates — corrections always happen in the present (0019)
 pub async fn impact_of(pool: &PgPool, kb_id: Uuid, a: Uuid, b: Uuid) -> AppResult<Impact> {
-    // 与一致性检查同一个口径：只看实体宾语的边，**按时间看**——两边各有一个不同的值，
-    // 合了之后若能排成先后接替（房东先 HPBB1、后 BBHQ1），一致性检查不会报，这里也
-    // 不拦。从前这里不看时间，一份换过房东的租约有两个名字就永远合不起来
+    // Same basis as the consistency check: only edges to entity objects, **judged by time** — when the two sides each hold a different value,
+    // if after merging they can be ordered as successors (landlord first HPBB1, then BBHQ1), the consistency check does not report and this does not block either
+    // Previously time was not considered here, so a lease whose landlord changed, with two names, could never be merged
     let contradictions = crate::temporal::merge_would_overlap(pool, kb_id, a, b).await?;
 
     let derived: i64 = sqlx::query_scalar(
@@ -171,7 +171,7 @@ pub async fn impact_of(pool: &PgPool, kb_id: Uuid, a: Uuid, b: Uuid) -> AppResul
     .fetch_one(pool)
     .await?;
 
-    // `resolved` 是每一轮回答认下的实体（id、名字、类型）；被认过就是被问过
+    // `resolved` is the entities recognized in each turn's answer (id, name, type); being recognized means having been asked about
     let answered: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM conversation_messages m
          JOIN conversations c ON c.id = m.conversation_id
@@ -192,9 +192,9 @@ pub async fn impact_of(pool: &PgPool, kb_id: Uuid, a: Uuid, b: Uuid) -> AppResul
     })
 }
 
-/// 撤一条事实会牵动什么（0044 决定 7 的勘误 agent 走这同一道闸门）：以它为前提、还成立的
-/// 派生；把它的主语认下过的回答（回答记的是它认下的东西，不是引的事实——主语被问过，
-/// 关于它的一条事实就可能进过答案；与合并同一个口径）。矛盾一栏空着：撤掉一条不会开出违规
+/// What retracting a fact would affect (the erratum agent under 0044 decision 7 goes through this same gate): derivations that rest on it and still hold;
+/// answers in which its subject was recognized (an answer records what was recognized, not the fact cited — the subject was asked about,
+/// so a fact about it may have entered the answer; same basis as merging). The contradiction column is left empty: retracting one does not raise violations
 pub async fn impact_of_fact(pool: &PgPool, kb_id: Uuid, fact_id: Uuid) -> AppResult<Impact> {
     let derived: i64 = sqlx::query_scalar(
         "SELECT count(DISTINCT d.id) FROM fact_derivations fd
@@ -223,15 +223,15 @@ pub async fn impact_of_fact(pool: &PgPool, kb_id: Uuid, fact_id: Uuid) -> AppRes
     })
 }
 
-/// 写一条事实会牵动什么：谓词只许一个值而主语已经有另一个东西——一致性检查下一次跑就
-/// 开出 `functional` 违规。与 0027 §5 同一个口径：只看实体宾语的边，不看时间，不看字面值
+/// What writing a fact would affect: the predicate allows only one value and the subject already has another — the next consistency check run
+/// raises a `functional` violation. Same basis as 0027 §5: only edges to entity objects, not time, not literal values
 pub async fn impact_of_write(
     pool: &PgPool,
     kb_id: Uuid,
     subject_id: Uuid,
     predicate_id: Uuid,
     object_id: Option<Uuid>,
-    // 这次写是要取代的那一行：改一条事实时旧行还活着，它不算撞
+    // The write is replacing this row: while the old row is still live when a fact is changed, it does not count as a collision
     replacing: Option<Uuid>,
 ) -> AppResult<Impact> {
     let Some(object) = object_id else {

@@ -1,16 +1,16 @@
-//! 环按整条路径定键（#641），打在真库上。
+//! Cycles keyed by their whole path (#641), hit against a real database.
 //!
-//! 环的 left 是最小那条事实、right 是转到它起头之后的最后一条。两个环共用这两条、
-//! 中间走的不同时，从前在 `(kb_id, kind, left_fact, right_fact)` 上撞成一行：后算出来的
-//! 覆盖先算出来的 path，另一个环在 Review 里消失，而留下哪一个取决于遍历顺序。钉四样：
+//! A cycle's left is its smallest fact and right is the last fact after rotating it to start. Two cycles sharing these two, but
+//! differing in the middle, used to collide into one row on `(kb_id, kind, left_fact, right_fact)`: the one computed later
+//! overwrote the path of the one computed earlier, so one cycle vanished from Review, and which one survived depended on traversal order. Four things are pinned:
 //!
-//! 1. **两个环两行**，重跑不插不清、行的 id 不变
-//! 2. **裁决各管各的**：认可其中一个，另一个放宽公理后重开——被认可的那一行 path
-//!    仍是它自己的环，没有被另一个环的路径盖掉
-//! 3. **撤掉只在一个环上的边**，只影响那一个
-//! 4. **别的种类照旧按首尾两条**：反对称那一对重跑仍是同一行
+//! 1. **Two cycles, two rows**: re-running neither inserts nor clears, and the row ids do not change
+//! 2. **Rulings are separate**: accept one, and after relaxing the axiom the other reopens: the accepted row's path
+//!    is still its own cycle, not overwritten by the other cycle's path
+//! 3. **Retracting an edge that sits on only one cycle** affects only that one
+//! 4. **Other kinds still key on the first and last edge**: re-running the antisymmetric pair is still the same row
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Without `UTOPIA_DATABASE_URL` it skips rather than fails. It sets up and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_store::reasoning;
@@ -101,7 +101,7 @@ async fn entity(pool: &PgPool, f: &Fixture, name: &str) -> anyhow::Result<Uuid> 
     Ok(id)
 }
 
-/// 一条从此刻起一直成立的事实：大家同时成立，这里只问形状
+/// A fact that holds from now on: everyone holds at once, here only the shape is asked
 async fn fact(pool: &PgPool, f: &Fixture, s: Uuid, p: Uuid, o: Uuid) -> anyhow::Result<Uuid> {
     let id = Uuid::now_v7();
     sqlx::query(
@@ -118,7 +118,7 @@ async fn fact(pool: &PgPool, f: &Fixture, s: Uuid, p: Uuid, o: Uuid) -> anyhow::
     Ok(id)
 }
 
-/// 环行：(id, path, status, resolution)，按 path 排
+/// Cycle rows: (id, path, status, resolution), ordered by path
 async fn cycle_rows(
     pool: &PgPool,
     f: &Fixture,
@@ -148,7 +148,7 @@ async fn two_cycles_sharing_their_ends_are_two_rows() -> anyhow::Result<()> {
             entity(&pool, &f, "D").await?,
             entity(&pool, &f, "X").await?,
         ];
-        // 按 id 先后插：A→B 最小，X→A 收尾最后一条。两个环的首尾都是这两条
+        // Inserted in order of id: A→B is the smallest, X→A closing is the last one. Both cycles' ends are these two edges
         let ab = fact(&pool, &f, a, f.part_of, b).await?;
         let bc = fact(&pool, &f, b, f.part_of, c).await?;
         let bd = fact(&pool, &f, b, f.part_of, d).await?;
@@ -157,7 +157,7 @@ async fn two_cycles_sharing_their_ends_are_two_rows() -> anyhow::Result<()> {
         let xa = fact(&pool, &f, x, f.part_of, a).await?;
         let (via_c, via_d) = (vec![ab, bc, cx, xa], vec![ab, bd, dx, xa]);
 
-        // ---- 一、两个环两行；重跑稳定
+        // ---- 1. Two cycles, two rows; stable on re-run
         let first = reasoning::run(&pool, f.kb).await?;
         assert_eq!(first.found, 2);
         assert_eq!(first.inserted, 2, "两个环各插一行，不是一行被另一行覆盖");
@@ -176,7 +176,7 @@ async fn two_cycles_sharing_their_ends_are_two_rows() -> anyhow::Result<()> {
         }
         let (id_c, id_d) = (rows[0].0, rows[1].0);
 
-        // ---- 二、裁决各管各的
+        // ---- 2. Rulings are separate
         reasoning::decide(&pool, f.kb, id_c, "accepted", f.user).await?;
         reasoning::decide(&pool, f.kb, id_d, "axiom_relaxed", f.user).await?;
         let r = reasoning::run(&pool, f.kb).await?;
@@ -195,7 +195,7 @@ async fn two_cycles_sharing_their_ends_are_two_rows() -> anyhow::Result<()> {
         );
         assert_eq!((rows[1].0, rows[1].2.as_str()), (id_d, "open"));
 
-        // ---- 三、撤掉只在经 D 那个环上的 B→D
+        // ---- 3. Retract B→D, which sits only on the cycle through D
         reasoning::retract_from_violation(&pool, f.kb, id_d, Some(bd), f.user).await?;
         let r = reasoning::run(&pool, f.kb).await?;
         assert_eq!(
@@ -207,7 +207,7 @@ async fn two_cycles_sharing_their_ends_are_two_rows() -> anyhow::Result<()> {
         assert_eq!(rows[0].3.as_deref(), Some("accepted"));
         assert_eq!(rows[1].3.as_deref(), Some("fact_retracted"));
 
-        // ---- 四、别的种类照旧按首尾两条
+        // ---- 4. Other kinds still key on the first and last edge
         let boss = fact(&pool, &f, c, f.reports_to, d).await?;
         let back = fact(&pool, &f, d, f.reports_to, c).await?;
         reasoning::run(&pool, f.kb).await?;

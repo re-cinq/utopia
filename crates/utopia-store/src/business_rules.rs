@@ -1,18 +1,18 @@
-//! 业务规则的存取（0021 / #277）。求值在 `utopia-reason::rules`，接进物化在
-//! `reasoning::materialize`；这里只管「人写下来的那几条规则怎么进库、怎么取回」。
+//! Storage and retrieval of business rules (0021 / #277). Evaluation lives in `utopia-reason::rules`, and hooking it into materialization is in
+//! `reasoning::materialize`; this module only handles how the rules people write down get into the KB and come back out.
 //!
-//! **判据是人写的。** 这个模块没有任何一处由模型生成规则的入口——与 0002 对
-//! 公理的态度同一条线。
+//! **The criterion is that people write them.** This module has no entry point where a model generates rules — the same line it takes on
+//! axioms in 0002.
 
 use serde_json::json;
 use sqlx::PgPool;
 use utopia_core::{AppError, AppResult};
 use uuid::Uuid;
 
-/// 内建 `is_a` 谓词：派生归类的结论落在它上面（0021 决策 2）。
+/// The built-in `is_a` predicate: derived classification conclusions land on it (0021 decision 2).
 ///
-/// **按需建，不在建库时铺。** 一个从不写规则的库不该多出一个它看不懂的谓词
-/// ——与 #231 给 `metric` / `dimension` 做的选择一致。
+/// **Created on demand, not laid down when the KB is created.** A KB that never writes a rule should not gain a predicate it does not understand
+/// — consistent with the choice #231 made for `metric` / `dimension`.
 pub async fn ensure_is_a(pool: &PgPool, kb_id: Uuid) -> AppResult<Uuid> {
     if let Some((id,)) =
         sqlx::query_as::<_, (Uuid,)>("SELECT id FROM relation_types WHERE kb_id = $1 AND key = $2")
@@ -35,7 +35,7 @@ pub async fn ensure_is_a(pool: &PgPool, kb_id: Uuid) -> AppResult<Uuid> {
     .bind("A class a rule concluded for this entity. Derived, and it never replaces the asserted type.")
     .execute(pool)
     .await?;
-    // ON CONFLICT 命中说明并发建过了，取回那一条
+    // An ON CONFLICT hit means a concurrent creation already happened; fetch that one
     let (id,): (Uuid,) =
         sqlx::query_as("SELECT id FROM relation_types WHERE kb_id = $1 AND key = $2")
             .bind(kb_id)
@@ -50,7 +50,7 @@ pub const IS_A: &str = "is_a";
 #[derive(sqlx::FromRow)]
 struct RuleRow {
     id: Uuid,
-    /// 当前定义是第几版（0060）。迁移给每条老规则补了第 1 版，所以总有
+    /// Which version the current definition is (0060). The migration backfilled version 1 for every existing rule, so there is always
     version: Option<i32>,
     name: String,
     description: String,
@@ -70,7 +70,7 @@ struct RuleRow {
     capped: i32,
 }
 
-/// 条件查询回来的一行：规则、组号、属性谓词及其标签、比较方式、操作数
+/// One row returned by the condition query: the rule, group number, attribute predicate and its label, comparison method, operand
 type ConditionRow = (
     Uuid,
     i32,
@@ -81,11 +81,11 @@ type ConditionRow = (
     String,
 );
 
-/// 一条条件，界面与 API 共用的形状。
+/// A condition, the shape shared by the UI and the API.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConditionInput {
-    /// 组号：同组「与」，组间「或」（0029）。**缺省 0**——不带组的调用方
-    /// 送来的就是一组合取，与从前一模一样
+    /// Group number: AND within a group, OR between groups (0029). **Default 0** — a caller that does not send groups
+    /// sends a single conjunction, exactly as before
     #[serde(default)]
     pub group: i32,
     pub predicate_id: Uuid,
@@ -113,8 +113,8 @@ fn validate_name(name: &str) -> AppResult<&str> {
     Ok(name)
 }
 
-/// 建一条规则。**校验在这里做完**：条件的 op 与操作数形状、谓词必须是属性、
-/// 结论的两种形状各自完整——库里的 CHECK 是最后一道，报错信息却是给人看的。
+/// Creates a rule. **Validation is done here**: the condition's op and operand shape, the predicate must be an attribute,
+/// and each of the two conclusion shapes must be complete — the CHECK in the database is the last line, but its error message is for people.
 #[allow(clippy::too_many_arguments)]
 pub async fn create(
     pool: &PgPool,
@@ -126,14 +126,14 @@ pub async fn create(
     conclude_type_id: Option<Uuid>,
     conclude_predicate_id: Option<Uuid>,
     conclude_value: Option<serde_json::Value>,
-    // 算出来的结论那棵树（0032）
+    // The computed conclusion tree (0032)
     conclude_expr: Option<serde_json::Value>,
     join_predicate_id: Option<Uuid>,
     conditions: &[ConditionInput],
 ) -> AppResult<Uuid> {
     let name = validate_name(name)?;
     if conditions.is_empty() {
-        // 空合取恒真，会把整个类归进去——挡在入口比在求值器里默默不推更早
+        // An empty conjunction is always true and would sweep the whole class in — blocking it at the entrance is earlier than silently deriving nothing in the evaluator
         return Err(AppError::invalid(
             "no_conditions",
             "A rule needs at least one condition; without one it would conclude for every entity of the class.",
@@ -200,21 +200,21 @@ pub async fn create(
     Ok(id)
 }
 
-/// 改一条规则：条件整组替换。
+/// Edit a rule: replace the whole condition group.
 ///
-/// **不做逐条的增删改**——条件是一个合取整体，替换比对着 seq 打补丁好读，
-/// 也没有「改到一半」的中间状态。
-/// 结论的一次改写。**两种形状各自完整地给**，不做「只改类、别的不动」——
-/// 结论的三格是互相定义的，部分更新会留下 typing 却带着值这种半截状态。
+/// **No per-condition add/update/delete** — the conditions are one conjunction as a whole; replacing reads better than patching against seq,
+/// and there is no half-edited intermediate state.
+/// One rewrite of the conclusion. **Both shapes are given in full**, not "only change the class, leave the rest" —
+/// the three cells of the conclusion define each other, and a partial update would leave a half state with a typing but a value.
 pub struct ConclusionInput {
     /// typing | attribute | computed
     pub kind: String,
     pub type_id: Option<Uuid>,
     pub predicate_id: Option<Uuid>,
     pub value: Option<serde_json::Value>,
-    /// 算出来的结论那棵树（0032）。`computed` 时必给，别的两支必空
+    /// The computed conclusion tree (0032). Required when `computed`; the other two branches must be empty
     pub expr: Option<serde_json::Value>,
-    /// X --join--> Y 的那条边，只在 relation 结论时非空
+    /// The X --join--> Y edge; non-empty only for a relation conclusion
     pub join_predicate_id: Option<Uuid>,
 }
 
@@ -264,9 +264,9 @@ pub async fn update(
     }
     let mut tx = pool.begin().await?;
     let res = sqlx::query(
-        // 结论给了就整组换（三格一起），没给就一格不动——COALESCE 在这里
-        // 不够用：把 typing 改成 attribute 要把 conclude_type_id 置回 NULL，
-        // 而 COALESCE 恰恰做不到「显式清空」
+        // If the conclusion is given, the whole group is replaced (all three cells together); if not, no cell changes — COALESCE is not enough here:
+        // changing typing to attribute requires setting conclude_type_id back to NULL,
+        // and COALESCE is exactly what cannot do an explicit clear
         "UPDATE attribute_rules
             SET name = COALESCE($3, name),
                 description = COALESCE($4, description),
@@ -304,7 +304,7 @@ pub async fn update(
         insert_conditions(&mut tx, rule_id, cs).await?;
     }
     if conditions.is_some() || conclusion.is_some() {
-        // 在持有规则行锁的事务内校验最终条件，保留条件和并发更新都不能绕过。
+        // Validate the final conditions inside the transaction that holds the rule's row lock; neither kept conditions nor concurrent updates may bypass it.
         let reads_y_without_join: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM attribute_rules r
@@ -324,17 +324,17 @@ pub async fn update(
             ));
         }
     }
-    // 定义变了才开新版本；改名、改描述、开关不算（0060）
+    // Open a new version only when the definition changed; renames, description edits, and toggles do not count (0060)
     record_version(&mut tx, kb_id, rule_id).await?;
     tx.commit().await?;
     Ok(())
 }
 
-/// 定义的快照（0060）：规则说了什么——主类、结论那几格、连接谓词、条件。名字、
-/// 描述和开关不在其中，它们是标签和开关，改了不等于规则换了说法。
+/// Snapshot of the definition (0060): what the rule says — the subject class, the conclusion cells, the connecting predicate, the conditions. Name,
+/// description and toggle are not in it: they are labels and switches; changing them does not mean the rule says something different.
 ///
-/// **与迁移 0076 里回填第 1 版的表达式一字不差**：版本变没变是拿这份 JSON 比出来的，
-/// 两处形状不一样就会把没改的规则也开成新版本
+/// **Must be word-for-word identical to the expression that backfills version 1 in migration 0076**: whether a version changed is determined by comparing this JSON;
+/// if the two shapes differ, unchanged rules would also be opened as new versions
 const DEFINITION_SQL: &str = "jsonb_build_object(
            'subject_type_id', r.subject_type_id,
            'conclusion', r.conclusion,
@@ -349,9 +349,9 @@ const DEFINITION_SQL: &str = "jsonb_build_object(
                    ORDER BY c.group_seq, c.seq)
                FROM attribute_rule_conditions c WHERE c.rule_id = r.id), '[]'::jsonb))";
 
-/// 定义变了就开新版本：关掉当前的，序号加一。没变什么都不做。回当前版本的 id。
+/// If the definition changed, open a new version: close the current one and increment the sequence number. If nothing changed, do nothing. Returns the current version's id.
 ///
-/// 在写规则的同一个事务里跑：定义和它的版本要么一起落，要么一起不落
+/// Runs inside the same transaction that writes the rule: the definition and its version either both land or both do not
 async fn record_version(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     kb_id: Uuid,
@@ -396,7 +396,7 @@ async fn record_version(
     Ok(id)
 }
 
-/// 一版：id、序号、定义、记录时间起止、此刻凭它成立的结论条数
+/// One version: id, sequence number, definition, recording start and end times, and the count of conclusions that hold on it right now
 type VersionRow = (
     Uuid,
     i32,
@@ -406,9 +406,9 @@ type VersionRow = (
     i64,
 );
 
-/// 一条规则的定义史，新的在前（0060）。每一版带它的记录时间起止、此刻凭它成立的
-/// 结论条数，和定义里提到的类与谓词的标签——历史里的 id 可能已经改名甚至删掉，
-/// 标签按现在能查到的给，查不到的界面显示 id
+/// A rule's definition history, newest first (0060). Each version carries its recording start and end times and the count of conclusions
+/// holding on it right now, plus the labels of the classes and predicates the definition mentions — an id in the history may have been renamed or even deleted,
+/// so labels are resolved as of now; where one cannot be resolved, the UI shows the id
 pub async fn versions(
     pool: &PgPool,
     kb_id: Uuid,
@@ -427,7 +427,7 @@ pub async fn versions(
     .fetch_all(pool)
     .await?;
     if rows.is_empty() {
-        // 规则不存在，或不在这个库：两者对调用方都是 404
+        // The rule does not exist, or is not in this KB: both are a 404 to the caller
         let known: Option<Uuid> =
             sqlx::query_scalar("SELECT id FROM attribute_rules WHERE id = $2 AND kb_id = $1")
                 .bind(kb_id)
@@ -488,8 +488,8 @@ pub async fn versions(
         .collect())
 }
 
-/// 删一条规则。它推出来的派生行随 `ON DELETE CASCADE` 一起走——**规则没了，
-/// 凭它得出的结论就没有依据了**，留着无从解释。
+/// Delete a rule. The derived rows it inferred go with it via `ON DELETE CASCADE` — **once the rule is gone,
+/// the conclusions derived from it have no basis, and keeping them would leave them unexplainable**.
 pub async fn delete(pool: &PgPool, kb_id: Uuid, rule_id: Uuid) -> AppResult<()> {
     let res = sqlx::query("DELETE FROM attribute_rules WHERE id = $2 AND kb_id = $1")
         .bind(kb_id)
@@ -502,7 +502,7 @@ pub async fn delete(pool: &PgPool, kb_id: Uuid, rule_id: Uuid) -> AppResult<()> 
     Ok(())
 }
 
-/// 列出规则，连同条件与「现在推出了多少条」。
+/// List rules, together with their conditions and how many conclusions each one currently infers.
 pub async fn list(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<serde_json::Value>> {
     let rules: Vec<RuleRow> = sqlx::query_as(
         "SELECT r.id, r.name, r.description, r.subject_type_id,
@@ -654,7 +654,7 @@ fn expression_text(
     ))
 }
 
-/// 命中查询回来的一行：派生 id、实体 id 与名字、结论、区间两端、前提的可读形态
+/// One row returned by the hit query: derived id, entity id and name, conclusion, both ends of the interval, and the readable form of the premises
 type MatchRow = (
     Uuid,
     Uuid,
@@ -670,10 +670,10 @@ type MatchRow = (
     Vec<String>,
 );
 
-/// 一条规则此刻标了哪些实体。
+/// Which entities this rule currently tags.
 ///
-/// **规则卡片上那个数字要点得动**：二十个实体还能一个个点开看，两百个就只能
-/// 靠这份列表。前提也带回来——「凭哪几条读数」与结论本身同样是答案的一半。
+/// **The number on the rule card has to be clickable**: twenty entities can still be opened one by one, but with two hundred you can only
+/// rely on this list. The premises are returned too — "which readings it was derived from" is half the answer, just like the conclusion itself.
 pub async fn matches(
     pool: &PgPool,
     kb_id: Uuid,
@@ -691,8 +691,8 @@ pub async fn matches(
     .await?;
 
     let rows: Vec<MatchRow> = sqlx::query_as(
-        // 结论读出来要是人看的那个名字。库里存的是类的 key/IRI（归类）或
-        // 字面值（属性），两者都不该原样端上来
+        // The name read out as the conclusion must be the human-facing one. What is stored in the KB is the class key/IRI (classification) or
+        // the literal value (attribute); neither should be sent out as-is
         "SELECT d.id, e.id, e.canonical_name,
                 o.id, o.canonical_name,
                 COALESCE(ct.label,
@@ -771,7 +771,7 @@ async fn insert_conditions(
     rule_id: Uuid,
     conditions: &[ConditionInput],
 ) -> AppResult<()> {
-    // seq 在**组内**编号：(rule, group, seq) 才是一条条件的位置，两组各自从 0 起
+    // seq is numbered **within a group**: (rule, group, seq) is the position of a condition; each of the two groups starts from 0
     let mut next: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
     for c in conditions {
         let seq = next.entry(c.group).or_insert(0);
@@ -795,8 +795,8 @@ async fn insert_conditions(
     Ok(())
 }
 
-/// 结论的校验。**建与改共用这一份**——分成两处写，改一次就能绕过建时的判据，
-/// 而库里的 CHECK 只会回一个约束名，读的人无从知道错在哪一格。
+/// Validation of the conclusion. **Create and edit share this one copy** — written in two places, changing it once could bypass the create-time check,
+/// while the CHECK in the database only returns a constraint name, leaving the reader no way to know which cell is wrong.
 async fn validate_conclusion(pool: &PgPool, kb_id: Uuid, c: &ConclusionInput) -> AppResult<()> {
     match c.kind.as_str() {
         "typing" => {
@@ -812,7 +812,7 @@ async fn validate_conclusion(pool: &PgPool, kb_id: Uuid, c: &ConclusionInput) ->
                 "That class is not in this base.",
             )
             .await?;
-            // 归类结论落在内建 is_a 上，第一次写这种规则时把它建出来
+            // A classification conclusion lands on the built-in is_a; create it the first time this kind of rule is written
             ensure_is_a(pool, kb_id).await?;
             Ok(())
         }
@@ -831,7 +831,7 @@ async fn validate_conclusion(pool: &PgPool, kb_id: Uuid, c: &ConclusionInput) ->
             }
             attribute_predicate(pool, kb_id, p).await
         }
-        // 算出来的属性（0032）：谓词照旧要在，值换成一棵算式树
+        // Computed attribute (0032): the predicate still has to exist, and the value becomes an expression tree
         "computed" => {
             let p = c.predicate_id.ok_or_else(|| {
                 AppError::invalid(
@@ -845,9 +845,9 @@ async fn validate_conclusion(pool: &PgPool, kb_id: Uuid, c: &ConclusionInput) ->
                     "A computed rule needs the expression it computes.",
                 ));
             };
-            // **这几条挡在入口而不是留给求值器。** 读不懂的树在求值时只会
-            // 「这条规则什么都不推」，而写它的人看不见任何理由（`not_in`
-            // 那次就是这么丢的，见 #494）
+            // **These are blocked at the entrance, not left to the evaluator.** A tree it cannot read only results in
+            // "this rule derives nothing" at evaluation time, and the person who wrote it sees no reason at all (that is how `not_in`
+            // was lost in that case, see #494)
             let reads = validate_expr(expr)?;
             if reads.is_empty() {
                 return Err(AppError::invalid(
@@ -879,11 +879,11 @@ async fn validate_conclusion(pool: &PgPool, kb_id: Uuid, c: &ConclusionInput) ->
     }
 }
 
-/// 一棵算式树的校验，返回它读到的谓词。
+/// Validation of an expression tree, returning the predicate it reads.
 ///
-/// **形状不对就说清哪里不对。** 库里的 CHECK 只管「computed 得有一棵树」，
-/// 树自己长得对不对得在这里判——否则一棵写坏的树要等到下一次物化才表现为
-/// 「这条规则不推东西」，而那时候没有任何地方说得出为什么。
+/// **When the shape is wrong, say exactly where.** The CHECK in the database only enforces "computed needs a tree";
+/// whether the tree itself is well-formed has to be judged here — otherwise a badly written tree only shows up at the next materialization as
+/// "this rule derives nothing", and at that point nothing anywhere can say why.
 fn validate_expr(raw: &serde_json::Value) -> AppResult<Vec<Uuid>> {
     let expr = utopia_reason::rules::Expr::from_json(raw)
         .map_err(|e| AppError::invalid(e.code(), e.message()))?;
@@ -892,7 +892,7 @@ fn validate_expr(raw: &serde_json::Value) -> AppResult<Vec<Uuid>> {
     Ok(reads)
 }
 
-/// 条件的校验。**报错要说人话**：库里的 CHECK 只会回一个约束名。
+/// Validation of conditions. **Errors must be in plain words**: the CHECK in the database only returns a constraint name.
 async fn validate_conditions(
     pool: &PgPool,
     kb_id: Uuid,
@@ -970,8 +970,8 @@ async fn validate_conditions(
     Ok(())
 }
 
-/// 条件与属性结论只能落在 kind='attribute' 的谓词上——规则读的是这个实体
-/// 自己的字面值，关系（实体到实体）不参与（0021 决策 3）。
+/// Conditions and attribute conclusions may only land on predicates with kind='attribute' — the rule reads this entity's
+/// own literal values; relations (entity to entity) do not take part (0021 decision 3).
 async fn attribute_predicate(pool: &PgPool, kb_id: Uuid, id: Uuid) -> AppResult<()> {
     let row: Option<(String,)> =
         sqlx::query_as("SELECT kind FROM relation_types WHERE id = $2 AND kb_id = $1")

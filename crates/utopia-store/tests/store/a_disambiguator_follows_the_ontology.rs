@@ -1,11 +1,11 @@
-//! 同名后缀从本体来，不从一张手写词表来（#299）。
+//! Same-name suffixes come from the ontology, not from a hand-written word list (#299).
 //!
-//! 为什么非要连库：选谁当后缀整个是一条 `ORDER BY`。四个排序键写反一个，
-//! `cargo check` 不会说话，症状是图上两个同名者并排显示成一模一样的
-//! "John Smith · Person"——看起来像没做消歧，其实是词表没对上。
+//! Why it must hit a database: choosing who gets the suffix is one whole `ORDER BY`. Reverse one of the four sort keys and
+//! `cargo check` says nothing; the symptom is two same-named people on the graph displayed as identical
+//! "John Smith · Person": it looks like no disambiguation was done, when in fact the word list does not match.
 //!
-//! 词汇表用 schema.org 那一套（`works_for`），**正是原先那张词表里没有的**：
-//! 这个测试在旧实现上必须是红的，否则它什么也没证明。
+//! The vocabulary uses schema.org's set (`works_for`), **which is exactly what the old word list lacked**:
+//! this test must be red on the old implementation, or it proves nothing.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -13,20 +13,20 @@ use uuid::Uuid;
 struct Fixture {
     org: Uuid,
     kb: Uuid,
-    /// 两个 John Smith：一个在 Acme Robotics，一个在 St Mary's Hospital
+    /// Two John Smiths: one at Acme Robotics, one at St Mary's Hospital
     smith_a: Uuid,
     smith_b: Uuid,
-    /// 两个 Wang Ning：都在 Acme，谁也分不开谁
+    /// Two Wang Nings: both at Acme, nothing tells them apart
     wang_a: Uuid,
     wang_b: Uuid,
-    /// 只有一个 Lin Zhao：组内唯一，不该有后缀
+    /// Only one Lin Zhao: unique within the group, so it should not get a suffix
     lin: Uuid,
 }
 
 async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     let (org, ws, kb) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     let (person, organization, document) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-    // works_for 声明了值域；mentioned_in 是抽取顺手长出来的，没人说过它指向什么
+    // works_for declares a range; mentioned_in grew out of extraction in passing, and no one said what it points to
     let (works_for, mentioned_in) = (Uuid::now_v7(), Uuid::now_v7());
     let (acme, st_marys) = (Uuid::now_v7(), Uuid::now_v7());
     let (report_a, report_b) = (Uuid::now_v7(), Uuid::now_v7());
@@ -62,7 +62,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
             .execute(pool)
             .await?;
     }
-    // works_for：状态关系，声明了值域 → 身份性的
+    // works_for: a state relation, range declared → identity-bearing
     sqlx::query(
         "INSERT INTO relation_types (id, kb_id, key, label, temporal)
          VALUES ($1, $2, 'works_for', 'works for', 'state')",
@@ -78,8 +78,8 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     .bind(organization)
     .execute(pool)
     .await?;
-    // mentioned_in：没声明值域，且是事件——**置信度和时间都更占优**，
-    // 旧排序（confidence DESC, recorded_at DESC）会选它
+    // mentioned_in: no range declared, and it is an event: **confidence and time both favour it**,
+    // the old ordering (confidence DESC, recorded_at DESC) would pick it
     sqlx::query(
         "INSERT INTO relation_types (id, kb_id, key, label, temporal)
          VALUES ($1, $2, 'mentioned_in', 'mentioned in', 'event')",
@@ -126,14 +126,14 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
             .bind(confidence)
             .bind(rec.parse::<chrono::DateTime<chrono::Utc>>().unwrap())
         };
-    // 两个 John Smith 分得清：雇主不同
+    // The two John Smiths are told apart: different employers
     fact(smith_a, works_for, acme, 0.8, "2026-01-01T00:00:00Z")
         .execute(pool)
         .await?;
     fact(smith_b, works_for, st_marys, 0.8, "2026-01-01T00:00:00Z")
         .execute(pool)
         .await?;
-    // 同时各有一条更晚、更高置信的「被提到过」——旧排序会挑中它
+    // Each also has a later, higher-confidence "was mentioned" row: the old ordering would pick it
     fact(
         smith_a,
         mentioned_in,
@@ -152,7 +152,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     )
     .execute(pool)
     .await?;
-    // 两个 Wang Ning 都在 Acme：这条事实分不开他们
+    // Both Wang Nings are at Acme: this fact cannot tell them apart
     fact(wang_a, works_for, acme, 0.8, "2026-02-01T00:00:00Z")
         .execute(pool)
         .await?;
@@ -194,8 +194,8 @@ async fn a_suffix_comes_from_the_ontology_not_a_word_list() -> anyhow::Result<()
         utopia_store::resolution::refresh_disambiguators(&pool, f.kb, name).await?;
     }
 
-    // 1. schema.org 的词汇也认。旧实现的词表里没有 works_for，两个人双双退回
-    //    "Person"——分得清清楚楚的两个人，界面上却一模一样
+    // 1. schema.org's vocabulary also recognizes it. The old implementation's word list had no works_for, so both fell back
+    //    to "Person": two clearly distinct people looked identical on screen
     assert_eq!(
         suffix(&pool, f.smith_a).await?.as_deref(),
         Some("Acme Robotics")
@@ -205,15 +205,15 @@ async fn a_suffix_comes_from_the_ontology_not_a_word_list() -> anyhow::Result<()
         Some("St Mary's Hospital")
     );
 
-    // 2. 更晚、更高置信的 mentioned_in 没有胜出：它没声明过值域，又是事件。
-    //    「他被写进过哪份报告」不是他是谁
+    // 2. The later, higher-confidence mentioned_in did not win: it declares no range, and it is an event.
+    //    "Which report this person was written into" is not who they are
     assert_ne!(
         suffix(&pool, f.smith_a).await?.as_deref(),
         Some("2026 Field Report")
     );
 
-    // 3. 同一个雇主分不开两个 Wang Ning：那就都写雇主，而不是编一个假的区分。
-    //    共同的雇主仍是信息，只是它不承担区分的职责
+    // 3. Two Wang Nings cannot be told apart by the same employer: then both just show the employer, rather than inventing a fake distinction.
+    //    The shared employer is still information; it just does not carry the job of distinguishing
     assert_eq!(
         suffix(&pool, f.wang_a).await?.as_deref(),
         Some("Acme Robotics")
@@ -223,7 +223,7 @@ async fn a_suffix_comes_from_the_ontology_not_a_word_list() -> anyhow::Result<()
         Some("Acme Robotics")
     );
 
-    // 4. 组内唯一：没有要分开的对象，就不该挂后缀
+    // 4. Unique within the group: nothing needs to be told apart, so no suffix should be attached
     assert_eq!(suffix(&pool, f.lin).await?, None);
 
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")

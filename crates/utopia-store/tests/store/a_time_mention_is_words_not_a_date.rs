@@ -1,8 +1,8 @@
-//! 一条时间提及是字，不是日期（0044 第一刀，#729；0045）。
+//! A time mention is words, not a date (0044 slice 1, #729; 0045).
 //!
-//! 「去年冬天」落库的是这四个字和它在 `chunks.text` 里的**字符**偏移（不是字节——
-//! 中文一个字三个字节，按字节记偏移界面就指错地方）。把字读成日期是后面几刀的事：
-//! 这条陈述没有 `valid_from`，也没有 `valid_to`。
+//! "last winter" is stored as these four characters and their **character** offset in `chunks.text` (not bytes —
+//! a Chinese character is three bytes, so an offset recorded in bytes would point the UI to the wrong place). Reading the words as a date is for later slices:
+//! this statement has no `valid_from` and no `valid_to`.
 
 use sqlx::PgPool;
 use utopia_store::graph::{self, FactObject};
@@ -100,7 +100,7 @@ async fn a_time_mention_resolves_inside_the_chunk_and_sets_no_date() -> anyhow::
         .await?;
         graph::add_evidence(&pool, fact, f.chunk, Some(TEXT), Some("收购了")).await?;
 
-        // 服务端在块里搜出来的**字符**偏移
+        // The **character** offset found by the server's search within the chunk
         let words = "去年冬天";
         let byte_start = TEXT.find(words).unwrap();
         let char_start = TEXT[..byte_start].chars().count() as i32;
@@ -112,7 +112,7 @@ async fn a_time_mention_resolves_inside_the_chunk_and_sets_no_date() -> anyhow::
         let id =
             time_mentions::record(&pool, f.kb, fact, f.chunk, words, char_start, "when").await?;
 
-        // 字与偏移在块里对得上：按字符数到那里，取同样多的字，得到的就是记下的字
+        // The offset matches within the chunk: counting that many characters there, taking the same number of characters, gives back the recorded words
         let (stored_text, stored_start): (String, i32) =
             sqlx::query_as("SELECT text, char_start FROM time_mentions WHERE id = $1")
                 .bind(id)
@@ -129,7 +129,7 @@ async fn a_time_mention_resolves_inside_the_chunk_and_sets_no_date() -> anyhow::
             .collect();
         assert_eq!(at, words);
         assert_eq!(stored_text, words);
-        // Postgres 的 substr 也按字符数：界面用它高亮时指的是同一处
+        // Postgres's substr also counts characters: the UI highlights the same place when it uses it
         let by_sql: String = sqlx::query_scalar(
             "SELECT substr(c.text, m.char_start + 1, char_length(m.text))
              FROM time_mentions m JOIN chunks c ON c.id = m.chunk_id WHERE m.id = $1",
@@ -139,7 +139,7 @@ async fn a_time_mention_resolves_inside_the_chunk_and_sets_no_date() -> anyhow::
         .await?;
         assert_eq!(by_sql, words);
 
-        // 字不是日期：陈述在世界轴上没有位置
+        // Words are not a date: the statement has no position on the world axis
         #[derive(sqlx::FromRow)]
         struct Span {
             valid_from: Option<chrono::DateTime<chrono::Utc>>,
@@ -161,12 +161,12 @@ async fn a_time_mention_resolves_inside_the_chunk_and_sets_no_date() -> anyhow::
         assert_eq!(mentions[&fact].len(), 1);
         assert_eq!(mentions[&fact][0].chunk_id, f.chunk);
         assert_eq!(mentions[&fact][0].role, "when");
-        // 刚记下的字还没有读法：解释与解算都空着
+        // Just-recorded words have no reading yet: both interpretation and resolution are empty
         let m = &mentions[&fact][0];
         assert!(m.shape.is_none() && m.reference.is_none() && m.granularity.is_none());
         assert!(m.grade.is_none() && m.resolved_from.is_none() && m.resolved_to.is_none());
 
-        // 起与止各是一条提及：同一处字换一个槽是另一行，同一个槽再记一次是同一行
+        // Start and end are each one mention: the same spot in a different slot is another row, and the same slot recorded again is the same row
         let ended =
             time_mentions::record(&pool, f.kb, fact, f.chunk, words, char_start, "ended").await?;
         assert_ne!(ended, id);
@@ -182,7 +182,7 @@ async fn a_time_mention_resolves_inside_the_chunk_and_sets_no_date() -> anyhow::
                 .collect::<Vec<_>>(),
             ["ended", "when"]
         );
-        // 槽只有这两个
+        // Only these two slots exist
         assert!(
             time_mentions::record(&pool, f.kb, fact, f.chunk, words, char_start, "as_of")
                 .await

@@ -1,14 +1,14 @@
-//! 检索把文档记一笔，但只记打开了衰减的源的文档（RC-003），打在真库上。
+//! Retrieval records a hit on each document, but only for documents from a source with decay turned on (RC-003), tested against a real database.
 //!
-//! 要钉住的行为：
+//! Behavior to pin:
 //!
-//! - **关着的源一行不写**
-//! - **第一次检索**：计数 1，半衰期从源里的值加 2 天
-//! - **再次检索**：计数加一、半衰期再加 2 天，最近检索时间更新
-//! - **半衰期封顶 365**
-//! - **同一次里多个文档一起记**，不存在的 id 被忽略
+//! - **A source that is switched off records nothing**
+//! - **First retrieval**: count 1, and the half-life goes up by 2 days from the source's value
+//! - **Each further retrieval**: count plus one, half-life plus 2 days again, and the last-retrieved time is updated
+//! - **Half-life capped at 365**
+//! - **Several documents in one go are recorded together**, and ids that do not exist are ignored
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_store::decay::record_retrievals;

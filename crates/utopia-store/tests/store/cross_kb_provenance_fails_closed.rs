@@ -1,15 +1,15 @@
-//! 出处链不许跨库（0070）：新行被触发器挡下，存量坏行让导出整份拒绝。
+//! A provenance chain must not cross KBs (0070): new rows are blocked by the trigger, and stored bad rows make the export reject the whole thing.
 //!
-//! `fact_evidence`/`chunks` 的外键只认 id 不认库——原生写入路径碰巧全是同库
-//! 构造，但 schema 什么也不拦。两层防：
-//!   1. 触发器（0070）挡在一切写入路径下游，包括绕过 store 层的 SQL；
-//!   2. 导出侧体检 + 逐页校验——存量坏行与绕过触发器进来的行，宁可整份拒导，
-//!      也不能把别库对象的 id 铸进本库 IRI。
+//! The foreign keys on `fact_evidence`/`chunks` check only the id, not the KB — the native write paths happen to build only same-KB
+//! references, but the schema blocks nothing. Two layers of defense:
+//!   1. The trigger (0070) sits downstream of all write paths, including SQL that bypasses the store layer;
+//!   2. The export side runs a health check and per-page validation — stored bad rows and rows that got past the trigger are rejected as a whole export rather than
+//!      minting another KB's object id under this KB's IRI.
 //!
-//! 坏行在测试里靠 `SET LOCAL session_replication_role='replica'` 制造：只关
-//! 本事务的触发器，不碰 catalog——`DISABLE TRIGGER` 是全局的，并行测试会把
-//! 对方断言的拒绝窗口撞没。行指着的东西都真实存在，只是不在同一个库——
-//! 正是线上会遇到的形态（比如从 0070 之前的备份恢复进来的旧行）。
+//! Bad rows are produced in the test via `SET LOCAL session_replication_role='replica'`: it turns off triggers only
+//! for this transaction and does not touch the catalog — `DISABLE TRIGGER` is global, and parallel tests would
+//! collide with each other's rejection windows. The things a row points at all really exist, just not in the same KB —
+//! exactly the shape production would meet (e.g. old rows restored from a backup taken before 0070).
 
 use sqlx::{Acquire, PgPool};
 use uuid::Uuid;
@@ -26,7 +26,7 @@ struct TwoKbs {
     fact_b: Uuid,
 }
 
-/// 两个库、每库一份文档一段一实体一事实——跨库引用需要的合法零件
+/// Two KBs, one document, one chunk, one entity and one fact each — the legal parts needed for a cross-KB reference
 async fn seed(pool: &PgPool) -> anyhow::Result<TwoKbs> {
     let (org, ws, a, b) = (
         Uuid::now_v7(),
@@ -129,11 +129,11 @@ async fn new_cross_kb_writes_are_rejected() -> anyhow::Result<()> {
         return Ok(());
     };
     let pool = PgPool::connect(&url).await?;
-    // 触发器是 0070 带来的：测试库可能还没迁移，这里先保证约束在场
+    // The trigger came with 0070: the test database may not be migrated yet, so first make sure the constraint is in place
     utopia_store::db::migrate(&pool).await?;
     let f = seed(&pool).await?;
 
-    // 事实引用别库段落：原生路径碰巧不会这么写，但 schema 从前不拦——现在拦
+    // A fact referencing another KB's chunk: the native path happens not to write it this way, but the schema did not block it before — now it does
     let err = sqlx::query(
         "INSERT INTO fact_evidence (fact_id, chunk_id, quote, document_id, doc_version)
          VALUES ($1, $2, 'x', $3, 1)",
@@ -145,7 +145,7 @@ async fn new_cross_kb_writes_are_rejected() -> anyhow::Result<()> {
     .await;
     assert!(err.is_err(), "fact→foreign chunk 必须被拒");
 
-    // 只坏冗余文档指针那一头：段落同库、文档别库
+    // Only the chunk side is bad: the chunk is in the same KB, the document is in another
     let err = sqlx::query(
         "INSERT INTO fact_evidence (fact_id, chunk_id, quote, document_id, doc_version)
          VALUES ($1, $2, 'x', $3, 1)",
@@ -157,7 +157,7 @@ async fn new_cross_kb_writes_are_rejected() -> anyhow::Result<()> {
     .await;
     assert!(err.is_err(), "evidence.document→foreign 必须被拒");
 
-    // 段落挂在别库文档下
+    // Chunk hangs under another KB's document
     let err = sqlx::query(
         "INSERT INTO chunks (id, kb_id, document_id, seq, text)
          VALUES ($1, $2, $3, 0, 'x')",
@@ -169,11 +169,11 @@ async fn new_cross_kb_writes_are_rejected() -> anyhow::Result<()> {
     .await;
     assert!(err.is_err(), "chunk→foreign document 必须被拒");
 
-    // 权威写入路径同一条约束：add_evidence 走 store API 也一样被拒
+    // The same constraint on the authoritative write path: add_evidence through the store API is rejected too
     let err = utopia_store::graph::add_evidence(&pool, f.fact_a, f.chunk_b, Some("x"), None).await;
     assert!(err.is_err(), "add_evidence 的跨库配对必须被拒");
 
-    // 过户：把文档挪到别的库，等于把指着它的行一次全变坏行
+    // Transfer: moving a document to another KB is the same as making every row pointing at it bad at once
     let err = sqlx::query("UPDATE documents SET kb_id = $2 WHERE id = $1")
         .bind(f.doc_a)
         .bind(f.b)
@@ -187,7 +187,7 @@ async fn new_cross_kb_writes_are_rejected() -> anyhow::Result<()> {
         .await;
     assert!(err.is_err(), "facts.kb_id 过户必须被拒");
 
-    // 同库的正常写入不受影响（防误伤）
+    // Same-KB normal writes are unaffected (guards against false positives)
     sqlx::query(
         "INSERT INTO fact_evidence (fact_id, chunk_id, quote, document_id, doc_version)
          VALUES ($1, $2, 'ok', $3, 1)",
@@ -211,28 +211,28 @@ async fn malformed_existing_rows_fail_the_export_closed() -> anyhow::Result<()> 
     utopia_store::db::migrate(&pool).await?;
     let f = seed(&pool).await?;
 
-    // 存量坏行：触发器只拦落在它之后的写，这种行只能绕过它造——导出侧要接住。
-    // SET LOCAL 只在本事务内关触发器，提交即恢复，不会撞掉并行测试的断言窗口
+    // Stored bad rows: the trigger only blocks writes after it, so these rows can only be made by bypassing it — the export side must catch them.
+    // SET LOCAL turns off the trigger only inside this transaction and restores it at commit, so it does not hit parallel tests' assertion windows
     let mut conn = pool.acquire().await?;
     let mut tx = conn.begin().await?;
     sqlx::query("SET LOCAL session_replication_role = 'replica'")
         .execute(&mut *tx)
         .await?;
 
-    // 只坏段落那一头：fact_a → chunk_b（文档指针留 NULL，隔离变量）
+    // Only the chunk end is bad: fact_a → chunk_b (document pointer left NULL, isolating the variable)
     sqlx::query("INSERT INTO fact_evidence (fact_id, chunk_id) VALUES ($1, $2)")
         .bind(f.fact_a)
         .bind(f.chunk_b)
         .execute(&mut *tx)
         .await?;
-    // 只坏冗余文档指针：fact_b → chunk_b 本身同库，指针却指 a 的文档
+    // Only the redundant document pointer is bad: fact_b → chunk_b itself is in the same KB, but the pointer points at a's document
     sqlx::query("INSERT INTO fact_evidence (fact_id, chunk_id, document_id) VALUES ($1, $2, $3)")
         .bind(f.fact_b)
         .bind(f.chunk_b)
         .bind(f.doc_a)
         .execute(&mut *tx)
         .await?;
-    // 段落挂在别库文档下
+    // Chunk hangs under another KB's document
     let stray_chunk = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO chunks (id, kb_id, document_id, seq, text) VALUES ($1, $2, $3, 9, 'stray')",
@@ -245,7 +245,7 @@ async fn malformed_existing_rows_fail_the_export_closed() -> anyhow::Result<()> 
     tx.commit().await?;
     drop(conn);
 
-    // 体检：库 A 坏在 evidence.chunk，库 B 坏在 evidence.document 与 chunk.document
+    // Health check: KB A is bad at evidence.chunk, KB B is bad at evidence.document and chunk.document
     let err_a = utopia_store::export::provenance_integrity(&mut pool.begin().await?, f.a).await;
     let msg_a = format!("{err_a:?}");
     assert!(err_a.is_err(), "库 A 的体检必须拒导");
@@ -262,9 +262,9 @@ async fn malformed_existing_rows_fail_the_export_closed() -> anyhow::Result<()> 
         "库 B 该报 evidence.document: {msg_b}"
     );
 
-    // 逐页校验同样fail-closed：体检之后的 TOCTOU 坏行也不能漏出伪造 IRI。
-    // 坏段落指针会顺着 facts_page 的 quote_origins 出去，坏文档指针顺着
-    // documents[] 出去——两路都在事实页上拦
+    // Per-page validation is equally fail-closed: even a TOCTOU bad row after the health check must not leak out a forged IRI.
+    // A bad chunk pointer goes out through facts_page's quote_origins, a bad document pointer goes out through
+    // documents[] — both are blocked on the facts page
     assert!(
         utopia_store::export::facts_page(&mut pool.begin().await?, f.a, None)
             .await
@@ -278,7 +278,7 @@ async fn malformed_existing_rows_fail_the_export_closed() -> anyhow::Result<()> 
         "fact_b 的 evidence.document 别库：事实页要拦"
     );
 
-    // 清掉坏行，导出立刻恢复——拒的是坏行，不是库本身
+    // Clear the bad rows and export recovers at once — it is the bad rows being rejected, not the KB itself
     sqlx::query("DELETE FROM fact_evidence WHERE fact_id IN ($1, $2)")
         .bind(f.fact_a)
         .bind(f.fact_b)

@@ -1,20 +1,20 @@
-//! 一条事实的日期从哪来（#970）。图谱工具的每条事实行带 `[n]`，打开的是那条事实读出来的
-//! 原句（#968），可有两种日期原句里没有：
+//! Where a fact's dates come from (#970). Each fact row in the graph tool carries `[n]`, which opens the source sentence that fact was read from (#968).
+//! Two kinds of dates can appear that the source sentence does not contain:
 //!
-//! - 时间线推出来的终点：李四自 2024-07-05 领 Aurora，周七 2025-09-01 接手，`leads` 一个项目
-//!   同时只有一个，对账把李四那一段关在 2025-09-01——`end_derived`；
-//! - 人改过的区间：张三的起点被人从 2023-01-10 改成 2023-02-01——`time_corrected`，改的是
-//!   起点（`corrected_ends`，随修正行写下），之后这一行再被改写也仍然是；再改终点就是两端。
-//!   标记在行上，不靠修正路由事后写的那条审计：李四的起点被改时没有审计，照样有标记。
-//!   人交来的是整段区间：李四那个推出来的终点，人没改它的值也是钉住了，两端都算人的。
+//! - An end point derived from the timeline: Li Si has led Aurora since 2024-07-05, Zhou Qi took over on 2025-09-01, and `leads` allows only one lead per project,
+//!   so reconciliation closes Li Si's span at 2025-09-01 -- `end_derived`;
+//! - A span a person edited: Zhang San's start was changed by a person from 2023-01-10 to 2023-02-01 -- `time_corrected`, and the edit changed the
+//!   start (`corrected_ends`, written with the correction row). If the row is rewritten later it stays marked; editing the end too makes both ends person-set.
+//!   The mark lives on the row, not on the audit that the correction route writes after the fact: when Li Si's start was edited there was no audit, yet the mark is still there.
+//!   When a person hands over the whole span, Li Si's derived end is pinned even if the person kept its value unchanged, so both ends count as the person's.
 //!
-//! 人手关上的一段两个都不是；它仍是一条修正行（`corrected`，网页证据栏那句提示按它说）。
+//! A span a person closed by hand is neither of those -- it is still a correction row (`corrected`, which the wording in the web evidence panel follows).
 //!
-//! 第二步：推出来的终点找得到关上它的那一行（李四那段是周七那一行；functional 的雇主是后
-//! 一个雇主），人改的区间带着修正时写下的备注。记录轴回到接手之前，李四那段还开着，
-//! 没有谁关它。
+//! Step two: the derived end can find the row that closed it (Li Si's span is closed by Zhou Qi's row; for functional the employer is the next employer),
+//! and a span a person edited carries the note written at correction time. Rewinding the record axis to before the takeover, Li Si's span is still open,
+//! and nobody has closed it.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
@@ -27,7 +27,7 @@ fn t(s: &str) -> DateTime<Utc> {
     s.parse().expect("fixed timestamp")
 }
 
-/// 一个日精度的日子
+/// A day-precision date
 fn day(s: &str) -> DateTime<Utc> {
     t(&format!("{s}T00:00:00Z"))
 }
@@ -51,18 +51,18 @@ fn fact_of<'f>(facts: &'f [EntityFact], who: &str) -> &'f EntityFact {
         .unwrap_or_else(|| panic!("no fact of {who}"))
 }
 
-/// 那个人的那一行：(终点是推出来的, 区间是人改过的, 是修正行)
+/// That person's row: (end is derived, span was edited by a person, is a correction row)
 fn flags(facts: &[EntityFact], who: &str) -> (bool, bool, bool) {
     let f = fact_of(facts, who);
     (f.end_derived, f.time_corrected, f.corrected)
 }
 
-/// 那个人的那一行，人改过哪一端
+/// That person's row, and which end a person edited
 fn ends(facts: &[EntityFact], who: &str) -> Option<String> {
     fact_of(facts, who).corrected_ends.clone()
 }
 
-/// 那个人的那一行被谁关上：(关它的那一行, 接任的那一端)
+/// Who closed that person's row: (the row that closed it, and which end the successor took over)
 fn closer(facts: &[EntityFact], who: &str) -> (Option<Uuid>, Option<String>) {
     let f = fact_of(facts, who);
     (f.closed_by_id, f.closed_by.clone())
@@ -113,14 +113,14 @@ async fn a_fact_says_where_its_dates_came_from() -> anyhow::Result<()> {
                     .map(|(id, _)| id)
             }
         };
-        // 周七接手：一个项目同时只有一个 lead，对账把李四那一段关在 2025-09-01
+        // Zhou Qi takes over: a project has only one lead at a time, so reconciliation closes Li Si's span at 2025-09-01
         let li_row = fact(li, leads, since("2024-07-05")).await?;
         let zhou_row = fact(zhou, leads, since("2025-09-01")).await?;
         let before_close: DateTime<Utc> =
             sqlx::query_scalar("SELECT now()").fetch_one(&pool).await?;
         utopia_store::temporal::reconcile_moved_facts(&pool, kb, &[li_row, zhou_row]).await?;
 
-        // 王五换了雇主：一个人同时只有一个雇主（functional），对账把 Acme 那段关在换的那天
+        // Wang Wu changes employer: a person has only one employer at a time (functional), so reconciliation closes the Acme span on the day of the change
         let acme_row = graph::insert_fact(
             &pool,
             kb,
@@ -145,7 +145,7 @@ async fn a_fact_says_where_its_dates_came_from() -> anyhow::Result<()> {
         .0;
         utopia_store::temporal::reconcile_moved_facts(&pool, kb, &[acme_row, globex_row]).await?;
 
-        // 人改张三的起点，终点照旧；审计记在被改的那一行上（与 PATCH /facts/{id} 同一条路）
+        // A person edits Zhang San's start, the end stays put; the audit is recorded on the edited row (same path as PATCH /facts/{id})
         let zhang_row = fact(zhang, leads, between("2023-01-10", "2024-07-05")).await?;
         let corrected = utopia_store::temporal::correct_interval(
             &pool,
@@ -165,7 +165,7 @@ async fn a_fact_says_where_its_dates_came_from() -> anyhow::Result<()> {
         )
         .await?;
 
-        // 人手关上的一段：一条修正行，但终点是人给的，区间也没被改过
+        // A span closed by hand: one correction row, but the end was given by the person and the span was not edited
         let wang_row = graph::insert_fact(
             &pool,
             kb,
@@ -197,7 +197,7 @@ async fn a_fact_says_where_its_dates_came_from() -> anyhow::Result<()> {
             (false, false, true),
             "closed by hand: rewritten, but neither mark"
         );
-        // 第二步：谁关的它，人改时说了什么
+        // Step two: who closed it, and what the person said when editing it
         assert_eq!(
             closer(&facts, "Li Si"),
             (Some(zhou_row), Some("Zhou Qi".to_string())),
@@ -221,12 +221,12 @@ async fn a_fact_says_where_its_dates_came_from() -> anyhow::Result<()> {
             (Some(globex_row), Some("Globex".to_string())),
             "a functional property: the next employer took over"
         );
-        // 记录轴回到接手之前：李四那段还开着，没有谁关它
+        // Rewind the record axis to before the takeover: Li Si's span is still open and nobody has closed it
         let (_, then) = graph::entity_detail(&pool, kb, aurora, None, Some(before_close)).await?;
         assert!(!flags(&then, "Li Si").0, "not closed yet");
         assert_eq!(closer(&then, "Li Si"), (None, None));
 
-        // 改过的区间再被改写一次（这里是关上），标记随行带着，备注仍在链上找得到
+        // An edited span is rewritten once more (here, closed): the mark is carried on the row, and the note is still findable along the chain
         utopia_store::temporal::close_superseded(
             &pool,
             corrected,
@@ -243,9 +243,9 @@ async fn a_fact_says_where_its_dates_came_from() -> anyhow::Result<()> {
             "the note is found up the chain"
         );
 
-        // 人只改了李四的起点、终点照抄：交来的是整段区间，那个推出来的终点从此是人钉住的
-        // （时间线不再重画它），两端都算人的——行上不能说终点是原句的。这一次没有审计，
-        // 标记照样在行上
+        // A person edited only Li Si's start and copied the end: the whole span was given, so the derived end is pinned by the person from now on
+        // (the timeline no longer redraws it), and both ends count as the person's -- the row cannot claim the end comes from the source sentence. No audit this time,
+        // but the mark is still on the row
         let li_now = fact_of(&facts, "Li Si").id;
         utopia_store::temporal::correct_interval(
             &pool,
@@ -271,7 +271,7 @@ async fn a_fact_says_where_its_dates_came_from() -> anyhow::Result<()> {
             "no note written"
         );
 
-        // 张三再改一次，这回改终点：两端都是人改的了，备注取最近那一次
+        // Zhang San edits once more, this time the end: both ends are now person-edited; the note takes the most recent edit
         let zhang_now = fact_of(&facts, "Zhang San").id;
         utopia_store::temporal::correct_interval(
             &pool,
@@ -307,9 +307,9 @@ async fn a_fact_says_where_its_dates_came_from() -> anyhow::Result<()> {
     run
 }
 
-/// 关闭者的两种情形（#986 合并时的评审）：
-/// - 同一天开始的两个后任：时间线按 id 取最先的那一行关上前任，行上说的也是它；
-/// - 关闭者自己后来又被下一任关上，改写成了新的一行：说的是活着的那一版，名字不变
+/// Two kinds of closer (#986 review at merge time):
+/// - Two successors starting the same day: the timeline takes the earliest row by id to close the predecessor, and the row says so too;
+/// - The closer was itself later closed by a next successor and rewritten into a new row: it refers to the live version, and the name does not change
 #[tokio::test]
 async fn a_closer_is_the_row_the_timeline_closed_with() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -361,8 +361,8 @@ async fn a_closer_is_the_row_the_timeline_closed_with() -> anyhow::Result<()> {
             }
         };
 
-        // Aurora：周七与孙八同一天接手。一个项目同时只有一个 lead，李四那段关在那一天，
-        // 关它的是 id 在前的周七那一行
+        // Aurora: Zhou Qi and Sun Ba take over the same day. A project has only one lead at a time, so Li Si's span closes on that day,
+        // and the one that closes it is Zhou Qi's row, the earlier id
         let li_a = lead(li, aurora, "2024-07-05").await?;
         let zhou_a = lead(zhou, aurora, "2025-09-01").await?;
         let sun_a = lead(sun, aurora, "2025-09-01").await?;
@@ -377,8 +377,8 @@ async fn a_closer_is_the_row_the_timeline_closed_with() -> anyhow::Result<()> {
             "the first of the two by id, as the engine orders them"
         );
 
-        // Helios：周七接手之后又被钱七接手，周七那一行被关上、改写成新的一行。李四那段的
-        // 关闭者是周七活着的那一版
+        // Helios: Zhou Qi takes over, then Qian Qi takes over from him: Zhou Qi's row is closed and rewritten into a new row. Li Si's
+        // closer is Zhou Qi's live version
         let li_h = lead(li, helios, "2024-07-05").await?;
         let zhou_h = lead(zhou, helios, "2025-09-01").await?;
         utopia_store::temporal::reconcile_moved_facts(&pool, kb, &[li_h, zhou_h]).await?;

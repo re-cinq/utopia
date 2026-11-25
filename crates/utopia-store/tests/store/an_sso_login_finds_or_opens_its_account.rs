@@ -1,4 +1,4 @@
-//! 单点登录按核实过的 email 找账号，找不到就开一个——打在真库上。
+//! Single sign-on finds the account by a verified email, and opens one if none exists -- tested against a real database.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -36,7 +36,7 @@ async fn ambiguous_active_emails_leave_accounts_and_identities_unchanged() -> an
                     .bind(ISSUER).bind(format!("existing-{first}")).bind(first).execute(&pool).await?;
             }
             let before = snapshot().await?;
-            // 两种精确拼写都必须拒绝；已有绑定也不能让另一个候选变得可选。
+            // Both exact spellings must be rejected; an existing binding must not make another candidate selectable either.
             for address in [&email, &email.to_uppercase()] {
                 let result = utopia_store::accounts::account_for_sso(
                     &pool, ISSUER, &format!("new-{first}"), address, "Changed",
@@ -54,9 +54,9 @@ async fn ambiguous_active_emails_leave_accounts_and_identities_unchanged() -> an
     run
 }
 
-/// 一个比库里其它组织都早的组织，开户会落进它的默认工作区
-/// 用「最早的组织」的测试一个一个跑，组织的时间也比库里现有的都早一天：
-/// 并行时谁更早说不准，中断的旧测试留下的组织也会抢走「最早」
+/// An organization older than every other organization in the library: opening an account lands it in that organization's default workspace
+/// The tests that use "the earliest organization" run one at a time, and their organization's timestamp is one day older than anything already in the library:
+/// when run in parallel, who is earlier cannot be known, and an organization left behind by an interrupted old test could also take the "earliest" spot
 static EARLIEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn earliest_org(pool: &PgPool) -> anyhow::Result<(Uuid, Uuid)> {
@@ -179,7 +179,7 @@ async fn an_unknown_email_opens_a_viewer_account_without_a_password() -> anyhow:
     run
 }
 
-/// 停用的账号还占着这个 email：不开新号——否则停用对允许名单里的人形同虚设
+/// A deactivated account still holds the email: do not open a new one -- otherwise deactivation is meaningless for someone on the allowlist
 #[tokio::test]
 async fn an_email_held_by_a_deactivated_account_opens_no_account() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -225,7 +225,7 @@ async fn an_email_held_by_a_deactivated_account_opens_no_account() -> anyhow::Re
     run
 }
 
-/// subject 已绑在别人身上：开户与绑定同一个事务，撞车就什么都不留
+/// The subject is already bound to someone else: opening the account and the binding happen in one transaction, so on a collision nothing is left behind
 #[tokio::test]
 async fn a_subject_linked_to_another_account_leaves_no_new_account() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {

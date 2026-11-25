@@ -1,16 +1,16 @@
-//! 名字是关于实体的一条事实（0041 决定 1）。
+//! A name is a fact about an entity (0041 decision 1).
 //!
-//! 一个实体的每个名字——本名、简称、曾用名、另一种文字的写法——都是内建属性
-//! `known_as` 上的一条值事实：`object_value = {"value": 名字}`，`object_id` 为空。
-//! 它有出处（证据引文）、两个时钟、可以有有效期（更名），能被撤回，合并时跟着
-//! 其它事实一起搬、撤回合并时一起搬回去。**它是值，不是节点**：画布只画带
-//! `object_id` 的边。
+//! Each name of an entity — its primary name, short name, former name, and spelling in another script — is a value fact on the built-in attribute
+//! `known_as`: `object_value = {"value": name}`, with `object_id` empty.
+//! It has a source (evidence quote), two clocks, can have a validity period (renaming), can be retracted, and when merging it moves along
+//! with other facts, and moves back when the merge is retracted. **It is a value, not a node**: the canvas only draws edges that carry
+//! an `object_id`.
 //!
-//! 读的时候要分清两件事，这个模块给两种 SQL 片段：
-//! - 召回：`has_name_in` —— 这个实体有没有叫这些名字之一的（含曾用名：世界轴上
-//!   结束了的名字仍然认得出旧文档里的它，所以只看记录轴 `invalidated_at`）；
-//! - 列事实：`not_a_name` —— 实体面板、审阅卡、度数、规则这些地方，名字不算
-//!   一条「事实」，不能冒充证据，也不能把计数撑大。
+//! When reading, two things must be kept apart; this module provides two SQL fragments:
+//! - Recall: `has_name_in` — whether this entity has any of these names (including former names: on the world axis a name that has ended
+//!   is still recognized in old documents, so only the record axis `invalidated_at` is checked);
+//! - Listing facts: `not_a_name` — in the entity panel, review cards, degree counts, and rules, a name does not count
+//!   as a "fact": it cannot pass as evidence, and it cannot inflate the count.
 
 use crate::graph::{add_evidence, insert_value_fact, Validity};
 use crate::resolution::{fold_markdown_markers, normalize_name};
@@ -20,10 +20,10 @@ use utopia_core::models::NameView;
 use utopia_core::AppResult;
 use uuid::Uuid;
 
-/// 内建属性的 key。与 `is_a` 同一个做法：`builtin = TRUE`，建库时不铺，第一次要时建
+/// Key of the built-in attribute. Same approach as `is_a`: `builtin = TRUE`, not seeded at store creation, created the first time it is needed
 pub const KNOWN_AS: &str = "known_as";
 
-/// 取（没有就建）这个库的 `known_as` 属性。
+/// Gets (or creates) this store's `known_as` attribute.
 pub async fn ensure_known_as(pool: &PgPool, kb_id: Uuid) -> AppResult<Uuid> {
     if let Some((id,)) =
         sqlx::query_as::<_, (Uuid,)>("SELECT id FROM relation_types WHERE kb_id = $1 AND key = $2")
@@ -48,7 +48,7 @@ pub async fn ensure_known_as(pool: &PgPool, kb_id: Uuid) -> AppResult<Uuid> {
     )
     .execute(pool)
     .await?;
-    // ON CONFLICT 命中说明并发建过了，取回那一条
+    // An ON CONFLICT hit means it was created concurrently; fetch that row
     let (id,): (Uuid,) =
         sqlx::query_as("SELECT id FROM relation_types WHERE kb_id = $1 AND key = $2")
             .bind(kb_id)
@@ -58,17 +58,17 @@ pub async fn ensure_known_as(pool: &PgPool, kb_id: Uuid) -> AppResult<Uuid> {
     Ok(id)
 }
 
-/// 一个名字的出处：哪一块、引文。没有出处的名字（人在界面上写的、迁移补的）传 None
+/// Source of a name: which chunk, and the quote. Names with no source (written by a person in the UI, or backfilled by migration) pass None
 #[derive(Debug, Clone, Copy)]
 pub struct NameSource<'a> {
     pub chunk_id: Uuid,
     pub quote: &'a str,
 }
 
-/// 记下「这段文字管这个实体叫这个名字」。返回名字事实的 id；名字是空的返回 None。
+/// Records that "this passage calls this entity by this name". Returns the id of the name fact; returns None if the name is empty.
 ///
-/// 同一个实体同一个名字只有一行（`insert_value_fact` 按主语、谓词、值去重），
-/// 再被提到只是多一条证据、证据日期往早挪。
+/// The same entity with the same name has only one row (`insert_value_fact` deduplicates by subject, predicate, and value),
+/// mentioning it again only adds one more piece of evidence and moves the evidence date earlier.
 pub async fn record(
     pool: &PgPool,
     kb_id: Uuid,
@@ -102,25 +102,25 @@ pub async fn record(
     Ok(Some(fact_id))
 }
 
-/// 召回用：实体 `{entity}` 有一条现行的名字事实，库 id 在第 `${kb}` 个参数，
-/// 小写值在第 `${names}` 个参数（text[]）里。
+/// For recall: entity `{entity}` has a current name fact, with the store id in parameter `${kb}`,
+/// and the lowercase value in parameter `${names}` (text[]).
 ///
-/// 只看记录轴：世界轴上结束了的名字（曾用名）照样召回——更名之前的文档还在用它。
+/// Record axis only: names that ended on the world axis (former names) are still recalled — documents from before a rename still use it.
 ///
-/// **写成不相关子查询，按库过滤，并带上索引的谓词**（`facts_value_text_idx` 是
-/// `(kb_id, lower(value)) WHERE invalidated_at IS NULL AND object_value IS NOT NULL`）。
-/// 相关子查询 `nf.subject_id = e.id` 不带库，规划器用不上这个索引，每次召回都要
-/// 扫全表的 facts——所有库的
+/// **Written as an uncorrelated subquery, filtered by store, and carrying the index's predicate** (`facts_value_text_idx` is
+/// `(kb_id, lower(value)) WHERE invalidated_at IS NULL AND object_value IS NOT NULL`).
+/// A correlated subquery `nf.subject_id = e.id` does not carry the store, so the planner cannot use this index, and every recall would have to
+/// scan the facts of every store in the whole table
 pub fn has_name_in(entity: &str, kb: usize, names: usize) -> String {
     format!("{entity}.id IN ({})", named_ids(kb, names))
 }
 
-/// [`has_name_in`] 的子查询本身：有这些名字之一的实体的 id
+/// The subquery for [`has_name_in`] itself: the ids of entities that have one of these names
 ///
-/// **值的查找放在 `OFFSET 0` 围栏里先跑。** 规划器看不到部分索引
-/// `facts_value_text_idx` 的表达式统计，任何值都按库行数的 0.5% 估，反而选了
-/// `known_as` 谓词索引，把这个库所有名字事实读一遍再按值过滤（生产上 71,665 个缓冲区，
-/// 先按值查是 23 个）。围栏让规划器不能把值过滤并进后面的谓词连接。
+/// **The value lookup runs first inside an `OFFSET 0` fence.** The planner cannot see the expression statistics of the partial index
+/// `facts_value_text_idx`, so it estimates any value at 0.5% of the store's rows, and instead picks the
+/// `known_as` predicate index, reading every name fact in this store and then filtering by value (in production, 71,665 buffers, versus 23 for looking up by value first).
+/// The fence stops the planner from merging the value filter into the following predicate join.
 pub fn named_ids(kb: usize, names: usize) -> String {
     format!(
         "SELECT v.subject_id FROM (
@@ -134,12 +134,12 @@ pub fn named_ids(kb: usize, names: usize) -> String {
     )
 }
 
-/// 召回用：实体 `{entity}` 的规范名（没被合并的）或现行名字事实是第 `${names}` 个参数里的
-/// 小写名字之一。
+/// For recall: the canonical name of entity `{entity}` (if not merged) or a current name fact is one of the lowercase
+/// names in parameter `${names}`.
 ///
-/// 规范名与别名写成一个 id 集合，各走各的索引（`entities_kb_name_idx`、
-/// `facts_value_text_idx`）。写成 `lower(canonical_name) = ANY(..) OR {has_name_in}` 的话
-/// 一边是子查询，规划器只能把库里的实体扫一遍。
+/// Canonical names and aliases are written as one id set, each going through its own index (`entities_kb_name_idx`,
+/// `facts_value_text_idx`). Written as `lower(canonical_name) = ANY(..) OR {has_name_in}`, one side is a subquery, so the planner can only scan
+/// every entity in the store.
 pub fn has_name_or_alias_in(entity: &str, kb: usize, names: usize) -> String {
     format!(
         "{entity}.id IN (SELECT x.id FROM entities x
@@ -150,7 +150,7 @@ pub fn has_name_or_alias_in(entity: &str, kb: usize, names: usize) -> String {
     )
 }
 
-/// 查找用：实体 `{entity}` 有一条现行的名字事实 ILIKE 第 `${param}` 个参数。
+/// For lookup: entity `{entity}` has a current name fact ILIKE parameter `${param}`.
 pub fn has_name_like(entity: &str, param: usize) -> String {
     format!(
         "EXISTS (SELECT 1 FROM facts nf
@@ -162,7 +162,7 @@ pub fn has_name_like(entity: &str, param: usize) -> String {
     )
 }
 
-/// 列事实用：事实 `{fact}` 不是名字事实。
+/// For listing facts: fact `{fact}` is not a name fact.
 pub fn not_a_name(fact: &str) -> String {
     format!(
         "NOT EXISTS (SELECT 1 FROM relation_types nr
@@ -170,7 +170,7 @@ pub fn not_a_name(fact: &str) -> String {
     )
 }
 
-/// 一个实体的名字栏：本名在前，其余按首次记下的先后。`as_of` 回放到当时库里记着的名字。
+/// An entity's name column: the primary name first, the rest in the order first recorded. `as_of` replays to the names the store had recorded at that time.
 pub async fn for_entity(
     pool: &PgPool,
     kb_id: Uuid,
@@ -201,18 +201,18 @@ pub async fn for_entity(
     .await?)
 }
 
-/// 一个刚从原文里读到的别名，别的实体已经在用：把这一对送去裁决（0041 决定 5 的第一步）。
+/// An alias just read from the source text that another entity already uses: send this pair to adjudication (step one of 0041 decision 5).
 ///
-/// **只排队，不合并。** 两个实体叫同一个名字，可能是一个东西被拆开了（「海探1」先到、
-/// 写着「简称海探1」的那篇后到），也可能就是两个东西。判断归裁决器与治理闸门。
-/// 不排的话，后到的那篇把名字记在新实体上，两个实体都叫「海探1」，却没有任何东西
-/// 把它们配成一对——入库顺序又一次决定了结果。
+/// **Only queues, does not merge.** Two entities with the same name may be one thing split in two (a "Haitan 1" that came first,
+/// and a document that came later saying "short name Haitan 1"), or they may really be two things. The judgment belongs to the arbiter and the governance gate.
+/// Without queuing, the document that arrives later records the name on a new entity, so two entities are both called "Haitan 1" with nothing
+/// pairing them — the insertion order decides the outcome once again.
 ///
-/// 类型一方为空或两边相同才配：声明了不同类型的同名，是重名那条路的事。
+/// Paired only when a type side is empty or both sides match: same names with declared different types are the business of the same-name path.
 ///
-/// **已经判过「不是一个」的对不再排。** 同一个简称每出现在一块里就会走到这里一次；
-/// 人（或裁决器）分开过的一对要是每次都重新进队列，分开这个决定就等于没有记住。
-/// 返回排进去的对数
+/// **Pairs already judged "not the same" are not queued again.** Each time the same short name appears in a chunk, it reaches here once;
+/// if a pair a person (or the arbiter) kept apart were re-queued every time, the split decision would be as good as not remembered.
+/// Returns the number of pairs queued
 pub async fn pair_shared_name(
     pool: &PgPool,
     kb_id: Uuid,
@@ -258,19 +258,19 @@ pub async fn pair_shared_name(
     Ok(others.len())
 }
 
-/// 两个名字都带数字、而数字不一样：召回不把它们配成一对。
+/// Both names carry numbers, and the numbers differ: recall does not pair them.
 ///
-/// 名字相近、只差一个数的东西几乎从来不是同一个：`migration 394` 与 `migration 395`、
-/// `#440` 与 `#441`、`海洋探测器1号` 与 `2号`。名字向量分不开它们——只差一个数的两个
-/// 名字在任何嵌入模型下余弦都在 0.9 以上——包含关系也分不开（`migration 39` 是
-/// `migration 395` 的子串）。一个工程文档库上，这类候选裁决了 1,663 对、只合并 3 对，
-/// 却占了队列的四成（#1104）。
+/// Names that are close and differ only by one number are almost never the same thing: `migration 394` and `migration 395`,
+/// `#440` and `#441`, `海洋探测器1号` and `2号`. Name vectors cannot tell them apart — two names differing by one number
+/// have cosine above 0.9 under any embedding model — and containment cannot either (`migration 39` is a substring of
+/// `migration 395`). On a documentation store of engineering documents, this kind of candidate judged 1,663 pairs, merged only 3, and took
+/// forty percent of the queue (#1104).
 ///
-/// **只在两边都有数字时才拦。** 一边没有数字的照常提议：`沧海` 与 `沧海分布式推理平台 2.0`
-/// 是简称对全称，正是包含关系要接住的那一种。
+/// **Blocks only when both sides have numbers.** A candidate with no number on one side is still proposed as usual: `沧海` and `沧海分布式推理平台 2.0`
+/// are a short name paired with its full name, exactly the containment case that should be caught.
 ///
-/// 比的是排过序的数字串，前导零不算（`0106` 就是 `106`），全角数字当半角。中文数字
-/// 不认：`一号` 的「一」和 `一个` 的「一」这里分不出来，宁可照常提议。
+/// Compares the sorted digit strings; leading zeros do not count (`0106` is `106`), and full-width digits count as half-width. Chinese numerals
+/// are not recognized: the "一" in `一号` and the "一" in `一个` cannot be told apart here, so it is better to propose as usual.
 pub fn numbers_differ(a: &str, b: &str) -> bool {
     let (a, b) = (digit_runs(a), digit_runs(b));
     !a.is_empty() && !b.is_empty() && a != b
@@ -306,14 +306,14 @@ fn digit_runs(name: &str) -> Vec<String> {
     runs
 }
 
-/// 拉丁词字符。范围逐一列出：UTF-8 locale 下 Postgres 的 `\w` 与 `[[:alnum:]]` 把汉字也算作字母。
+/// Latin word characters. Ranges are listed one by one: under a UTF-8 locale, Postgres's `\w` and `[[:alnum:]]` count Han characters as letters too.
 const LATIN_WORD: &[(char, char)] = &[
     ('0', '9'),
     ('A', 'Z'),
     ('_', '_'),
     ('a', 'z'),
     ('\u{C0}', '\u{D6}'),
-    // 组合附加符，用于分解写法的 `é`
+    // Combining mark, used for the decomposed spelling of `é`
     ('\u{300}', '\u{36F}'),
     ('\u{D8}', '\u{F6}'),
     ('\u{F8}', '\u{24F}'),
@@ -324,14 +324,14 @@ fn is_latin_word(c: char) -> bool {
     LATIN_WORD.iter().any(|&(lo, hi)| (lo..=hi).contains(&c))
 }
 
-/// `shorter` 在 `longer` 里，且它以拉丁字符开头或结尾时，那一侧不挨着拉丁词字符（#1104）。
-/// `token` 不在 `service_token` 里，`holmes` 在 `sherlock holmes` 里；汉字边不设规则。
+/// When `shorter` is inside `longer`, and it starts or ends with a Latin character, that side must not touch a Latin word character (#1104).
+/// `token` is not inside `service_token`, `holmes` is inside `sherlock holmes`; no rule for Han character edges.
 pub fn contains_at_word_edges(longer: &str, shorter: &str) -> bool {
-    // 与 SQL 一致：空名字在任何名字里
+    // Consistent with SQL: an empty name is inside any name
     let (Some(first), Some(last)) = (shorter.chars().next(), shorter.chars().last()) else {
         return true;
     };
-    // 不用 `match_indices`：一处命中可能与前一处没过边界检查的命中重叠
+    // Not `match_indices`: one hit may overlap a previous hit that failed the boundary check
     longer.char_indices().any(|(at, _)| {
         if !longer[at..].starts_with(shorter) {
             return false;
@@ -357,7 +357,7 @@ fn word_class() -> String {
         .collect()
 }
 
-/// 同一条规则，写成给 `name` 用的 Postgres 正则。
+/// The same rule, written as a Postgres regex for `name`.
 pub fn word_edges_pattern(name: &str) -> String {
     let (Some(first), Some(last)) = (name.chars().next(), name.chars().last()) else {
         return String::new();
@@ -379,7 +379,7 @@ pub fn word_edges_pattern(name: &str) -> String {
     p
 }
 
-/// 同一条规则，写成 SQL，给某一列里的名字。`expr` 必须是可信的 SQL。
+/// The same rule, written as SQL, for names in a column. `expr` must be trusted SQL.
 pub(crate) fn word_edges_sql(expr: &str) -> String {
     let class = word_class();
     format!(
@@ -389,7 +389,7 @@ pub(crate) fn word_edges_sql(expr: &str) -> String {
     )
 }
 
-/// 本名以外的现行名字，按首次记下的先后。给裁决器与审阅卡的「又名」那一行
+/// Current names other than the primary name, in the order first recorded. For the "also known as" line given to the arbiter and review cards.
 pub async fn other_names(pool: &PgPool, entity_id: Uuid) -> AppResult<Vec<String>> {
     Ok(other_names_many(pool, &[entity_id])
         .await?
@@ -434,7 +434,7 @@ pub(crate) async fn other_names_many(
 mod tests {
     use super::{contains_at_word_edges, numbers_differ, word_edges_pattern, word_edges_sql};
 
-    /// (longer, shorter, 是否包含)，Rust 与两种 SQL 写法共用
+    /// (longer, shorter, whether it contains), shared by Rust and both SQL forms
     const WORD_EDGES: &[(&str, &str, bool)] = &[
         ("service_token", "token", false),
         ("install_scheduled_task.ps1", "task", false),

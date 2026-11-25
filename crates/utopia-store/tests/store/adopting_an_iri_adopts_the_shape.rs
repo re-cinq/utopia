@@ -1,14 +1,14 @@
-//! 一个类被词汇表认领之后，**形状要跟着说实话**。
+//! Once a class is claimed by a vocabulary, its **shape must also tell the truth**.
 //!
-//! 形状承载的是来历：方 = 词表声明的，圆 = 语料里长出来的。而 `adopt_iri_onto_key`
-//! 是在形状还不表示来历的年代写的，它只写 IRI——于是往一个已经有 `person` /
-//! `organization` 的库里导 schema.org，那几个类**拿到了 IRI 却仍然是圆的**。
-//! 有 IRI 却是圆的，画面就在说谎。
+//! The shape carries the provenance: square = declared by the vocabulary, circle = grown out of the corpus. But `adopt_iri_onto_key`
+//! was written in the era when the shape did not yet express provenance; it only writes the IRI — so importing schema.org into a KB that already has `person` /
+//! `organization`, those classes **got an IRI but stayed circles**.
+//! An IRI with a circle shape: the picture is lying.
 //!
-//! 这个缝隙只有真导入一次才撞得到：单看 `adopt_iri_onto_key` 的签名和调用点，
-//! 没有任何东西提示"还有个字段该一起改"。实测撞上过（demo 库里 5 个类中招）。
+//! This seam only shows up on a real import: looking at `adopt_iri_onto_key`'s signature and call sites alone,
+//! nothing hints that "another field should change along with it". It was hit in practice (5 classes in the demo KB were affected).
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset. Creates and tears down its own; never touches an existing database.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -19,7 +19,7 @@ async fn adopting_an_iri_turns_the_class_square() -> anyhow::Result<()> {
         return Ok(());
     };
     let pool = PgPool::connect(&url).await?;
-    // 开跑前先扫地：断言 panic 会跳过 teardown，一次失败会给下一次留垃圾
+    // Sweep up before starting: a panicking assertion skips teardown, and one failure leaves garbage for the next run
     sqlx::query("DELETE FROM organizations WHERE name = 'adopt-shape-test'")
         .execute(&pool)
         .await?;
@@ -43,7 +43,7 @@ async fn adopting_an_iri_turns_the_class_square() -> anyhow::Result<()> {
     .await?;
 
     let run = async {
-        // 一个「语料里长出来的」类：没有 IRI，所以是圆的
+        // A "grown out of the corpus" class: no IRI, so it is a circle
         let grown = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO entity_types (id, kb_id, key, label, color, shape)
@@ -60,7 +60,7 @@ async fn adopting_an_iri_turns_the_class_square() -> anyhow::Result<()> {
             .await?;
         assert_eq!(shape, "circle", "还没被认领时该是圆的");
 
-        // 导入一份词汇表，把 schema.org 的 Person 认到这个 key 上
+        // Import a vocabulary, adopting schema.org's Person onto this key
         let adopted = utopia_store::ontology::adopt_iri_onto_key(
             &pool,
             kb,
@@ -80,11 +80,11 @@ async fn adopting_an_iri_turns_the_class_square() -> anyhow::Result<()> {
             shape, "square",
             "认领之后是词表声明的类了，形状要跟着说实话"
         );
-        // **颜色不该动**：颜色是身份（同一个 key 永远同一个色），
-        // 认领改变的是来历不是身份
+        // **The color must not change**: color is identity (the same key is always the same color),
+        // claiming changes the provenance, not the identity
         assert_eq!(color, "#7fd0ff", "认领不该动用户看惯的颜色");
 
-        // 幂等：再认一次不该改动任何东西（iri 已非空，UPDATE 匹配不上）
+        // Idempotent: claiming again must change nothing (the iri is already non-empty, so the UPDATE matches nothing)
         let again = utopia_store::ontology::adopt_iri_onto_key(
             &pool,
             kb,

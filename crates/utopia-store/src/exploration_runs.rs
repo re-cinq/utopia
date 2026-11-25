@@ -1,45 +1,45 @@
-//! 一轮映射探索的账：扫了多大的东西、丢了什么、覆盖了多少（#503）。
+//! The ledger of one mapping exploration run: how big a thing it scanned, what it dropped, and how much it covered (#503).
 //!
-//! 从前一轮探索只留下两样：`concept_mappings` 里若干行，以及「一条都没提出来」
-//! 时的一条告警。**覆盖率没有任何地方说**——十一条提议对着一张八十列的宽表，
-//! 与十一条刚好覆盖完一个小库，页面上一模一样。
+//! Before, an exploration run left only two things: several rows in `concept_mappings`, and a warning for "not a single one was proposed".
+//! **Coverage was not reported anywhere** — eleven proposals against an eighty-column wide table,
+//! and eleven that exactly cover a small database, looked identical on the page.
 //!
-//! 丢弃更是静默的。`explore_mappings` 对每条提议有四处 `continue`，四处都不计数。
-//! 实测踩过一次：源叫 `tpch-2026-09-08-12-30`，模型看着 schema 回的是 `tpch`，
-//! 十二条一条不剩地被吞掉，任务照样 `done`。
+//! Dropping was even quieter. `explore_mappings` has four `continue`s for each proposal, and none of the four is counted.
+//! Hit once in practice: the source was named `tpch-2026-09-08-12-30`, the model returned `tpch` looking at the schema,
+//! and all twelve were swallowed without a trace while the task still went `done`.
 //!
-//! 与 `extraction_drops` 的分工照那张表自己的话说：那边答「这些事实没落地」，
-//! 读者是传文档的人；这边答「这一轮看见了多大的东西、覆盖了多少」，读者是
-//! 管数据源的人，动作是给列加注释或者再跑一轮。
+//! Its split from `extraction_drops` follows that table's own words: that one answers "these facts did not land", and its reader is
+//! the person who uploads documents; this one answers "how big a thing this run saw and how much it covered", and its reader is
+//! the person who manages the data source, whose action is to add column comments or run another round.
 
 use sqlx::PgPool;
 use utopia_core::models::ExplorationRun;
 use utopia_core::AppResult;
 use uuid::Uuid;
 
-/// 丢弃原因码。前端按这个查文案，所以是稳定契约，不要改字面量
-/// （与 `extraction_drops::reason` 同一约定）。
+/// Drop reason codes. The frontend looks up the copy by these, so they are a stable contract: do not change the literals
+/// (same convention as `extraction_drops::reason`).
 pub mod drop_reason {
-    /// 模型回的 `source` 对不上任何挂载源的名字。**最常踩的一个**：源名带了
-    /// 环境后缀或时间戳，而模型照着 schema 回一个短名
+    /// The model's returned `source` matches no mounted source's name. **The most common one**: the source name carries an
+    /// environment suffix or timestamp, and the model, reading the schema, returned a short name
     pub const SOURCE: &str = "source";
-    /// `kind` 不是 metric / dimension
+    /// `kind` is not metric / dimension
     pub const KIND: &str = "kind";
-    /// 概念类查不到——本体里没有 Metric / Dimension，`ensure_concept_types`
-    /// 之后不该再发生
+    /// Concept lookup finds nothing: the ontology has no Metric / Dimension, so
+    /// after `ensure_concept_types` this should not happen
     pub const TYPE: &str = "type";
-    /// `definition` 不是一个对象，或者拿不出可执行的定义
+    /// `definition` is not an object, or no executable definition can be extracted from it
     pub const DEFINITION: &str = "definition";
-    /// 模型回的条数超过这一轮的上限，超出的没看。上限按表数定，回得比它多，
-    /// 多半是模型把列当成了口径——宽表上常见
+    /// The model returned more entries than this run's cap, and the excess was not looked at. The cap is set by the number of tables; returning more than that
+    /// usually means the model treated columns as definitions — common on wide tables
     pub const CAP: &str = "cap";
-    /// 这条概念在这个源上已经有人表过态（确认或拒绝）。提议不覆盖决定，
-    /// 所以下一轮探索算出同一条时它既不回到待看，也不算这一轮写入的
+    /// This concept already has a human verdict on this source (confirmed or rejected). Proposals do not override decisions,
+    /// so when the next run computes the same concept, it neither goes back to pending review nor counts as written by this run
     pub const DECIDED: &str = "decided";
 }
 
-/// 开一轮。**先开行再干活**，跑挂了那一轮也有账可查——
-/// 失败与「跑了但什么都没提」在页面上从前都是「没有新提议」。
+/// Opens a run. **Open the row before doing the work**, so a run that crashed still has a record of it.
+/// Failure used to look the same as "ran but proposed nothing": both showed as "no new proposals" on the page.
 pub async fn start(pool: &PgPool, kb_id: Uuid) -> AppResult<Uuid> {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO mapping_exploration_runs (id, kb_id) VALUES ($1, $2)")
@@ -50,8 +50,8 @@ pub async fn start(pool: &PgPool, kb_id: Uuid) -> AppResult<Uuid> {
     Ok(id)
 }
 
-/// 读完 schema、还没问模型时先记下规模。**问模型可能要一分钟**，
-/// 这期间页面上该看得见「正在扫的是多大的东西」。
+/// Right after reading the schema and before asking the model, record the scale first. **Asking the model can take a minute**,
+/// and during that time the page should show how big a thing is being scanned.
 pub async fn scanned(
     pool: &PgPool,
     id: Uuid,
@@ -78,10 +78,10 @@ pub async fn scanned(
     Ok(())
 }
 
-/// 收一轮。`dropped` 的形状见 [`drop_reason`]：每个原因一个
-/// `{"n": 计数, "example": "一条例子"}`——**光有计数诊断不动**，
-/// 「十二条源名对不上」要配上「模型说的是 tpch，挂的是 tpch-2026-09-08」
-/// 才知道该改什么。
+/// Closes a run. The shape of `dropped` is described at [`drop_reason`]: each reason gets one
+/// `{"n": count, "example": "one example"}` — **a count alone diagnoses nothing**;
+/// "twelve source names did not match" needs "the model said tpch, but the mount is tpch-2026-09-08"
+/// before you know what to change.
 pub async fn finish(
     pool: &PgPool,
     id: Uuid,
@@ -106,8 +106,8 @@ pub async fn finish(
     Ok(())
 }
 
-/// 这一轮挂了。记下来就收摊——**报错路径上的失败不该淹掉它要报的那件事**，
-/// 调用方一律 `let _ =`（与 `extraction_drops` 同一约定）。
+/// This run failed. Record it and stop — **a failure on the error path must not drown out the thing it is reporting**;
+/// callers always use `let _ =` (same convention as `extraction_drops`).
 pub async fn fail(pool: &PgPool, id: Uuid, error: &str) -> AppResult<()> {
     sqlx::query(
         "UPDATE mapping_exploration_runs
@@ -120,7 +120,7 @@ pub async fn fail(pool: &PgPool, id: Uuid, error: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// 最近几轮，新的在前。数据映射页读它。
+/// The most recent runs, newest first. The data mapping page reads this.
 pub async fn recent(pool: &PgPool, kb_id: Uuid, limit: i64) -> AppResult<Vec<ExplorationRun>> {
     Ok(sqlx::query_as(
         "SELECT id, started_at, finished_at, sources, tables_scanned, columns_scanned,

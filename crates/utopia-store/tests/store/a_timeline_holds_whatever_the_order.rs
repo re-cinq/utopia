@@ -92,7 +92,7 @@ async fn arrive_on(
     subject: Uuid,
     value: &str,
     from: Option<&str>,
-    // (文档的日期, doc_time_source)；没有日期的文档是 (None, "none")（0045 决定 3）
+    // (the document's date, doc_time_source); a document with no date is (None, "none") (0045 decision 3)
     doc: Option<(Option<chrono::DateTime<chrono::Utc>>, &str)>,
     confidence: f32,
     reconcile: bool,
@@ -139,7 +139,7 @@ async fn arrive_on(
     )
     .await?;
     if doc.is_some_and(|(at, _)| at.is_none()) {
-        // 模拟文档抽取的无时间行（0064）；人工写入口的 None 缺省是此刻。
+        // Timeless rows simulating document extraction (0064); the None default on the manual write entry point is right now.
         sqlx::query("UPDATE facts SET attested_from = NULL WHERE id = $1")
             .bind(id)
             .execute(pool)
@@ -432,8 +432,8 @@ async fn a_revert_restores_both_timelines_a_merge_rewrote() -> anyhow::Result<()
         after_revert, before_target,
         "target history not restored; after merge it was {after_merge:?}"
     );
-    // 两个值都回到源实体上。回来的是改写出的新行，不是把旧行复活：撤回也是一次认知变更，
-    // 记录轴上看得见（0057）；源实体上的时间线顺带按两行重算
+    // Both values return to the source entity. What comes back is a newly rewritten row, not the old row revived: the undo is also a cognitive change,
+    // visible on the record axis (0057); the timeline on the source entity is recomputed over the two rows along the way
     assert_eq!(
         source_rows,
         vec![

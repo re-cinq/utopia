@@ -167,7 +167,7 @@ async fn edge(
     Ok(id)
 }
 
-/// 同一条谓词、同一个主语，宾语另指：给 functional 那条公理一个可以撞的对象
+/// Same predicate, same subject, a different object: gives the functional axiom an object to collide with
 async fn edge_to(
     pool: &PgPool,
     f: &Fixture,
@@ -224,7 +224,7 @@ fn pressure_condition(f: &Fixture, side: &str) -> [ConditionInput; 1] {
     }]
 }
 
-/// 只改结论、不带条件的更新会清掉连接而把 Y 侧条件留下（#1109）：整条更新被拒，什么都不写
+/// An update that changes only the conclusion, without a condition, clears the join and leaves the Y-side condition behind (#1109): the whole update is rejected, nothing is written
 #[tokio::test]
 async fn dropping_the_join_is_refused_while_the_rule_keeps_y_conditions() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -288,7 +288,7 @@ async fn dropping_the_join_is_refused_while_the_rule_keeps_y_conditions() -> any
             ("relation".into(), Some(f.supplies), "y".into())
         );
 
-        // 同一次更新里把条件换到 X 侧，去掉连接就是合法的
+        // In the same update, the condition moves to the X side, so dropping the join is legal
         let on_x = pressure_condition(&f, "x");
         business_rules::update(
             &pool,
@@ -303,7 +303,7 @@ async fn dropping_the_join_is_refused_while_the_rule_keeps_y_conditions() -> any
         .await?;
         assert_eq!(saved().await?, ("attribute".into(), None, "x".into()));
 
-        // 修复之前存下的非法规则仍然能改名、停用：只有动了条件或结论才校验
+        // A rule stored invalid before the fix can still be renamed or deactivated: validation only runs when the condition or conclusion is changed
         sqlx::query("UPDATE attribute_rule_conditions SET subject_side = 'y' WHERE rule_id = $1")
             .bind(rule)
             .execute(&pool)
@@ -649,9 +649,9 @@ async fn a_joined_rule_reads_the_other_side_of_a_declared_edge() -> anyhow::Resu
     run
 }
 
-/// 一条规则推出的关系边撞上断言时不落地，而审核队列要看得见它（0017，0047 决定 3）：
-/// `run()` 与 `materialize()` 从同一次求解取候选，被拦下的关系候选留在候选里，
-/// 队列那一行说明它是哪条业务规则推出来的、撞在哪条断言上
+/// A relation edge inferred by a rule that collides with an assertion does not land, but the review queue must show it (0017, 0047 decision 3):
+/// `run()` and `materialize()` take candidates from the same solve, and blocked relation candidates stay in the candidates,
+/// the queue row says which business rule inferred it and which assertion it collided with
 #[tokio::test]
 async fn a_relation_the_graph_refuses_still_reaches_the_review_queue() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -662,8 +662,8 @@ async fn a_relation_the_graph_refuses_still_reaches_the_review_queue() -> anyhow
     let f = seed(&pool).await?;
 
     let run = async {
-        // upstream_of 是 functional：X 已经断言了另一个上游 Z，规则推出的 X → Y
-        // 与它区间相交，asserted > derived，这条派生不落地
+        // upstream_of is functional: X already asserts another upstream Z, so the rule-inferred X → Y
+        // overlaps its interval, asserted > derived, so this derivation does not land
         sqlx::query("UPDATE relation_types SET functional = true WHERE id = $1")
             .bind(f.upstream_of)
             .execute(&pool)
@@ -752,7 +752,7 @@ async fn a_relation_the_graph_refuses_still_reaches_the_review_queue() -> anyhow
         assert_eq!(detail["attribute_rule_id"], serde_json::json!(rule));
         assert_eq!(detail["object_id"], serde_json::json!(f.y));
 
-        // 同一次求解，第二遍不多不少：队列跟图对得上
+        // The same solve, and the second pass is neither more nor fewer: the queue matches the graph
         let again = utopia_store::reasoning::run(&pool, f.kb).await?;
         assert_eq!(again.inserted, 0, "{again:?}");
         assert_eq!(again.cleared, 0, "{again:?}");

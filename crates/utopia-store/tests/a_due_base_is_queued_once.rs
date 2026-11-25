@@ -1,8 +1,8 @@
-//! #1304：到期的库在它的推理任务还排着时只排一份。
+//! #1304: a store that is due is queued only once while its inference task is still pending.
 //!
-//! `queue_due_inferences` 扫的是全库到期的库，同时跑的测试刚建的库也会被它排上任务，所以
-//! 这个测试自成一个二进制（为什么见 `store/main.rs`），收尾删掉它排下的**每一份**
-//! `materialize_inferences`，不只是自己那个库的。
+//! `queue_due_inferences` scans every store that is due, and a store just created by a concurrently running test would also get a task queued by it, so
+//! this test is its own binary (why, see `store/main.rs`), and cleans up **every** `materialize_inferences` it queued at the end,
+//! not only the one for its own store.
 
 use sqlx::PgPool;
 use utopia_store::reasoning::queue_due_inferences;
@@ -27,7 +27,7 @@ async fn a_due_base_is_queued_once_while_its_job_waits() -> anyhow::Result<()> {
         .fetch_one(&pool)
         .await?;
 
-    // 两拍之间没人认领：从没推过的库两拍都算到期
+    // Nobody claimed it between the two passes: a store never pushed is due on both passes
     queue_due_inferences(&pool).await?;
     queue_due_inferences(&pool).await?;
     let queued: i64 = sqlx::query_scalar(

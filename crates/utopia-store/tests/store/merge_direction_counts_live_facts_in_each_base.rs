@@ -1,4 +1,4 @@
-//! 合并方向只看有效事实；知识库限定不能改变度数和 UUID 平局规则。
+//! Merge direction looks only at live facts; scoping by knowledge base must not change the degree counts or the UUID tie rule.
 
 use sqlx::PgPool;
 use utopia_store::resolution::merge_direction;
@@ -102,7 +102,7 @@ async fn merge_direction_counts_live_facts_in_each_base() -> anyhow::Result<()> 
     fact(&pool, kb, predicate, older, older).await?;
     fact(&pool, kb, predicate, peer, newer).await?;
     let outgoing = fact(&pool, kb, predicate, newer, peer).await?;
-    // older 的自关联只算一条；若拆成两次计数相加，2:2 会错误地留下 older。
+    // A self-link of older is counted once; if it were split into two counts and added, 2:2 would wrongly leave older behind.
     assert_direction(
         &pool,
         newer,

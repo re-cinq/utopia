@@ -1,15 +1,15 @@
-//! 勘误（0044 决定 7，第六刀）：抽取之后按文档复审类型化图谱的那个 agent 在库里留下的东西。
+//! Errata (0044 decision 7, the sixth cut): what the agent that re-reviews the typed graph per document after extraction leaves behind in the database.
 //!
-//! 结构先报（[`candidates`]）：主语或宾语在属性声明的类之外、文档里找不到的名字、日期属性
-//! 没有日期。这几条不问模型就报得出，先看它们，其余抽样——0044 §7 的次序。
+//! Structural report first ([`candidates`]): subject or object names that sit outside the class the property is declared on and cannot be found in the document, and date properties
+//! with no date. These can be reported without asking the model, so look at them first and sample the rest -- the order from 0044 §7.
 //!
-//! 每一条看过的事实记一笔（keep 也记）：「没看过的」就是没行的，复审不重复；撤、改、加
-//! 记成动作，带着文档的原话。动作走 0027 的闸门：撤的事实有派生靠着、主语在回答里被认
-//! 过，或者写的事实会让一个只许一个值的谓词有两个值——留给人，agent 不动手。
+//! Each fact that gets reviewed is logged once (keep is logged too): "never reviewed" is simply having no row, so the review does not repeat; retract, revise and add
+//! are logged as actions, carrying the document's own words. Actions go through the 0027 gate: a retracted fact that something derives from, a subject the answer relies on,
+//! or a written fact that would give a single-valued predicate two values -- these are left for a human; the agent does not act.
 //!
-//! 撤销要站得住：物化下一轮会把活着的陈述再算成同一条类型化行。所以动作记着（陈述, 属性），
-//! 物化与蕴含都跳过被勘误撤过的那一对（见 `materialize`）。别的文档说了同一件事照样算——
-//! 勘误看的是这份文档，撤的是这份文档产生的那条。
+//! A retraction has to hold up: materialization would otherwise re-derive the live statement as the same typed row. So actions record (statement, property),
+//! and materialization and entailment both skip the pair that an erratum retracted (see `materialize`). Other documents that say the same thing still count --
+//! errata look at this document, and retract the one row this document produced.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -21,13 +21,13 @@ use uuid::Uuid;
 use crate::execution_gate::{self, Impact};
 use crate::graph::{FactObject, Validity};
 
-/// 排队的任务名：一个库一份，复审有类型化行还没看过的文档
+/// The queued task name: one per library, reviewing documents that have typed rows not yet reviewed
 pub const JOB_KIND: &str = "errata_review";
 
-/// 结构报出来的四种理由，与迁移里的 CHECK 同一份
+/// The four reasons the structure check can report, the same list as the CHECK in the migration
 pub const FLAGS: &[&str] = &["domain", "range", "name_absent", "no_date"];
 
-/// 一条送去看的类型化事实：两端的名字与类、属性、来源陈述、结构报的理由、这份文档里的引文
+/// One typed fact sent for review: the names and classes at both ends, the property, the source statement, the reason the structure reported, and the quote from this document
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Candidate {
     pub fact_id: Uuid,
@@ -41,13 +41,13 @@ pub struct Candidate {
     pub object_id: Option<Uuid>,
     pub object: String,
     pub object_class: Option<String>,
-    /// 空 = 结构没报，抽样看
+    /// Empty = structure reported nothing, so sample it
     pub flag: Option<String>,
     pub quote: Option<String>,
 }
 
-/// 类的祖先闭包在 SQL 里算：属性声明在 legal_entity 上，organization 是它的子类就在域内。
-/// 没有类的一端不报——「不知道是什么」不是「在类之外」
+/// The class ancestor closure is computed in SQL: the property is declared on legal_entity, and organization, a subclass of it, is in scope.
+/// A side with no class is not reported -- "not known what it is" is not "outside the class"
 const CANDIDATES_SQL: &str = r#"
 WITH RECURSIVE up AS (
     SELECT id AS child, id AS anc FROM entity_types WHERE kb_id = $1
@@ -112,7 +112,7 @@ SELECT t.id AS fact_id, ty.statement_id, t.predicate_id, t.subject_id, t.recorde
 ORDER BY (c.flag IS NULL), c.recorded_at, c.fact_id
 "#;
 
-/// 这份文档产生的、活着的、还没看过的类型化事实，结构报了的在前
+/// The live, not-yet-reviewed typed facts this document produced, with the structurally reported ones first
 pub async fn candidates(
     pool: &PgPool,
     kb_id: Uuid,
@@ -125,7 +125,7 @@ pub async fn candidates(
         .await?)
 }
 
-/// 文档当前版本的正文，按分块顺序接起来
+/// The body of the document's current version, joined in chunk order
 pub async fn document_text(pool: &PgPool, document_id: Uuid) -> AppResult<String> {
     let text: Option<String> = sqlx::query_scalar(
         "SELECT string_agg(text, ' ' ORDER BY seq) FROM chunks
@@ -137,12 +137,12 @@ pub async fn document_text(pool: &PgPool, document_id: Uuid) -> AppResult<String
     Ok(text.unwrap_or_default())
 }
 
-/// 该看的文档：还有活着的类型化行没看过的，以及抽完了却一次都没看过的（它可能一条类型化行
-/// 都没有——对齐没绑上——这时 agent 能做的只有加，而加正是第一次真跑里最值的那一半）。
-/// 最早摄入的在前。
+/// Documents to look at: those that still have live typed rows not yet reviewed, and those that were extracted but never reviewed at all (it may have
+/// no typed rows -- alignment did not bind -- in which case the agent can only add, and adding is the half that proved most valuable in the first real run).
+/// Earliest ingested first.
 ///
-/// 推送来的文档（`statements` 来源）不看（RC-001）：勘误拿行去对文档的原话，推送的陈述
-/// 没有原话（0054 的 `quote` 必须为空），无从对起
+/// Pushed documents (`statements` source) are not reviewed (RC-001): the errata check rows against the document's own words, and pushed statements
+/// have no own words (0054's `quote` must be empty), so there is nothing to match against
 pub async fn documents_due(pool: &PgPool, kb_id: Uuid, limit: i64) -> AppResult<Vec<Uuid>> {
     Ok(sqlx::query_scalar(
         "SELECT d.id FROM documents d
@@ -169,7 +169,7 @@ pub async fn documents_due(pool: &PgPool, kb_id: Uuid, limit: i64) -> AppResult<
     .await?)
 }
 
-/// 这份文档看过几次
+/// How many times this document has been reviewed
 pub async fn runs_of(pool: &PgPool, document_id: Uuid) -> AppResult<i64> {
     Ok(
         sqlx::query_scalar("SELECT count(*) FROM errata_runs WHERE document_id = $1")
@@ -179,7 +179,7 @@ pub async fn runs_of(pool: &PgPool, document_id: Uuid) -> AppResult<i64> {
     )
 }
 
-/// 一次复审开账
+/// Opens the books for one review
 pub async fn start_run(
     pool: &PgPool,
     kb_id: Uuid,
@@ -201,7 +201,7 @@ pub async fn start_run(
     Ok(id)
 }
 
-/// 结账：问了几次、端点报了多少用量（没报就空着）
+/// Closing the books: how many calls were made and how much usage the endpoint reported (left empty if not reported)
 pub async fn finish_run(
     pool: &PgPool,
     run_id: Uuid,
@@ -222,12 +222,12 @@ pub async fn finish_run(
     Ok(())
 }
 
-/// agent 对一条事实的说法，或它想加的一条
+/// The agent's claim about a fact, or a fact it wants to add
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Proposed {
     Keep,
     Retract,
-    /// 换属性（键）、换宾语（名字或值），至少一样
+    /// Change the property (key) or the object (name or value), at least one of them
     Revise {
         property: Option<String>,
         object: Option<String>,
@@ -253,26 +253,26 @@ impl Proposed {
 pub struct ActionInput<'a> {
     pub run_id: Uuid,
     pub document_id: Uuid,
-    /// keep / retract / revise 看的那条；add 没有
+    /// The fact that keep / retract / revise look at; add has none
     pub candidate: Option<&'a Candidate>,
     pub proposed: Proposed,
     pub reason: &'a str,
     pub quote: Option<&'a str>,
-    /// 文档正文，引文按它验
+    /// The document body; quotes are checked against it
     pub document_text: &'a str,
 }
 
-/// 一笔记下来的动作：落了地、留给人了、还是没过验证
+/// A recorded action: applied, left for a human, or failed verification
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Recorded {
     pub id: Uuid,
     pub status: &'static str,
-    /// 留给人的理由，或没过验证的理由
+    /// The reason it was left for a human, or the reason it failed verification
     pub detail: Option<String>,
     pub new_fact_id: Option<Uuid>,
 }
 
-/// 引文是不是文档的原话：折掉大小写与空白后的连续一段。空引文不算
+/// Is the quote the document's own words: a contiguous run after folding case and whitespace. An empty quote does not count
 pub fn quote_in(document: &str, quote: &str) -> bool {
     let q = squash(quote);
     !q.is_empty() && squash(document).contains(&q)
@@ -285,7 +285,7 @@ fn squash(s: &str) -> String {
         .to_lowercase()
 }
 
-/// 动作指向的那条事实：名字给队列卡片看，id 给执行用
+/// The fact an action points at: the name for the queue card, the id for execution
 struct Target {
     subject_id: Uuid,
     predicate_id: Uuid,
@@ -320,7 +320,7 @@ impl Target {
     }
 }
 
-/// 属性键在这个库里对应的行：id、是关系还是属性
+/// The row in this library for a property key: its id, and whether it is a relation or an attribute
 async fn property_by_key(
     pool: &PgPool,
     kb_id: Uuid,
@@ -335,9 +335,9 @@ async fn property_by_key(
     )
 }
 
-/// 一个名字解成库里的东西：已有的按名字找；没有的，只要这个名字是文档的原话，就按 0041 建一个
-/// 带名字事实的实体——文档说了一个新东西，勘误加事实不该因为抽取没把它当实体而作罢。不在文档
-/// 里的名字不建：那是 agent 编的
+/// Resolve a name to something in the library: find an existing one by name; if none exists and the name is in the document's own words, create one per 0041
+/// an entity carrying the name as a fact -- the document introduced something new, and an erratum adding a fact should not give up just because extraction did not treat it as an entity. Names not in the document
+/// are not created: those were made up by the agent
 async fn thing_named(
     pool: &PgPool,
     kb_id: Uuid,
@@ -358,7 +358,7 @@ async fn thing_named(
     )))
 }
 
-/// 宾语的文本按属性的种类解：关系要一样东西（见 `thing_named`），属性落成值
+/// Resolve the object's text according to the property kind: a relation needs an actual thing (see `thing_named`), an attribute is stored as a value
 async fn object_of(
     pool: &PgPool,
     kb_id: Uuid,
@@ -379,8 +379,8 @@ async fn object_of(
     }
 }
 
-/// 记一笔并（能的话）执行。keep 只记；撤、改、加先验引文，再过闸门，过了才动图。
-/// 没过验证的也记（refused）：这条事实算看过了，agent 的说法留着给人看，但不再问
+/// Log an entry and, if possible, apply it. keep is only logged; retract, revise and add check the quote first, then pass the gate, and only then touch the graph.
+/// Entries that fail verification are still logged (refused): the fact counts as reviewed, the agent's claim is kept for people to see, but it is not asked again
 pub async fn record(pool: &PgPool, kb_id: Uuid, input: ActionInput<'_>) -> AppResult<Recorded> {
     let id = Uuid::now_v7();
     let action = input.proposed.action();
@@ -394,7 +394,7 @@ pub async fn record(pool: &PgPool, kb_id: Uuid, input: ActionInput<'_>) -> AppRe
         Some(c) => (Some(c.fact_id), c.statement_id, c.flag.clone()),
         None => (None, None, None),
     };
-    // 动作指向的那条事实，与验证的结果
+    // The fact the action points at, and the verification result
     let resolved: Result<Option<Target>, String> = match &input.proposed {
         Proposed::Keep => Ok(None),
         Proposed::Retract => {
@@ -499,7 +499,7 @@ pub async fn record(pool: &PgPool, kb_id: Uuid, input: ActionInput<'_>) -> AppRe
             }
         }
     };
-    // 撤、改、加都得引文档的原话；不是原话的说法记下来，不执行
+    // retract, revise and add all need the quote to be the document's own words; a claim that is not an exact quote is recorded and not executed
     let resolved = match resolved {
         Ok(t) => {
             if input.proposed != Proposed::Keep
@@ -518,7 +518,7 @@ pub async fn record(pool: &PgPool, kb_id: Uuid, input: ActionInput<'_>) -> AppRe
         Ok(Some(t)) => Some(t.json()),
         _ => None,
     };
-    // 0027 的闸门：撤的那条有什么靠着它，写的那条会不会立刻开出违规
+    // 0027 gate: what depends on the fact being retracted, and whether the fact being written would immediately open a violation
     let hold = match &resolved {
         Ok(Some(t)) => {
             let mut impact = Impact::default();
@@ -543,8 +543,8 @@ pub async fn record(pool: &PgPool, kb_id: Uuid, input: ActionInput<'_>) -> AppRe
         }
         _ => None,
     };
-    // 结构没报过的事实，agent 单方面要撤或改：留给人。第一次真跑里撤掉的行十之八九原文其实说了
-    // （bench README），而结构报了的那几条才是它该动的；抽样看到的，人确认了再动
+    // The agent alone wants to retract or change a fact that the structure check did not report: leave it for a human. In the first real run, nine in ten retracted rows were in fact stated in the source text
+    // (bench README), while the few the structure check reported are the ones it should act on; what sampling turned up, act on only after a human confirms
     let unflagged = c.is_some_and(|c| c.flag.is_none())
         && matches!(input.proposed, Proposed::Retract | Proposed::Revise { .. });
     let (status, detail): (&'static str, Option<String>) = match (&resolved, &hold) {
@@ -605,9 +605,9 @@ pub async fn record(pool: &PgPool, kb_id: Uuid, input: ActionInput<'_>) -> AppRe
     })
 }
 
-/// 动图：撤是作废（`reject_fact`，证据不动，台账留痕）；改是撤旧写新，新行接旧行的时间；
-/// 加是写一行，锚在文档的日期上。新行的证据是引文所在的分块。
-/// 已经不在的行（别处先撤了）不算错——要的结果已经在了
+/// Applying to the graph: retract is a void (`reject_fact`, evidence untouched, ledger kept); revise is retract-old-then-write-new, the new row inheriting the old row's time;
+/// add writes a row anchored on the document's date. The new row's evidence is the chunk containing the quote.
+/// A row that is already gone (retracted elsewhere first) is not an error -- the desired result is already in place
 async fn apply(
     pool: &PgPool,
     kb_id: Uuid,
@@ -652,7 +652,7 @@ async fn apply(
         to: v.valid_to,
         to_precision: v.valid_to_precision.as_deref(),
         attested_at: v.attested_from.or(doc_time),
-        // 新行接旧行的终点，也接它说的是哪个时段（#994）；改到事件、恒常属性上的，写入口丢掉
+        // The new row inherits the end point of the old row and the period it says it covers (#994); for one that changes an event or a constant attribute, the write path drops it
         end_after_period: v.end_after_period,
     };
     let object = match (target.object_id, &target.object_value) {
@@ -671,7 +671,7 @@ async fn apply(
         0.9,
     )
     .await?;
-    // 证据：引文所在的分块；引文跨块时退到文档的第一块
+    // evidence: the chunk containing the quote; if the quote spans chunks, fall back to the document's first chunk
     let placed = sqlx::query(
         "INSERT INTO fact_evidence (fact_id, chunk_id, quote, document_id, doc_version)
          SELECT $1, c.id, $3, c.document_id, c.doc_version FROM chunks c
@@ -703,9 +703,9 @@ async fn apply(
     Ok(Some(new))
 }
 
-/// 改是撤旧写新，新行接旧行的时间。旧行两端相等（一刻的事件，或 #966 之前写下的状态），
-/// 新行的属性又声明成状态时，接过来的那段任何时刻都不成立，`Validity::under` 不写它：
-/// 验证时就拒，执行时先查再撤——不会撤了旧行才发现新行写不进
+/// revise is retract-old-then-write-new, the new row inheriting the old row's time. When both ends of the old row are equal (an instant event, or a state written before #966),
+/// and the new row's property is declared as a state, the carried-over span holds at no instant, so `Validity::under` does not write it:
+/// refuse at verification, and at execution check first, then retract -- so we never retract the old row only to find the new one cannot be written
 async fn empty_state_revision(pool: &PgPool, fact_id: Uuid, predicate_id: Uuid) -> AppResult<bool> {
     let point: Option<bool> = sqlx::query_scalar(
         "SELECT valid_from IS NOT NULL AND valid_to IS NOT DISTINCT FROM valid_from
@@ -730,7 +730,7 @@ struct ValidityRow {
     attested_from: Option<DateTime<Utc>>,
 }
 
-/// 闸门留给人的一笔：看的是哪份文档的哪条事实、agent 想怎么办、凭哪句原话、为什么留下
+/// A gate entry left for a human: which fact from which document, what the agent wants to do, which sentence it cites, and why it was left
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct HeldItem {
     pub id: Uuid,
@@ -762,7 +762,7 @@ pub async fn held(pool: &PgPool, kb_id: Uuid, limit: i64, offset: i64) -> AppRes
     .await?)
 }
 
-/// 等人的几笔，最老的从什么时候起等
+/// Several entries waiting on a human, with the time the oldest began waiting
 pub async fn waiting(pool: &PgPool, kb_id: Uuid) -> AppResult<(i64, Option<DateTime<Utc>>)> {
     Ok(sqlx::query_as(
         "SELECT count(*), min(created_at) FROM errata_actions WHERE kb_id = $1 AND status = 'held'",
@@ -781,7 +781,7 @@ struct HeldRow {
     quote: Option<String>,
 }
 
-/// 人答留给人的一笔：批了就执行，否了就记 rejected。不是 held 的（已经答过、别的库的）回 false
+/// A human's answer to a gate entry: approved means it runs, rejected means it is logged as rejected. Those not held (already answered, or in another library) return false
 pub async fn decide_held(
     pool: &PgPool,
     kb_id: Uuid,

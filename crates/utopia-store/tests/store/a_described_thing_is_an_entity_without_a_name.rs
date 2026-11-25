@@ -1,8 +1,8 @@
-//! 一个被描述的东西是一个没有名字的实体（0044 第一刀，#729）。
+//! A described thing is an entity with no name (0044 slice 1, #729).
 //!
-//! `create_described` 写 `description`、不写 `known_as`：名字事实是召回的桥（0041），
-//! 一段描述不能做桥——两篇文档里碰巧描述得一样的两个东西不该因此接到一起。
-//! 于是按名字召回找不到它，它的名字栏是空的，`facts` 里没有一条以它为主语的行。
+//! `create_described` writes `description` and does not write `known_as`: a name fact is the bridge for recall (0041),
+//! and a description cannot serve as a bridge — two things that happen to be described identically in two documents should not be linked for that reason.
+//! So recall by name cannot find it, its name cell is empty, and `facts` has no row with it as subject.
 
 use sqlx::PgPool;
 use utopia_store::{names, resolution};
@@ -70,7 +70,7 @@ async fn a_described_thing_has_a_description_and_no_name() -> anyhow::Result<()>
         assert!(type_id.is_none(), "文档的类别词不是本体的类");
         assert_eq!(specific.as_deref(), Some("subsidiary"));
 
-        // 没有一条以它为主语的事实——尤其没有 known_as
+        // No fact has it as subject — in particular no known_as
         let facts: i64 = sqlx::query_scalar("SELECT count(*) FROM facts WHERE subject_id = $1")
             .bind(id)
             .fetch_one(&pool)
@@ -81,13 +81,13 @@ async fn a_described_thing_has_a_description_and_no_name() -> anyhow::Result<()>
             "名字栏是空的"
         );
 
-        // 按名字召回找不到它：描述不是桥
+        // Recall by name cannot find it: a description is not a bridge
         assert_eq!(
             resolution::existing_by_name(&pool, f.kb, description).await?,
             None,
             "一段描述不能把后来的提及接到它身上"
         );
-        // 名字事实那条召回也找不到它：库里有一条同样小写值的名字事实才算
+        // The name-fact recall cannot find it either: it counts only when the KB holds a name fact with the same lowercased value
         let recalled: Option<Uuid> = sqlx::query_scalar(&format!(
             "SELECT e.id FROM entities e
              WHERE e.kb_id = $1 AND e.merged_into IS NULL AND {}",
@@ -98,13 +98,13 @@ async fn a_described_thing_has_a_description_and_no_name() -> anyhow::Result<()>
         .fetch_optional(&pool)
         .await?;
         assert_eq!(recalled, None);
-        // 后来一条同样措辞的提及走消解：另建一个，不归到被描述的那个身上
+        // A later mention with the same wording goes through resolution: a separate one is created, not attached to the described one
         let later =
             resolution::resolve_mention(&pool, f.kb, None, description, None, None, None, &[]).await?;
         assert!(later.created, "描述不是桥，提及不归到它身上");
         assert_ne!(later.entity_id, id);
 
-        // 同一段描述再建一次是另一个实体：库里不去重，同一篇里并成一个是调用方的事
+        // Creating the same description again is another entity: the KB does not deduplicate; merging within the same document is the caller's job
         let twin = resolution::create_described(&pool, f.kb, description, None).await?;
         assert_ne!(twin, id);
         let specific: Option<String> =

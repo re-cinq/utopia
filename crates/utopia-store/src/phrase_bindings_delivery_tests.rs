@@ -1,8 +1,8 @@
-//! 人的判定与它的重算任务是一次提交（0051）。
+//! A person's judgment and its recompute job are one commit (0051).
 //!
-//! 四件事：判定和 job 一起落库、载荷指着这个库；排队失败时判定也没了；别人握着
-//! 物化锁时 `try_materialize` 立刻让开而不是等；两次判定各自的 job 不管先后处理，
-//! 类型化图都收敛到最后一次判定。没有 `UTOPIA_DATABASE_URL` 时跳过。
+//! Four things: the judgment and the job are written together, and the payload points at this library; if queuing fails, the judgment is gone too; when someone else holds
+//! the materialization lock, `try_materialize` steps aside at once instead of waiting; and two judgments' jobs converge the typed graph on the last judgment
+//! whichever one is processed first. Skipped when `UTOPIA_DATABASE_URL` is not set.
 
 use super::{decide_with_delivery, decide_with_delivery_budget, Decision, MATERIALIZE_KIND};
 use crate::{materialize, phrase_bindings};
@@ -131,7 +131,7 @@ async fn a_decision_and_its_job_commit_together() -> anyhow::Result<()> {
         let bindings = phrase_bindings::bindings(&pool, f.kb).await?;
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].status, "bound");
-        // 载荷只带库：job 读当前绑定，不回放这次判定的属性
+        // The payload carries only the library: the job reads the current binding, and does not replay this judgment's properties
         let payload: serde_json::Value = sqlx::query_scalar("SELECT payload FROM jobs WHERE id=$1")
             .bind(id)
             .fetch_one(&pool)
@@ -153,7 +153,7 @@ async fn an_enqueue_failure_takes_the_decision_with_it() -> anyhow::Result<()> {
     crate::db::migrate(&pool).await?;
     let f = seed(&pool).await?;
     let run = async {
-        // 预算 0 被 enqueue 拒掉：一次发生在判定写入之后的真实失败
+        // Budget 0 is rejected by enqueue: a real failure occurring after the judgment write
         assert!(
             decide_with_delivery_budget(&pool, f.kb, &f.sig, bound(f.property), 0)
                 .await
@@ -178,7 +178,7 @@ async fn a_busy_projection_is_declined_not_waited_for() -> anyhow::Result<()> {
     let f = seed(&pool).await?;
     let run = async {
         decide_with_delivery(&pool, f.kb, &f.sig, bound(f.property)).await?;
-        // 另一条连接抱着锁：try 版本立刻回 None，不占第二条连接排队
+        // Another connection holds the lock: the try version returns None at once, without taking a second connection to queue
         let mut gate = pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext('typed_materialize'), hashtext($1))")
             .bind(f.kb.to_string())
@@ -209,11 +209,11 @@ async fn jobs_processed_in_any_order_converge_on_the_last_decision() -> anyhow::
     let f = seed(&pool).await?;
     let run = async {
         let first = decide_with_delivery(&pool, f.kb, &f.sig, bound(f.property)).await?;
-        // 先领走第一个 job：在跑的 job 不吸收新判定（0051），第二次判定才会有自己的 job
+        // Claim the first job: a running job does not absorb new judgments (0051), so the second judgment gets a job of its own
         claim(&pool, first).await?;
         let second = decide_with_delivery(&pool, f.kb, &f.sig, none()).await?;
         assert!(first < second);
-        // 两个 job 都在（一个在跑、一个排着）；先处理后来的，再处理先来的——每次都读当前绑定
+        // Both jobs exist (one running, one queued); process the later one first, then the earlier one -- each reads the current binding
         assert_eq!(jobs_for(&pool, f.kb).await?.len(), 2);
         materialize::try_materialize(&pool, f.kb).await?;
         materialize::try_materialize(&pool, f.kb).await?;
@@ -222,7 +222,7 @@ async fn jobs_processed_in_any_order_converge_on_the_last_decision() -> anyhow::
             0,
             "the last decision was none"
         );
-        // 反过来：先绑、再解绑、先处理老的
+        // The reverse: bind, then unbind, and process the old one first
         decide_with_delivery(&pool, f.kb, &f.sig, bound(f.property)).await?;
         materialize::try_materialize(&pool, f.kb).await?;
         assert_eq!(materialize::count(&pool, f.kb).await?, 1);

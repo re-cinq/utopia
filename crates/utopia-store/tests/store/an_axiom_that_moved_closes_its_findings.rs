@@ -1,17 +1,17 @@
-//! 判据一动，靠着它的 open 违规就得当场对账（#564 / 0062）。
+//! When the criterion moves, the open violations that rely on it must be reconciled on the spot (#564 / 0062).
 //!
-//! `axiom_violations.status = 'open'` 的承诺是「已对账于**当前**本体」。
-//! 从前 `update_relation_type` 只管写：放宽一条公理，上一轮检出的 open 行
-//! 原样留着——下一次导出会把一个只在旧判据下成立的发现说成是现在的。
-//! 这里钉的是同一条事务里做完的三件事：
+//! The promise of `axiom_violations.status = 'open'` is "reconciled against the **current** ontology".
+//! Previously `update_relation_type` only wrote: relaxing one axiom left the open rows found in the last round
+//! untouched — so the next export would present a finding that held only under the old criterion as if it were current.
+//! What is pinned here are three things done in the same transaction:
 //!
-//! 1. **旧判据下的检出先记下来**——动笔之前库里还是旧本体
-//! 2. **写完后按新本体重检出**——新的违规同一份提交里进来
-//! 3. **只在旧判据下成立的 open 行收 `criterion_changed`**——不是人裁的
-//!    （decided_by 空），是公理/签名换了；早就不成立的照旧删掉，与
-//!    `reasoning::run` 同一条清陈规矩
+//! 1. **Detections under the old criterion are recorded first** — before writing, the DB still holds the old ontology
+//! 2. **After writing, re-detect against the new ontology** — new violations enter in the same commit
+//! 3. **Open rows that held only under the old criterion receive `criterion_changed`** — not decided by a person
+//!    (decided_by is empty), but because the axiom or signature changed; those that were already not holding are deleted as before, following the same
+//!    clearing rule as `reasoning::run`
 //!
-//! 没动判据的编辑（label、描述）不跑检测——那是对账不必付的价。
+//! Edits that do not move the criterion (label, description) do not run detection — reconciliation is a cost that need not be paid there.
 
 use sqlx::PgPool;
 use utopia_core::models::RelationAxioms;
@@ -25,7 +25,7 @@ struct Fixture {
     person: Uuid,
     /// state + asymmetric
     reports_to: Uuid,
-    /// state，带 domain=[person]
+    /// state, with domain=[person]
     works_for: Uuid,
 }
 
@@ -147,7 +147,7 @@ async fn fact(pool: &PgPool, f: &Fixture, (s, p, o): (Uuid, Uuid, Uuid)) -> anyh
     Ok(id)
 }
 
-/// 某一行的现状：(status, resolution, decided_at)
+/// The current state of a row: (status, resolution, decided_at)
 async fn row_state(
     pool: &PgPool,
     id: Uuid,
@@ -177,8 +177,8 @@ async fn cleanup(pool: &PgPool, f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 放宽一条公理：open 行收 criterion_changed，不是删也不是继续开着；
-/// 把公理改回去，同一行重开——`criterion_changed` 是破约家族的一员
+/// Relaxing an axiom: open rows receive criterion_changed, neither deleted nor left open;
+/// put the axiom back and the same row reopens — `criterion_changed` is a member of the broken-contract family
 #[tokio::test]
 async fn relaxing_an_axiom_closes_its_finding_and_reinstating_reopens_it() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -202,7 +202,7 @@ async fn relaxing_an_axiom_closes_its_finding_and_reinstating_reopens_it() -> an
                 .fetch_one(&pool)
                 .await?;
 
-        // 改判据：asymmetric 关掉。同一事务里这行该被收编成 criterion_changed
+        // Change the criterion: asymmetric turned off. In the same transaction this row should be absorbed into criterion_changed
         ontology::update_relation_type(
             &pool,
             f.kb,
@@ -228,7 +228,7 @@ async fn relaxing_an_axiom_closes_its_finding_and_reinstating_reopens_it() -> an
         );
         anyhow::ensure!(decided, "decided_at should mark when it stopped being open");
 
-        // 改回来：同一处矛盾又成立，同一行重开——不是另插一行
+        // Change it back: the same contradiction holds again, and the same row reopens — not a separately inserted row
         ontology::update_relation_type(
             &pool,
             f.kb,
@@ -256,7 +256,7 @@ async fn relaxing_an_axiom_closes_its_finding_and_reinstating_reopens_it() -> an
     result.and(cleanup)
 }
 
-/// domain 换了签名就换：原来开着的 signature 违规按新判据收场
+/// Changing a domain changes the signature: an open signature violation is resolved under the new criterion
 #[tokio::test]
 async fn a_domain_change_closes_the_signature_finding() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -266,7 +266,7 @@ async fn a_domain_change_closes_the_signature_finding() -> anyhow::Result<()> {
     let f = seed(&pool).await?;
 
     let result = async {
-        // works_for domain=person，而一个 thing 断言了它——signature 违规
+        // works_for domain=person, and a thing asserted it — a signature violation
         let (acme, alice) = (
             entity(&pool, &f, f.thing, "Acme").await?,
             entity(&pool, &f, f.thing, "Alice").await?,
@@ -279,7 +279,7 @@ async fn a_domain_change_closes_the_signature_finding() -> anyhow::Result<()> {
             "expected one signature finding"
         );
 
-        // domain 放宽到 thing：判据没了，这行收 criterion_changed
+        // Relax domain to thing: the criterion is gone, so this row receives criterion_changed
         ontology::update_relation_type(
             &pool,
             f.kb,
@@ -316,8 +316,8 @@ async fn a_domain_change_closes_the_signature_finding() -> anyhow::Result<()> {
     result.and(cleanup)
 }
 
-/// 不动判据的编辑不跑对账：一条只在旧检测里才「成立过」的 open 行，
-/// 换 label 不碰它，真改判据时按早就陈掉的处置——删掉，不是 criterion_changed
+/// An edit that does not move the criterion does not run reconciliation: an open row that held only under the old detection,
+/// touched by changing the label, is not affected; when the criterion really changes, it is handled as stale long ago — deleted, not criterion_changed
 #[tokio::test]
 async fn a_label_edit_leaves_the_ledger_alone() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -332,8 +332,8 @@ async fn a_label_edit_leaves_the_ledger_alone() -> anyhow::Result<()> {
             entity(&pool, &f, f.thing, "B").await?,
         );
         let f1 = fact(&pool, &f, (a, f.works_for, b)).await?;
-        // 一行检出函数永远不会产出的 open 行（自环挂着 functional 键）：
-        // 它早就陈了，下一次对账该删掉而不是收编
+        // A row that the detection function would never produce (a self-loop carrying a functional key):
+        // it is stale long ago, so the next reconciliation should delete it, not absorb it
         let stray = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO axiom_violations (id, kb_id, kind, left_fact, right_fact)
@@ -345,8 +345,8 @@ async fn a_label_edit_leaves_the_ledger_alone() -> anyhow::Result<()> {
         .execute(&pool)
         .await?;
 
-        // 只改 label：判据没动，不跑检测——陈行原样留着（检出是有代价的，
-        // 不该为一次改名付）
+        // Only the label changes: the criterion is unchanged, so detection is not run — stale rows are left as they are (detection has a cost,
+        // which should not be paid for a rename)
         ontology::update_relation_type(
             &pool,
             f.kb,
@@ -366,8 +366,8 @@ async fn a_label_edit_leaves_the_ledger_alone() -> anyhow::Result<()> {
             "a label-only edit must not touch violation state"
         );
 
-        // 真改判据（domain 从 person 换成 thing）：这行不在旧基线里
-        //（检出从没产出过它）——删掉，与 run() 的清陈同一条规矩
+        // Really changing the criterion (domain from person to thing): this row is not in the old baseline
+        //(detection never produced it) — delete it, the same rule as stale clearing in run()
         ontology::update_relation_type(
             &pool,
             f.kb,
@@ -393,7 +393,7 @@ async fn a_label_edit_leaves_the_ledger_alone() -> anyhow::Result<()> {
     result.and(cleanup)
 }
 
-/// 父链也是判据：给类挂上父类后签名对上了，open 违规当场收编
+/// The parent chain is also part of the criterion: after attaching a parent class so the signature matches, an open violation is absorbed on the spot
 #[tokio::test]
 async fn a_new_parent_closes_the_signature_finding() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -403,7 +403,7 @@ async fn a_new_parent_closes_the_signature_finding() -> anyhow::Result<()> {
     let f = seed(&pool).await?;
 
     let result = async {
-        // works_for domain=person；thing ⊏ person——thing 断言它算违规
+        // works_for domain=person; thing ⊏ person — thing asserting it is a violation
         let (acme, alice) = (
             entity(&pool, &f, f.thing, "Acme").await?,
             entity(&pool, &f, f.thing, "Alice").await?,
@@ -412,7 +412,7 @@ async fn a_new_parent_closes_the_signature_finding() -> anyhow::Result<()> {
         reasoning::run(&pool, f.kb).await?;
         anyhow::ensure!(open_count(&pool, &f).await? == 1);
 
-        // 给 thing 挂上 person 当父类：签名沿祖先链判，这就对上了
+        // Attach person as thing's parent class: the signature is judged along the ancestor chain, and now it matches
         ontology::update_entity_type(
             &pool,
             f.kb,
@@ -446,9 +446,9 @@ async fn a_new_parent_closes_the_signature_finding() -> anyhow::Result<()> {
     result.and(cleanup)
 }
 
-/// 删掉被别人的 `sub_property_of` 指着的关系，也是一次判据变动：
-/// 0070 把那条外键建成 DEFERRABLE SET NULL——提交才落地，所以得在事务里
-/// 先显式断链再对账。断链之后靠它派生的发现不该还在
+/// Deleting a relation that another's `sub_property_of` points at is also a change of criterion:
+/// 0070 made that foreign key DEFERRABLE SET NULL — it only lands on commit, so within the transaction one must
+/// first explicitly break the link and then reconcile. After the link is broken, findings derived through it should no longer exist
 #[tokio::test]
 async fn deleting_a_linked_relation_reconciles_what_depended_on_it() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -458,8 +458,8 @@ async fn deleting_a_linked_relation_reconciles_what_depended_on_it() -> anyhow::
     let f = seed(&pool).await?;
 
     let result = async {
-        // manages 是 functional 的超属性：supervises ⊑ manages——零断言，
-        // 只活在派生链上，所以它能被删
+        // manages is a functional super-property of supervises ⊑ manages — zero assertions,
+        // it lives only on the derived chain, so it can be deleted
         let (manages, supervises) = (Uuid::now_v7(), Uuid::now_v7());
         sqlx::query(
             "INSERT INTO relation_types (id, kb_id, key, label, temporal, functional)
@@ -486,8 +486,8 @@ async fn deleting_a_linked_relation_reconciles_what_depended_on_it() -> anyhow::
         fact(&pool, &f, (alice, supervises, carol)).await?;
         fact(&pool, &f, (alice, supervises, dave)).await?;
         reasoning::run(&pool, f.kb).await?;
-        // supervises ⊑ manages 派生出 manages(alice→carol) 与 manages(alice→dave)：
-        // 两条派生撞上 functional——规则对层的发现进 ontology_defects
+        // supervises ⊑ manages derives manages(alice→carol) and manages(alice→dave):
+        // the two derivations collide with functional — the rule's findings for the layer go into ontology_defects
         let defects: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM ontology_defects
               WHERE kb_id = $1 AND kind = 'rules_disagree'",
@@ -500,8 +500,8 @@ async fn deleting_a_linked_relation_reconciles_what_depended_on_it() -> anyhow::
             "expected one rules_disagree defect, got {defects}"
         );
 
-        // manages 零断言可以删：先断 supervises 的链再删再对账——发现随之消失，
-        // 不留「一条只对已删判据成立的发现」走出提交点
+        // manages has zero assertions and can be deleted: first break the chain from supervises, then delete and reconcile — the findings disappear with it,
+        // so no finding "that holds only for a criterion already deleted" survives past the commit point
         ontology::delete_relation_type(&pool, f.kb, manages).await?;
         let left: i64 =
             sqlx::query_scalar("SELECT count(*) FROM ontology_defects WHERE kb_id = $1")
@@ -525,9 +525,9 @@ async fn deleting_a_linked_relation_reconciles_what_depended_on_it() -> anyhow::
     result.and(cleanup)
 }
 
-/// 证据漂移不是身份漂移：行里留的 `path` 是上一轮拍下的组员集，检出重算
-/// 时它可以变——分档比的是 `(kind, left, right)`，不是那张旧照片。一条
-/// 旧判据下确实检得出的违规，不能因为存的证据换了组就当成「早就陈了」删掉
+/// Evidence drift is not identity drift: the `path` kept in the row is the member set photographed in the last round, and re-computation in detection
+/// may change it — tiering compares `(kind, left, right)`, not that old photograph. One
+/// violation that really was detectable under the old criterion must not be deleted as "stale long ago" just because the stored evidence now has a different group
 #[tokio::test]
 async fn drifted_evidence_still_closes_as_criterion_changed() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -552,8 +552,8 @@ async fn drifted_evidence_still_closes_as_criterion_changed() -> anyhow::Result<
                 .fetch_one(&pool)
                 .await?;
 
-        // 模拟上一轮检出留下的旧证据：path 组员漂移过，端点没变——
-        // 这还是同一处违规（0054：非环种类按 (kind,left,right) 认身份）
+        // Simulate old evidence left by the last detection: the path members drifted, but the endpoints did not change —
+        // it is still the same violation (0054: non-cycle kinds are identified by (kind,left,right))
         sqlx::query("UPDATE axiom_violations SET path = $2 WHERE id = $1")
             .bind(id)
             .bind(&[f1, f3][..])
@@ -587,8 +587,8 @@ async fn drifted_evidence_still_closes_as_criterion_changed() -> anyhow::Result<
     result.and(cleanup)
 }
 
-/// 断链同样改判据：`update_relation_type` 把 `sub_property_of` 摘掉，
-/// 靠它派生的发现当场清掉——与 `delete_relation_type` 同一条规矩
+/// Breaking the link also changes the criterion: `update_relation_type` removes `sub_property_of`,
+/// and the findings derived through it are cleared on the spot — the same rule as `delete_relation_type`
 #[tokio::test]
 async fn unlinking_a_sub_property_reconciles_what_depended_on_it() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -633,7 +633,7 @@ async fn unlinking_a_sub_property_reconciles_what_depended_on_it() -> anyhow::Re
         .await?;
         anyhow::ensure!(defects == 1, "expected one rules_disagree defect");
 
-        // 摘掉 supervises ⊑ manages：判据变了，派生链断——发现随提交一起清
+        // Remove supervises ⊑ manages: the criterion changed, the derivation chain is broken — the findings are cleared with the commit
         ontology::update_relation_type(
             &pool,
             f.kb,
@@ -664,7 +664,7 @@ async fn unlinking_a_sub_property_reconciles_what_depended_on_it() -> anyhow::Re
     result.and(cleanup)
 }
 
-/// 删掉一个牵着判据的类，同一事务里把靠着它的发现收掉
+/// Deleting a class that a criterion hangs on: in the same transaction, the findings depending on it are absorbed
 #[tokio::test]
 async fn deleting_a_domain_class_closes_the_signature_finding() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -682,7 +682,7 @@ async fn deleting_a_domain_class_closes_the_signature_finding() -> anyhow::Resul
         reasoning::run(&pool, f.kb).await?;
         anyhow::ensure!(open_count(&pool, &f).await? == 1);
 
-        // person 是 works_for 的 domain：删掉它，判据跟着没了
+        // person is works_for's domain: deleting it, and the criterion goes with it
         ontology::delete_entity_type(&pool, f.kb, f.person).await?;
         anyhow::ensure!(
             open_count(&pool, &f).await? == 0,

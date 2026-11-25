@@ -1,11 +1,11 @@
-//! 停用账号的四条硬性质——打在真库上（见 `users.deactivated_at`）。
+//! Four hard properties of a deactivated account — run against a real store (see `users.deactivated_at`).
 //!
-//! 软删除的风险全在「漏过滤一处」：只要有一条读 `users` 的路径忘了带
-//! `deactivated_at IS NULL`，停用就成了摆设，而且**不会有任何报错**。
-//! 所以这几条守的不是函数，是**路径**。
+//! All the risk of soft-delete lies in "one path forgot to filter": if any single path that reads `users` forgets to include
+//! `deactivated_at IS NULL`, deactivation becomes a showpiece, and **with no error of any kind**.
+//! So these guard not a function but **paths**.
 //!
-//! 反过来，归因那几处必须**照旧查得到**：审计事件、合并日志、改类账本的
-//! `actor_id` 指着这个人，而那些是审计材料——人走了不等于那件事没发生。
+//! The reverse also holds: the attribution sites must **still be found as before**: audit events, the merge log, and the type-change ledger
+//! have `actor_id` pointing at this person, and those are audit material — the person leaving does not mean that the event did not happen.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -52,15 +52,15 @@ async fn a_retired_account_cannot_get_back_in() -> anyhow::Result<()> {
 
         utopia_store::accounts::deactivate_user(&pool, b, a).await?;
 
-        // 登录这条路
+        // The login path
         assert!(
             utopia_store::accounts::find_user_by_email(&pool, &email)
                 .await?
                 .is_none(),
             "停用的账号还能按 email 找到——登录挡不住"
         );
-        // **已经签发出去的 token 那条路**。会话校验走 find_user_by_id，
-        // 所以停用立即生效，不必等 token 过期
+        // **The path for tokens already issued.** Session validation goes through find_user_by_id,
+        // so deactivation takes effect immediately, without waiting for the token to expire
         assert!(
             utopia_store::accounts::find_user_by_id(&pool, b)
                 .await?
@@ -68,7 +68,7 @@ async fn a_retired_account_cannot_get_back_in() -> anyhow::Result<()> {
             "停用的账号还能按 id 找到——已签发的 token 仍然有效"
         );
 
-        // 归因照旧：那一行还在，只是打了时间戳
+        // Attribution unchanged: the row is still there, only stamped with a time
         let still_there: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id = $1")
             .bind(b)
             .fetch_one(&pool)
@@ -109,10 +109,10 @@ async fn the_last_admin_and_oneself_are_protected() -> anyhow::Result<()> {
             "最后一个管理员不能停用，否则组织从此没人能管成员"
         );
 
-        // 幂等：重复停用不是错误
+        // Idempotent: deactivating twice is not an error
         utopia_store::accounts::deactivate_user(&pool, b, a).await?;
 
-        // 恢复之后一切照旧
+        // After restoring, everything is as before
         utopia_store::accounts::reactivate_user(&pool, b).await?;
         assert!(
             utopia_store::accounts::find_user_by_id(&pool, b)

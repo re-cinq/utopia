@@ -1,5 +1,5 @@
-//! `paths_between`（#558）：两点之间的链，短的在前，每条边都要在 `at` 成立，
-//! 枢纽不穿越，记录轴照走。
+//! `paths_between` (#558): chains between two points, shortest first, with every edge holding at `at`;
+//! hubs are not traversed, and the record axis is followed as usual.
 
 use sqlx::PgPool;
 use utopia_store::graph::Validity;
@@ -10,9 +10,9 @@ fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
     s.parse().unwrap()
 }
 
-/// Acme 与 Beta 之间四条路：直连（2023 起）、经 Bob（Acme 雇员 2016–2020-12，
-/// 2021 起创办 Beta）、经 Dan（雇员 2016–2019，2021 起创办 Beta）、经 Carol 和
-/// Gamma（Carol 2018 起在 Acme，2019 起为 Gamma 顾问，Gamma 2020 起与 Beta 合作）
+/// Four routes between Acme and Beta: the direct link (from 2023), via Bob (Acme employee 2016–2020-12,
+/// founded Beta from 2021), via Dan (employee 2016–2019, founded Beta from 2021), and via Carol and
+/// Gamma (Carol at Acme from 2018, advisor to Gamma from 2019, Gamma partnered with Beta from 2020)
 struct Fixture {
     org: Uuid,
     kb: Uuid,
@@ -131,7 +131,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
             span("2016-01-01T00:00:00Z", Some("2019-01-01T00:00:00Z")),
         ),
         (dan, founder, beta, span("2021-01-01T00:00:00Z", None)),
-        // 同一条边的第二份事实（只有锚点、没日期的那种）：路径不该因此多出一条
+        // The second fact on the same edge (the kind with only an anchor and no date): the path must not gain an extra edge because of it
         (
             bob,
             founder,
@@ -173,7 +173,7 @@ async fn teardown(pool: &PgPool, f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 路径读成「途经谁」，好断言
+/// Reads the path as "through whom", so it can be asserted
 fn via(p: &Path) -> Vec<Uuid> {
     p.nodes[1..p.nodes.len() - 1].to_vec()
 }
@@ -197,7 +197,7 @@ async fn paths_come_shortest_first_and_stop_at_max_hops() -> anyhow::Result<()> 
         let two: Vec<Vec<Uuid>> = all[1..3].iter().map(via).collect();
         assert!(two.contains(&vec![f.bob]) && two.contains(&vec![f.dan]));
         assert_eq!(via(&all[3]), vec![f.carol, f.gamma]);
-        // 边自带两端与谓词，顺着走的边主语就是上一个节点
+        // An edge carries both ends and its predicate, so going forward the edge's subject is the previous node
         let chain = &all[3];
         assert_eq!(chain.edges[0].subject_id, f.acme);
         assert_eq!(chain.edges[0].object_name, "Carol");
@@ -213,7 +213,7 @@ async fn paths_come_shortest_first_and_stop_at_max_hops() -> anyhow::Result<()> 
         let one = paths_between(&pool, f.kb, f.acme, f.beta, None, None, limits(1)).await?;
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].edges[0].fact_id, f.direct);
-        // 反向问同样走得通
+        // Asking in reverse works the same way
         let back =
             paths_between(&pool, f.kb, f.beta, f.acme, None, None, Limits::default()).await?;
         assert_eq!(back.len(), 4);
@@ -225,7 +225,7 @@ async fn paths_come_shortest_first_and_stop_at_max_hops() -> anyhow::Result<()> 
     run
 }
 
-/// 带 `at` 时每一条边都得在那一刻成立：2021 年中，Acme 到 Beta 只剩 Carol–Gamma 那条
+/// With `at`, every edge must hold at that moment: in mid-2021, Acme to Beta leaves only the Carol–Gamma route
 #[tokio::test]
 async fn a_path_holds_only_when_every_edge_holds() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -267,7 +267,7 @@ async fn a_path_holds_only_when_every_edge_holds() -> anyhow::Result<()> {
     run
 }
 
-/// 枢纽不往下展：Carol 一多几条边就不再是三跳路径的中转
+/// Hubs are not expanded: once Carol has a few more edges, she is no longer a transit point for three-hop paths
 #[tokio::test]
 async fn a_hub_is_not_walked_through() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -282,7 +282,7 @@ async fn a_hub_is_not_walked_through() -> anyhow::Result<()> {
         };
         let before = paths_between(&pool, f.kb, f.acme, f.beta, None, None, tight).await?;
         assert_eq!(before.len(), 4, "Carol 两条边，不算枢纽");
-        // Carol 再顾问三家：度数 5，超过上限
+        // Carol advises three more firms: degree 5, above the cap
         for _ in 0..3 {
             let other = Uuid::now_v7();
             sqlx::query(
@@ -309,7 +309,7 @@ async fn a_hub_is_not_walked_through() -> anyhow::Result<()> {
         let loose =
             paths_between(&pool, f.kb, f.acme, f.beta, None, None, Limits::default()).await?;
         assert_eq!(loose.len(), 4, "默认上限下她还只是个普通节点");
-        // 两跳路径不受枢纽限制：Bob 和 Dan 的度数不进这条判断，两端更不进
+        // Two-hop paths are not subject to the hub limit: Bob's and Dan's degrees do not enter this judgment, and the endpoints even less
         let _ = (f.employee, f.founder, f.partner, f.bob, f.dan);
         anyhow::Ok(())
     }
@@ -318,8 +318,8 @@ async fn a_hub_is_not_walked_through() -> anyhow::Result<()> {
     run
 }
 
-/// 记录轴：直连那条边今天才录入，其余前天就在；问「昨天的记录」走不到它，
-/// 不带 as_of 是此刻的记录（记录轴上 NULL 即现在，0019），四条都在
+/// Record axis: the direct edge was entered only today, the rest existed the day before; asking about "yesterday's record" cannot reach it,
+/// without `as_of` is the record as of now (on the record axis NULL means now, 0019), and all four are present
 #[tokio::test]
 async fn a_path_reads_the_base_as_it_was() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {

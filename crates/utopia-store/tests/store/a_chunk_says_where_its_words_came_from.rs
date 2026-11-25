@@ -1,10 +1,10 @@
-//! 0040：一块文字从哪来，存在分块上。
+//! 0040: where a piece of text came from, stored on the chunk.
 //!
-//! 1. **出处原样落库、原样认领。** 同一份正文里一块原文、一块扫描页，读回来各是各的；
-//!    再处理一遍，出处没变的块认领原行（id 不变），同一句话换了出处算新块。
-//! 2. **锚点的形状由来源定。** 转写必须带说话人，原文不许带锚点——数据库拒收。
+//! 1. **Provenance is stored and claimed as-is.** Within the same body, one chunk of original text and one chunk from a scanned page read back as separate things;
+//!    when processed again, a chunk whose provenance is unchanged claims its original row (same id), and the same sentence with a changed provenance counts as a new chunk.
+//! 2. **The anchor's shape is determined by the source.** A transcript must carry a speaker; original text must not carry an anchor — the database rejects it.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is not set. It builds and tears down its own data and never touches an existing DB.
 
 use sqlx::PgPool;
 use utopia_ingest::{ChunkPiece, Origin, Provenance};
@@ -104,7 +104,7 @@ async fn a_chunk_keeps_its_provenance_and_is_claimed_by_it() -> anyhow::Result<(
             Some(serde_json::json!(1))
         );
 
-        // 再处理一遍：出处没变的认领原行；同一句话换到另一页，是新的一块
+        // Processed again: a chunk whose provenance is unchanged claims its original row; the same sentence moved to another page is a new chunk
         let second = vec![
             piece(0, "Rent is paid monthly.", Provenance::stated()),
             piece(1, "The rent is 1,000 per month.", ocr(2)),
@@ -121,7 +121,7 @@ async fn a_chunk_keeps_its_provenance_and_is_claimed_by_it() -> anyhow::Result<(
             Some(serde_json::json!(2))
         );
 
-        // 锚点形状：转写必须分得出说话人；原文不带锚点
+        // Anchor shape: a transcript must distinguish speakers; original text carries no anchor
         let no_speaker = Provenance {
             origin: Origin::Transcribed,
             model: Some("whisper".into()),

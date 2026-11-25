@@ -1,7 +1,7 @@
-//! 名字是关于实体的一条事实（0041 决定 1）。
+//! A name is a fact about an entity (0041 decision 1).
 //!
-//! 建实体时本名就是一条名字事实；记下的别名让后来的提及找得到它；名字不进事实列表、
-//! 不算度数；合并把名字当普通事实搬走，撤回合并再搬回来。
+//! When an entity is created, its canonical name is already a name fact; a recorded alias lets later mentions find it; names are not in the fact list,
+//! do not count towards degree; a merge moves names as ordinary facts, and undoing the merge moves them back.
 
 use sqlx::PgPool;
 use utopia_store::{graph, names, resolution};
@@ -57,7 +57,7 @@ async fn teardown(pool: &PgPool, f: &Fixture) -> anyhow::Result<()> {
 }
 
 async fn mention(pool: &PgPool, f: &Fixture, name: &str) -> anyhow::Result<resolution::Resolution> {
-    // 不给向量：召回到候选就走「并到事实最多的那个」，量的正是召回找不找得到
+    // No vector given: a candidate is recalled and then the one with the most facts is taken; what is measured is whether recall can find it at all
     Ok(
         resolution::resolve_mention(pool, f.kb, Some(f.equipment), name, None, None, None, &[])
             .await?,
@@ -85,7 +85,7 @@ async fn a_new_entity_carries_its_name_and_an_alias_brings_a_later_mention_home(
         assert_eq!(values(&n), vec!["海洋探测器1号"], "本名是一条名字事实");
         assert!(n[0].canonical);
 
-        // 没有桥的简称：另起一个实体（这正是 0041 要修的，这一刀靠记下名字修）
+        // A short name with no bridge: a separate entity is created (this is exactly what 0041 is meant to fix; this slice fixes it by recording the name)
         let before = mention(&pool, &f, "海探2").await?;
         assert!(before.created && before.entity_id != probe.entity_id);
 
@@ -98,7 +98,7 @@ async fn a_new_entity_carries_its_name_and_an_alias_brings_a_later_mention_home(
             Some(probe.entity_id)
         );
 
-        // 同一个名字再记一次只有一行
+        // Recording the same name again yields only one row
         names::record(&pool, f.kb, probe.entity_id, " 海探1 ", None, None).await?;
         let n = names::for_entity(&pool, f.kb, probe.entity_id, None).await?;
         assert_eq!(values(&n), vec!["海探1", "海洋探测器1号"]);
@@ -182,7 +182,7 @@ async fn a_name_another_entity_already_has_queues_the_pair_without_merging() -> 
     let pool = PgPool::connect(&url).await?;
     let f = seed(&pool).await?;
     let run = async {
-        // 倒序到达：只写简称的那篇先建出「海探1」，写着全称的那篇后到
+        // Arrived out of order: the document that writes only the short name creates "Haitan 1" first, and the one that writes the full name arrives later
         let short = mention(&pool, &f, "海探1").await?.entity_id;
         let full = mention(&pool, &f, "海洋探测器1号").await?.entity_id;
         names::record(&pool, f.kb, full, "海探1", None, None).await?;
@@ -211,7 +211,7 @@ async fn a_name_another_entity_already_has_queues_the_pair_without_merging() -> 
                 .fetch_one(&pool)
                 .await?;
         assert_eq!(merged, None, "只排队，不合并");
-        // 再报一次同一个名字不重复排
+        // Reporting the same name again does not queue it twice
         assert_eq!(
             names::pair_shared_name(&pool, f.kb, full, "海探1").await?,
             1
@@ -254,7 +254,7 @@ async fn the_adjudicator_sees_the_other_names_and_never_the_shared_one() -> anyh
     run
 }
 
-/// 分开过的一对，同一个简称再被读到也不再排队：分开这个决定要记得住
+/// A pair that was separated: when the same short name is read again it is not queued again — the decision to separate must be remembered
 #[tokio::test]
 async fn a_pair_kept_apart_is_not_queued_again() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -295,9 +295,9 @@ async fn a_pair_kept_apart_is_not_queued_again() -> anyhow::Result<()> {
     run
 }
 
-/// 名字属性不是一条普通属性：按 key 找不到，改不了，也不进本体向量索引。
-/// 否则本体提议能把「简称」一类的值归并到它上面、唯一性面板能把它标成 functional，
-/// 名字的核对与配对就都绕过去了
+/// A name attribute is not an ordinary attribute: it cannot be found by key, cannot be changed, and does not enter the ontology vector index.
+/// Otherwise ontology proposals could merge values such as "short names" into it, and the uniqueness panel could mark it functional,
+/// and the name checks and pairing would all be bypassed
 #[tokio::test]
 async fn the_name_attribute_is_not_an_ordinary_attribute() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -346,8 +346,8 @@ async fn the_name_attribute_is_not_an_ordinary_attribute() -> anyhow::Result<()>
     run
 }
 
-/// 一段只写了名字的引文不是原文：给治理 agent 的片段里没有它，带整句的别名照样有。
-/// 删掉文档，实体的本名还在，只凭这篇文档读到的别名跟着作废
+/// A quote that writes only a name is not the original text: it is not in the snippet given to the governance agent, but an alias carrying a whole sentence still is.
+/// Delete the document and the entity's canonical name remains; only aliases read from this document alone are invalidated along with it
 #[tokio::test]
 async fn a_bare_name_is_not_a_quote_and_a_deleted_document_keeps_the_name() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {

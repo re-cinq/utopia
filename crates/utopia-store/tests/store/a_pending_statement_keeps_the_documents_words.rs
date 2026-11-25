@@ -1,12 +1,12 @@
-//! 等人点头的一条陈述也留着文档自己的字（0044 第一刀的记忆侧，迁移 0062）——打在真库上。
+//! A statement awaiting a person's nod also keeps the document's own words (memory side of 0044 slice 1, migration 0062), run against a real DB.
 //!
-//! 对话里说「Acme 把总部搬到了深圳」，抽出来的不再是一条带本体谓词的三元组，而是一条
-//! 开放陈述：短语照写、角色词属性、照抄的时间词、引文在块里的位置。它先在
-//! `pending_facts` 里等着；人点头之后按 `insert_open_statement` 那条路进账本——
-//! `layer = 'open'`、没有谓词、不写 `valid_*`、证据带偏移、属性与时间词各归各表；
-//! 摇头之后挡的是**这句话**（短语进了键），同一对实体之间换一句话照样能提。
+//! The conversation says "Acme moved its headquarters to Shenzhen", and what is extracted is no longer a triple with an ontology predicate, but an
+//! open statement: the phrase is kept as written, with role-word attributes, time words copied verbatim, and the quote's position in the block. It first
+//! waits in `pending_facts`; once a person nods, it enters the ledger along the `insert_open_statement` path —
+//! `layer = 'open'`, no predicate, no `valid_*` written, evidence carries offsets, and attributes and time words each go to their own table;
+//! after a shake of the head, what is blocked is **this sentence** (the phrase is part of the key), so the same pair of entities can still be proposed with a different sentence.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is not set. It builds and tears down its own data and never touches an existing DB.
 
 use sqlx::PgPool;
 use utopia_store::pending::{self, Outcome, Proposal};
@@ -17,13 +17,13 @@ const PHRASE: &str = "moved its headquarters to";
 const TIME_WORDS: &str = "on 2026-03-15";
 
 struct Fixture {
-    /// 夹具建的 org，收尾时从它删起（级联）
+    /// The org built by the fixture, deleted from first at teardown (cascading)
     org: Uuid,
     kb: Uuid,
     acme: Uuid,
     shenzhen: Uuid,
     chunk: Uuid,
-    /// 那句记忆入库后的全文——带 `[YYYY-MM-DD HH:MM] ` 前缀，偏移按它算
+    /// The full text of that memory once stored — with the `[YYYY-MM-DD HH:MM] ` prefix; the offsets are computed against it
     text: String,
 }
 
@@ -54,7 +54,7 @@ async fn fixture(pool: &PgPool) -> anyhow::Result<Fixture> {
             .execute(pool)
             .await?;
     }
-    // 那句记忆，走产品自己的路落成 chunk
+    // That memory sentence becomes a chunk through the product's own path
     let (_doc, chunk) =
         utopia_store::memory::append_episode(pool, kb, SENTENCE, chrono::Utc::now()).await?;
     let text: String = sqlx::query_scalar("SELECT text FROM chunks WHERE id = $1")
@@ -71,7 +71,7 @@ async fn fixture(pool: &PgPool) -> anyhow::Result<Fixture> {
     })
 }
 
-/// 引文在块里的字符偏移：服务端搜文本算出来的那个数——从入库后的文本算，不从字面量算
+/// The character offset of the quote within the block: the number the server computes by searching the text — computed from the text as stored, not from a literal
 fn span_of(text: &str, quote: &str) -> (i32, i32) {
     let start = text.find(quote).expect("quote is in the chunk");
     let chars_before = text[..start].chars().count() as i32;
@@ -124,7 +124,7 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
             )
         };
 
-        // 1. 提议不上图；队列里的那一条带着文档自己的字
+        // 1. The proposal does not go onto the graph; the one in the queue carries the document's own words
         let first = propose(PHRASE).await?;
         assert!(matches!(first, Outcome::Proposed(_)), "第一次该进队列");
         assert_eq!(live_facts(&pool, f.kb).await?, 0, "提议阶段图上不能有活边");
@@ -143,10 +143,10 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
         );
         assert_eq!(q.quote, f.text, "原句要跟着提议一起给人看");
 
-        // 2. 同一句重抽不重复提
+        // 2. Re-extracting the same sentence does not propose it again
         assert_eq!(propose(PHRASE).await?, Outcome::AlreadyPending);
 
-        // 3. 点头：按开放陈述进账本
+        // 3. Nod: enters the ledger as an open statement
         let Outcome::Proposed(id) = first else {
             unreachable!()
         };
@@ -187,7 +187,7 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
             "记录轴总是有：记忆文档没有文档日期，落成此刻"
         );
 
-        // 证据指回那句记忆，带着引文在块里的位置
+        // Evidence points back at that memory sentence, with the quote's position in the block
         let (ev_chunk, ev_proposed, ev_start, ev_end): (
             Uuid,
             Option<String>,
@@ -203,7 +203,7 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
         assert_eq!(ev_chunk, f.chunk, "证据要指回那句记忆");
         assert_eq!(ev_proposed.as_deref(), Some(PHRASE), "表层谓词就是短语");
         assert_eq!((ev_start, ev_end), (Some(quote_start), Some(quote_end)));
-        // 引文就是偏移截出的那句话，不是整块（整块带时间戳前缀，还会被截到 120 字）
+        // The quote is exactly the sentence cut out by the offsets, not the whole block (the whole block carries a timestamp prefix, and would also be cut to 120 characters)
         let (ev_quote, at_span): (Option<String>, String) = sqlx::query_as(
             "SELECT fe.quote, substr(c.text, fe.quote_start + 1, fe.quote_end - fe.quote_start)
                FROM fact_evidence fe JOIN chunks c ON c.id = fe.chunk_id WHERE fe.fact_id = $1",
@@ -218,7 +218,7 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
         );
         assert_eq!(ev_quote.as_deref(), Some(SENTENCE));
 
-        // 角色词属性按文档的角色词落
+        // Role-word attributes are written with the document's role words
         let qualifier_rows: Vec<(String, Option<serde_json::Value>, Option<Uuid>)> =
             sqlx::query_as(
                 "SELECT role, value, entity_id FROM statement_qualifiers WHERE fact_id = $1",
@@ -231,7 +231,7 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
         assert_eq!(qualifier_rows[0].1, Some(serde_json::json!("2026-03-15")));
         assert!(qualifier_rows[0].2.is_none());
 
-        // 时间词照抄，偏移在块里能复原出那几个字
+        // Time words are copied verbatim; the offsets can recover those characters within the block
         let mentions: Vec<(String, i32, String)> = sqlx::query_as(
             "SELECT m.text, m.char_start, substr(c.text, m.char_start + 1, length(m.text))
                FROM time_mentions m JOIN chunks c ON c.id = m.chunk_id
@@ -250,10 +250,10 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
             "点头后队列清空"
         );
 
-        // 4. 图上已有的不再问
+        // 4. Something already on the graph is not asked about again
         assert_eq!(propose(PHRASE).await?, Outcome::AlreadyAsserted);
 
-        // 5. 摇头挡的是这句话：短语进了拒绝记录；同一对实体之间换一句话照样能提
+        // 5. The shake of the head blocks this sentence: the phrase went into the refusal record; the same pair of entities can still be proposed with another sentence
         let Outcome::Proposed(bad) = propose("closed its office in").await? else {
             panic!("换一个短语该是新提议");
         };
@@ -274,7 +274,7 @@ async fn a_pending_statement_keeps_the_documents_words() -> anyhow::Result<()> {
     }
     .await;
 
-    // 删掉夹具自己建的 org，级联带走工作区、知识库与其余一切
+    // Delete the org the fixture itself created; the cascade takes the workspace, the KB and everything else with it.
     sqlx::query("DELETE FROM organizations WHERE id = $1")
         .bind(f.org)
         .execute(&pool)

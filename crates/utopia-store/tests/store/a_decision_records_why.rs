@@ -1,14 +1,14 @@
-//! 一次裁决记下的是「为什么」（0026），打在真库上。
+//! A verdict records "why" (0026), run against a real DB.
 //!
-//! 从前 `resolution_reviews` 记 status / decided_by / decided_at，`reason` 记的是
-//! 这一对**为什么被排进队列**。人拍板时想的那句话没有地方落，于是先例只有结果：
-//! 一次错误的合并被读成"这类该合"，错误洗成政策。
+//! Previously `resolution_reviews` recorded status / decided_by / decided_at, and `reason` recorded
+//! why **this pair was queued**. The sentence a person had in mind when deciding had nowhere to go, so precedents had only outcomes:
+//! one wrong merge was read as "this kind gets merged", laundering the mistake into policy.
 //!
-//! 三件事各自会以不同的方式坏掉：
-//! - **落库**：理由写进这一行，空白与只有空格算没写（不存一串空格）
-//! - **先例带理由**：治理与裁决器读先例走的是审计台账，不是这张表——所以理由
-//!   也得进 `detail.why`，`precedents_for` 才读得到，`render_lines` 才写得出
-//! - **老行不炸**：0026 之前的决定没有 why，`Precedent.why` 是 None，渲染照旧
+//! Three things can each break in a different way:
+//! - **Storage**: the reason is written onto this row; blank or whitespace-only counts as not written (a run of spaces is not stored)
+//! - **Precedents carry the reason**: governance and the adjudicator read precedents from the audit ledger, not from this table — so the reason
+//!   must also go into `detail.why`, for `precedents_for` to read it and `render_lines` to print it
+//! - **Old rows do not blow up**: decisions made before 0026 have no why, so `Precedent.why` is None and rendering proceeds as before
 
 use sqlx::PgPool;
 use utopia_core::models::{ReviewItem, ReviewSide};
@@ -119,7 +119,7 @@ async fn a_decision_keeps_its_reason_and_the_precedent_carries_it() -> anyhow::R
     let pool = PgPool::connect(&url).await?;
     let f = seed(&pool).await?;
 
-    // 人把它们分开，并说了为什么
+    // A person separated them, and said why
     utopia_store::resolution::decide_review(
         &pool,
         f.kb,
@@ -141,7 +141,7 @@ async fn a_decision_keeps_its_reason_and_the_precedent_carries_it() -> anyhow::R
         "理由落在这一行上，两头的空格去掉"
     );
 
-    // 先例走审计：路由把 why 写进 detail，这里照路由的写法记一笔
+    // Precedents go through the audit: the route writes why into detail, so here we record an entry the same way the route does
     utopia_store::audit::record(
         &pool,
         Some(f.kb),
@@ -170,7 +170,7 @@ async fn a_decision_keeps_its_reason_and_the_precedent_carries_it() -> anyhow::R
         "提示词里那一行要引用理由：{lines:?}"
     );
 
-    // 老行：没有 why 的决定照样是先例，只是没有理由
+    // Old rows: a decision with no why is still a precedent, just without a reason
     utopia_store::audit::record(
         &pool,
         Some(f.kb),
@@ -195,7 +195,7 @@ async fn a_decision_keeps_its_reason_and_the_precedent_carries_it() -> anyhow::R
         "没理由的那条不该凭空长出一句引文：{lines:?}"
     );
 
-    // 空理由不落库
+    // An empty reason is not stored
     let review2 = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO resolution_reviews (id, kb_id, left_id, right_id, score, reason, stage)

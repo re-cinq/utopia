@@ -1,4 +1,4 @@
-//! 同一条边上，先写 `65`（老库里的整数）再写 `65.0`：是同一个数，不是冲突。
+//! On one edge, writing `65` first (an integer in an older DB) and then `65.0`: it is the same number, not a conflict.
 
 use sqlx::PgPool;
 use uuid::Uuid;

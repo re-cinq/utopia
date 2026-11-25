@@ -1,13 +1,13 @@
-//! 算出来的结论打在真库上（0032 / #488）。
+//! A computed conclusion run against a real database (0032 / #488).
 //!
-//! 算式本身的用例在 `utopia-reason::rules`，纯逻辑、不起库。这里钉的是那一层
-//! 看不见的三样：
+//! The formula itself has its cases in `utopia-reason::rules`, pure logic that does not start a database. What is pinned here is three things at the layer
+//! that cannot be seen there:
 //!
-//! - 一棵存进 `conclude_expr` 的树，**编译回来还是同一棵**，算得出同一个数
-//! - **算式读的那几条读数一并进前提**——「这个数凭什么」在库里也得是真的
-//! - 写坏的算式在**写的时候**就被拦下，而不是等到物化时表现成「不推东西」
+//! - A tree stored in `conclude_expr` **compiles back to the same tree** and computes the same number
+//! - **The readings the formula reads are also added to the premises** — "why this number" must be true in the database too
+//! - A badly written formula is blocked **at write time**, rather than surfacing at materialization as "derives nothing"
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset. Creates and tears down its own; never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_store::business_rules::ConditionInput;
@@ -97,7 +97,7 @@ async fn attr(pool: &PgPool, f: &Fixture, predicate: Uuid, value: f64) -> anyhow
     Ok(id)
 }
 
-/// 只有一个条件：revenue 有记录。算式读的是 revenue 与 cost
+/// Only one condition: revenue has a record. The formula reads revenue and cost
 fn present_revenue(f: &Fixture) -> Vec<ConditionInput> {
     vec![ConditionInput {
         group: 0,
@@ -116,8 +116,8 @@ fn margin_expr(f: &Fixture) -> serde_json::Value {
     })
 }
 
-/// margin = revenue − cost，**走 `create` 写进去**（不是直接 INSERT：要过的
-/// 正是校验与序列化那一段），跑一遍，看落下来的值和前提。
+/// margin = revenue − cost, **written in through `create`** (not a direct INSERT: the checks and the serialization step
+/// are exactly what must pass), run once, and see the value and premises that come out.
 #[tokio::test]
 async fn a_computed_conclusion_lands_with_the_readings_it_read() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -168,8 +168,8 @@ async fn a_computed_conclusion_lands_with_the_readings_it_read() -> anyhow::Resu
             "300 − 120"
         );
 
-        // **算式读的两条都在前提里。** 条件只提到 revenue，可 cost 也让这个数
-        // 成立——漏掉它，这一行就说不出自己凭什么，改了 cost 也不会退场
+        // **Both readings the formula reads are in the premises.** The condition mentions only revenue, but cost also makes this number
+        // hold — leave it out and this row cannot say why it holds, and changing cost would not retire it
         let premises: Vec<(Option<Uuid>,)> = sqlx::query_as(
             "SELECT premise_fact_id FROM fact_derivations WHERE derived_fact_id = $1 ORDER BY seq",
         )
@@ -180,7 +180,7 @@ async fn a_computed_conclusion_lands_with_the_readings_it_read() -> anyhow::Resu
         assert_eq!(got.len(), 2);
         assert!(got.contains(&rev) && got.contains(&cost));
 
-        // 改掉 cost，值跟着变——这正是「算完抄回来当断言」做不到的那一半
+        // Change cost, and the value follows — this is exactly the half that "compute, then copy back as an assertion" cannot do
         sqlx::query("UPDATE facts SET object_value = $2 WHERE id = $1")
             .bind(cost)
             .bind(serde_json::json!({ "value": 50.0 }))
@@ -216,7 +216,7 @@ async fn a_computed_conclusion_lands_with_the_readings_it_read() -> anyhow::Resu
     run
 }
 
-/// 缺一条读数**不落行**，而不是落一行零。没记不等于零（0032）
+/// Missing one reading **does not land a row**, rather than landing a row of zero. Not recorded is not zero (0032)
 #[tokio::test]
 async fn a_missing_reading_lands_nothing() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -260,10 +260,10 @@ async fn a_missing_reading_lands_nothing() -> anyhow::Result<()> {
     run
 }
 
-/// 写坏的算式在**写的时候**就被拒，而不是等到物化时表现成「这条规则不推东西」。
+/// A badly written formula is rejected **at write time**, rather than surfacing at materialization as "this rule derives nothing".
 ///
-/// `not_in` 那次（#494）正是后一种：一条读不懂的条件让整条规则被静默跳过，
-/// 而规则页上它开着、看着好好的。这一组用例是那次的教训。
+/// The `not_in` case (#494) was the latter: a condition that could not be read silently skipped the whole rule,
+/// while on the rule page it stayed open and looked fine. This group of cases is the lesson from that incident.
 #[tokio::test]
 async fn a_broken_expression_is_refused_where_it_is_written() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {

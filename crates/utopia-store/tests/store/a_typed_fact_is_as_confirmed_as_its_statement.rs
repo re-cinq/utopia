@@ -1,9 +1,9 @@
-//! 类型化行跟着陈述走，「待确认」也跟着陈述判（RC-005）。
+//! Typed rows follow their statement, and "pending confirmation" is also judged by the statement (RC-005).
 //!
-//! 物化时类型化行抄一份陈述的证据。来源重推、同一条陈述再被说出，新分块上的证据落在
-//! 陈述上，类型化行手里只剩旧分块的那份——陈述现行、有活证据，它却被列成待确认。
-//! 这里钉住：有陈述来源的类型化行，只要哪条来源陈述现行、开放、证据落在活分块上，就不算
-//! 待确认；陈述的证据也全被取代了，两条一起算。没有陈述来源的行照旧判。
+//! When materializing, the typed row copies the statement's evidence. When a source is re-pushed and the same statement is said again, the new evidence lands
+//! on the statement, while the typed row still holds only the old chunk's copy: the statement is current and has live evidence, yet it is listed as pending confirmation.
+//! What is pinned here: a typed row with a statement source is not pending confirmation as long as one of its source statements is current, open, and has evidence on a live chunk;
+//! if the statement's evidence is also all superseded, both count together. Rows without a statement source are judged as before.
 
 use sqlx::PgPool;
 use utopia_store::{graph, materialize, review};
@@ -58,7 +58,7 @@ async fn a_typed_fact_is_unconfirmed_only_once_its_statement_is() -> anyhow::Res
         ))
         .execute(&pool)
         .await?;
-        // 物化：类型化行抄走陈述此刻的证据（第一版分块）
+        // Materialize: the typed row copies the statement's current evidence (first version's chunk)
         materialize::materialize(&pool, kb).await?;
         let typed: Uuid = sqlx::query_scalar(
             "SELECT f.id FROM facts f JOIN typed_fact_sources s ON s.fact_id = f.id
@@ -68,7 +68,7 @@ async fn a_typed_fact_is_unconfirmed_only_once_its_statement_is() -> anyhow::Res
         .fetch_one(&pool)
         .await?;
 
-        // 重推：第一版被取代，同一条陈述在第二版上又被说出
+        // Re-push: first version superseded, the same statement said again on the second version
         sqlx::raw_sql(&format!(
             "UPDATE chunks SET superseded_at = now() WHERE id = '{first}';
              INSERT INTO fact_evidence (fact_id,chunk_id,document_id,quote)

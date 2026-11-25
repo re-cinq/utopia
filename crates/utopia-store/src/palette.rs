@@ -1,56 +1,56 @@
-//! 实体类的配色：一套莫兰迪色板，加一个**按 key 取色**的确定性函数。
+//! Colour palette for entity classes: a Morandi palette, plus a deterministic function that **picks a colour by key**.
 //!
-//! ## 为什么要有它
+//! ## Why this exists
 //!
-//! 从前每个自动建出来的类都拿同一个 `#8ea5bd`——导入的、类型消解建的、
-//! 建库时铺的，全是那一个灰蓝。产品里明明有一套精选色板，但它**只在人手动
-//! 点开颜色选择器时才用得上**。于是：装一个 schema.org（1010 个类）进来，
-//! 得到的是 1010 个类共用一种颜色，图上一片灰。
+//! Previously every automatically created class got the same `#8ea5bd` — imported ones, ones built by type resolution,
+//! ones laid down when a KB is created, all that same grey-blue. The product has a curated palette, but it is **only reachable when a person manually
+//! opens the colour picker**. So: install schema.org (1010 classes) and
+//! you get 1010 classes sharing one colour, and a grey graph.
 //!
-//! 能力一直在，只是没接到自动那条路上。这个模块就是那截接线。
+//! The capability has always been there, it just was not wired into the automatic path. This module is that piece of wiring.
 //!
-//! ## 为什么是哈希而不是轮转
+//! ## Why a hash rather than round-robin
 //!
-//! 轮转（第 n 个类取第 n 个色）要维护一个计数器，而类是从好几条路建出来的
-//! （手动、导入、消解、建库），计数器就得跨路共享——那是个会不同步的状态。
-//! 按 key 哈希不需要状态：**同一个 key 永远同一个颜色**，无论它是谁建的、
-//! 第几个建的、重建过几次。重导一遍本体，颜色不会跳。
+//! Round-robin (the nth class takes the nth colour) needs a counter to maintain, and classes are created from several paths
+//! (manual, import, resolution, KB creation), so the counter would have to be shared across paths — a state that can drift out of sync.
+//! Hashing by key needs no state: **the same key is always the same colour**, whoever created it,
+//! whichever number it was, however many times it was rebuilt. Re-importing an ontology does not change colours.
 //!
-//! ## 为什么不用 `DefaultHasher`
+//! ## Why not `DefaultHasher`
 //!
-//! `std::collections::hash_map::DefaultHasher` 的种子**每个进程都不一样**
-//! （防哈希碰撞攻击）。拿它取色，服务器一重启同一个类就换颜色——
-//! 而颜色是用户用来认东西的。所以这里手写一个 FNV-1a：定死的常量，
-//! 定死的结果，跨进程跨机器都一样。
+//! The seed of `std::collections::hash_map::DefaultHasher` is **different in every process**
+//! (to guard against hash-collision attacks). Colouring with it means a class changes colour every time the server restarts —
+//! and colour is how users recognise things. So here a FNV-1a is hand-written: fixed constants,
+//! fixed results, identical across processes and machines.
 
-/// 实体类的色板。**这一组是既有的，本次没有换**——换过一版莫兰迪，
-/// 拿真实的图一看就否了：低饱和加中明度是为纸面调的，撞上近黑的画布会整片发灰，
-/// 类与类之间分不开。深色底需要的是饱和度撑得住的颜色。
+/// The entity-class palette. **This set is pre-existing and was not replaced in this change** — a Morandi palette was tried and rejected
+/// on a real graph: low saturation with mid lightness was tuned for paper, and against a near-black canvas the whole thing turns grey,
+/// with classes indistinguishable from each other. A dark background needs colours whose saturation holds up.
 ///
-/// **改这里就得同步改 `web/src/palette.ts` 的 `ENTITY_PALETTE`**：
-/// 手动挑的色和自动取的色必须来自同一组，否则一张图里会出现两套配色。
-/// 有测试盯着（见本文件末尾），改漏了会红。
+/// **Changing this must be matched by changing `ENTITY_PALETTE` in `web/src/palette.ts`**:
+/// colours picked by hand and colours picked automatically must come from the same set, otherwise a graph would show two colour schemes.
+/// A test guards this (see the end of this file), and it fails if the change is missed.
 pub const ENTITY_PALETTE: &[&str] = &[
     "#7fd0ff", "#5fa8ff", "#5fd4d0", "#63e2b7", "#4cc38a", "#a8d878", "#ffd479", "#f2b66d",
     "#ff9d76", "#ff8a9e", "#ff9daf", "#e797d8", "#c4a5ff", "#9fa8ff", "#8ea5bd", "#b3b9c4",
 ];
 
-/// 类的形状：**方 = 词表声明的，圆 = 语料里长出来的**。
+/// The shape of a class: **square = declared by a vocabulary, circle = grown from the corpus**.
 ///
-/// 从前所有自动建的类都写死 `circle`——跟颜色一样，能力在（画布有
-/// `NodeSquareShellProgram`，图例也会跟着变方），只是没人给它值。
+/// Previously every automatically created class was hardcoded to `circle` — as with colour, the capability was there (the canvas has
+/// `NodeSquareShellProgram`, and the legend changes to square as well), it just nobody supplied a value.
 ///
-/// **为什么不像颜色那样哈希**：形状只有两个值，哈希出来是随机的——
-/// `person` 是方是圆不代表任何事，那只是噪声。形状少而醒目，
-/// 该承载一个真实区分。
+/// **Why not hash it the way colour is hashed**: shape has only two values, so a hash would be random —
+/// whether `person` is square or circle means nothing; it would be noise. Shape is sparse and eye-catching,
+/// so it should carry a real distinction.
 ///
-/// **为什么是 IRI 而不是「顶层类」**：顶层类听着更自然，但很多知识库的类是
-/// 扁平的（消解建出来的都没有父类），那样会变成「全是方的」，
-/// 只是把问题反了个面。而有没有 IRI 是**确定的、当场就知道的**：
-/// 导入的词表带 IRI，从语料里长出来的没有。
+/// **Why an IRI rather than "top-level class"**: "top-level class" sounds more natural, but many KBs' classes are
+/// flat (ones created by resolution have no parent class), which would turn everything into "all squares",
+/// merely flipping the problem over. Whether an IRI exists is **deterministic and known on the spot**:
+/// imported vocabularies carry IRIs, and ones grown from the corpus do not.
 ///
-/// 这也正是这产品一直在讲的事——**说清楚一样东西是哪来的**。
-/// 一张图上一眼就分得出「这是本体里声明过的类」和「这是从文档里长出来的类」。
+/// This is also what the product has been talking about all along — **making clear where a thing came from**.
+/// On one graph you can tell at a glance "this is a class declared in the ontology" from "this is a class grown from the documents".
 pub fn shape_for(iri: &str) -> &'static str {
     if iri.trim().is_empty() {
         "circle"
@@ -59,19 +59,19 @@ pub fn shape_for(iri: &str) -> &'static str {
     }
 }
 
-/// 类的 key → 颜色。同一个 key 永远得到同一个颜色。
+/// A class's key → colour. The same key always gets the same colour.
 ///
-/// FNV-1a，常量写死。别换成 `DefaultHasher`——那个每进程换种子，
-/// 服务器一重启颜色就全变，而用户是靠颜色认东西的。
+/// FNV-1a, constants fixed. Do not swap in `DefaultHasher` — it reseeds per process,
+/// so colours all change on every server restart, and users recognise things by colour.
 pub fn color_for_key(key: &str) -> &'static str {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
     for b in key.as_bytes() {
         hash ^= *b as u64;
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3); // FNV prime
     }
-    // **雪崩混合**：光 FNV 再取模会聚集——实测 person/project/research_lab
-    // 撞进同一格，八个常见 key 只散到五种颜色。这一步把高位搅进低位，
-    // 同样八个 key 就散开了。（色板长度不是质数，低位本身带不了多少信息）
+    // **Avalanche mixing**: plain FNV followed by modulo clusters — measured: person/project/research_lab
+    // collide into the same bucket, and eight common keys spread over only five colours. This step mixes the high bits into the low bits,
+    // and the same eight keys then spread out. (The palette length is not prime, so the low bits alone carry little information)
     hash ^= hash >> 33;
     hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
     hash ^= hash >> 33;
@@ -82,22 +82,22 @@ pub fn color_for_key(key: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    /// **同一个 key 永远同一个颜色**——跨调用、跨进程。
-    /// 这里把几个具体值钉死：换了哈希实现，已有知识库的颜色就会集体跳变。
+    /// **The same key always gets the same colour** — across calls and across processes.
+    /// A few concrete values are pinned here: change the hash implementation and every existing KB's colours jump at once.
     #[test]
     fn the_same_key_always_gets_the_same_colour() {
         for _ in 0..3 {
             assert_eq!(color_for_key("organization"), color_for_key("organization"));
         }
-        // 钉住具体结果：不是为了这几个值本身好看，
-        // 而是为了「换实现 = 已有库的配色全变」这件事必须是显式决定
+        // Pin the concrete results: not because these few values are meant to look nice,
+        // but so that "changing the implementation = every existing KB's colours change" must be an explicit decision
         assert_eq!(color_for_key("person"), "#ff9d76");
         assert_eq!(color_for_key("organization"), "#e797d8");
         assert_eq!(color_for_key("product"), "#f2b66d");
     }
 
-    /// 相邻的 key 不该撞成同一个色——否则一张图上「人」和「产品」分不开。
-    /// 不保证全局无碰撞（十几个色装不下上千个类），但常见的几个要散开。
+    /// Adjacent keys should not collide into the same colour — otherwise on one graph "person" and "product" cannot be told apart.
+    /// Global collision-freedom is not guaranteed (a dozen-odd colours cannot hold thousands of classes), but the common few must spread out.
     #[test]
     fn the_common_keys_spread_across_the_palette() {
         let keys = [
@@ -118,7 +118,7 @@ mod tests {
         );
     }
 
-    /// 形状承载来历：词表声明的是方的，语料里长的是圆的。
+    /// The shape carries provenance: vocabulary-declared ones are square, corpus-grown ones are circles.
     #[test]
     fn the_shape_says_where_the_class_came_from() {
         assert_eq!(shape_for("https://schema.org/Person"), "square");
@@ -126,16 +126,16 @@ mod tests {
         assert_eq!(shape_for("   "), "circle", "空白也算没有 IRI");
     }
 
-    /// **前端的 colorForKey 必须与这里逐位一致。**
+    /// **The front end's colorForKey must match this one bit for bit.**
     ///
-    /// 新建类时前端先按 key 挑一个颜色显示，用户不改就这么存下去；
-    /// 而导入/消解那条路是后端算的。两边算得不一样，同一个 key 就会因为
-    /// 「谁建的」拿到不同颜色——而这**不会有任何报错**。
+    /// When a new class is created, the front end first picks a colour from the key to display, and if the user does not change it, that is what gets saved;
+    /// whereas the import/resolution path is computed on the back end. If the two compute differently, the same key gets a different colour
+    /// depending on "who created it" — and this produces **no error whatsoever**.
     ///
-    /// 这里只能检查前端那份代码在不在、结构对不对；数值一致性靠
-    /// 「同一组常量 + 同一套运算」来保证，两边的注释互相指了路。
-    /// 中文 key 尤其要当心：JS 那边必须按 UTF-8 字节遍历（TextEncoder），
-    /// 按 char code 遍历算出来就不一样了。
+    /// This can only check that the front-end copy exists and its structure is right; numerical agreement is guaranteed by
+    /// "the same set of constants + the same operations", and each side's comment points to the other.
+    /// Keys containing CJK characters need particular care: the JS side must iterate over UTF-8 bytes (TextEncoder),
+    /// iterating over char codes gives a different result.
     #[test]
     fn the_frontend_has_a_matching_hash() {
         let ts = include_str!("../../../web/src/palette.ts");
@@ -143,7 +143,7 @@ mod tests {
             ts.contains("export function colorForKey"),
             "前端缺 colorForKey——新建类的颜色就会跟后端对不上"
         );
-        // 这三样写错任何一个，算出来的颜色都会静默偏离
+        // Getting any one of these three wrong silently shifts the computed colour
         assert!(ts.contains("0xcbf29ce484222325n"), "FNV 初值不对");
         assert!(ts.contains("0x100000001b3n"), "FNV 质数不对");
         assert!(ts.contains("0xff51afd7ed558ccdn"), "雪崩混合常量不对");
@@ -153,12 +153,12 @@ mod tests {
         );
     }
 
-    /// **前后端的色板必须是同一组。**
+    /// **The front-end and back-end palettes must be the same set.**
     ///
-    /// 手动挑色走前端的 `ENTITY_PALETTE`，自动取色走这里的。两边漂了，
-    /// 一张图里就会出现两套配色，而且没有任何编译期检查会说话——
-    /// 与 `sources::KINDS` 前后端不同步是同一类错（那次的症状是
-    /// 界面上选得到、建的时候报 kind 不合法，只有端到端会撞上）。
+    /// Hand-picked colours come from the front end's `ENTITY_PALETTE`, automatically picked ones from here. If the two drift apart,
+    /// one graph ends up with two colour schemes, and no compile-time check speaks up —
+    /// it is the same kind of error as `sources::KINDS` falling out of sync between front and back end (that time the symptom was that
+    /// the UI let you select it but creation failed with "invalid kind"; only an end-to-end run would hit it)
     #[test]
     fn the_frontend_palette_matches_this_one() {
         let ts = include_str!("../../../web/src/palette.ts");

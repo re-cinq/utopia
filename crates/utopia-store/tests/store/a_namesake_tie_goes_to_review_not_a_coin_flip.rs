@@ -1,13 +1,13 @@
-//! 同名并列的灰区不该靠候选顺序掷硬币（#270，续 #221/#296）。
+//! Ties among same-named candidates must not be decided by a coin toss over candidate order (#270, continuing #221/#296).
 //!
-//! 一个库里已有两个「张伟」，画像向量一模一样（都从同一个 chunk 里长出来，
-//! #221 之后这是常态）。后来一条没有任何 handle 的「张伟」mention 进来，对两个
-//! 候选打出同一个分数。旧的 `resolve_mention` 在最高分 ≥ `SIM_ATTACH` 时直接归并到
-//! **先遇到的那个**，且不入任何审核对——落到谁头上全看候选从库里回来的顺序。
+//! One library already has two "Zhang Wei"s with identical profile vectors (both grown from the same chunk;
+//! since #221 this has been the norm). Later a "Zhang Wei" mention with no handle at all came in, and it scored the two
+//! candidates the same. The old `resolve_mention`, once the top score was ≥ `SIM_ATTACH`, merged straight into
+//! **whichever one it met first**, with no review pair at all -- so whoever got it depended entirely on the order candidates came back from the library.
 //!
-//! 分不开就别硬分：新建实体，对并列的两个候选各入一条**人工**审核对，绝不静默归并。
-//! 连库才测得到——「先遇到的那个」是一条 `ORDER BY` 缺省下的物理顺序，`cargo check`
-//! 一个字看不见。没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败，自建自拆，绝不碰已有的库。
+//! If they cannot be told apart, do not force a split: create a new entity, and enter one **manual** review pair for each of the two tied candidates; never merge silently.
+//! This can only be tested against a real database -- "the one met first" is a physical order under the default `ORDER BY`, which `cargo check`
+//! cannot see at all. Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set; it creates and tears down its own data and never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_store::resolution::ReviewStage;
@@ -21,7 +21,7 @@ struct Fx {
     zhang_b: Uuid,
 }
 
-/// 两个同名的「张伟」，画像向量完全相同；雇主不同，但那条线索此刻没人用得上。
+/// Two same-named "Zhang Wei"s with identical profile vectors; their employers differ, but no one can use that clue at this point.
 async fn seed(pool: &PgPool) -> anyhow::Result<Fx> {
     let (org, ws, kb) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     let (person, organization) = (Uuid::now_v7(), Uuid::now_v7());
@@ -66,8 +66,8 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fx> {
     .execute(pool)
     .await?;
 
-    // 两个雇主，两个同名的人。故意一个大写一个小写：召回用 SQL `lower()`，
-    // 「Zhang Wei」和「zhang wei」本就是一对同名候选，并列判定也必须忽略大小写。
+    // Two employers, two people with the same name. The capitalization differs on purpose: recall uses SQL `lower()`,
+    // so "Zhang Wei" and "zhang wei" are already a same-name candidate pair, and the tie decision must also ignore case.
     for (id, type_id, name) in [
         (platform, organization, "Platform Engineering"),
         (finance, organization, "Finance"),
@@ -84,14 +84,14 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fx> {
         .execute(pool)
         .await?;
     }
-    // 画像向量一模一样：两人都是同一个 chunk 里播下的种子，质心相同
+    // Identical profile vectors: both people were seeded from the same chunk, so the centroids match
     for id in [zhang_a, zhang_b] {
         sqlx::query("UPDATE entities SET profile_embedding = '[1,0,0]'::vector, profile_n = 1 WHERE id = $1")
             .bind(id)
             .execute(pool)
             .await?;
     }
-    // 区分他们的事实就摆在这里——department/雇主——只是画像比对看不见它
+    // The facts that tell them apart are right here -- department/employer -- but the profile comparison cannot see them
     for (subject, object) in [(zhang_a, platform), (zhang_b, finance)] {
         sqlx::query(
             "INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_id, confidence)
@@ -124,7 +124,7 @@ async fn a_namesake_tie_creates_an_entity_and_two_reviews() -> anyhow::Result<()
     let f = seed(&pool).await?;
 
     let run = async {
-        // 与两个候选画像都一致的上下文：对 A、对 B 打出的余弦相同
+        // Context that matches both candidates' profiles: the cosine is the same against A and against B
         let ctx: Vec<f32> = vec![1.0, 0.0, 0.0];
         let r = utopia_store::resolution::resolve_mention(
             &pool,
@@ -138,7 +138,7 @@ async fn a_namesake_tie_creates_an_entity_and_two_reviews() -> anyhow::Result<()
         )
         .await?;
 
-        // 分不开就不归并：新建了第三个实体，没有 attach 到 A 或 B
+        // Cannot be told apart, so no merge: a third entity was created, not attached to A or B
         assert!(
             r.created,
             "同名并列不该静默归并到先遇到的那个——该新建实体（#270）"
@@ -146,20 +146,20 @@ async fn a_namesake_tie_creates_an_entity_and_two_reviews() -> anyhow::Result<()
         assert_ne!(r.entity_id, f.zhang_a, "attach 到了 A：候选顺序掷出的硬币");
         assert_ne!(r.entity_id, f.zhang_b, "attach 到了 B：候选顺序掷出的硬币");
 
-        // 对并列的两个候选各入一条审核对
+        // Enter one review pair for each of the two tied candidates
         let mut reviewed: Vec<Uuid> = r.reviews.iter().map(|rv| rv.other_id).collect();
         reviewed.sort();
         let mut want = vec![f.zhang_a, f.zhang_b];
         want.sort();
         assert_eq!(reviewed, want, "两个同名候选都该进审核，一个都不能少");
 
-        // 同名并列只有人分得开，绝不能让批量裁决器把两条几乎相同的画像自动并掉
+        // A same-name tie can only be told apart by a person, and the batch adjudicator must never auto-merge two nearly identical profiles
         assert!(
             r.reviews.iter().all(|rv| rv.stage == ReviewStage::Human),
             "同名并列的审核对必须是人工阶段（Human）"
         );
 
-        // 落库后确实是两条待裁的人工审核对，都挂在新建的实体上
+        // After the write, there really are two manual review pairs waiting for a verdict, both attached to the newly created entity
         for rv in &r.reviews {
             utopia_store::resolution::create_review(
                 &pool,

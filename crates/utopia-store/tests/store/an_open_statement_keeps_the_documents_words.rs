@@ -1,12 +1,12 @@
-//! 一条陈述留着文档自己的字（0044 第一刀，#729）。
+//! A statement keeps the document's own words (0044 part one, #729).
 //!
-//! 开放陈述是 `facts` 里 `layer = 'open'` 的一行：短语照写、没有谓词。所有已经容得下
-//! 空谓词的读路径（图、实体面板、邻域、路径、导出）要按短语显示它；同一句话再听到
-//! 一次是同一行、证据累积；它的短语永远不出现在等着被采纳的说法里；角色词属性与
-//! 时间词各自取得回来；证据带着引文在块里的偏移；库拒绝没有短语的开放行。
-//! 角色词只在它那块活着时说话，没有活块时最后被取代的那块说话（0070）。
+//! An open statement is a row in `facts` with `layer = 'open'`: the phrase is written as-is, with no predicate. All read paths that can already accommodate
+//! an empty predicate (graph, entity panel, neighbourhood, path, export) must show it by its phrase; hearing the same sentence again
+//! is the same row, with evidence accumulating; its phrase never appears in the wording waiting to be adopted; role-word attributes and
+//! time words are each fetched back; evidence carries the quote's offset within the chunk; the database rejects an open row with no phrase.
+//! A role word speaks only while its chunk is alive; with no live chunk, the chunk most recently superseded speaks (0070).
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset. Creates and tears down its own; never touches an existing database.
 
 use sqlx::PgPool;
 use utopia_store::graph::{self, FactObject};
@@ -103,7 +103,7 @@ async fn seed(pool: &PgPool, org_name: &str) -> anyhow::Result<Fixture> {
     })
 }
 
-/// 引文在块里的字符偏移：服务端搜文本算出来的那个数（这里的文本是 ASCII，字节即字符）
+/// The quote's character offset within the chunk: the number computed by the server-side text search (here the text is ASCII, so bytes are characters)
 fn span_of(text: &str, quote: &str) -> (i32, i32) {
     let start = text.find(quote).expect("quote is in the chunk");
     let chars_before = text[..start].chars().count() as i32;
@@ -123,7 +123,7 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
     let f = seed(&pool, ORG).await?;
 
     let run = async {
-        // 1. 落一条开放陈述：Acme —acquired→ Beta，短语照写、谓词为空、没有 valid_*
+        // 1. Write an open statement: Acme —acquired→ Beta, the phrase written as-is, the predicate empty, no valid_*
         let (fact, created) = graph::insert_open_statement(
             &pool,
             f.kb,
@@ -188,7 +188,7 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
             "开放陈述在世界轴上还没有位置"
         );
 
-        // 2. 每条读路径都按短语显示它
+        // 2. Every read path shows it by its phrase
         let (_, edges, _, _) = graph::overview(&pool, f.kb, 50, None, None).await?;
         let e = edges
             .iter()
@@ -196,7 +196,7 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
             .expect("overview shows it");
         assert_eq!(e.label.as_deref(), Some("acquired"));
         assert!(e.inferred, "名字来自原文，不是本体认下的关系");
-        // 角色词属性跟着边读回来（#1267），不混进按本体属性记的 qualifiers
+        // Role-word attributes are read back along the edge (#1267), not mixed into the qualifiers recorded by ontology attributes
         let amount = |q: &[utopia_core::models::StatementQualifier]| {
             serde_json::to_value(q).unwrap()
                 == serde_json::json!([{ "role": "amount",
@@ -255,7 +255,7 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
         assert_eq!(x.surface_predicate.as_deref(), Some("acquired"));
         assert!(x.predicate_id.is_none());
 
-        // 3. 同一句话再听到一次：同一行，证据累积
+        // 3. Hearing the same sentence again: the same row, evidence accumulates
         let (again, created) = graph::insert_open_statement(
             &pool,
             f.kb,
@@ -298,7 +298,7 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
         .await?;
         assert_eq!(live, 1, "两次观察一行");
 
-        // 另一个宾语是另一行：去重键里有宾语
+        // A different object is a different row: the dedup key includes the object
         let (other, created) = graph::insert_open_statement(
             &pool,
             f.kb,
@@ -311,7 +311,7 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
         .await?;
         assert!(created && other != fact);
 
-        // 4. 角色词属性与时间词各自取得回来
+        // 4. Role-word attributes and time words are each fetched back
         let qualifiers = graph::statement_qualifiers_for(&pool, &[fact], None).await?;
         let q = &qualifiers[&fact];
         assert_eq!(q.len(), 1);
@@ -321,7 +321,7 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
             Some(serde_json::json!({ "value": "$1.2 billion" }))
         );
         assert!(q[0].entity_id.is_none());
-        // 角色词记在说它的那一块上：另一块的值另记一行，同一块再说一次不添行
+        // A role word is recorded on the chunk that says it: another chunk's value is recorded in a separate row; saying it again in the same chunk adds no row
         for (chunk, amount) in [(f.chunk_b, "$2 billion"), (f.chunk_a, "$1.2 billion")] {
             graph::add_statement_qualifier(
                 &pool,
@@ -347,7 +347,7 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
                 (f.chunk_b, serde_json::json!({ "value": "$2 billion" })),
             ]
         );
-        // 值与实体必须恰好一个
+        // Exactly one value or one entity
         assert!(
             graph::add_statement_qualifier(&pool, fact, f.chunk_a, "buyer", None, None)
                 .await
@@ -382,7 +382,7 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
             "同一位置再记一次回的是同一行"
         );
 
-        // 6. 库拒绝没有短语的开放行
+        // 6. The database rejects an open row with no phrase
         let bad = sqlx::query(
             "INSERT INTO facts (id, kb_id, subject_id, layer, object_id)
              VALUES ($1, $2, $3, 'open', $4)",
@@ -405,7 +405,7 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
         .bind(f.beta)
         .execute(&pool)
         .await;
-        // 库里没有关系类型时这句什么也不插；有的话必须被约束挡下
+        // If there are no relation types in the database, this sentence inserts nothing; if there are, the constraint must block it
         if let Ok(done) = &bad {
             assert_eq!(done.rows_affected(), 0);
         }
@@ -420,7 +420,7 @@ async fn an_open_statement_shows_under_its_phrase_and_reuses_its_row() -> anyhow
     run
 }
 
-/// 一条陈述，两块都是它的证据；每块记下自己说的角色词
+/// One statement, with both chunks as its evidence; each chunk records the role words it speaks
 async fn stated(pool: &PgPool, f: &Fixture, words: &[(Uuid, &str, &str)]) -> anyhow::Result<Uuid> {
     let (fact, _) = graph::insert_open_statement(
         pool,
@@ -458,7 +458,7 @@ async fn supersede(pool: &PgPool, chunk: Uuid, at: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 现在说话的角色词：(角色, 值, 说它的块)
+/// Role words speaking now: (role, value, the chunk that says it)
 async fn speaking(
     pool: &PgPool,
     fact: Uuid,
@@ -478,7 +478,7 @@ async fn speaking(
         .collect())
 }
 
-/// 每个测试自己的组织：建库、跑完、拆掉
+/// Each test's own organization: create the KB, run it, tear it down
 async fn with_fixture<F, Fut>(org_name: &str, run: F) -> anyhow::Result<()>
 where
     F: FnOnce(PgPool, Fixture) -> Fut,
@@ -624,7 +624,7 @@ async fn a_restored_document_lets_its_live_chunk_speak_58_70_alone_again() -> an
                 .bind(at)
                 .execute(&pool)
         };
-        // 删在取代之前：两块同一刻到头，都说话
+        // Delete comes before the supersession: both chunks end at the same moment and both speak
         deleted_at(Some("2026-02-01")).await?;
         assert_eq!(
             speaking(&pool, fact).await?,

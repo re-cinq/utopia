@@ -1,20 +1,20 @@
-//! 不变量家族（0070、0091）的 DDL 不许依赖会话的 search_path：`CREATE FUNCTION`、
-//! `CREATE TRIGGER ... ON`、`EXECUTE FUNCTION` 全部限定到 `public.*`——
-//! pg_restore 会把会话 search_path 置空再灌数据，首位被占住的会话也不能
-//! 把函数建到别的 schema 去。落在别处的触发器等于没有触发器。
+//! DDL for the invariant families (0070, 0091) must not depend on the session's search_path: `CREATE FUNCTION`,
+//! `CREATE TRIGGER ... ON`, and `EXECUTE FUNCTION` are all qualified to `public.*`.
+//! pg_restore empties the session search_path before loading data, and even a session with a first-position hijack must not be able
+//! to build a function into some other schema. A trigger that lands elsewhere is no trigger at all.
 //!
-//! 三种会话下逐个验证（0070 与 0091 各跑一遍）：
-//!   - 正常 search_path（默认）→ 装上；
-//!   - `SET LOCAL search_path = ''` → 同样装上，函数落在 public；
-//!   - `SET LOCAL search_path = 'decoy'`（先在首位摆上同名干扰物）→
-//!     照样装进 public，干扰物一个不被调用。
+//! Verified one by one under three sessions (each of 0070 and 0091 is run through all three):
+//!   - a normal search_path (the default) → installs;
+//!   - `SET LOCAL search_path = ''` → installs just the same, with the function landing in public;
+//!   - `SET LOCAL search_path = 'decoy'` (with a same-named decoy placed first) →
+//!     still installs into public, and the decoy is never called.
 //!
-//! 完备性守卫的 scratch 库迁到**当前链尾**，不停在 0070：链停在哪，责任面
-//! 就停在哪——0073 之后进库的表对停在 0070 的守卫结构性不可见（#901 的
-//! 盲区就是这么来的）。
+//! The scratch DB for the completeness guard migrates to **the current end of the chain**, not stopping at 0070: wherever the chain stops, the responsibility surface
+//! stops there too — tables added to the DB after 0073 are structurally invisible to a guard that stops at 0070 (this is where
+//! the blind spot of #901 came from).
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过；设了地址却连不上、或建不了库——**失败**，
-//! 不是跳过：地址都给了还说「没库」是假话，那个绿色等于这条检查没跑过。
+//! Skipped when `UTOPIA_DATABASE_URL` is not set; if an address is set but cannot be connected to, or the DB cannot be created — **fails**,
+//! rather than skipping: to be given an address and still say "no DB" is a lie, and that green tick would mean this check never ran.
 
 use sqlx::{Acquire, PgPool};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -26,8 +26,8 @@ fn admin_url() -> Option<String> {
     Some(format!("{head}/postgres"))
 }
 
-/// 按文件顺序跑 `after < version <= through` 的迁移，各自一个事务
-/// （与 sqlx::migrate 同一形状）
+/// Runs the migrations with `after < version <= through` in file order, each in its own transaction
+/// (same shape as sqlx::migrate)
 async fn migrate_range(pool: &PgPool, after: i64, through: i64) -> anyhow::Result<()> {
     let migrator = sqlx::migrate!("../../migrations");
     let mut conn = pool.acquire().await?;
@@ -46,7 +46,7 @@ async fn migrate_to(pool: &PgPool, through: i64) -> anyhow::Result<()> {
     migrate_range(pool, 0, through).await
 }
 
-/// 在 `search_path` 为 `path` 的事务里跑 `version` 那份迁移本体
+/// Runs the body of migration `version` in a transaction whose search_path is `path`
 async fn migration_under(pool: &PgPool, version: i64, path: &str) -> Result<(), sqlx::Error> {
     let migrator = sqlx::migrate!("../../migrations");
     let m = migrator
@@ -72,10 +72,10 @@ async fn migration_70_under(pool: &PgPool, path: &str) -> Result<(), sqlx::Error
     migration_under(pool, 70, path).await
 }
 
-/// 隔离库：建 → 迁到 0069 → 返回（库名, 连接池）。
-/// 跳过只有一种情形：**根本没设** `UTOPIA_DATABASE_URL`。设了地址连不上、
-/// 建不了库、迁移链跑不动，全都以错误返回——给了地址却拿不到库，这次检查
-/// 就是没有执行过，不该被记成绿色
+/// Isolated DB: create → migrate to 0069 → return (DB name, connection pool).
+/// Skipping has only one case: **`UTOPIA_DATABASE_URL` is not set at all**. If an address is set but cannot be connected to,
+/// the DB cannot be created, or the migration chain cannot be run, all of these return an error — having been given an address yet getting no DB, this check
+/// simply did not run, and it should not be recorded as green
 async fn scratch(suffix: &str) -> anyhow::Result<Option<(String, PgPool)>> {
     let Some(admin) = admin_url() else {
         return Ok(None);
@@ -111,8 +111,8 @@ async fn drop_scratch(name: &str) {
     }
 }
 
-/// 在隔离库上跑 `f`——不管成功、失败还是断言 panic，库都清掉再走：
-/// 测失败的证据不许靠运维去捡烂尾库
+/// Runs `f` on the isolated DB — whether it succeeds, fails, or an assertion panics, the DB is cleaned up before returning:
+/// the evidence of a failing test must not depend on operators picking up abandoned DBs
 async fn with_scratch<Fut>(suffix: &str, f: impl FnOnce(PgPool) -> Fut) -> anyhow::Result<()>
 where
     Fut: std::future::Future<Output = anyhow::Result<()>>,
@@ -122,7 +122,7 @@ where
     let Some((name, pool)) = scratch(suffix).await? else {
         return Ok(());
     };
-    // catch_unwind：断言 panic 落在 Err 上，清库照常走到再重抛
+    // catch_unwind: an assertion panic lands on Err; the cleanup still runs as usual, then the panic is re-raised
     let r = AssertUnwindSafe(f(pool.clone())).catch_unwind().await;
     pool.close().await;
     drop_scratch(&name).await;
@@ -132,9 +132,9 @@ where
     }
 }
 
-/// 完备性守卫的隔离库:scratch 迁到 0069 之后,把链上剩下的全部跑完——
-/// 停在 0070 的守卫对后进的表结构性不可见,post-0070 的引用列要靠
-/// 「迁到当前链尾」才数得出来。
+/// Isolated DB for the completeness guard: after scratch migrates to 0069, run everything remaining on the chain to the end —
+/// a guard that stops at 0070 is structurally blind to tables added later, so post-0070 reference columns can only be counted
+/// by "migrating to the current end of the chain".
 async fn with_full_chain<Fut>(suffix: &str, f: impl FnOnce(PgPool) -> Fut) -> anyhow::Result<()>
 where
     Fut: std::future::Future<Output = anyhow::Result<()>>,
@@ -146,18 +146,18 @@ where
     .await
 }
 
-/// 装完 0070 之后把链推进到 0090,再在被测的 search_path 下装 0091。
-/// 中间段的 search_path 不属被测面,走默认路径与真实升级同序。
+/// After installing 0070, advance the chain to 0090, then install 0091 under the search_path being tested.
+/// The search_path of the middle stretch is not part of what is under test, so it takes the default path, in the same order as a real upgrade.
 async fn finish_chain_then_91_under(pool: &PgPool, path: &str) -> anyhow::Result<()> {
     migrate_range(pool, 70, 90).await?;
     migration_under(pool, 91, path).await?;
     Ok(())
 }
 
-/// 装完后要点名的几件东西：声明式边 26 条复合外键、父行作证边 10 个触发器、
-/// 库不可过户 12 个触发器、支撑唯一约束 8 条，且所有新函数都在 public schema。
-/// 同表自指边的提交边界检查由 DEFERRABLE INITIALLY DEFERRED 复合外键承担
-/// （supersedes / from_statement_id / inverse_of / sub_property_of）
+/// What to name after installation: 26 declarative composite foreign keys on edges, 10 triggers for parent-row attested edges,
+/// 12 triggers for DB non-transferability, and 8 supporting unique constraints, with all new functions in the public schema.
+/// The commit-boundary check for same-table self-referencing edges is carried by DEFERRABLE INITIALLY DEFERRED composite foreign keys
+/// (supersedes / from_statement_id / inverse_of / sub_property_of)
 async fn assert_installed(pool: &PgPool) -> anyhow::Result<()> {
     let fns: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -175,7 +175,7 @@ async fn assert_installed(pool: &PgPool) -> anyhow::Result<()> {
     .await?;
     assert_eq!(fns, 10, "全部触发器函数都必须落在 public schema");
 
-    // 复合外键：每条源行自带 kb_id 的边一条，26 条
+    // Composite foreign keys: one for each edge whose source row carries its own kb_id, 26 in all
     let fks: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_constraint WHERE contype = 'f' AND conname IN (
            'chunks_document_same_kb',
@@ -199,7 +199,7 @@ async fn assert_installed(pool: &PgPool) -> anyhow::Result<()> {
     .await?;
     assert_eq!(fks, 26, "每条声明式边一个复合外键，一条都不能少");
 
-    // 支撑唯一约束：被引表一家一个 (kb_id, id)
+    // Supporting unique constraints: one (kb_id, id) per referenced table family
     let uniques: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_constraint WHERE contype = 'u' AND conname IN (
            'documents_kb_id_key','chunks_kb_id_key','entities_kb_id_key',
@@ -210,7 +210,7 @@ async fn assert_installed(pool: &PgPool) -> anyhow::Result<()> {
     .await?;
     assert_eq!(uniques, 8, "每个被引表一条 (kb_id, id) 唯一约束");
 
-    // 同表自指边真的递延：condeferrable 与 condeferred 两个位都立着
+    // Self-referencing edges within the same table are really deferred: both condeferrable and condeferred bits are set
     let deferred: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_constraint
           WHERE contype = 'f' AND condeferrable AND condeferred
@@ -223,7 +223,7 @@ async fn assert_installed(pool: &PgPool) -> anyhow::Result<()> {
     .await?;
     assert_eq!(deferred, 4, "同表自指边的提交边界检查必须在场");
 
-    // 父行作证的边与库不可过户：触发器计数（FK 自带的内部触发器不算）
+    // Edges attested by the parent row and DB non-transferability: trigger counts (the FK's own internal triggers are not counted)
     let trg: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname IN (
            'fact_evidence_same_kb','fact_derivations_same_kb',
@@ -244,9 +244,9 @@ async fn assert_installed(pool: &PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 0091 必须完成的装配:新触发器函数落 public、13 条新复合键、
-/// 3 个 `(kb_id,id)` 支撑唯一约束、5 个 kb 不可过户触发器 +
-/// implied_fact_sources 的归属推导触发器,一个都不能少。
+/// The assembly that 0091 must complete: the new trigger functions land in public, 13 new composite keys,
+/// 3 `(kb_id,id)` supporting unique constraints, 5 KB-non-transferability triggers, and
+/// the ownership-derivation trigger of implied_fact_sources — none of them may be missing.
 async fn assert_0091_installed(pool: &PgPool) -> anyhow::Result<()> {
     let fns: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -295,17 +295,17 @@ async fn assert_0091_installed(pool: &PgPool) -> anyhow::Result<()> {
 }
 
 // =====================================================================
-// 完备性守卫:0070 的覆盖面不靠「数过的约束名/触发器名」维持——那种数法
-// 会在有人往账本里加了一条引用列、却没人回来改 0070 的时候保持全绿。
-// 这里反过来:从 pg_catalog 现数责任面里的每一条列级引用边,逐条归类,
-// 归不进任何一类就红;登记表里有而 catalog 里没有,也是红。
+// Completeness guard: the coverage of 0070 is not maintained by "counting constraint names / trigger names" — that style of counting
+// would stay fully green when someone adds a reference column to the ledger without anyone coming back to change 0070.
+// Here it is the other way round: count every column-level reference edge of the responsibility surface afresh from pg_catalog, classify each one,
+// and go red if any fails to fall into a class; a registry entry with no counterpart in the catalog is also red.
 // =====================================================================
 
-/// 0070 的责任面:语义账本的表——导出逐边解析引用的那些。
-/// 这是范围声明而不是覆盖断言:一张新表要进账本,得先把表名登记进来,
-/// 它的引用边才轮到逐条归类;面外表(审计、暂存、运维)不归这条不变量管。
+/// 0070's responsibility surface: the tables of the semantic ledger — those whose references the export resolves edge by edge.
+/// This is a declaration of scope rather than a coverage assertion: a new table entering the ledger must first have its name registered,
+/// and only then do its reference edges come up for classification one by one; tables outside the surface (audit, staging, operations) are not governed by this invariant.
 const LEDGER_TABLES: &[&str] = &[
-    // 自带 kb_id 的语义行
+    // Semantic rows that carry their own kb_id
     "attribute_rule_versions",
     "attribute_rules",
     "chunks",
@@ -326,7 +326,7 @@ const LEDGER_TABLES: &[&str] = &[
     "rules",
     "time_mentions",
     "type_bindings",
-    // 行自己没有 kb_id、kb 权威由父行作证的连接行
+    // Join rows whose own row has no kb_id, where the kb authority is attested by the parent row
     "attribute_rule_conditions",
     "entity_type_parents",
     "fact_derivations",
@@ -340,9 +340,9 @@ const LEDGER_TABLES: &[&str] = &[
     "typed_fact_sources",
 ];
 
-/// 父行作证表:(表, owner 列, owner 表)。owner 边给出该行的 kb 权威,
-/// 它本身不是「同库语义引用」,自动归 EXPLICIT_NON_SCOPE;其余指向带
-/// kb_id 表的边都必须登记到 TRIGGER_EDGES。
+/// Parent-row attestation table: (table, owner column, owner table). The owner edge gives that row's kb authority;
+/// it is not itself a "same-KB semantic reference", and is automatically classed as EXPLICIT_NON_SCOPE; every other edge pointing at a
+/// table with a kb_id must be registered in TRIGGER_EDGES.
 const OWNER_ROWS: &[(&str, &str, &str)] = &[
     ("attribute_rule_conditions", "rule_id", "attribute_rules"),
     ("entity_type_parents", "child_id", "entity_types"),
@@ -365,10 +365,10 @@ const OWNER_ROWS: &[(&str, &str, &str)] = &[
     ("typed_fact_sources", "fact_id", "facts"),
 ];
 
-/// 触发器边登记:(表, 列, 触发器名)。登记是列级的——「这张表装着触发器」
-/// 不蕴含「新加的列被它检查」:除登记外,还核对列落在该触发器的
-/// UPDATE OF 清单里。表上新增一条指向带 kb_id 表的引用列而不登记,
-/// 就归不进任何一类。
+/// Trigger-edge registry: (table, column, trigger name). Registration is column-level — "this table has a trigger installed"
+/// does not imply "the newly added column is checked by it": beyond registration, it is also checked that the column sits in that trigger's
+/// UPDATE OF list. A new reference column added to a table that points at a kb_id table, without being registered,
+/// falls into no class.
 const TRIGGER_EDGES: &[(&str, &str, &str)] = &[
     (
         "attribute_rule_conditions",
@@ -445,16 +445,16 @@ const TRIGGER_EDGES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// 面内但不属同库语义引用的边——一条一句话理由。owner 边不列在这里,
-/// 由 OWNER_ROWS 自动豁免。
+/// Edges within the surface that do not belong to same-KB semantic references — one sentence of reason each. Owner edges are not listed here;
+/// they are automatically exempted by OWNER_ROWS.
 const NON_SCOPE: &[(&str, &str, &str)] = &[
-    // 采集来源归属:导出从不把这条引用解析成 IRI
+    // Collection-source ownership: the export never resolves this reference into an IRI
     (
         "documents",
         "source_id",
         "ingest attribution, not an export-resolved reference",
     ),
-    // 合并簿记:merged_into 非空的行不进导出,这条指针永不进 IRI
+    // Merge bookkeeping: rows with a non-empty merged_into are not exported, so this pointer never enters an IRI
     (
         "entities",
         "merged_into",
@@ -462,9 +462,9 @@ const NON_SCOPE: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// pg_catalog 里数出来的一条列级引用边。`pairs` 是同一约束按
-/// conkey/confkey 序数对齐出的全部列对——一条复合外键给出多行边,
-/// 它们共享同一份 pairs。
+/// One column-level reference edge counted from pg_catalog. `pairs` is all the column pairs that the same constraint aligns by
+/// conkey/confkey ordinal — one composite foreign key yields several rows of edges,
+/// which share the same pairs.
 struct RefEdge {
     src_table: String,
     src_col: String,
@@ -485,8 +485,8 @@ impl RefEdge {
     }
 }
 
-/// 从 pg_catalog 现数 public schema 的全部外键列对——不读迁移源码,
-/// conkey/confkey 按序数对齐,不靠数组位置猜。
+/// Counts afresh every foreign-key column pair of the public schema from pg_catalog — it does not read the migration source,
+/// and aligns conkey/confkey by ordinal rather than guessing from array position.
 async fn catalog_edges(pool: &PgPool) -> anyhow::Result<Vec<RefEdge>> {
     let rows = sqlx::query_as::<_, (i64, String, String, String, String, String, bool, bool)>(
         "SELECT c.oid::bigint,
@@ -531,7 +531,7 @@ async fn catalog_edges(pool: &PgPool) -> anyhow::Result<Vec<RefEdge>> {
         .collect())
 }
 
-/// 带 kb_id 列的表 = 有库归属的行。
+/// A table with a kb_id column = a row that has KB ownership.
 async fn kb_scoped_tables(pool: &PgPool) -> anyhow::Result<HashSet<String>> {
     Ok(sqlx::query_scalar::<_, String>(
         "SELECT c.relname FROM pg_class c
@@ -547,7 +547,7 @@ async fn kb_scoped_tables(pool: &PgPool) -> anyhow::Result<HashSet<String>> {
     .collect())
 }
 
-/// 用户触发器 -> 它 UPDATE OF 盯着的列名集合(tgattr)。
+/// User trigger -> the set of column names it watches with UPDATE OF (tgattr).
 async fn trigger_watch_lists(
     pool: &PgPool,
 ) -> anyhow::Result<HashMap<(String, String), HashSet<String>>> {
@@ -572,8 +572,8 @@ async fn trigger_watch_lists(
         .collect())
 }
 
-/// 身上装着 0070 机制的表(同库约束/触发器、不可过户触发器、支撑唯一约束)——
-/// 用来与 LEDGER_TABLES 互证:机制落在面外、或面内表什么机制都没有,都算漂移。
+/// Tables carrying the 0070 mechanisms (same-KB constraints/triggers, non-transferability triggers, supporting unique constraints) —
+/// used to cross-check against LEDGER_TABLES: a mechanism outside the surface, or an in-surface table with no mechanism at all, both count as drift.
 async fn mechanism_tables(pool: &PgPool) -> anyhow::Result<HashSet<String>> {
     Ok(sqlx::query_scalar::<_, String>(
         "SELECT cls.relname FROM pg_constraint c
@@ -593,38 +593,38 @@ async fn mechanism_tables(pool: &PgPool) -> anyhow::Result<HashSet<String>> {
     .collect())
 }
 
-/// 逐条归类的结果。declarative / trigger_covered / non_scope 之外
-/// 任何一桶非空,覆盖就是不完备。
+/// The result of classifying each edge. Beyond declarative / trigger_covered / non_scope,
+/// if any bucket is non-empty, coverage is incomplete.
 #[derive(Debug, Default)]
 struct Coverage {
     declarative: Vec<String>,
     trigger_covered: Vec<String>,
     non_scope: Vec<String>,
-    /// 归进 declarative / trigger_covered 的边的结构身份
-    /// (src_table, src_col, tgt_table, tgt_col)——体检核对按四元组,
-    /// 两条边共用一个报错 label 也得各算一条
+    /// The structural identity of edges classed as declarative / trigger_covered
+    /// (src_table, src_col, tgt_table, tgt_col) — the health check matches by the four-tuple,
+    /// so two edges sharing one error label must each count as one
     protected: BTreeSet<EdgeKey>,
-    /// owner-derived 表上 catalog 有、登记没有的边
+    /// Edges that catalog has on owner-derived tables but registration does not
     unknown: Vec<String>,
-    /// 登记/豁免/owner 声明在 catalog 里对不上的边
+    /// Edges where registration / exemption / owner declarations do not match in the catalog
     stale_registry: Vec<String>,
-    /// kb 自持行上没有合法复合外键的边
+    /// Edges on KB-self-owned rows with no legal composite foreign key
     unprotected_direct: Vec<String>,
-    /// 登记过、但触发器没装上或没盯该列的边
+    /// Edges that are registered, but whose trigger is not installed or does not watch that column
     unprotected_trigger: Vec<String>,
-    /// 责任面与已装机制对不上
+    /// The responsibility surface does not match the installed mechanisms
     surface_drift: Vec<String>,
-    /// schema 保护了、但 preflight 没有对应扫描分支的边
+    /// Edges protected by the schema, but for which preflight has no corresponding scan branch
     preflight_missing: Vec<String>,
-    /// preflight 扫描声明的边在 catalog 保护集里对不上——
-    /// 表/列改名后留下的腐掉分支
+    /// Edges declared by a preflight scan that do not match the catalog protected set —
+    /// rotten branches left behind after a table or column rename
     stale_preflight: Vec<String>,
 }
 
 impl Coverage {
-    /// 完备 = 没有未归类的边、没有腐掉的登记、面与机制互证得上,
-    /// 每条受保护边都进了导出体检、体检里没有腐掉的分支,
-    /// 且两类已覆盖边的数量与当前迁移链的 44/17 一致。
+    /// Complete = no unclassified edges, no rotten registrations, and the surface and mechanisms cross-check; every protected edge
+    /// enters the export health check, and the health check has no rotten branches,
+    /// and the counts of the two covered-edge categories match 44 / 17 on the current migration chain.
     fn assert_complete(&self) -> anyhow::Result<()> {
         let mut problems = String::new();
         let mut dump = |name: &str, xs: &[String]| {
@@ -663,15 +663,15 @@ impl Coverage {
     }
 }
 
-/// preflight SQL 里一条结构边标记的四元组
+/// The four-tuple marking one structural edge in the preflight SQL
 /// (src_table, src_col, tgt_table, tgt_col)
 type EdgeKey = (String, String, String, String);
 
-/// 从 export_provenance_integrity.sql 解析出的覆盖面——测试读的就是
-/// 运行时执行的那一份(include_str! 同一条路径),不存在「登记给测试看、
-/// 跑的是另一份」的缝隙。edges = 每条 cross_kb 分支声明的结构边;
-/// labels = 结构边 → 报错 label;filters = 「同库但不在导出集」的
-/// merged 检查——它护的是导出过滤口径,不是 schema 引用边
+/// The coverage surface parsed from export_provenance_integrity.sql — the test reads
+/// the very copy executed at runtime (the same path via include_str!), so there is no seam where one copy is registered for the test to see and
+/// another copy is run. edges = the structural edges each cross_kb branch declares;
+/// labels = structural edge → error label; filters = the "same KB but not in the export set"
+/// merged check — it guards the export filter's scope, not schema reference edges
 #[derive(Default)]
 struct PreflightSurface {
     edges: BTreeSet<EdgeKey>,
@@ -679,8 +679,8 @@ struct PreflightSurface {
     filters: BTreeSet<String>,
 }
 
-/// 一段 SQL 文本里的字符串字面量,按出现顺序——每个扫描分支的
-/// 头两个字面量就是它的报错 label 与 kind('cross_kb'/'unexported')
+/// The string literals in a block of SQL text, in order of appearance — the first two literals of each scan branch
+/// are its error label and kind ('cross_kb' / 'unexported')
 fn quoted_literals(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut chars = text.chars();
@@ -700,7 +700,7 @@ fn quoted_literals(text: &str) -> Vec<String> {
     out
 }
 
-/// 'src_table.src_col -> tgt_table.tgt_col' → 四元组
+/// 'src_table.src_col -> tgt_table.tgt_col' → four-tuple
 fn parse_edge_key(marker: &str) -> Option<EdgeKey> {
     let (src, tgt) = marker.split_once("->")?;
     let (st, sc) = src.trim().rsplit_once('.')?;
@@ -708,10 +708,10 @@ fn parse_edge_key(marker: &str) -> Option<EdgeKey> {
     Some((st.into(), sc.into(), tt.into(), tc.into()))
 }
 
-/// 把 preflight SQL 按 UNION ALL 切成扫描分支,逐条核对标记:
-/// cross_kb 分支恰好一条 @edge、unexported 分支恰好一条与 label 同名的
-/// @filter;@edge 报出的表/列要在分支本体里真的出现——标记指错方向、
-/// 分支漏标记、一条边两条分支,都在这里炸出来
+/// Splits the preflight SQL into scan branches on UNION ALL, and checks the markers branch by branch:
+/// a cross_kb branch carries exactly one @edge, an unexported branch exactly one @filter with the same name as its label;
+/// the table/column reported by @edge must genuinely appear in the branch body — a marker pointing in the wrong direction,
+/// a branch missing its marker, or one edge appearing in two branches, all blow up here
 fn preflight_surface() -> anyhow::Result<PreflightSurface> {
     const SRC: &str = include_str!("../../src/export_provenance_integrity.sql");
     let mut surface = PreflightSurface::default();
@@ -728,8 +728,8 @@ fn preflight_surface() -> anyhow::Result<PreflightSurface> {
             }
         }
         let literals = quoted_literals(chunk);
-        // 注释里写到 "UNION ALL" 也会切出一段——那种碎片没有 SELECT,跳过;
-        // 真分支缺字面量仍然是错
+        // A comment that writes "UNION ALL" would also split out a piece — such a fragment has no SELECT, so skip it;
+        // a real branch missing its literals is still an error
         let (Some(label), Some(kind)) = (literals.first(), literals.get(1)) else {
             if chunk.contains("SELECT") {
                 problems.push_str(&format!("  branch {i}: no 'label'/'kind' literals found\n"));
@@ -793,9 +793,9 @@ fn preflight_surface() -> anyhow::Result<PreflightSurface> {
     }
 }
 
-/// 每个归类为保护边的 catalog 边,都必须在同一份 preflight SQL 里有
-/// 一条声明同样结构身份的扫描分支;反过来,preflight 声称的每条边也
-/// 必须仍是 catalog 保护集的一员——表/列改名后留着的旧分支照样红
+/// Every catalog edge classified as a protected edge must have, in the same preflight SQL,
+/// a scan branch declaring the same structural identity; conversely, every edge preflight claims must
+/// still be a member of the catalog protected set — a stale branch left behind after a table or column rename is still red
 fn check_preflight(cov: &mut Coverage) -> anyhow::Result<()> {
     let surface = preflight_surface()?;
     for key in &surface.edges {
@@ -817,10 +817,10 @@ fn check_preflight(cov: &mut Coverage) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 每条相关边归到恰好一类。相关 = 源表在责任面、引用列不是 kb_id
-/// 本身、目标表带 kb_id——kb_id→knowledge_bases 这类容器边被
-/// `src_col != kb_id` 自然挡在面外,复合外键里的 kb_id→kb_id 那一腿
-/// 也只是绑定机制、不是一条独立语义引用。
+/// Each relevant edge is placed into exactly one class. Relevant = the source table is in the responsibility surface, the referencing column is not kb_id
+/// itself, and the target table carries a kb_id — a container edge such as kb_id→knowledge_bases is naturally
+/// kept outside the surface by `src_col != kb_id`, and the kb_id→kb_id leg inside a composite foreign key
+/// is likewise only a binding mechanism, not an independent semantic reference.
 fn classify(
     edges: &[RefEdge],
     kb_scoped: &HashSet<String>,
@@ -863,7 +863,7 @@ fn classify(
         }
     }
 
-    // 登记三个方向的腐化:owner 边、触发器边、豁免边在 catalog 里都得还在
+    // Drift in all three directions of the registry: owner edges, trigger edges, and exempt edges must all still exist in the catalog
     for (t, col, parent) in OWNER_ROWS {
         if !edges
             .iter()
@@ -923,8 +923,8 @@ fn classify(
         } else if let Some(reason) = exemptions.get(&(e.src_table.as_str(), e.src_col.as_str())) {
             cov.non_scope.push(format!("{label} ({reason})"));
         } else {
-            // 直接 kb 边:同一条约束内必须同时绑住 (kb_id→kb_id) 与 (ref→id);
-            // 单列 FOREIGN KEY (ref) REFERENCES t(id) 不算同库覆盖
+            // Direct kb edge: within one constraint it must bind both (kb_id→kb_id) and (ref→id) at once;
+            // a single-column FOREIGN KEY (ref) REFERENCES t(id) does not count as same-KB coverage
             let composite = e.tgt_col == "id"
                 && e.pairs.len() == 2
                 && e.pairs.iter().any(|(s, t)| s == "kb_id" && t == "kb_id");
@@ -977,8 +977,8 @@ async fn every_reference_edge_on_the_ledger_is_classified() -> anyhow::Result<()
     .await
 }
 
-/// 漂移探针 A:kb 自持行上新增一条单列外键(不配 kb_id)。
-/// 「名字还在」挡不住它——catalog 会把它数出来,归不进任何一类。
+/// Drift probe A: add a single-column foreign key to a KB-self-owned row (without kb_id).
+/// "The name is still there" does not stop it — the catalog would count it out, and it would fall into no class.
 #[tokio::test]
 async fn a_new_reference_on_a_kb_owned_row_fails_the_guard() -> anyhow::Result<()> {
     with_full_chain("driftd", |pool| async move {
@@ -1001,8 +1001,8 @@ async fn a_new_reference_on_a_kb_owned_row_fails_the_guard() -> anyhow::Result<(
     .await
 }
 
-/// 漂移探针 B:父行作证表上新增一条指向 kb 表的引用列,但不去碰它的
-/// 触发器。「表上有触发器」不许让这条新列显得已被覆盖——登记是列级的。
+/// Drift probe B: add a reference column pointing at a kb table to a parent-row-attested table, without touching its
+/// trigger. "The table has a trigger" must not make this new column appear covered — registration is column-level.
 #[tokio::test]
 async fn a_new_reference_on_an_owner_derived_row_fails_the_guard() -> anyhow::Result<()> {
     with_full_chain("driftt", |pool| async move {
@@ -1025,10 +1025,10 @@ async fn a_new_reference_on_an_owner_derived_row_fails_the_guard() -> anyhow::Re
     .await
 }
 
-/// 漂移探针 C:kb 自持行上新增一条**保护方式完全正确**的复合外键边——
-/// schema 侧挑不出毛病(归进 DECLARATIVE),但没人给它补导出体检。
-/// 只查 schema 的守卫会放行;这条边必须落进 PREFLIGHT_MISSING,
-/// 报错里点名是哪条结构边
+/// Drift probe C: add a composite foreign key to a KB-self-owned row whose protection is completely correct —
+/// the schema side finds nothing wrong (it is classed as DECLARATIVE), but nobody has added an export health check for it.
+/// A guard that checks only the schema would let it through; this edge must land in PREFLIGHT_MISSING,
+/// with the error naming which structural edge it is
 #[tokio::test]
 async fn a_protected_edge_missing_from_preflight_fails_the_guard() -> anyhow::Result<()> {
     with_full_chain("driftp", |pool| async move {
@@ -1063,12 +1063,12 @@ async fn a_protected_edge_missing_from_preflight_fails_the_guard() -> anyhow::Re
     .await
 }
 
-/// 比对器自身的敏感度:少一条已声明边 → MISSING;多一条 catalog 保护集
-/// 没有的 → STALE。守卫本身不能是「怎么都过」的摆设
+/// The comparator's own sensitivity: one fewer declared edge → MISSING; one extra catalog-protected edge
+/// with no declaration → STALE. The guard itself must not be a fixture that passes no matter what
 #[test]
 fn the_preflight_check_notices_a_dropped_or_stray_edge() -> anyhow::Result<()> {
     let surface = preflight_surface()?;
-    // 同一份文件两个方向各数一次:61 条结构边 + 5 条 merged 过滤检查
+    // The same file is counted once in each direction: 61 structural edges + 5 merged filter checks
     assert_eq!(surface.edges.len(), 61, "preflight 必须覆盖全部保护边");
     assert_eq!(
         surface.filters,
@@ -1085,7 +1085,7 @@ fn the_preflight_check_notices_a_dropped_or_stray_edge() -> anyhow::Result<()> {
         "merged 过滤完整性检查是单独一类,不许静默增减"
     );
 
-    // 保护集 = 体检声明集时两桶皆空
+    // With the protected set equal to the declared set of the health check, both buckets are empty
     let mut cov = Coverage {
         protected: surface.edges.clone(),
         ..Coverage::default()
@@ -1096,7 +1096,7 @@ fn the_preflight_check_notices_a_dropped_or_stray_edge() -> anyhow::Result<()> {
         "声明集与保护集一致时不许误报: {cov:?}"
     );
 
-    // 漏一条:假定未来某条边从 SQL 里被删掉而 schema 仍在保护它
+    // Drop one: suppose some edge is removed from the SQL while the schema still protects it
     let mut missing = Coverage {
         protected: surface.edges.clone(),
         ..Coverage::default()
@@ -1114,7 +1114,7 @@ fn the_preflight_check_notices_a_dropped_or_stray_edge() -> anyhow::Result<()> {
         "catalog 有而 preflight 没有的边必须落进 MISSING"
     );
 
-    // 反过来:preflight 还在看一条 catalog 不再保护的边
+    // The reverse: preflight still checks an edge that the catalog no longer protects
     let mut stale = Coverage::default();
     check_preflight(&mut stale)?;
     assert_eq!(
@@ -1141,8 +1141,8 @@ async fn the_migration_installs_under_an_empty_search_path() -> anyhow::Result<(
 #[tokio::test]
 async fn the_migration_installs_under_a_hostile_search_path() -> anyhow::Result<()> {
     with_scratch("evil", |pool| async move {
-        // 首位摆个干扰 schema：同名的 entities 表与同名函数——裸名解析会先看到它。
-        // 限定到 public.* 的 DDL 不该理会它
+        // Put a decoy schema first: a same-named entities table and a same-named function — bare-name resolution would see it first.
+        // DDL qualified to public.* should ignore it
         sqlx::query("CREATE SCHEMA decoy").execute(&pool).await?;
         sqlx::query("CREATE TABLE decoy.entities (id uuid, kb_id uuid, merged_into uuid)")
             .execute(&pool)
@@ -1166,7 +1166,7 @@ async fn the_migration_installs_under_a_hostile_search_path() -> anyhow::Result<
         let r = finish_chain_then_91_under(&pool, "decoy, public").await;
         assert!(r.is_ok(), "首位被占的 search_path 下也装得上 0091: {r:?}");
         assert_0091_installed(&pool).await?;
-        // 干扰物原样留着：一次都没被选中
+        // The decoy is left as it is: it was never selected once
         let decoy_fn: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
               WHERE n.nspname = 'decoy' AND p.proname IN
@@ -1193,16 +1193,16 @@ async fn the_migration_installs_under_a_normal_search_path() -> anyhow::Result<(
     .await
 }
 
-/// 0091 的前置检查:账本上已经躺着越库出处的库,装 0091 必须整份中止——
-/// 装上不变量却对已违反它的账本报喜,等于替坏数据背书。中止必须连锅端:
-/// 报了哪条边、一行新机制都不许留下。
+/// The precondition check for 0091: a DB that already has cross-KB provenance lying in its ledger must abort the install of 0091 entirely —
+/// installing the invariant while reporting success on a ledger that already breaks it would be vouching for bad data. The abort must be complete:
+/// it reports which edge it was, and must leave not a single new mechanism behind.
 #[tokio::test]
 async fn migration_91_refuses_a_ledger_with_cross_kb_sources() -> anyhow::Result<()> {
     with_scratch("dirty", |pool| async move {
         migration_70_under(&pool, "public").await?;
         migrate_range(&pool, 70, 90).await?;
 
-        // 两库、各一实体/属性/规则/事实;出处行的事实在本库、规则在别库
+        // Two KBs, each with one entity / attribute / rule / fact; the provenance row's fact is in this KB, its rule is in another KB
         sqlx::query(
             "WITH org AS (
                 INSERT INTO organizations (id, name) VALUES (gen_random_uuid(), 't')
@@ -1249,7 +1249,7 @@ async fn migration_91_refuses_a_ledger_with_cross_kb_sources() -> anyhow::Result
             "报错必须点名是哪条边: {msg}"
         );
 
-        // 中止要干净:一行新机制都不能留
+        // The abort must be clean: not a single row of new mechanism may remain
         let leftovers: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pg_constraint
               WHERE contype = 'f' AND conname LIKE 'implication_rules%_same_kb'",

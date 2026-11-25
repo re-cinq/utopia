@@ -1,16 +1,16 @@
-//! 业务规则打在真库上（0021 / #277）。
+//! Business rules fired against a real database (0021 / #277).
 //!
-//! 求值本身的用例在 `utopia-reason::rules`，纯逻辑、不起库。这里钉的是那一层
-//! 看不见的四样：
+//! The evaluation cases themselves live in `utopia-reason::rules`: pure logic, no database. What is pinned here is the four things
+//! that layer cannot see:
 //!
-//! - 命中真的落进 `derived_facts` 的**字面值通道**，并挂着 `attribute_rule_id`
-//! - 前提链进 `fact_derivations`——「这口井凭哪两条读数」
-//! - **重跑不产生第二行**：同一性索引把 NULL 宾语认成同一条（这是拓宽表时
-//!   最容易漏的一处，漏了就是每轮多一行）
-//! - 阈值抬高后重跑，旧结论**作废而不是删除**，记录轴上留着「曾据此推出」
+//! - A hit really lands in `derived_facts` on the **literal-value channel**, with `attribute_rule_id` attached
+//! - The premise chain goes into `fact_derivations` -- "which two readings this rests on"
+//! - **Rerunning does not produce a second row**: the identity index treats NULL objects as the same one (this is the spot most easily missed when widening the table:
+//!   miss it and every round adds another row)
+//! - Raising the threshold and rerunning **retracts the old conclusion rather than deleting it**; the record axis keeps "was once derived from this"
 //!
-//! 还钉一条与公理那一趟的相处：两趟合流进同一次对账，谁也不该把对方的行
-//! 判成陈旧。
+//! Also pinned is how this coexists with the axioms pass: the two passes merge into one reconciliation, and neither should mark the other's rows
+//! as stale.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -60,7 +60,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
             .execute(pool)
             .await?;
     }
-    // 两个属性谓词 + 内建 is_a
+    // Two attribute predicates + built-in is_a
     for (id, key, label, datatype) in [
         (thc, "total_hydrocarbon", "全烃", "number"),
         (category, "interpretation_category", "解释结论", "text"),
@@ -99,7 +99,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     })
 }
 
-/// 一条属性事实。
+/// One attribute fact.
 async fn attr(
     pool: &PgPool,
     f: &Fixture,
@@ -124,7 +124,7 @@ async fn attr(
     Ok(id)
 }
 
-/// 一条规则：全烃 > 阈值 且 解释结论 ∈ {气测异常, 气测异常后效} → GasBearingWell
+/// A rule: total hydrocarbons > threshold and the interpreted conclusion ∈ {gas-test anomaly, post-gas-test anomaly} → GasBearingWell
 async fn rule(pool: &PgPool, f: &Fixture, threshold: f64) -> anyhow::Result<Uuid> {
     let id = Uuid::now_v7();
     sqlx::query(
@@ -223,7 +223,7 @@ async fn a_rule_types_a_well_and_says_which_readings_did_it() -> anyhow::Result<
             "区间取两条前提的交集"
         );
 
-        // 前提链：凭哪两条读数
+        // Premise chain: which two readings
         let premises: Vec<(Uuid,)> = sqlx::query_as(
             "SELECT premise_fact_id FROM fact_derivations WHERE derived_fact_id = $1 ORDER BY seq",
         )
@@ -234,8 +234,8 @@ async fn a_rule_types_a_well_and_says_which_readings_did_it() -> anyhow::Result<
         assert_eq!(got.len(), 2, "两条前提都要记下来");
         assert!(got.contains(&a) && got.contains(&b));
 
-        // **重跑不该多一行。** 字面值结论的 object_id 是 NULL，而 Postgres 默认
-        // 把 NULL 当互不相同——同一性索引写错的话这里每跑一轮多一条
+        // **Rerunning must not add a row.** The object_id of a literal-value conclusion is NULL, and Postgres by default
+        // treats NULLs as distinct -- if the identity index is written wrong, every round adds one more row here
         let again = utopia_store::reasoning::materialize(&pool, f.kb).await?;
         assert_eq!(again.inserted, 0, "同一条结论重跑不再插");
         assert_eq!(again.invalidated, 0, "也不该把自己判成陈旧");
@@ -251,10 +251,10 @@ async fn a_rule_types_a_well_and_says_which_readings_did_it() -> anyhow::Result<
     run
 }
 
-/// 两组「或」（0029 / #476）：第二组独自成立时，落下的结论只挂**它自己那条**读数。
+/// Two groups of "or" (0029 / #476): when the second group holds on its own, the resulting conclusion is attached only to **its own** reading.
 ///
-/// 钉的是纯逻辑那层看不见的一件事：前提链进 `fact_derivations` 的是这一组的
-/// 前提，不是这条规则全部条件碰过的事实——「凭哪条读数」在库里也得是真的。
+/// Pins something the pure-logic layer cannot see: the premise chain written to `fact_derivations` is this group's
+/// premises, not every fact that all the rule's conditions touched -- "which reading it rests on" must also be real in the database.
 #[tokio::test]
 async fn either_group_concludes_and_names_only_its_own_reading() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -264,8 +264,8 @@ async fn either_group_concludes_and_names_only_its_own_reading() -> anyhow::Resu
     let f = seed(&pool).await?;
 
     let run = async {
-        // 只有一条全烃读数，没有解释结论：第 0 组（全烃 > 8 且 解释 ∈ {…}）
-        // 不成立，第 1 组（全烃 > 20）成立
+        // Only one total-hydrocarbon reading, and no interpreted conclusion: group 0 (total > 8 and interpretation ∈ {…})
+        // does not hold, group 1 (total > 20) does
         let a = attr(
             &pool,
             &f,
@@ -328,7 +328,7 @@ async fn either_group_concludes_and_names_only_its_own_reading() -> anyhow::Resu
     run
 }
 
-/// 阈值抬到读数之上再跑：结论**作废而不是删除**——记录轴上留着「我们曾据此推出」
+/// Rerun with the threshold raised above the reading: the conclusion is **retracted rather than deleted** -- the record axis keeps "we once derived this from"
 #[tokio::test]
 async fn raising_the_threshold_invalidates_without_deleting() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -358,7 +358,7 @@ async fn raising_the_threshold_invalidates_without_deleting() -> anyhow::Result<
         utopia_store::reasoning::materialize(&pool, f.kb).await?;
         assert_eq!(derived(&pool, &f).await?.len(), 1);
 
-        // 阈值抬到 20：同一份数据不再满足
+        // Threshold raised to 20: the same data no longer satisfies it
         sqlx::query(
             "UPDATE attribute_rule_conditions SET operand = '20' WHERE rule_id = $1 AND seq = 0",
         )
@@ -383,7 +383,7 @@ async fn raising_the_threshold_invalidates_without_deleting() -> anyhow::Result<
     run
 }
 
-/// 关掉规则等同于前提消失：结论下一轮失效，而规则行还在
+/// Turning a rule off is the same as its premise disappearing: the conclusion goes invalid next round, but the rule row stays
 #[tokio::test]
 async fn disabling_a_rule_retires_what_it_concluded() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -432,7 +432,7 @@ async fn disabling_a_rule_retires_what_it_concluded() -> anyhow::Result<()> {
     run
 }
 
-/// 撤掉一条前提事实，结论跟着失效——与公理那一趟同一条路
+/// Retracting one premise fact invalidates the conclusion that rests on it -- the same path the axioms pass takes
 #[tokio::test]
 async fn retracting_a_reading_retires_the_conclusion() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -480,8 +480,8 @@ async fn retracting_a_reading_retires_the_conclusion() -> anyhow::Result<()> {
     run
 }
 
-/// 派生的结论**不写 `entities.type_id`**（0021 决策 2）：断言类型是人的，
-/// 规则的结论是叠在上面的一层
+/// A derived conclusion **is not written to `entities.type_id`** (0021 decision 2): an asserted type belongs to a person,
+/// and a rule's conclusion is a layer stacked on top of it
 #[tokio::test]
 async fn the_asserted_type_is_left_alone() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -518,7 +518,7 @@ async fn the_asserted_type_is_left_alone() -> anyhow::Result<()> {
         let rows = derived(&pool, &f).await?;
         assert_eq!(rows.len(), 1, "GasBearingWell 只作为派生存在");
         assert_eq!(rows[0].object_id, None);
-        // 结论落在内建 is_a 上
+        // The conclusion lands on built-in is_a
         let (p,): (Uuid,) = sqlx::query_as("SELECT predicate_id FROM derived_facts WHERE id = $1")
             .bind(rows[0].id)
             .fetch_one(&pool)
@@ -535,11 +535,11 @@ async fn the_asserted_type_is_left_alone() -> anyhow::Result<()> {
     run
 }
 
-/// 改结论：从「推一个类」改成「推一个属性值」。
+/// Changing a conclusion: from "infer a class" to "infer an attribute value".
 ///
-/// **旧结论要作废，而不是留在那里跟着新结论一起成立。** 三格是互相定义的，
-/// 所以这里也顺带钉住 `conclude_type_id` 被清空了——半截状态（说是 attribute
-/// 却还挂着类）在库里看不出错，只会在导出与画布上冒出来。
+/// **The old conclusion must be retracted, not left in place to hold alongside the new one.** The three slots are defined in terms of each other,
+/// so this also pins that `conclude_type_id` is cleared -- a half-finished state (saying attribute
+/// while still carrying a class) looks fine in the database and only surfaces in exports and the canvas.
 #[tokio::test]
 async fn changing_the_conclusion_retires_the_old_one() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -574,7 +574,7 @@ async fn changing_the_conclusion_retires_the_old_one() -> anyhow::Result<()> {
             Some(serde_json::json!({"class": "gas_well"}))
         );
 
-        // 结论换成属性：含气性 = 含气
+        // Conclusion changed to an attribute: containing gas = gas
         let verdict = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO relation_types (id, kb_id, key, label, kind, datatype)
@@ -636,11 +636,11 @@ async fn changing_the_conclusion_retires_the_old_one() -> anyhow::Result<()> {
     run
 }
 
-/// 展不完的组合要**留在规则上**，不是只在跑完那一刻说一句。
+/// Combinations that cannot be expanded must **stay on the rule**, not just be mentioned once at the moment of the run.
 ///
-/// 一口井上两个属性各九条读数就是 81 种组合，超过上限之后这个实体整个被跳过
-/// ——而「跳过」与「不满足」在结果里长得一模一样。读数减回来，这个数字要跟着
-/// 归零，否则它只会单调地累积成一句吓人的假话。
+/// A well with two attributes of nine readings each is 81 combinations; past the cap the entity is skipped wholesale,
+/// and "skipped" looks exactly like "not satisfied" in the result. The reading count is wound back, and this number must drop
+/// back to zero with it -- otherwise it only piles up monotonically into a scary, false statement.
 #[tokio::test]
 async fn a_capped_expansion_is_remembered() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -685,7 +685,7 @@ async fn a_capped_expansion_is_remembered() -> anyhow::Result<()> {
             "落在规则上，卡片读得到"
         );
 
-        // 读数收回到 1 × 9：能展开了
+        // Readings wound back to 1 × 9: now it can be expanded
         for id in thc_facts.iter().skip(1) {
             sqlx::query("DELETE FROM facts WHERE id = $1")
                 .bind(id)
@@ -707,7 +707,7 @@ async fn a_capped_expansion_is_remembered() -> anyhow::Result<()> {
     run
 }
 
-/// 卡片上那个数字点开之后看见的东西：谁被标住了，以及凭哪几条读数。
+/// What you see after clicking the number on the card: who is flagged, and from which readings.
 #[tokio::test]
 async fn the_matches_list_says_who_and_why() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -755,7 +755,7 @@ async fn the_matches_list_says_who_and_why() -> anyhow::Result<()> {
             "前提按顺序，读得出「凭什么」"
         );
 
-        // 规则关掉之后结论退场，列表也就空了——数字与列表是同一份事实
+        // Once the rule is turned off its conclusions retire and the list empties too -- the number and the list are the same fact
         utopia_store::business_rules::update(&pool, f.kb, r, None, None, Some(false), None, None)
             .await?;
         utopia_store::reasoning::materialize(&pool, f.kb).await?;
@@ -773,7 +773,7 @@ async fn the_matches_list_says_who_and_why() -> anyhow::Result<()> {
     run
 }
 
-/// 一条规则上次跑的时候，有几个实体没展开完。
+/// How many entities were not fully expanded the last time the rule ran.
 async fn capped_of(pool: &PgPool, kb: Uuid, rule_id: Uuid) -> anyhow::Result<i64> {
     let rules = utopia_store::business_rules::list(pool, kb).await?;
     let r = rules
@@ -783,12 +783,12 @@ async fn capped_of(pool: &PgPool, kb: Uuid, rule_id: Uuid) -> anyhow::Result<i64
     Ok(r["capped"].as_i64().expect("capped 是个数"))
 }
 
-/// 「不属于」写进库、读回来、真的判得动（0029 / #476）。
+/// "Not in" written to the database, read back, and actually evaluated (0029 / #476).
 ///
-/// 钉的是编译那一步：`parse_operand` 曾经只给 `in` 留了分支，`not_in` 落到
-/// 数字那一支上解析不出来，于是**整条规则被当成写坏的跳过**——它什么都不推，
-/// 而规则页上它看着一切正常。这种病只有打在真库上才看得见：纯逻辑那层的用例
-/// 是直接构造 `Operand::Set` 的，绕过了正出问题的那一步。
+/// Pins the compile step: `parse_operand` once only had a branch for `in`, so `not_in` fell through to the
+/// numeric branch and could not be parsed, and **the whole rule was skipped as badly written** -- it inferred nothing,
+/// while on the rules page it looked completely normal. Only a test run against a real database can see this bug: the pure-logic cases
+/// construct `Operand::Set` directly, bypassing the step that was going wrong.
 #[tokio::test]
 async fn a_rule_that_says_not_one_of_is_not_silently_skipped() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {

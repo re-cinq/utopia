@@ -1,20 +1,20 @@
-//! 按模型的并发限制。
+//! Per-model concurrency limits.
 //!
-//! 真正的约束是供应商的速率限制，而那是按 (base_url, model) 来的——本地 Ollama
-//! 可能只扛 2 个并发，托管 API 能吃 50。此前只有一个部署级 `worker_concurrency`
-//! 管住所有任务，等于用一个数字管两种完全不同的东西。
+//! The real constraint is the provider's rate limit, and that is per (base_url, model) -- a local Ollama
+//! may only handle 2 concurrent calls, while a hosted API can take 50. Until now a single deployment-level `worker_concurrency`
+//! governed all tasks, which means one number was managing two completely different things.
 //!
-//! 没配过的模型走 `deployment_settings.default_model_concurrency`（缺省 10）。
+//! A model with no configuration falls back to `deployment_settings.default_model_concurrency` (default 10).
 
 use sqlx::PgPool;
 use utopia_core::models::ModelLimit;
 use utopia_core::AppResult;
 
-/// 这个模型允许多少并发。没有专属配置就走部署缺省。
+/// How many concurrent calls this model allows. With no model-specific config it falls back to the deployment default.
 ///
-/// 每次 LLM 调用前查一次——相对于一次动辄二十几秒的调用，这个查询的成本可以
-/// 忽略。闸门手里也存着一份：管理员改限额时 `ModelGates::refresh` 再查一遍、当场
-/// 调闸门（#1302），等在闸门上的任务不必等下一次调用来读。
+/// Checked once before each LLM call -- compared to a call that often takes twenty-odd seconds, the cost of this query can
+/// be ignored. The gate also keeps a copy: when an admin changes the limit, `ModelGates::refresh` re-reads it and immediately
+/// updates the gate (#1302), so tasks waiting at the gate need not wait for the next call to read it.
 pub async fn limit_for(pool: &PgPool, base_url: &str, model: &str) -> AppResult<usize> {
     let row: Option<(i32,)> = sqlx::query_as(
         "SELECT max_concurrent FROM model_concurrency WHERE base_url = $1 AND model = $2",
@@ -34,7 +34,7 @@ pub async fn limit_for(pool: &PgPool, base_url: &str, model: &str) -> AppResult<
     Ok(dflt.max(1) as usize)
 }
 
-/// 已配置的模型 + 部署缺省（管理页一次取回）。
+/// Configured models + deployment default (fetched in one go for the admin page).
 pub async fn list(pool: &PgPool) -> AppResult<(Vec<ModelLimit>, i32)> {
     let rows: Vec<ModelLimit> = sqlx::query_as(
         "SELECT base_url, model, max_concurrent FROM model_concurrency ORDER BY base_url, model",
@@ -49,7 +49,7 @@ pub async fn list(pool: &PgPool) -> AppResult<(Vec<ModelLimit>, i32)> {
     Ok((rows, dflt))
 }
 
-/// 设一个模型的并发。`max_concurrent` 为 None 表示删掉专属配置、回落到缺省。
+/// Set one model's concurrency. `max_concurrent` of None means remove the model-specific config and fall back to the default.
 pub async fn set(
     pool: &PgPool,
     base_url: &str,
@@ -87,7 +87,7 @@ pub async fn set(
     Ok(())
 }
 
-/// 部署缺省并发（未单独配置的模型都走它）。
+/// Deployment default concurrency (used by any model without its own setting).
 pub async fn set_default(pool: &PgPool, value: i32) -> AppResult<()> {
     if !(1..=256).contains(&value) {
         return Err(utopia_core::AppError::invalid(
@@ -102,7 +102,7 @@ pub async fn set_default(pool: &PgPool, value: i32) -> AppResult<()> {
     Ok(())
 }
 
-/// 部署里实际在用的模型（各工作区设置里出现过的），供管理页列出可配置项。
+/// Models actually in use in the deployment (those that appeared in any workspace setting), for the admin page to list as configurable.
 pub async fn models_in_use(pool: &PgPool) -> AppResult<Vec<(String, String, String)>> {
     Ok(sqlx::query_as(
         "SELECT DISTINCT chat_base_url, chat_model, 'chat' FROM llm_settings

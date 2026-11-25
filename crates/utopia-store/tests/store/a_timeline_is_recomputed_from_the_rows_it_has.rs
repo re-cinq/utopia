@@ -1,11 +1,11 @@
-//! 一条时间线只取决于它有哪些行（#679 第二轮评审的复现，留作回归）。
+//! A timeline depends only on which rows it has (regression kept from the reproduction of the #679 second-round review).
 //!
-//! 第一版靠「终点正好等于另一行的起点」认出引擎画的界：后面那一段挪了（晚到的证据把
-//! 日期往前挪、补上了起点）就认不出来，界留在原地、两段叠在一起；整理一轮一轮地来，
-//! 轮数用完就静默停下；撤回合并先改行再拿锁，与落库对账互相等死，还会复活人驳回的行、
-//! 丢掉人改的区间。现在引擎画的终点记在行上（0057），每次按当下的行一次重算。
+//! The first version recognized the engine's drawn boundary by "the end exactly equals another row's start": if the later span moved (a late-arriving source pushed dates earlier and filled in the start), the boundary went unrecognized, stayed in place, and the two spans overlapped; tidying ran one round at a time,
+//! and when the rounds ran out it silently stopped. Retracting a merge edited rows before taking the lock, which deadlocked against reconciliation with the database, and it brought back rows a person had rejected and dropped
+//! intervals a person had edited. Now the end the engine draws is recorded on the row (0057),
+//! and it is recomputed once per call from the rows as they stand now.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped, not failed, when `UTOPIA_DATABASE_URL` is not set. It creates and tears down its own data and never touches an existing database.
 
 use serde_json::json;
 use sqlx::PgPool;
@@ -86,7 +86,7 @@ fn t(day: &str) -> chrono::DateTime<chrono::Utc> {
     format!("{day}T00:00:00Z").parse().unwrap()
 }
 
-/// 一次观察：值、起止、出自哪天的哪种文档、置信度、起点的来历
+/// One observation: value, start and end, which kind of document on which day it came from, confidence, and where the start came from
 #[derive(Clone, Copy)]
 struct Seen<'a> {
     subject: Uuid,
@@ -95,7 +95,7 @@ struct Seen<'a> {
     to: Option<&'a str>,
     doc: Option<&'a str>,
     confidence: f32,
-    /// `None` = 没经过时间解析（这些测试的默认），`Some("C")` = 有时间词却锚不到
+    /// `None` = no time parsing happened (the default for these tests), `Some("C")` = a time word was present but could not be anchored
     grade: Option<&'a str>,
 }
 
@@ -111,7 +111,7 @@ fn seen<'a>(f: &Fixture, value: &'a str, from: &'a str) -> Seen<'a> {
     }
 }
 
-/// 抽取的写法：落库（或并进已有断言）、写证据、对账——**并进已有断言的也对账**
+/// The extraction path: write (or merge into an existing assertion), write the evidence, and reconcile -- **merged assertions are reconciled too**
 async fn observe(pool: &PgPool, f: &Fixture, x: Seen<'_>) -> anyhow::Result<Uuid> {
     let mut validity = Validity {
         from: x.from.map(t),
@@ -177,7 +177,7 @@ async fn observe(pool: &PgPool, f: &Fixture, x: Seen<'_>) -> anyhow::Result<Uuid
     Ok(id)
 }
 
-/// (值, 起点, 终点, 终点精度, 终点锚点, 读出的起点, 读出的终点)
+/// (value, start, end, end precision, end anchor, start read out, end read out)
 type Seg = (
     String,
     Option<String>,
@@ -207,7 +207,7 @@ async fn timeline(pool: &PgPool, f: &Fixture, subject: Uuid) -> anyhow::Result<V
     .await?)
 }
 
-/// 读出来的区间叠在一起、值又不同的行有几对
+/// How many pairs of rows have overlapping read-out intervals but different values
 async fn overlaps(pool: &PgPool, f: &Fixture, subject: Uuid) -> anyhow::Result<i64> {
     let hf = utopia_store::world_axis::facts_holds_from("f");
     let ht = utopia_store::world_axis::facts_holds_to("f");
@@ -272,8 +272,8 @@ async fn pool() -> anyhow::Result<Option<PgPool>> {
     ))
 }
 
-/// 后面那一段晚到的文件补上了起点（第十一份补充协议之后，交割文件说 BBHQ1 从 7 月 31 日
-/// 起就是房东）：HPBB1 止于那一天，不再叠到 8 月 13 日
+/// A later span's start was filled in by a late-arriving file (after the eleventh supplementary agreement, the delivery file says BBHQ1 has been the landlord since July 31),
+/// so HPBB1 ends on that day and no longer overlaps to August 13
 #[tokio::test]
 async fn a_start_that_arrives_later_moves_the_end_before_it() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -317,7 +317,7 @@ async fn a_start_that_arrives_later_moves_the_end_before_it() -> anyhow::Result<
     Ok(())
 }
 
-/// 没起点的后任又被一份更早的文件提到：前任的锚点跟着往前挪
+/// A successor with no start was raised by an earlier file: the predecessor's anchor moves earlier with it
 #[tokio::test]
 async fn earlier_evidence_for_a_value_with_no_start_moves_the_end_before_it() -> anyhow::Result<()>
 {
@@ -350,7 +350,7 @@ async fn earlier_evidence_for_a_value_with_no_start_moves_the_end_before_it() ->
     Ok(())
 }
 
-/// 一条没起点的值先到，有起点的后到：文档日期从不写进日期列，也不叠
+/// A value with no start arrives first and one with a start arrives later: the document date is never written into the date columns, and nothing overlaps
 #[tokio::test]
 async fn a_value_with_no_start_that_arrives_first_still_takes_its_place() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -383,7 +383,7 @@ async fn a_value_with_no_start_that_arrives_first_still_takes_its_place() -> any
     Ok(())
 }
 
-/// 已经结束的新值与开着的旧值，谁先到都一样
+/// A new value that has already ended and an old value still open: the order of arrival makes no difference
 #[tokio::test]
 async fn a_closed_value_and_an_open_one_meet_the_same_way_in_either_order() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -417,7 +417,7 @@ async fn a_closed_value_and_an_open_one_meet_the_same_way_in_either_order() -> a
     Ok(())
 }
 
-/// 七十个置信度不够的值排在前面，一个够格的值到了：每一个都关上，没有轮数用完这回事
+/// Seventy values with insufficient confidence come first, then one qualifying value arrives: each one is closed, and there is no such thing as running out of rounds
 #[tokio::test]
 async fn unanchored_values_do_not_keep_a_placed_one_from_closing_them() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -446,8 +446,8 @@ async fn unanchored_values_do_not_keep_a_placed_one_from_closing_them() -> anyho
     Ok(())
 }
 
-/// 起点锚不到的后任不关前任（0045 第 3 刀）：它进得了图、排得进时间线，可它在轴上的
-/// 位置是文档日期给的，不是那句话给的，拿它改写历史就是拿一个猜的位置改写历史
+/// A successor whose start cannot be anchored does not close its predecessor (0045 cut 3): it can enter the graph and be placed on the timeline, but its position on the axis
+/// comes from the document date, not from the sentence, so rewriting history with it means rewriting history with a guessed position
 #[tokio::test]
 async fn an_unanchored_successor_closes_nothing() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -465,7 +465,7 @@ async fn an_unanchored_successor_closes_nothing() -> anyhow::Result<()> {
     )
     .await?;
     let open = open_rows(&pool, &f, f.lease).await?;
-    // 再来一个锚得住的：这一个才关得了前面两个
+    // Another one that can be anchored: this one is what closes the two before it
     observe(&pool, &f, seen(&f, "third", "2022-01-01")).await?;
     let after = open_rows(&pool, &f, f.lease).await?;
     cleanup(&pool, &f).await?;
@@ -474,7 +474,7 @@ async fn an_unanchored_successor_closes_nothing() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 两条各一百个值的时间线交错着合并：一次重算排好，没有轮数上限
+/// Two timelines of a hundred values each, interleaved and merged: one recompute sorts it out, with no round limit
 #[tokio::test]
 async fn a_merge_of_two_long_timelines_leaves_one_timeline() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -506,7 +506,7 @@ async fn a_merge_of_two_long_timelines_leaves_one_timeline() -> anyhow::Result<(
     Ok(())
 }
 
-/// 合并两条交错的时间线再撤回：两边都回到合并之前的样子
+/// Merge two interleaved timelines and then retract: both sides return to how they were before the merge
 #[tokio::test]
 async fn a_revert_gives_both_timelines_back_as_they_were() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -557,7 +557,7 @@ async fn a_revert_gives_both_timelines_back_as_they_were() -> anyhow::Result<()>
     Ok(())
 }
 
-/// 合并之后又到了一个值、关上了搬来的那一行：撤回时那一行（连同关上它的改写）回源实体
+/// After merging, another value arrives and closes the moved row: retracting restores that row (together with the rewrite that closed it) back to its source entity
 #[tokio::test]
 async fn a_revert_takes_back_a_moved_value_closed_after_the_merge() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -590,7 +590,7 @@ async fn a_revert_takes_back_a_moved_value_closed_after_the_merge() -> anyhow::R
     Ok(())
 }
 
-/// 合并把 A 关在 D 开始时，人把 A 的起点改成了 2019-12-01：撤回之后人改的那一行还在
+/// Merge closed A when D starts, then a person changed A's start to 2019-12-01: after retracting, the row a person edited is still there
 #[tokio::test]
 async fn a_revert_keeps_the_interval_a_person_corrected() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -646,7 +646,7 @@ async fn a_revert_keeps_the_interval_a_person_corrected() -> anyhow::Result<()> 
     Ok(())
 }
 
-/// 合并把 A 关上之后，人把 A 驳回了：撤回合并不让它回来
+/// After the merge closed A, a person rejected A: retracting the merge does not bring it back
 #[tokio::test]
 async fn a_revert_does_not_bring_back_a_value_a_person_rejected() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -676,7 +676,7 @@ async fn a_revert_does_not_bring_back_a_value_a_person_rejected() -> anyhow::Res
     Ok(())
 }
 
-/// 人驳回了后任：关在它开始时的前任重新开着
+/// A person rejected the successor: the predecessor that was closed at its start is open again
 #[tokio::test]
 async fn rejecting_a_successor_reopens_the_value_it_closed() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -694,7 +694,7 @@ async fn rejecting_a_successor_reopens_the_value_it_closed() -> anyhow::Result<(
     Ok(())
 }
 
-/// 人写明的终点不随时间线重算：后任走了，它仍然关着
+/// An end a person wrote is not recomputed by the timeline: the successor left, yet it stays closed
 #[tokio::test]
 async fn an_end_a_person_wrote_is_never_recomputed() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -712,7 +712,7 @@ async fn an_end_a_person_wrote_is_never_recomputed() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 删掉后任出自的文档，前任重新开着；恢复文档，前任又关上
+/// Deleting the document the successor came from reopens the predecessor; restoring the document closes it again
 #[tokio::test]
 async fn deleting_and_restoring_a_document_moves_the_end_it_drew() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -754,7 +754,7 @@ async fn deleting_and_restoring_a_document_moves_the_end_it_drew() -> anyhow::Re
     Ok(())
 }
 
-/// 并行落库：三个、五个值同时到，最后都是一条时间线
+/// Parallel writes: three, then five values arrive at once, and in the end they form one timeline
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn values_that_arrive_together_leave_one_timeline() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
@@ -801,7 +801,7 @@ async fn values_that_arrive_together_leave_one_timeline() -> anyhow::Result<()> 
     Ok(())
 }
 
-/// 撤回合并与落库同时进行：谁也不等死谁，最后没有叠在一起的区间
+/// Retracting a merge and writing to the database happen at the same time: neither waits on the other to death, and in the end no intervals overlap
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revert_and_arriving_values_do_not_deadlock() -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {

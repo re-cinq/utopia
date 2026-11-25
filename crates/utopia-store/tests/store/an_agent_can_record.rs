@@ -1,14 +1,14 @@
-//! 经 MCP 提的记忆，审核卡上要认得出是**哪一个 agent**（#304 / 0026）。
+//! A memory proposed through MCP must be recognizable on the review card as **which agent** it came from (#304 / 0026).
 //!
-//! 为什么非要连库：这条身份链整个由 SQL 承担——一列外键、一个 LEFT JOIN、
-//! 一个 `AS` 别名。写错列名、join 错表、别名和 `FromRow` 的字段对不上，
-//! `cargo check` 一个字都不会说，界面上只会安静地少显示半行字。
+//! Why this needs a database: the whole identity chain lives in SQL -- one foreign key column, one LEFT JOIN,
+//! and one `AS` alias. A wrong column name, a wrong join table, or an alias that does not match the `FromRow` field
+//! is said nothing about by `cargo check`; the interface just quietly shows half a line less.
 //!
-//! 两条都要断言，因为它们坏的方式不同：
-//! - 带令牌的提议，视图要给出令牌的名字（join 漏了 → 永远是空）
-//! - 不带令牌的提议（网页端对话），那一位要是空（join 写成内连接 → 整条不见了）
+//! Both cases must be asserted, because they break in different ways:
+//! - A proposal made with a token: the view must show the token's name (a missing join → always empty)
+//! - A proposal made without a token (web chat): that field must be empty (an inner join → the whole row disappears)
 //!
-//! 自建自拆：一次性 org/workspace/kb，跑完连 org 一起删。
+//! It creates and tears down its own data: a one-off org / workspace / kb, removed along with the org when done.
 
 use sqlx::PgPool;
 use utopia_store::graph::Validity;
@@ -18,9 +18,9 @@ use uuid::Uuid;
 struct Fixture {
     org: Uuid,
     kb: Uuid,
-    /// 令牌记的那一条
+    /// The entry recorded by a token
     by_agent: Uuid,
-    /// 网页端对话记的那一条
+    /// The entry recorded by a web chat
     by_person: Uuid,
 }
 
@@ -47,7 +47,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     .bind(ws)
     .execute(pool)
     .await?;
-    // 邮箱唯一：带一次性后缀，别撞上库里留下的账号
+    // Email must be unique: a one-off suffix keeps it from colliding with accounts left in the database
     sqlx::query(
         "INSERT INTO users (id, org_id, email, password_hash, display_name)
          VALUES ($1, $2, $3, 'x', 'Zhang San')",
@@ -57,7 +57,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     .bind(format!("agent-test-{tag}@utopia.test"))
     .execute(pool)
     .await?;
-    // token_hash 也唯一
+    // token_hash must be unique too
     sqlx::query(
         "INSERT INTO personal_tokens (id, user_id, name, token_hash, token_prefix, scope)
          VALUES ($1, $2, 'Meeting notes agent', $3, 'utp_pat_test', 'write')",
@@ -85,7 +85,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         .execute(pool)
         .await?;
     }
-    // blob 按 sha 跨库共用，sha 也带一次性后缀
+    // Blobs are shared across libraries by sha, so the sha also gets a one-off suffix
     sqlx::query(
         "INSERT INTO documents (id, kb_id, filename, sha256, status)
          VALUES ($1, $2, 'memory-log.md', $3, 'ready')",
@@ -131,7 +131,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
         }
     };
     let by_agent = propose(zenith, Some(token)).await?;
-    // 同一个 (主语, 谓词, 宾语) 会被判成 AlreadyPending，所以第二条换个宾语
+    // The same (subject, predicate, object) would be judged AlreadyPending, so the second one uses a different object
     let by_person = propose(acme, None).await?;
 
     Ok(Fixture {
@@ -158,8 +158,8 @@ async fn a_pending_fact_names_the_agent_that_proposed_it() -> anyhow::Result<()>
             .expect("待确认项不在队列里")
     };
 
-    // 1. 令牌记的那条：人和 agent 都答得出。人是身份，agent 是「哪一个客户端」——
-    //    同一个人挂三个 agent 时，卡片上只有后者分得开
+    // 1. The entry recorded by a token: both a person and an agent can answer for it. The person is the identity; the agent is "which client" --
+    //    when one person has three agents, only the latter is distinguishable on the card
     let agent = find(f.by_agent);
     assert_eq!(agent.proposed_by_name.as_deref(), Some("Zhang San"));
     assert_eq!(
@@ -168,15 +168,15 @@ async fn a_pending_fact_names_the_agent_that_proposed_it() -> anyhow::Result<()>
         "令牌名没跟出来——多半是 VIEW_SELECT 少了那个 join"
     );
 
-    // 2. 网页端对话记的那条：没有 agent，但**这一条本身不能消失**
-    //    （join 写成内连接就会整条不见，而那是最难发现的一种丢失）
+    // 2. The entry recorded by a web chat: there is no agent, but **this entry itself must not disappear**
+    //    (if the join became an inner join the whole row would vanish, and that is the hardest kind of loss to spot)
     let person = find(f.by_person);
     assert_eq!(person.proposed_by_name.as_deref(), Some("Zhang San"));
     assert_eq!(person.proposed_token_name, None);
 
-    // **先删库再删 org。** 删 org 级联到 users，而 `pending_facts.proposed_by`
-    // 是不带 ON DELETE 的外键（台账该拦住这种删除）；库不跟着 org 级联，
-    // 所以顺序反了就会被外键顶回来
+    // **Delete the library first, then the org.** Deleting the org cascades to users, and `pending_facts.proposed_by`
+    // is a foreign key without ON DELETE (the ledger should block exactly this kind of delete); the library does not cascade with the org,
+    // so if the order were reversed, the foreign key would push back
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(f.kb)
         .execute(&pool)

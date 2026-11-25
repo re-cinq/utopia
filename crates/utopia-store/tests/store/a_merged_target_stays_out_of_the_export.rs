@@ -1,9 +1,9 @@
-//! 同库不等于在导出集里：`entities_page` 滤掉 `merged_into`
-//! 非空的行，但 merge 只改写 fact 的主语/宾语——属性里的实体值、派生的
-//! 主语/宾语仍可能指着已合并的行。序列化照铸它的 IRI 就是一条悬空边。
+//! Being in the same library is not the same as being in the export set: `entities_page` filters out rows where `merged_into`
+//! is non-empty, but a merge only rewrites a fact's subject and object -- an entity value in an attribute, and a derived
+//! subject or object, can still point at a merged-away row. Serializing it with the IRI minted for it leaves a dangling edge.
 //!
-//! 判法：**同库但不在导出集**也是越界——与越库同一处置，整份拒导。不
-//! 重写指向留下的实体（那是另一个语义动作），也不静默省略。
+//! The rule: **same library but not in the export set** also counts as out of bounds -- the same treatment as crossing libraries: refuse the whole export. Do not
+//! rewrite the entities that the pointers left behind (that is a different semantic action), and do not silently omit them.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -19,8 +19,8 @@ struct Fixture {
     fact: Uuid,
 }
 
-/// 一个库、留着的实体与已合并的实体、一条事实、一条指向已合并实体的
-/// 派生——merged 是合法状态（没有触发器拦它），要拦的是导出侧
+/// One library, an entity kept and an entity merged away, one fact, and one
+/// derivation pointing at the merged entity -- merged is a legal state (no trigger blocks it); what must be blocked is the export side
 async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     let (org, ws, kb) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     sqlx::query("INSERT INTO organizations (id, name) VALUES ($1, 'merged-test')")
@@ -139,7 +139,7 @@ async fn insert_derived(
     Ok(id)
 }
 
-/// 已合并的实体不进导出集——它不在 entities 页里出现
+/// A merged entity does not enter the export set -- it does not appear on the entities page
 #[tokio::test]
 async fn a_merged_entity_is_not_emitted() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -159,7 +159,7 @@ async fn a_merged_entity_is_not_emitted() -> anyhow::Result<()> {
     cleanup(&pool, &f).await
 }
 
-/// 指着已合并实体的属性值：同库但缺席——体检与事实页都要拦
+/// An attribute value pointing at a merged entity: same library but absent -- the health check and the fact page both must block it
 #[tokio::test]
 async fn a_qualifier_on_a_merged_entity_fails_closed() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -200,7 +200,7 @@ async fn a_qualifier_on_a_merged_entity_fails_closed() -> anyhow::Result<()> {
     cleanup(&pool, &f).await
 }
 
-/// 派生的主语/宾语指着已合并的实体：同库但缺席
+/// A derived subject or object pointing at a merged entity: same library but absent
 #[tokio::test]
 async fn a_derived_on_a_merged_entity_fails_closed() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -236,13 +236,13 @@ async fn a_derived_on_a_merged_entity_fails_closed() -> anyhow::Result<()> {
         .execute(&pool)
         .await?;
 
-    // 干净之后就放行——拒的是缺席的引用，不是库本身
+    // Clean after this -- what is refused is the absent reference, not the library itself
     utopia_store::export::provenance_integrity(&mut pool.begin().await?, f.kb).await?;
     cleanup(&pool, &f).await
 }
 
-/// 事实的主语/宾语指着已合并的实体（merge 没走到的旧写或绕过 store 的写）：
-/// 事实页与体检都要拦
+/// A fact's subject or object pointing at a merged entity (an old write that the merge did not reach, or a write that bypassed the store):
+/// both the fact page and the health check must block it
 #[tokio::test]
 async fn a_fact_on_a_merged_entity_fails_closed() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {

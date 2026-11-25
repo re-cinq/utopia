@@ -1,7 +1,7 @@
-//! 判定落下之后建的实体也拿到它类别词绑上的类（`apply_bound`）。
+//! An entity created after a judgement has landed also gets the class its category word is bound to (`apply_bound`).
 //!
-//! 判定那一刻的投影（`apply`）只看得见那一刻的实体；抽到一半的文档后半建的公司落成没有类的，
-//! 它的属性陈述就进不了任何声明了定义域的属性的候选。没有 `UTOPIA_DATABASE_URL` 时跳过。
+//! The projection at the moment of judgement (`apply`) only sees the entities that exist at that moment; a company created in the second half of a half-extracted document ends up with no class,
+//! so its attribute statements never reach any attribute candidate whose domain is declared. Skipped when `UTOPIA_DATABASE_URL` is not set.
 
 use super::apply_bound;
 use sqlx::PgPool;
@@ -45,7 +45,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fx> {
         .bind(kb)
         .execute(pool)
         .await?;
-    // 「公司」已经绑到企业类；判定时还没有下面这些实体
+    // "Company" is already bound to the enterprise class; the entities below did not exist at the time of judgement
     sqlx::query(
         "INSERT INTO type_bindings(id,kb_id,kind_word,type_id,status) VALUES($1,$2,'公司',$3,'bound')",
     )
@@ -54,7 +54,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fx> {
     .bind(class)
     .execute(pool)
     .await?;
-    // 判定之后抽出来的公司：类别词写法带空白，归一后是同一个词
+    // A company extracted after the judgement: the category word is written with whitespace, and after normalisation it is the same word
     sqlx::query(
         "INSERT INTO entities(id,kb_id,canonical_name,specific_type) VALUES($1,$2,'蓝海物流有限公司',' 公司 ')",
     )
@@ -62,7 +62,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fx> {
     .bind(kb)
     .execute(pool)
     .await?;
-    // 人说了它没有类：绑定不盖人的决定
+    // The person said it has no class: a binding does not override a human decision
     sqlx::query(
         "INSERT INTO entities(id,kb_id,canonical_name,specific_type,type_source) VALUES($1,$2,'某公司','公司','human')",
     )
@@ -70,7 +70,7 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fx> {
     .bind(kb)
     .execute(pool)
     .await?;
-    // 别的类别词：没有绑定，不动
+    // Other category words: no binding, left alone
     sqlx::query(
         "INSERT INTO entities(id,kb_id,canonical_name,specific_type,proposed_type) VALUES($1,$2,'王海','董事长','chairman')",
     )
@@ -122,7 +122,7 @@ async fn an_entity_built_after_the_decision_still_gets_its_class() -> anyhow::Re
             class_of(&pool, f.other).await?,
             (None, "extracted".into(), Some("chairman".into()))
         );
-        // 幂等：已经在那个类上的不再算改动
+        // Idempotent: entities already on that class do not count as a change
         assert_eq!(apply_bound(&pool, f.kb).await?, 0);
         anyhow::Ok(())
     }

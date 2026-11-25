@@ -1,4 +1,4 @@
-//! 摄入来源仓储："来源即文件夹"——source 是容器，挂着它摄入的文档，可定时同步。
+//! Ingest source repository: "a source is a folder" — a source is a container holding the documents it ingests, and can be synced on a schedule.
 
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -8,20 +8,20 @@ use uuid::Uuid;
 
 use crate::decay::DecaySettings;
 
-/// folder = 纯容器（上传/拖拽入内，无同步语义）；url/rss = 拉取型；api = 推送型。
-/// 本机目录监听（watch_folder）已否决——自部署用户看不到服务器磁盘；
-/// 对象存储 / WebDAV / Notion 是它的替代形态（0013）。
-/// custom = 自定义拉取器：任何实现 Utopia ingest 接口的 URL（返回 items JSON）即可定时摄取。
-/// github_issues / gitlab_issues / jira_issues = 工单：一张工单连同它的状态变更史成为一篇文档。
+/// folder = plain container (files are uploaded/dragged in, no sync semantics); url/rss = pull-type; api = push-type.
+/// Watching a local directory (watch_folder) was rejected — self-hosting users cannot see the server's disk;
+/// object storage / WebDAV / Notion are its replacements (0013).
+/// custom = custom puller: any URL that implements the Utopia ingest interface (returning items JSON) can be ingested on a schedule.
+/// github_issues / gitlab_issues / jira_issues = tickets: one ticket, together with its status-change history, becomes one document.
 ///
-/// 种类的清单**不在这里写**：`SourceKind`（utopia-core）一个枚举出全部——创建的白名单、
-/// 同步的分派、前端的下拉框（有测试对表）。从前这里有一张手写的 `KINDS`，五种连接器
-/// 加了同步却没进这张表，界面上选得到、建不出来（#247）
+/// The list of kinds is **not written here**: `SourceKind` (utopia-core) enumerates them all in one enum — the creation allowlist,
+/// sync dispatch, and the front-end dropdown (a test checks them against each other). Previously a hand-written `KINDS` lived here, and five connectors
+/// gained sync without being added to this table, so the UI let you pick them but creation failed (#247)
 pub fn creatable_kinds() -> Vec<&'static str> {
     SourceKind::creatable().map(|k| k.as_str()).collect()
 }
 
-/// 校验并规范化标准 5 段 cron 表达式（内部用 cron crate 的 6 段：补秒位）。
+/// Validates and normalises a standard 5-field cron expression (internally the cron crate uses 6 fields: a seconds field is prepended).
 pub fn validate_cron(expr: &str) -> AppResult<String> {
     let mut fields: Vec<String> = expr.split_whitespace().map(str::to_string).collect();
     if fields.len() != 5 {
@@ -42,11 +42,11 @@ pub fn validate_cron(expr: &str) -> AppResult<String> {
     Ok(normalized)
 }
 
-/// 星期那一段的数字按标准 cron 读（0–7，0 与 7 都是周日），存成名字。
+/// Numbers in the weekday field are read as standard cron (0–7, where 0 and 7 are both Sunday), and stored as names.
 ///
-/// cron crate 的数字星期是 Quartz 那一套，1 是周日：照 Advanced 旁边链着的 crontab.guru
-/// 写 `1-5`，同步落在周日到周四，`0` 则被当成越界拒掉。名字两边读法一样，存下来的
-/// 表达式也就没有歧义。没有数字、或读不懂的写法原样交给 cron crate 去校验
+/// The cron crate's numeric weekdays follow the Quartz scheme, where 1 is Sunday: following the crontab.guru linked next to Advanced,
+/// `1-5` is written, which syncs Sunday to Thursday, and `0` is rejected as out of range. Names are read the same way on both sides, so the stored
+/// expression is unambiguous. An expression with no numbers, or one that cannot be read, is handed to the cron crate for validation as-is
 fn weekday_names(field: &str) -> Option<String> {
     if !field.bytes().any(|b| b.is_ascii_digit()) {
         return None;
@@ -111,11 +111,11 @@ pub fn rss_full_content_enabled(kind: &str, config: &serde_json::Value) -> AppRe
     Ok(rss_content_mode(config)? == RSS_FULL_CONTENT_MODE)
 }
 
-/// cron 的下一次触发时刻（服务器本地时区）。
+/// The next trigger time of the cron (server local time zone).
 fn cron_next_after(expr: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
     use std::str::FromStr;
-    // 改成存名字之前保存的来源，表达式里还是数字星期：同样按标准 cron 读，
-    // 不然存着 `1-5` 的来源照旧周日到周四同步
+    // A source saved before names were stored still has numeric weekdays in its expression: these are likewise read by standard cron,
+    // otherwise a source storing `1-5` would keep syncing Sunday to Thursday
     let mut fields: Vec<&str> = expr.split_whitespace().collect();
     let names = fields.get(4).copied().and_then(weekday_names);
     if let Some(names) = &names {
@@ -130,11 +130,11 @@ fn cron_next_after(expr: &str, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
 }
 
 pub async fn list(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<SourceView>> {
-    // config 剔掉凭据：列表给 Viewer 看，哪一种连接器的密钥都不下发。
-    // 键在 `SOURCE_SECRET_KEYS` 一张表上——从前这里只减 `auth_header`，五种连接器
-    // 的密钥就这么漏出去的（#246）
-    // 外层别名不能与 ENTRY_SELECT 的来源别名重名；来源和当前代谓词必须留在投影内部，
-    // 否则 PostgreSQL 会先计算部署中的全部 observation，再丢弃与当前来源无关的行。
+    // config strips credentials: the list is shown to Viewers, so no connector's secrets are ever sent down.
+    // The keys live in one table, `SOURCE_SECRET_KEYS` — previously this only removed `auth_header`, and the secrets of five
+    // connectors leaked out that way (#246)
+    // The outer alias must not clash with the source alias in ENTRY_SELECT; the source and the current predicate must stay inside the projection,
+    // otherwise PostgreSQL computes every observation in the deployment first and then discards the rows unrelated to the current source.
     let rows: Vec<SourceView> = sqlx::query_as(&format!(
         "SELECT listed_source.id, listed_source.kind, listed_source.name,
                 listed_source.config - $2::text[] AS config, listed_source.icon,
@@ -192,8 +192,8 @@ pub async fn list(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<SourceView>> {
     Ok(rows)
 }
 
-/// 出库即开封：配置里的凭据键与推送密钥在库里是封印的（`utopia_core::secrets`）。
-/// 任何返回 `Source` 的查询都从这里过——`list` 不用，它在 SQL 里就把凭据键剔了
+/// Opened on the way out of the store: credential keys and push secrets in the config are sealed in the DB (`utopia_core::secrets`).
+/// Every query that returns a `Source` goes through here — `list` does not, it strips the credential keys in SQL.
 fn opened(mut s: Source) -> AppResult<Source> {
     secrets::open_json_keys(&mut s.config, SOURCE_SECRET_KEYS).map_err(AppError::Other)?;
     s.ingest_token = secrets::open_opt(s.ingest_token.as_deref()).map_err(AppError::Other)?;
@@ -231,14 +231,14 @@ pub async fn create(
             "Source name is required",
         ));
     }
-    // 互斥：cron 优先（UI 只会传其一）
+    // Mutually exclusive: cron takes precedence (the UI only ever sends one of them)
     let cron_norm = sync_cron.map(validate_cron).transpose()?;
     let interval = if cron_norm.is_some() {
         None
     } else {
         sync_interval_minutes
     };
-    // serde 缺省的 Value::Null 会以 jsonb null 落库，前端读 config.x 直接炸——规范化为空对象
+    // serde's default Value::Null lands in the DB as jsonb null, and the front end reading config.x blows up — normalise it to an empty object
     let mut config = if config.is_null() {
         serde_json::json!({})
     } else {
@@ -269,7 +269,7 @@ pub async fn create(
     opened(source)
 }
 
-/// 设置 api 来源的推送密钥（创建 / 轮换时）。
+/// Sets the push secret for an api source (on creation / rotation).
 pub async fn set_ingest_token(pool: &PgPool, source_id: Uuid, token: &str) -> AppResult<()> {
     let res = sqlx::query("UPDATE sources SET ingest_token = $2 WHERE id = $1")
         .bind(source_id)
@@ -282,7 +282,7 @@ pub async fn set_ingest_token(pool: &PgPool, source_id: Uuid, token: &str) -> Ap
     Ok(())
 }
 
-/// 更新调度：interval 与 cron 互斥，任一被显式设置时都会覆盖两者。
+/// Updating the schedule: interval and cron are mutually exclusive, and whichever is explicitly set overrides both.
 fn rss_feed_url(config: &serde_json::Value) -> Option<&str> {
     config
         .get("feed_url")
@@ -342,8 +342,8 @@ pub async fn update(
         && old_full
         && new_full
         && rss_feed_url(&previous.config) != rss_feed_url(&next_config);
-    // gitlab_issues 换了项目、或打开了合并请求：checkpoint 之前的那些工单从没读过，而增量只问
-    // 它之后的。清掉它，下一轮从头读；没变的工单靠去重不记新版本（0072）。关掉合并请求不用重读
+    // gitlab_issues changed project, or merge requests were turned on: the tickets from before the checkpoint were never read, while the incremental query only asks
+    // for those after it. Clear it, so the next run reads from the start; unchanged tickets are not recorded as new versions thanks to deduplication (0072). Turning off merge requests does not need a re-read
     let merge_requests =
         |config: &serde_json::Value| config["include_merge_requests"].as_bool().unwrap_or(false);
     let reread = previous.kind == "gitlab_issues"
@@ -374,9 +374,9 @@ pub async fn update(
     .fetch_one(&mut *tx)
     .await?;
     if reread {
-        // 正在跑的那一轮是按旧配置列的，它要写下的 checkpoint 不作数。checkpoint 本来就空着时
-        // （第一轮），上面的清空挡不住它：空对空，`finish_timestamp_sync` 照样提交。把那一轮
-        // 记成失败，它只认 running 的轮次，于是 checkpoint 跟着一起回滚
+        // The run in progress was listed against the old config, so the checkpoint it is about to write does not count. Even when the checkpoint was already empty
+        // (the first run), the clearing above cannot stop it: empty against empty, and `finish_timestamp_sync` still commits. Recording that run
+        // as failed — it only accepts runs in the running state — rolls the checkpoint back along with it
         sqlx::query(
             "UPDATE source_sync_runs SET finished_at = now(), status = 'failed', error = $2
              WHERE source_id = $1 AND status = 'running'",
@@ -397,8 +397,8 @@ pub async fn update(
     opened(source)
 }
 
-/// 只动配置里的几个键：`set` 里的写进去（密钥照样封印），`remove` 里的删掉，别的键原样。
-/// 一条语句完成，不先读后写——两个请求同时改不同的键时，谁也不会把对方刚写的盖掉
+/// Only touches a few keys in the config: those in `set` are written in (secrets are still sealed), those in `remove` are deleted, and other keys are left as-is.
+/// Completes in one statement, with no read-then-write — when two requests change different keys at once, neither overwrites the other's fresh write
 pub async fn patch_config(
     pool: &PgPool,
     id: Uuid,
@@ -421,7 +421,7 @@ pub async fn patch_config(
     opened(source)
 }
 
-/// 删除来源；其文档保留（source_id 置 NULL，落回 Uploads 组）。
+/// Deletes a source; its documents are kept (source_id set to NULL, falling back to the Uploads group).
 pub async fn delete(pool: &PgPool, id: Uuid) -> AppResult<()> {
     let res = sqlx::query("DELETE FROM sources WHERE id = $1")
         .bind(id)
@@ -433,8 +433,8 @@ pub async fn delete(pool: &PgPool, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
-/// 到期待同步的来源（调度器每分钟扫）。
-/// interval 型在 SQL 里判定；cron 型取回 Rust 侧求下一次触发时刻再过滤。
+/// Sources due for a sync (the scheduler scans every minute).
+/// interval-type is decided in SQL; cron-type is fetched and the next trigger time computed on the Rust side, then filtered.
 pub async fn due_sources(pool: &PgPool) -> AppResult<Vec<Source>> {
     let rows: Vec<Source> = sqlx::query_as(
         "SELECT * FROM sources
@@ -455,9 +455,9 @@ pub async fn due_sources(pool: &PgPool) -> AppResult<Vec<Source>> {
     Ok(rows
         .into_iter()
         .filter(|s| match &s.sync_cron {
-            None => true, // interval 型已在 SQL 判定
+            None => true, // interval type is already decided in SQL
             Some(expr) => {
-                // 基准取上次同步时刻（没同步过取创建时刻）：错过的触发点在下一轮扫描补上
+                // The baseline is the last sync time (or the creation time if it has never synced): missed trigger points are caught up on the next scan
                 let anchor = s.last_sync_at.unwrap_or(s.created_at);
                 cron_next_after(expr, anchor).is_some_and(|next| next <= now)
             }
@@ -465,7 +465,7 @@ pub async fn due_sources(pool: &PgPool) -> AppResult<Vec<Source>> {
         .collect())
 }
 
-/// 状态、任务和 worker 通知一起提交；已在队列/运行中则返回 false。
+/// Status, task and worker notification are committed together; if it is already queued or running, returns false.
 pub async fn enqueue_sync(pool: &PgPool, id: Uuid) -> AppResult<bool> {
     let mut tx = pool.begin().await?;
     let queued = mark_queued_tx(&mut tx, id).await?;
@@ -482,8 +482,8 @@ pub async fn enqueue_sync(pool: &PgPool, id: Uuid) -> AppResult<bool> {
     Ok(queued)
 }
 
-/// 换了 Drive 文件夹，即使旧同步正在运行，也要再排一次读取新配置。
-/// 配置由调用方先保存；这里只保证状态和后续任务一起提交。
+/// Changing the Drive folder re-queues a read to pick up the new config, even if the old sync is still running.
+/// The caller saves the config first; here we only guarantee that the status and the follow-up task are committed together.
 pub async fn enqueue_sync_after_config_change(pool: &PgPool, id: Uuid) -> AppResult<()> {
     let mut tx = pool.begin().await?;
     mark_queued_tx(&mut tx, id).await?;
@@ -517,10 +517,10 @@ pub async fn mark_running(pool: &PgPool, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
-/// 一次同步收尾。失败时记一条告警，成功时什么都不做——
-/// **"现在好了没有"不是告警中心该回答的问题**，来源页面上就写着。
+/// Wraps up a sync. On failure it records one alert; on success it does nothing —
+/// **"Is it fine now?" is not a question the alert centre should answer**, and the source page already says so.
 ///
-/// 返回值是"记了没有"，调用方据此决定要不要推事件。
+/// The return value is "was it recorded", and the caller uses that to decide whether to emit the event.
 pub async fn finish_sync(
     pool: &PgPool,
     id: Uuid,
@@ -551,12 +551,12 @@ pub async fn finish_sync(
             kb_id: Some(kb_id),
             severity: "error",
             kind: crate::alerts::kind::SOURCE_SYNC_FAILED,
-            // 内容类给 editor，不只给 admin：管理员需要知道该修连接了，
-            // 但**配这个源的人**更需要知道你的东西没进来
+            // The content category goes to editors, not only admins: an admin needs to know the connection must be fixed,
+            // but **the person who configured this source** needs more to know that your things did not get in
             min_role: Role::Editor,
             subject_type: Some("source"),
             subject_id: Some(id),
-            // 名字存一份：源被删之后 subject_id 解析不出名字，而告警该留得住
+            // The name is stored too: once the source is deleted, subject_id cannot resolve a name, and the alert should still be able to show it
             detail: serde_json::json!({ "name": name, "error": msg }),
         },
     )
@@ -564,7 +564,7 @@ pub async fn finish_sync(
     Ok(true)
 }
 
-/// 记录同步时刻（避免调度器在长同步过程中重复触发后又立刻到期）。
+/// Records the sync time (to stop the scheduler re-triggering during a long sync and then immediately seeing it as due again).
 pub async fn touch_sync_time(pool: &PgPool, id: Uuid, at: DateTime<Utc>) -> AppResult<()> {
     sqlx::query("UPDATE sources SET last_sync_at = $2 WHERE id = $1")
         .bind(id)
@@ -575,10 +575,10 @@ pub async fn touch_sync_time(pool: &PgPool, id: Uuid, at: DateTime<Utc>) -> AppR
 }
 
 // ---------------------------------------------------------------------------
-// 同步运行记录（渠道审计历史）
+// Sync run records (the channel audit history)
 // ---------------------------------------------------------------------------
 
-/// 工单来源的进度独立于只保留 50 条的审计历史；NULL 也不能回退到旧的 ok 行。
+/// Ticket-source progress is independent of the audit history, which keeps only 50 entries; NULL must also not fall back to an old ok row.
 pub async fn sync_checkpoint(pool: &PgPool, source_id: Uuid) -> AppResult<Option<DateTime<Utc>>> {
     sqlx::query_scalar("SELECT sync_checkpoint FROM sources WHERE id = $1")
         .bind(source_id)
@@ -587,11 +587,11 @@ pub async fn sync_checkpoint(pool: &PgPool, source_id: Uuid) -> AppResult<Option
         .ok_or(AppError::NotFound)
 }
 
-/// 记成 failed，**但不发告警**。
+/// is recorded as failed, **but no alert is sent**.
 ///
-/// 一轮触顶不是连接坏了：它没读完，而下一轮会从游标那儿接着读（0072）。
-/// `finish_sync` 把「记状态」和「发告警」绑在一起，于是每触顶一次就发一个
-/// source.sync_failed 告警——同一个来源天天报同一件事（#1212）。
+/// Hitting the cap in one run is not a broken connection: it has not finished reading, and the next run picks up from the cursor (0072).
+/// `finish_sync` ties "record the status" to "send the alert", so every time the cap is hit an
+/// source.sync_failed alert is sent — the same source reports the same thing every day (#1212).
 pub async fn finish_sync_quiet(
     pool: &PgPool,
     id: Uuid,
@@ -611,16 +611,16 @@ pub async fn finish_sync_quiet(
     Ok(row.is_some())
 }
 
-/// 完整时间戳组的进度与成功记录一起提交，任一写入失败都保留旧游标。
+/// A full timestamp group's progress is committed together with the success record; if any write fails, the old cursor is kept.
 ///
-/// **两类来源用同一列，取的值不同**：
+/// **The two kinds of source use the same column, but the value they store differs**:
 ///
-/// - 工单来源（GitHub / Jira）：游标是**消费到的更新时刻**，且那一刻的整组都读完了
-///   （ADR 0072）。下一轮的下界就是它。
-/// - custom：端点一次把整个窗口给全了，游标是**这一轮开始的时刻**——推进到它而不是
-///   推进到现在，运行期间到达的改动才留在下一轮的窗口里（ADR 0072 的 Custom 一节）。
+/// - Ticket sources (GitHub / Jira): the cursor is **the update time consumed up to**, and the whole group at that moment has been read
+///   (ADR 0072). It is the lower bound for the next run.
+/// - custom: the endpoint returns the whole window in one go, and the cursor is **the time this run started** — advance it to that rather than
+///   to now, so changes arriving during the run stay in the next run's window (see the Custom section of ADR 0072).
 ///
-/// 两者对读端点都是同一句话：**下一轮的下界**。
+/// For both, the read endpoints mean the same thing: **the lower bound of the next run**.
 pub async fn finish_timestamp_sync(
     pool: &PgPool,
     run_id: Uuid,
@@ -711,7 +711,7 @@ pub async fn finish_run(
     .bind(updated_docs)
     .execute(pool)
     .await?;
-    // 每来源只留最近 50 条
+    // Keep only the latest 50 per source
     sqlx::query(
         "DELETE FROM source_sync_runs WHERE source_id = $1 AND id NOT IN
          (SELECT id FROM source_sync_runs WHERE source_id = $1
@@ -747,14 +747,14 @@ mod tests {
             validate_cron("  0  9 * * Mon,Thu ").unwrap(),
             "0 9 * * Mon,Thu"
         );
-        assert!(validate_cron("9 * * *").is_err()); // 4 段
-        assert!(validate_cron("99 9 * * *").is_err()); // 分钟越界
-        assert!(validate_cron("0 0 0 0 0 0").is_err()); // 6 段
+        assert!(validate_cron("9 * * *").is_err()); // 4 fields
+        assert!(validate_cron("99 9 * * *").is_err()); // minute out of range
+        assert!(validate_cron("0 0 0 0 0 0").is_err()); // 6 fields
     }
 
     #[test]
     fn cron_weekday_numbers_read_as_standard_cron() {
-        // crontab.guru 的 1-5 是周一到周五；cron crate 的数字星期却从周日 = 1 数起
+        // crontab.guru's 1-5 is Monday to Friday, but the cron crate's numeric weekdays count from Sunday = 1
         assert_eq!(
             validate_cron("0 9 * * 1-5").unwrap(),
             "0 9 * * Mon,Tue,Wed,Thu,Fri"
@@ -766,7 +766,7 @@ mod tests {
     #[test]
     fn a_source_saved_with_weekday_numbers_runs_on_standard_cron_days() {
         use chrono::TimeZone;
-        // 2026-10-31 是周六；`1-5` 的下一次是周一，不是周日
+        // 2026-10-31 is a Saturday; the next `1-5` is Monday, not Sunday
         let saturday = chrono::Local
             .with_ymd_and_hms(2026, 10, 31, 12, 0, 0)
             .unwrap()

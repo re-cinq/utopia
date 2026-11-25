@@ -1,4 +1,4 @@
-//! 本体代理看过的形状（0061 cut 1.1）：提了、已有、没提各记一行，下一轮据此不再送。
+//! Shapes the ontology agent has reviewed (0061 cut 1.1): raised, already present, and not-raised shapes each get one line; the next round skips them accordingly.
 
 use serde_json::Value;
 use sqlx::PgPool;
@@ -13,7 +13,7 @@ pub struct Review {
     /// proposed | existing | declined
     pub outcome: String,
     pub target: Option<String>,
-    /// 看它时词表的指纹；变了，已有与没提的形状再送一次
+    /// Fingerprint of the vocabulary when it was checked; if it changed, existing and not-raised shapes are sent again.
     pub basis: String,
 }
 
@@ -26,7 +26,7 @@ pub async fn list(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Review>> {
     .await?)
 }
 
-/// 记一轮看过的。同一形状再看是刷新
+/// Records a shape reviewed in a round. Reviewing the same shape again refreshes it.
 pub async fn record(pool: &PgPool, kb_id: Uuid, items: &[Review]) -> AppResult<()> {
     for it in items {
         sqlx::query(

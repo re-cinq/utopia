@@ -1,18 +1,18 @@
-//! 人工修正一条事实的有效区间（302），打在真库上。
+//! Manually correcting the validity interval of a fact (302), run against a real store.
 //!
-//! 抽取把「2023 年上半年」读成 1 月 1 日，在此之前只能删掉文档重抽一遍。
-//! 这条路径的全部风险在于**它长得像一次 UPDATE**：改一个日期，图上就对了，
-//! 谁也看不出账本少了什么。所以这里钉的四样，`cargo check` 一样都看不见：
+//! Extraction read "first half of 2023" as 1 January, and before this one could only delete the document and extract it again.
+//! All the risk of this path is that **it looks like a single UPDATE**: change a date, and the graph is right,
+//! but nobody can see what the ledger lost. So the four things pinned here are ones `cargo check` cannot see at all:
 //!
-//! - 旧行留在账本里并记下作废时刻，修正行以 `supersedes` 链回它——原地改
-//!   会让这次修改自己消失，而那正是记录轴要回放的东西（0019）
-//! - 证据随修正行复制。少了这一步，改完时间的事实立刻变成"无人陈述"，
-//!   会被 stale 判定扫成灰的
-//! - 起点挪动之后要重新对账：挪过继任者的上任日，唯一性不变量才第一次
-//!   看到这次相撞
-//! - 已被作废的行改不动，返回 None 而不是凭空插一条挂在死行后面的修正
+//! - The old row stays in the ledger with its void time recorded, and the correction row links back to it through `supersedes` — editing in place
+//!   would make the change itself vanish, and that is exactly what the record axis must replay (0019)
+//! - Evidence is copied along with the correction row. Without that step, a fact whose time was just edited instantly becomes "no one states it",
+//!   and the stale check would grey it out
+//! - After the start moves, reconcile again: having moved a successor's start date, the uniqueness invariant sees this collision
+//!   for the first time
+//! - A row already voided cannot be changed: it returns None rather than conjuring a correction hung off a dead row
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when there is no `UTOPIA_DATABASE_URL`. Sets up and tears down its own data, never touching an existing store.
 
 use sqlx::PgPool;
 use utopia_store::graph::Validity;
@@ -58,8 +58,8 @@ async fn seed(pool: &PgPool) -> anyhow::Result<Fixture> {
     .bind(kb)
     .execute(pool)
     .await?;
-    // inverse_functional：一个项目同时只有一个人 leads 它——宾语侧的唯一性，
-    // 起点挪动要撞的正是这条不变量
+    // inverse_functional: only one person leads a project at a time — the uniqueness on the object side,
+    // which is the invariant a moved start date must collide with
     sqlx::query(
         "INSERT INTO relation_types (id, kb_id, key, label, temporal, inverse_functional)
          VALUES ($1, $2, 'leads', 'leads', 'state', TRUE)",
@@ -117,7 +117,7 @@ fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
     s.parse().unwrap()
 }
 
-/// 一条带证据的开放事实。
+/// An open fact with evidence.
 async fn assert_fact(
     pool: &PgPool,
     f: &Fixture,
@@ -176,7 +176,7 @@ async fn evidence_count(pool: &PgPool, id: Uuid) -> anyhow::Result<i64> {
     Ok(n)
 }
 
-/// 改一个日期，账本要留下改过的痕迹：旧行作废但不删，修正行链回它，证据跟着走。
+/// Change a date, and the ledger must keep the trace of the change: the old row is voided but not deleted, the correction row links back to it, and evidence goes with it.
 #[tokio::test]
 async fn correcting_a_date_leaves_the_old_reading_in_the_ledger() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -186,7 +186,7 @@ async fn correcting_a_date_leaves_the_old_reading_in_the_ledger() -> anyhow::Res
     let f = seed(&pool).await?;
 
     let run = async {
-        // 抽取读成了 1 月 1 日，精确到日——原文其实只说了「上半年」
+        // Extraction read it as 1 January, to the day — the source actually said only "first half"
         let wrong = assert_fact(&pool, &f, f.zhang, "2023-01-01T00:00:00Z", "day").await?;
 
         let corrected = utopia_store::temporal::correct_interval(
@@ -234,8 +234,8 @@ async fn correcting_a_date_leaves_the_old_reading_in_the_ledger() -> anyhow::Res
     run
 }
 
-/// 结束端的三态都要改得进去，尤其是**把闭区间重新打开**——
-/// 那是「当初误判它结束了」唯一的出路，而它长得像一次「什么都没填」。
+/// All three states of the end must be editable, especially **reopening a closed interval** —
+/// that is the only way out of "we wrongly judged it ended", and it looks like "filled nothing in".
 #[tokio::test]
 async fn an_end_that_was_never_there_can_be_taken_back() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -246,7 +246,7 @@ async fn an_end_that_was_never_there_can_be_taken_back() -> anyhow::Result<()> {
 
     let run = async {
         let fact = assert_fact(&pool, &f, f.zhang, "2023-01-01T00:00:00Z", "day").await?;
-        // 先闭合到 2024
+        // First close to 2024
         let closed = utopia_store::temporal::correct_interval(
             &pool,
             fact,
@@ -267,7 +267,7 @@ async fn an_end_that_was_never_there_can_be_taken_back() -> anyhow::Result<()> {
             Some(t("2024-01-01T00:00:00Z"))
         );
 
-        // 判错了：它其实没结束。把结束端整个收回
+        // Judged wrongly: it did not end. Take back the whole end
         let reopened = utopia_store::temporal::correct_interval(
             &pool,
             closed,
@@ -293,12 +293,12 @@ async fn an_end_that_was_never_there_can_be_taken_back() -> anyhow::Result<()> {
     run
 }
 
-/// 改完起点要重新对账。**这是这一刀最容易漏掉的一半**：区间改对了，图上
-/// 那条边看着也对了，可它与继任者的关系没人再算一遍。
+/// After changing the start, reconcile again. **This is the half most easily missed in this slice**: the interval is right, and the edge on the graph
+/// looks right too, but nobody recomputes its relation with the successor.
 ///
-/// 这里的两个人在修改前后交换了身份——改之前张三 2025 上任，是李四的继任者；
-/// 改回 2023 之后他成了前任，该被闭合在李四的上任日上。唯一性不变量只在
-/// 这次对账里才第一次看到这件事。
+/// The two people here swap identities before and after the edit: before the change, Zhang San took office in 2025 and was Li Si's successor;
+/// once changed back to 2023 he becomes the predecessor, and should be closed at Li Si's start date. The uniqueness invariant sees this
+/// for the first time only in this reconciliation.
 #[tokio::test]
 async fn moving_a_start_earlier_makes_it_the_predecessor() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -308,12 +308,12 @@ async fn moving_a_start_earlier_makes_it_the_predecessor() -> anyhow::Result<()>
     let f = seed(&pool).await?;
 
     let run = async {
-        // 两条都开放：李四 2024-07 接任，张三被抽取读成 2025-01（错的，
-        // 他其实 2023 年就在任）。此刻不变量已经被违反，只是还没人算
+        // Both open: Li Si took over 2024-07, and Zhang San was extracted as 2025-01 (wrong,
+        // he was in office already in 2023). At this point the invariant is already violated, only no one has computed it yet
         let li_fact = assert_fact(&pool, &f, f.li, "2024-07-01T00:00:00Z", "month").await?;
         let zhang_fact = assert_fact(&pool, &f, f.zhang, "2025-01-01T00:00:00Z", "month").await?;
 
-        // 把张三改回真实的 2023
+        // Change Zhang San back to the real 2023
         let fixed = utopia_store::temporal::correct_interval(
             &pool,
             zhang_fact,
@@ -327,7 +327,7 @@ async fn moving_a_start_earlier_makes_it_the_predecessor() -> anyhow::Result<()>
             !report.corrected.is_empty(),
             "对账要动手：张三 2023 起、李四 2024-07 接任，两条不能都挂着开放区间"
         );
-        // 新事实开始得更早 = 它是前任，闭合在旧事实的开始（引擎的判据）
+        // The new fact starts earlier = it is the predecessor, closed at the old fact's start (the engine's criterion)
         assert!(
             row(&pool, fixed).await?.invalidated_at.is_some(),
             "被闭合的是张三自己那条，不是李四——早的那个是前任"
@@ -365,8 +365,8 @@ async fn moving_a_start_earlier_makes_it_the_predecessor() -> anyhow::Result<()>
     run
 }
 
-/// 已被作废的行改不动。少了这道闸，两个人同时改会串出两条各自挂在死行后面的
-/// 修正，图上凭空多一条边。
+/// A voided row cannot be changed. Without this gate, two people editing at once would produce two corrections each hung off a dead row,
+/// adding a spurious edge to the graph.
 #[tokio::test]
 async fn a_row_that_is_already_gone_cannot_be_corrected() -> anyhow::Result<()> {
     let Some(url) = utopia_store::test_db::url() else {
@@ -385,7 +385,7 @@ async fn a_row_that_is_already_gone_cannot_be_corrected() -> anyhow::Result<()> 
         .await?;
         assert!(first.is_some());
 
-        // 第二次拿着同一个（已作废的）id 再改
+        // Edited again with the same (already voided) id the second time
         let second = utopia_store::temporal::correct_interval(
             &pool,
             fact,

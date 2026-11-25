@@ -1,9 +1,9 @@
-//! 来源说了不抽取的文档，`queue_extraction` 不排——打在真库上（0035 决定 7，#553）。
+//! A document whose source says not to extract is not queued by `queue_extraction` -- tested against a real database (0035 decision 7, #553).
 //!
-//! 挂载数据源时 schema 被摄成一份 markdown，好让问数检索得到表结构。它从前跟
-//! 别的文档一样进抽取，抽取器把每个列名都当成实体：宽表语料上四十个概念实体里
-//! 二十八个是列名。「只检索、不学习」记在来源的 config 上，而这条过滤放在库里
-//! 而不是各个入口——全库重建、按来源重抽、以后任何新入口都走这一个查询。
+//! When a data source is attached, its schema is ingested as a markdown document, so question answering can retrieve the table structure. Previously it went through extraction like
+//! any other document, and the extractor treated every column name as an entity: on a wide-table corpus, twenty-eight of forty concept entities
+//! were column names. "Retrieve, do not learn" is recorded on the source's config, and this filter lives in the database
+//! rather than in each entry point -- full rebuilds, per-source re-extraction, and any future entry point all go through this one query.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -55,7 +55,7 @@ async fn a_source_that_does_not_extract_keeps_its_documents_out_of_the_queue() -
     let kb = base(&pool).await?;
 
     let run = async {
-        // 与 `sync_schema_doc` 建的那个一模一样：folder，config 里明说不抽取
+        // Identical to the one `sync_schema_doc` creates: a folder, with the config stating outright not to extract
         let schemas = utopia_store::sources::create(
             &pool,
             kb,
@@ -67,7 +67,7 @@ async fn a_source_that_does_not_extract_keeps_its_documents_out_of_the_queue() -
             None,
         )
         .await?;
-        // 老来源：config 是 `{}`，照旧抽取
+        // Old source: the config is `{}`, so it is still extracted as before
         let uploads = utopia_store::sources::create(
             &pool,
             kb,
@@ -84,12 +84,12 @@ async fn a_source_that_does_not_extract_keeps_its_documents_out_of_the_queue() -
         let schema_doc = ready_document(&pool, kb, schemas.id, "wide-schema.md").await?;
         let prose_doc = ready_document(&pool, kb, uploads.id, "report.md").await?;
 
-        // 全库重建走的就是这一条（source_id = None）
+        // A full rebuild goes through exactly this path (source_id = None)
         let queued = utopia_store::documents::queue_extraction(&pool, kb, None).await?;
         assert_eq!(queued, vec![prose_doc], "只有普通来源下的文档该被排上");
         assert!(!queued.contains(&schema_doc));
 
-        // 按来源重抽：来源本身说了不抽取，排出来的是空
+        // Re-extracting by source: the source itself says not to extract, so what gets queued is empty
         let queued = utopia_store::documents::queue_extraction(&pool, kb, Some(schemas.id)).await?;
         assert!(queued.is_empty(), "不抽取的来源按来源重抽也该是空");
 
@@ -97,7 +97,7 @@ async fn a_source_that_does_not_extract_keeps_its_documents_out_of_the_queue() -
     }
     .await;
 
-    // 只删知识库，不删 org——用户是软删除的，测试也不该造一个产品里不存在的动作
+    // Only the knowledge base is deleted, not the org -- users are soft-deleted, and the test should not invent an action that does not exist in the product
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(kb)
         .execute(&pool)

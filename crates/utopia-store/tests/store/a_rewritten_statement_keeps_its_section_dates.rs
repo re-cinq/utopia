@@ -1,10 +1,10 @@
-//! 开放陈述改挂到另一个实体、人改了它的区间，新行还是那条开放陈述：层和短语不变，带着
-//! 见证日期的名字，它的证据也照样记着各自那一节的日期（0104）。
+//! An open statement re-attached to another entity with a human-edited interval: the new row is still that open statement, with its layer and phrase unchanged, carrying the
+//! witness date's name, and its evidence still records the dates of each section (0104).
 //!
-//! 之后删掉最早那篇文档，见证挪到还在的证据里最早的那一节，连同名字；不退回那篇文档
-//! 自己的日期。
+//! Afterwards the earliest document is deleted: the witness moves to the earliest section among the remaining evidence, along with its name; it does not fall back to that document's
+//! own date.
 //!
-//! 没有 `UTOPIA_DATABASE_URL` 时跳过而不是失败。自建自拆，绝不碰已有的库。
+//! Skipped rather than failed when `UTOPIA_DATABASE_URL` is unset. Creates and tears down its own; never touches an existing database.
 
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
@@ -19,7 +19,7 @@ fn day(y: i32, m: u32, d: u32) -> DateTime<Utc> {
 
 type Anchor = (Option<DateTime<Utc>>, Option<String>);
 
-/// 改写出来的新行还是开放陈述，说的还是原文那个短语
+/// The rewritten new row is still an open statement, still saying the original phrase
 async fn shape(pool: &PgPool, fact: Uuid) -> anyhow::Result<(String, Option<String>)> {
     Ok(
         sqlx::query_as("SELECT layer, phrase FROM facts WHERE id = $1")
@@ -38,7 +38,7 @@ async fn anchor(pool: &PgPool, fact: Uuid) -> anyhow::Result<Anchor> {
     )
 }
 
-/// 一篇自己带日期的文档和它的一块正文
+/// A document with its own date, and one block of its body
 async fn document(pool: &PgPool, kb: Uuid, own: DateTime<Utc>) -> anyhow::Result<(Uuid, Uuid)> {
     let (doc, chunk) = (Uuid::now_v7(), Uuid::now_v7());
     sqlx::query(
@@ -63,7 +63,7 @@ async fn document(pool: &PgPool, kb: Uuid, own: DateTime<Utc>) -> anyhow::Result
     Ok((doc, chunk))
 }
 
-/// 一条开放陈述，两篇文档各有一条证据，各记着自己那一节的日期
+/// One open statement, with each of two documents holding one piece of evidence, each recording the date of its own section
 async fn statement(
     pool: &PgPool,
     kb: Uuid,
@@ -120,19 +120,19 @@ async fn a_rewritten_statement_keeps_the_dates_its_sections_speak_from() -> anyh
     let run = async {
         let (chapter_2015, chapter_2020) = (day(2015, 6, 1), day(2020, 6, 1));
         let (by_2015, by_2020) = ("2015 年年报", "2020 年年报");
-        // 两篇文档自己的日期都在 2026 年，章节说的是 2015 和 2020
+        // The two documents' own dates are both in 2026; the sections say 2015 and 2020
         let (early, early_chunk) = document(&pool, kb, day(2026, 1, 10)).await?;
         let (_late, late_chunk) = document(&pool, kb, day(2026, 3, 1)).await?;
         let evidence = [(early_chunk, chapter_2015, by_2015), (late_chunk, chapter_2020, by_2020)];
 
-        // 一条改挂到另一个实体上（合并时走的那条路）
+        // One re-attached to another entity (the path taken on merge)
         let to_move = statement(&pool, kb, watch, market, &evidence).await?;
         let mut tx = pool.begin().await?;
         let moved = utopia_store::temporal::rehome_tx(&mut tx, to_move, Some(meter), None)
             .await?
             .expect("a live row is rehomed");
         tx.commit().await?;
-        // 一条由人改了区间
+        // One whose interval was edited by a human
         let to_correct = statement(&pool, kb, watch, market, &evidence).await?;
         let corrected = utopia_store::temporal::correct_interval(
             &pool,

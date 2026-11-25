@@ -1,13 +1,13 @@
-//! 语义层映射的两条硬性质——打在真库上（见 `docs/decisions/0011`）。
+//! Two hard properties of the semantic-layer mapping — run against a real store (see `docs/decisions/0011`).
 //!
-//! 这两条都是搬出账本换来的东西，也正是从前做不到的：
+//! Both are things bought by moving out of the ledger, and they are exactly what could not be done before:
 //!
-//! 1. **同一个 (概念, 源) 只有一条。** 从前这条唯一性藏在 `object_value`
-//!    这个 JSONB 内部，数据库看不见，只能靠确认流程显式闭合——也就是靠流程
-//!    而不是约束。现在它是主键。
-//! 2. **表过态的不被下一轮探索刷回待看。** `ontology_proposals` 那边踩过同一个
-//!    坑（`ontology_proposals` 那边）：重跑必然再次算出被拒绝过的那条，不挡住就等于每跑一次都把
-//!    人的否决抹掉一次。
+//! 1. **There is only one row per (concept, source).** Previously this uniqueness hid inside `object_value`,
+//!    a JSONB blob the database could not see, so it could only be closed explicitly by the confirmation flow — that is, by process
+//!    rather than by constraint. Now it is the primary key.
+//! 2. **A judged row is not flipped back to pending by the next exploration.** `ontology_proposals` hit the same
+//!    pitfall (on that side): a rerun will inevitably compute again the one that was rejected, and unless blocked it is the same as wiping
+//!    a person's rejection on every run.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -77,7 +77,7 @@ async fn one_concept_one_source_one_mapping() -> anyhow::Result<()> {
             "重跑探索该刷新定义"
         );
 
-        // 换一个源就是另一条：同一概念在不同源上有不同定义是有意支持的
+        // A different source is a different row: the same concept having different definitions on different sources is supported on purpose
         utopia_store::mappings::propose(
             &pool,
             kb,
@@ -102,9 +102,9 @@ async fn one_concept_one_source_one_mapping() -> anyhow::Result<()> {
     }
     .await;
 
-    // **只删知识库,不删 org/user。** 用户是软删除的,生产代码里没有
-    // `DELETE FROM users`——测试也不该造一个产品里不存在的动作,否则
-    // 撞上的外键约束是夹具自己的问题,会被误当成产品缺陷（实测发生过）
+    // **Delete only the knowledge base, not org/user.** Users are soft-deleted, and production code has no
+    // `DELETE FROM users` — the test should not invent an action the product does not have, otherwise
+    // a foreign-key constraint it runs into would be the fixture's own problem and get mistaken for a product defect (this actually happened)
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(kb)
         .execute(&pool)
@@ -146,7 +146,7 @@ async fn a_rejected_mapping_does_not_come_back() -> anyhow::Result<()> {
         .await?;
         utopia_store::mappings::decide(&pool, kb, id, "rejected", user).await?;
 
-        // 下一轮探索会再次算出同一条——它不该被刷回待看，也不算写入
+        // The next exploration will compute the same one again — it should not be flipped back to pending, and it does not count as a write
         let (_, written) = utopia_store::mappings::propose(
             &pool,
             kb,
@@ -167,7 +167,7 @@ async fn a_rejected_mapping_does_not_come_back() -> anyhow::Result<()> {
                 .is_empty(),
             "拒绝过的不该重新排队"
         );
-        // 确认过的同理不该被探索覆盖
+        // Same for a confirmed one: exploration must not overwrite it
         assert!(
             utopia_store::mappings::confirmed(&pool, kb, 100)
                 .await?
@@ -178,9 +178,9 @@ async fn a_rejected_mapping_does_not_come_back() -> anyhow::Result<()> {
     }
     .await;
 
-    // **只删知识库,不删 org/user。** 用户是软删除的,生产代码里没有
-    // `DELETE FROM users`——测试也不该造一个产品里不存在的动作,否则
-    // 撞上的外键约束是夹具自己的问题,会被误当成产品缺陷（实测发生过）
+    // **Delete only the knowledge base, not org/user.** Users are soft-deleted, and production code has no
+    // `DELETE FROM users` — the test should not invent an action the product does not have, otherwise
+    // a foreign-key constraint it runs into would be the fixture's own problem and get mistaken for a product defect (this actually happened)
     sqlx::query("DELETE FROM knowledge_bases WHERE id = $1")
         .bind(kb)
         .execute(&pool)
