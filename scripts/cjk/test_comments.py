@@ -1,6 +1,6 @@
 import unittest
 
-from comments import anchors, blanked_comments, code_projection, copied_translations, missing_anchors, comment_text, split_lines
+from comments import anchors, blanked_comments, reindented, code_projection, copied_translations, missing_anchors, comment_text, split_lines
 
 
 def comments_of(lines, is_rust=True):
@@ -44,6 +44,14 @@ class SplitLines(unittest.TestCase):
 
     def test_identifier_ending_in_r_before_a_string_is_not_a_raw_string(self):
         self.assertEqual(comments_of(['let bar = "a//b"; // 注释']), ["// 注释"])
+
+    def test_string_spanning_lines_is_code_on_every_line_even_with_a_block_comment_inside(self):
+        lines = ['const Q: &str = "', '  /* 两个方向分开记 */', '  SELECT 1";  // 注释']
+        self.assertEqual(comments_of(lines), ["", "", "// 注释"])
+
+    def test_string_continued_with_a_backslash_stays_open(self):
+        lines = ['let s = "a \\', '  // 不是注释 b";  // 注释']
+        self.assertEqual(comments_of(lines), ["", "// 注释"])
 
 
 class Anchors(unittest.TestCase):
@@ -104,6 +112,14 @@ class BlankedComments(unittest.TestCase):
 
     def test_trailing_comment_that_was_emptied_is_reported(self):
         self.assertEqual(blanked_comments(["// 注释"], ["//"]), [1])
+
+
+class Reindented(unittest.TestCase):
+    def test_line_that_lost_its_leading_spaces_is_reported(self):
+        self.assertEqual(reindented(["    a 注释", "  b"], ["a note", "  b"]), [1])
+
+    def test_unchanged_indentation_is_fine(self):
+        self.assertEqual(reindented(["    注释", "\t注释"], ["    note", "\tnote"]), [])
 
 
 if __name__ == "__main__":

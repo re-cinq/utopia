@@ -23,6 +23,7 @@ class Segment:
 class LineState:
     block_depth: int = 0
     raw_string_closer: str = ""
+    open_quote: str = ""
 
 
 def split_lines(source_lines: list[str], is_rust: bool) -> list[list[Segment]]:
@@ -59,6 +60,19 @@ def missing_anchors(before: str, after: str) -> list[str]:
     if REWRITTEN_NUMBER_WORDS.search(before):
         lost = {anchor for anchor in lost if not anchor[0].isdigit()}
     return sorted(lost)
+
+
+def reindented(before_lines: list[str], after_lines: list[str]) -> list[int]:
+    """Changed lines whose leading whitespace is not what it was (rustfmt moves block comments)."""
+    return [
+        number
+        for number, (old, new) in enumerate(zip(before_lines, after_lines), start=1)
+        if old != new and _leading_whitespace(old) != _leading_whitespace(new)
+    ]
+
+
+def _leading_whitespace(line: str) -> str:
+    return line[: len(line) - len(line.lstrip())]
 
 
 def blanked_comments(before_comments: list[str], after_comments: list[str]) -> list[int]:
@@ -101,7 +115,7 @@ def _split_line(line: str, state: LineState, is_rust: bool):
     segments: list[Segment] = []
     start = 0
     position = 0
-    quote = ""
+    quote = state.open_quote
     while position < len(line):
         if raw_string_closer:
             end = line.find(raw_string_closer, position)
@@ -152,7 +166,7 @@ def _split_line(line: str, state: LineState, is_rust: bool):
             if start < position:
                 segments.append(Segment(False, line[start:position]))
             segments.append(Segment(True, line[position:]))
-            return segments, LineState(block_depth, raw_string_closer)
+            return segments, LineState(block_depth, raw_string_closer, _quote_that_spans_lines(quote, is_rust))
         elif two == "/*":
             if start < position:
                 segments.append(Segment(False, line[start:position]))
@@ -165,7 +179,12 @@ def _split_line(line: str, state: LineState, is_rust: bool):
         segments.append(Segment(True, line[start:]))
     elif start < len(line):
         segments.append(Segment(False, line[start:]))
-    return segments, LineState(block_depth, raw_string_closer)
+    return segments, LineState(block_depth, raw_string_closer, _quote_that_spans_lines(quote, is_rust))
+
+
+def _quote_that_spans_lines(quote: str, is_rust: bool) -> str:
+    spans_lines = '"' if is_rust else "`"
+    return quote if quote == spans_lines else ""
 
 
 def _skip_rust_char_literal(line: str, position: int) -> int:
