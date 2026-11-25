@@ -409,3 +409,161 @@ async fn undoing_a_merge_takes_the_copied_evidence_off_a_rewritten_name() -> any
     })
     .await
 }
+
+#[tokio::test]
+async fn a_name_with_identity_evidence_only_is_not_pending() -> anyhow::Result<()> {
+    in_kb(|pool, kb, project, _| async move {
+        let (_, identity) = chunk(&pool, kb, Some(json!({"names": "identity"}))).await?;
+        let pushed = holder(&pool, kb, Some(project), "acme/a.ts").await?;
+        named(&pool, kb, pushed, "acme/a.ts", &[identity]).await?;
+        assert_eq!(pending_entities(&pool, kb).await?, Vec::<Uuid>::new());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_name_from_a_source_that_is_not_statements_is_pending_despite_the_identity_flag(
+) -> anyhow::Result<()> {
+    in_kb(|pool, kb, project, _| async move {
+        let (source, rss) = chunk(&pool, kb, Some(json!({"names": "identity"}))).await?;
+        sqlx::query("UPDATE sources SET kind = 'rss' WHERE id = $1")
+            .bind(source)
+            .execute(&pool)
+            .await?;
+        let feed = holder(&pool, kb, Some(project), "acme/a.ts").await?;
+        named(&pool, kb, feed, "acme/a.ts", &[rss]).await?;
+        assert_eq!(pending_entities(&pool, kb).await?, vec![feed]);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn another_bases_identity_name_leaves_the_same_name_pending_here() -> anyhow::Result<()> {
+    in_kb(|pool, kb, project, _| async move {
+        let (_, identity) = chunk(&pool, kb, Some(json!({"names": "identity"}))).await?;
+        let pushed = holder(&pool, kb, Some(project), "acme/a.ts").await?;
+        named(&pool, kb, pushed, "acme/a.ts", &[identity]).await?;
+        in_kb(|pool, other_kb, other_project, _| async move {
+            let (_, prose) = chunk(&pool, other_kb, None).await?;
+            let written = holder(&pool, other_kb, Some(other_project), "acme/a.ts").await?;
+            named(&pool, other_kb, written, "acme/a.ts", &[prose]).await?;
+            assert_eq!(pending_entities(&pool, other_kb).await?, vec![written]);
+            Ok(())
+        })
+        .await
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_name_with_a_vector_is_not_pending() -> anyhow::Result<()> {
+    in_kb(|pool, kb, project, _| async move {
+        let (_, prose) = chunk(&pool, kb, None).await?;
+        let file = holder(&pool, kb, Some(project), "acme/a.ts").await?;
+        let file_name = named(&pool, kb, file, "acme/a.ts", &[prose]).await?;
+        name_vectors::set(&pool, kb, &[(file_name, file, vec![1.0, 0.0, 0.0])]).await?;
+        assert_eq!(pending_entities(&pool, kb).await?, Vec::<Uuid>::new());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn an_invalidated_name_is_not_pending() -> anyhow::Result<()> {
+    in_kb(|pool, kb, project, _| async move {
+        let file = holder(&pool, kb, Some(project), "acme/a.ts").await?;
+        sqlx::query("UPDATE facts SET invalidated_at = now() WHERE id = $1")
+            .bind(live_name(&pool, file).await?)
+            .execute(&pool)
+            .await?;
+        assert_eq!(pending_entities(&pool, kb).await?, Vec::<Uuid>::new());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_value_under_another_predicate_is_not_pending() -> anyhow::Result<()> {
+    in_kb(|pool, kb, project, _| async move {
+        let file = holder(&pool, kb, Some(project), "acme/a.ts").await?;
+        name_vectors::set(
+            &pool,
+            kb,
+            &[(live_name(&pool, file).await?, file, vec![1.0, 0.0, 0.0])],
+        )
+        .await?;
+        let mentions = Uuid::now_v7();
+        sqlx::query("INSERT INTO relation_types (id, kb_id, key, label, builtin) VALUES ($1, $2, 'mentions', 'mentions', false)")
+            .bind(mentions)
+            .bind(kb)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO facts (id, kb_id, subject_id, predicate_id, object_value) VALUES ($1, $2, $3, $4, '{\"value\": \"acme/b.ts\"}')")
+            .bind(Uuid::now_v7())
+            .bind(kb)
+            .bind(file)
+            .bind(mentions)
+            .execute(&pool)
+            .await?;
+        assert_eq!(pending_entities(&pool, kb).await?, Vec::<Uuid>::new());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn pending_returns_the_first_two_names_by_fact_id_when_the_limit_is_two() -> anyhow::Result<()>
+{
+    in_kb(|pool, kb, project, _| async move {
+        let mut first_two = Vec::new();
+        for name in ["acme/a.ts", "acme/b.ts", "acme/c.ts"] {
+            let entity = holder(&pool, kb, Some(project), name).await?;
+            first_two.push(live_name(&pool, entity).await?);
+        }
+        first_two.truncate(2);
+        let limited: Vec<Uuid> = name_vectors::pending(&pool, kb, 2)
+            .await?
+            .into_iter()
+            .map(|(fact, _, _)| fact)
+            .collect();
+        assert_eq!(limited, first_two);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn dropping_identity_vectors_leaves_another_bases_vectors_alone() -> anyhow::Result<()> {
+    in_kb(|pool, kb, project, _| async move {
+        let (_, identity) = chunk(&pool, kb, Some(json!({"names": "identity"}))).await?;
+        let (_, prose) = chunk(&pool, kb, None).await?;
+        let pushed = holder(&pool, kb, Some(project), "acme/a.ts").await?;
+        let pushed_name = named(&pool, kb, pushed, "acme/a.ts", &[prose]).await?;
+        name_vectors::set(&pool, kb, &[(pushed_name, pushed, vec![1.0, 0.0, 0.0])]).await?;
+        named(&pool, kb, pushed, "acme/a.ts", &[identity]).await?;
+        in_kb(|pool, other_kb, other_project, _| async move {
+            let (_, other_prose) = chunk(&pool, other_kb, None).await?;
+            let written = holder(&pool, other_kb, Some(other_project), "acme/a.ts").await?;
+            let written_name = named(&pool, other_kb, written, "acme/a.ts", &[other_prose]).await?;
+            name_vectors::set(
+                &pool,
+                other_kb,
+                &[(written_name, written, vec![1.0, 0.0, 0.0])],
+            )
+            .await?;
+            let mut tx = pool.begin().await?;
+            name_vectors::drop_with_identity_evidence(&mut tx, &[pushed_name, written_name])
+                .await?;
+            tx.commit().await?;
+            assert_eq!(
+                (vectors(&pool, kb).await?, vectors(&pool, other_kb).await?),
+                (Vec::<Uuid>::new(), vec![written_name])
+            );
+            Ok(())
+        })
+        .await
+    })
+    .await
+}

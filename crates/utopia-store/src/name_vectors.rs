@@ -25,15 +25,19 @@ pub const TOP_K: usize = 8;
 /// 0.4 上下的余弦——所以这条线比画像的 `SIM_ATTACH` 高。同样是待测量的临时值
 pub const SIM_FLOOR: f32 = 0.60;
 
-/// 名字事实 `$fact` 有身份来源的证据（0071 决定 4、5）：这样的名字不留向量
+/// 名字事实 `$fact` 有身份来源的证据（0071 决定 4、5）：这样的名字不留向量。
+/// `$kb` 是事实所在库：证据文档与事实必在同一个库（0070 的 (kb_id, document_id) 外键），
+/// 只在本库找；不带它，反连接会铺到每个库的身份证据上（内部集群 64 个名字 143 秒、930 万缓冲）
 macro_rules! has_identity_evidence {
-    ($fact:literal) => {
+    ($fact:literal, $kb:literal) => {
         concat!(
             "EXISTS (SELECT 1 FROM fact_evidence fe
                        JOIN documents d ON d.id = fe.document_id
                        JOIN sources s ON s.id = d.source_id
                       WHERE fe.fact_id = ",
             $fact,
+            " AND d.kb_id = ",
+            $kb,
             " AND s.kind = 'statements' AND s.config->>'names' = 'identity')"
         )
     };
@@ -55,7 +59,7 @@ const PENDING_SQL: &str = concat!(
         AND f.invalidated_at IS NULL AND f.object_value IS NOT NULL
         AND v.fact_id IS NULL
         AND NOT ",
-    has_identity_evidence!("f.id"),
+    has_identity_evidence!("f.id", "f.kb_id"),
     "
       ORDER BY f.id
       LIMIT $3"
@@ -117,7 +121,7 @@ pub async fn drop_with_identity_evidence(
     }
     sqlx::query(concat!(
         "DELETE FROM name_vectors v WHERE v.fact_id = ANY($1) AND ",
-        has_identity_evidence!("v.fact_id")
+        has_identity_evidence!("v.fact_id", "v.kb_id")
     ))
     .bind(facts)
     .execute(&mut **tx)
@@ -138,7 +142,7 @@ pub async fn set(pool: &PgPool, kb_id: Uuid, items: &[(Uuid, Uuid, Vec<f32>)]) -
         sqlx::query(concat!(
             "INSERT INTO name_vectors (fact_id, kb_id, entity_id, embedding)
                  SELECT $1::uuid, $2::uuid, $3::uuid, $4::vector WHERE NOT ",
-            has_identity_evidence!("$1"),
+            has_identity_evidence!("$1", "$2"),
             " ON CONFLICT (fact_id) DO UPDATE SET embedding = EXCLUDED.embedding"
         ))
         .bind(fact_id)
