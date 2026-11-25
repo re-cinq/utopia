@@ -7,8 +7,8 @@ hostname: utopia.gcp.re-cinq.com
 
 image:
   repository: ghcr.io/re-cinq/utopia
-  tag: 0.1.0-re.44
-  digest: sha256:3ebc943e5e0d2f9ce1e428387906739ca878091da03ff6f85018c033f32299c9
+  tag: 0.1.0-re.45
+  digest: sha256:330990f9d9c84bdbd294cdec2d1e4c5a4edc0feaf93565a862a94b4e1278b54c
   pullSecret: ghcr-pull-secret
 
 googleDrive:
