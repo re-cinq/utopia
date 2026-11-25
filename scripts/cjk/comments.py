@@ -37,6 +37,16 @@ def split_lines(source_lines: list[str], is_rust: bool) -> list[list[Segment]]:
     return result
 
 
+def lines_starting_in_code(source_lines: list[str], is_rust: bool) -> list[bool]:
+    """False for a line that begins inside a block comment or a string spanning lines."""
+    state = LineState()
+    result = []
+    for line in source_lines:
+        result.append(state == LineState())
+        _, state = _split_line(line, state, is_rust)
+    return result
+
+
 def code_projection(source_lines: list[str], is_rust: bool) -> list[str]:
     return [
         "".join(segment.text for segment in segments if not segment.is_comment)
