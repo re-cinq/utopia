@@ -1,31 +1,31 @@
-//! 业务规则：读一个实体自己的属性事实，得出一个结论（见 `docs/decisions/0021`）。
+//! Business rules: read an entity's own attribute facts and derive a conclusion (see `docs/decisions/0021`).
 //!
-//! **与 `derive()` 分开的一趟。** 那一趟走的是实体—实体的边，在公理下做闭包；
-//! 这一趟做的是「拿字面值跟阈值比」。两件事的输入、判据、终止条件都不一样，
-//! 塞进一个函数只会让两边都难读。
+//! **A separate pass from `derive()`.** That pass walks entity–entity edges and takes the closure under the axioms;
+//! this pass does "compare the literal value against a threshold". The inputs, criteria and termination conditions of the two differ,
+//! and cramming them into one function would only make both harder to read.
 //!
-//! 与那一趟共享的是**区间语义**（`derive::validity`）和「结论是派生的」这条
-//! 身份：命中产出的东西照样进 `derived_facts`、照样挂前提、照样在前提消失时失效。
+//! What it shares with that pass is the **interval semantics** (`derive::validity`) and the identity that "the conclusion is derived":
+//! whatever a hit produces still goes into `derived_facts`, still carries its premises, and still becomes invalid when a premise disappears.
 //!
-//! 这一层同样不碰数据库。取规则、取属性事实、落库都在 `utopia-store`。
+//! This layer likewise does not touch the database. Fetching rules, fetching attribute facts and persisting all happen in `utopia-store`.
 
 use crate::derive::validity;
 pub use crate::expressions::{Expr, Scalar, MAX_EXPR_DEPTH};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// 一个实体、一条属性、一个时段上的字面值。求值器的全部输入。
+/// A literal value for one entity, one attribute, over one time period. The full input to the evaluator.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttrFact {
     pub id: Uuid,
     pub subject: Uuid,
-    /// `relation_types` 里 kind='attribute' 的那个谓词
+    /// The predicate in `relation_types` with kind='attribute'
     pub predicate: Uuid,
-    /// `facts.object_value -> 'value'`，已经从外壳里取出来
+    /// `facts.object_value -> 'value'`, already extracted from the wrapper
     pub value: serde_json::Value,
 }
 
-/// 一条参与规则连接的实体—实体边。
+/// An entity–entity edge taking part in a rule's join.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuleEdge {
     pub id: Uuid,
@@ -34,7 +34,7 @@ pub struct RuleEdge {
     pub object: Uuid,
 }
 
-/// 连接边的两侧。`X` 是规则的主语；`Y` 是这条边把它连到的另一个实体。
+/// The two sides of the join edge. `X` is the rule's subject; `Y` is the other entity this edge connects it to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Side {
     X,
@@ -58,7 +58,7 @@ impl Side {
     }
 }
 
-/// 条件的比较方式。与 `attribute_rule_conditions.op` 的 CHECK 一一对应。
+/// How a condition compares. One-to-one with the CHECK on `attribute_rule_conditions.op`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
     Gt,
@@ -67,8 +67,8 @@ pub enum Op {
     Lte,
     Between,
     In,
-    /// 反过来的 In。**它判的仍然是一条存在的事实**，所以照样有前提、有区间；
-    /// 「压根没有这个属性」是另一件事，不在这套里（0029 末节）
+    /// The inverse In. **It still judges an existing fact**, so it still has premises and an interval;
+    /// "the attribute is absent altogether" is another matter and is not covered by this (see the end of 0029)
     NotIn,
     Present,
 }
@@ -102,22 +102,22 @@ impl Op {
     }
 }
 
-/// 操作数。形状由 op 决定，读的时候一次解析好，求值热路径上不再碰 JSON。
+/// Operand. Its shape is decided by `op`; it is parsed once on read, so the evaluation hot path no longer touches JSON.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operand {
     Num(f64),
-    /// 闭区间 [lo, hi]
+    /// Closed interval [lo, hi]
     Range(f64, f64),
-    /// 类别集合。**逐字匹配**——同一类别换个语言就不算命中，这是 0021 记下的
-    /// 未决问题，不在这里偷偷做模糊
+    /// Category set. **Exact string match**—the same category in another language does not count as a hit; this is the open question 0021 recorded
+    /// and fuzzy matching is not quietly done here
     Set(Vec<String>),
-    /// 算出来的数（0032）：拿这个实体别的读数算一个门槛，而不是写死一个
+    /// A computed number (0032): a threshold calculated from this entity's other readings, rather than a hard-coded
     Calc(Expr),
     None,
 }
 
-/// 四则。**只有这四个**：再多一个就得回答它对缺读数、对除零、对单位各是什么
-/// 语义，而那是一门语言的开头（0002 / 0032）
+/// Four arithmetic operations. **Only these four**: adding another would require answering what it means for missing readings, division by zero, and units,
+/// and that is the start of a language (0002 / 0032)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arith {
     Add,
@@ -166,29 +166,29 @@ impl Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Condition {
-    /// 同组的条件用「与」连，组与组之间用「或」连（0029）。老规则全是第 0 组
+    /// Conditions in the same group are joined with AND, groups are joined with OR (0029). Old rules are all in group 0
     pub group: i32,
-    /// 这一条件读连接的哪一侧。没有连接的老规则读的永远是 X
+    /// Which side of the join this condition reads. Old rules without a join always read X
     pub side: Side,
     pub predicate: Uuid,
     pub op: Op,
     pub operand: Operand,
 }
 
-/// 结论。两种形状对应 `attribute_rules.conclusion` 的两支。
+/// Conclusion. The two shapes correspond to the two branches of `attribute_rules.conclusion`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Conclusion {
-    /// 派生归类：结论是一个类，落成 `is_a` 上的字面值
+    /// Derived classification: the conclusion is a class, stored as a literal value on `is_a`
     Typing { class: String },
-    /// 派生属性：算出来的数（0032）。与上面那支的区别只在值从哪来——
-    /// 算式读的那几条读数**一并进前提**，所以结论仍然说得出「凭什么」
+    /// Derived attribute: a computed number (0032). The only difference from the branch above is where the value comes from—
+    /// the readings the formula reads **also go into the premises**, so the conclusion can still say "on what basis"
     Computed { predicate: Uuid, expr: Expr },
-    /// 派生属性：某个属性谓词上的一个字面值
+    /// Derived attribute: a literal value on some attribute predicate
     Attribute {
         predicate: Uuid,
         value: serde_json::Value,
     },
-    /// 派生关系：从 X 经规则声明的连接指向 Y（0047）
+    /// Derived relation: from X to Y through the join the rule declares (0047)
     Relation { predicate: Uuid },
 }
 
@@ -196,20 +196,20 @@ pub enum Conclusion {
 pub struct BusinessRule {
     pub id: Uuid,
     pub conclusion: Conclusion,
-    /// 把 X 与 Y 连起来的那条谓词。`None` 就是老的单实体规则
+    /// The predicate that connects X and Y. `None` is the old single-entity rule
     pub join_predicate: Option<Uuid>,
-    /// 条件。**组内合取、组间析取**（0029）：同一组里全部满足才算这一组成立，
-    /// 任何一组成立这条规则就命中。空条件集永不命中——一条没有判据的规则应当
-    /// 什么都不推，而不是把整个类都归进去
+    /// Conditions. **AND within a group, OR between groups** (0029): a group holds only when all its conditions are satisfied,
+    /// and the rule hits when any group holds. An empty condition set never hits—a rule with no criteria should
+    /// infer nothing, rather than sweep in the whole class
     pub conditions: Vec<Condition>,
 }
 
-/// 一次命中。前提是**真正让它成立的那几条事实**，不是这个实体的全部属性。
+/// One hit. The premises are **the facts that actually made it hold**, not all of this entity's attributes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuleHit {
     pub rule: Uuid,
     pub subject: Uuid,
-    /// 关系结论的宾语；其他结论没有实体宾语
+    /// The object of a relation conclusion; other conclusions have no entity object
     pub object: Option<Uuid>,
     pub premises: Vec<Uuid>,
     pub from: Option<i64>,
@@ -221,36 +221,36 @@ pub struct RuleHit {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuleReport {
-    /// 参与求值的规则数
+    /// Number of rules taking part in evaluation
     pub rules: usize,
-    /// 命中数（去重后）
+    /// Number of hits (after deduplication)
     pub hits: usize,
-    /// 因组合数超上限而没有展开完的 (规则, 实体) 对数。**必须报出来**：
-    /// 少推几条与「这个实体不满足」在结果里长得一模一样
+    /// Number of (rule, entity) pairs not fully expanded because the combination count exceeded the cap. **Must be reported**:
+    /// inferring a few fewer and "this entity does not satisfy it" look identical in the result
     pub capped: usize,
 }
 
-/// 一个 (规则, 实体) 对最多展开多少种前提组合。
+/// How many premise combinations a single (rule, entity) pair may expand to at most.
 ///
-/// 组合数是各条件命中集大小的乘积：一口井的同一项读数报过三次、三个条件，
-/// 就是 27 种。真实数据里每项通常只有一两条，这个上限只在「同一属性被反复
-/// 覆盖几十次」时才够得着，而那种时候多算出来的区间也早就没有阅读价值了。
+/// The combination count is the product of the sizes of each condition's hit set: one well's same reading reported three times across three conditions
+/// is 27 combinations. In real data each item usually has only one or two readings, so this cap only comes into play when "the same attribute is repeatedly
+/// covered dozens of times"; and in those cases the extra intervals computed have long lost their reading value.
 const MAX_COMBOS: usize = 64;
 
-/// 求值。
+/// Evaluation.
 ///
-/// `facts` 是**已经限定在这条规则的主类之内**的属性事实——挑哪些实体参与是
-/// 取数那一侧的事（子类展开要查本体），这一层只管判断。
+/// `facts` are attribute facts **already restricted to this rule's main class**—choosing which entities take part is
+/// the job of the data-fetching side (subclass expansion consults the ontology); this layer only judges.
 ///
-/// 语义：每个条件各自挑出满足它的事实集合，再在「每个条件取一条」的组合上
-/// 求区间交集，交集非空即一次命中。**所以同一条规则可以在同一个实体上产出
-/// 多段区间**——2023 那次读数命中、2025 那次不命中，得到的是两段各自成立的
-/// 结论，而不是一行翻来覆去改（0021 决策 4）。
+/// Semantics: each condition picks out the set of facts that satisfy it, then over the combinations of "one from each condition"
+/// the interval intersection is taken; a non-empty intersection is one hit. **So the same rule can produce, on the same entity,
+/// several intervals**—a 2023 reading hits and a 2025 one does not, giving two spans each holding on its own
+/// conclusions, rather than one row flipping back and forth (0021 decision 4).
 ///
-/// **组内与、组间或**（0029）：上面那一段是一组的算法，整条规则就是把它按组
-/// 跑几遍。封顶按组算——一组展不开不该拖累另一组；两组推出同一区间时按区间
-/// 去重，留先到的那组当证明（多条证明路径对读的人没有区别，全存下来只会让
-/// 证明树跟着路径数长）。
+/// **AND within a group, OR between groups** (0029): the paragraph above is the algorithm for one group; the whole rule is that run group by group
+/// several times. The cap is applied per group—one group failing to expand must not drag down another; when two groups infer the same interval, deduplicate by interval
+/// and keep the first-arriving group as the proof (multiple proof paths make no difference to the reader; storing them all would only make
+/// the proof tree grow with the number of paths).
 pub fn evaluate(
     rules: &[BusinessRule],
     facts: &[AttrFact],
@@ -297,30 +297,30 @@ pub fn evaluate_with_pool(
             continue;
         }
 
-        // 按实体分组：这条规则谈的还是一个实体自己的属性
+        // Group by entity: this rule still concerns one entity's own attributes
         let mut by_subject: HashMap<Uuid, Vec<&AttrFact>> = HashMap::new();
         for f in facts {
             by_subject.entry(f.subject).or_default().push(f);
         }
-        // 按组切开，组序保持稳定：同一区间被两组同时推出时，留下的是**组序在前**
-        // 的那条证明，而不是 HashMap 顺序决定的随机一条
+        // Split by group, keeping group order stable: when two groups infer the same interval, what is kept is **the proof of the group that comes first**
+        // rather than a random one decided by HashMap order
         let groups = group_conditions(&rule.conditions);
         for (subject, own) in &by_subject {
-            // 同一实体上，一条规则的多个组可能推出同一段区间。去重跨组，
-            // 因为它们落成的是同一行派生事实
-            // 去重的键带上算出来的值（0032）：同一区间上两个不同的值是两行
+            // On the same entity, several groups of one rule may infer the same span. Deduplication crosses groups,
+            // because they land as the same derived fact row
+            // The deduplication key includes the computed value (0032): two different values on the same interval are two rows
             let mut seen: Vec<(Option<i64>, Option<i64>, Option<Scalar>)> = Vec::new();
-            // 这条规则在这个实体上有没有哪一组因组合太多没展开完。**按 (规则, 实体)
-            // 记一次**：报出来的是「这里少推了东西」，不是「少推了几组」
+            // Whether any group of this rule was left unexpanded on this entity because of too many combinations. **Recorded per (rule, entity)
+            // once**: what is reported is "something was inferred less here", not "some groups were missing"
             let mut capped_here = false;
             for group in &groups {
-                // ---- 槽位：这一组要各挑一条读数的那几处。
+                // ---- Slots: the places where this group each picks one reading.
                 //
-                // 前 group.len() 个是条件自己的谓词（**一个条件一个槽**，与
-                // 0032 之前一样：两个写在同一属性上的条件仍然各挑各的读数）；
-                // 后面是算式里读到、而条件没覆盖的谓词（0032）。算式引用一个
-                // 谓词时绑到**第一个**同谓词的槽——`thc > thc * 0.5` 两边说的
-                // 就是同一条读数，而不是同一属性的两条
+                // The first group.len() slots are the conditions' own predicates (**one slot per condition**, the same as
+                // before 0032: two conditions written on the same attribute still each pick their own reading);
+                // The rest are predicates read in the formula that the conditions do not cover (0032). When the formula refers to a
+                // predicate, it binds to the **first** slot with the same predicate: in `thc > thc * 0.5` both sides mean
+                // the same reading, not two readings of the same attribute
                 let mut slots: Vec<Uuid> = group.iter().map(|c| c.predicate).collect();
                 let mut extra: Vec<Uuid> = Vec::new();
                 for c in group {
@@ -337,7 +337,7 @@ pub fn evaluate_with_pool(
                     }
                 }
 
-                // 每个槽位的候选读数。任何一个为空，这一组在这个实体上就不成立
+                // Candidate readings for each slot. If any one is empty, this group does not hold on this entity
                 let mut per_slot: Vec<Vec<Uuid>> = Vec::with_capacity(slots.len());
                 let mut satisfiable = true;
                 for p in &slots {
@@ -356,7 +356,7 @@ pub fn evaluate_with_pool(
                     continue;
                 }
 
-                // 封顶按组算：一组展不开，不该把另一组也拦下
+                // The cap is per group: one group failing to expand should not block the other either
                 if combinations_exceed_cap(&per_slot) {
                     capped_here = true;
                     continue;
@@ -364,11 +364,11 @@ pub fn evaluate_with_pool(
 
                 let by_id: HashMap<Uuid, &AttrFact> = own.iter().map(|f| (f.id, *f)).collect();
 
-                // 笛卡尔积。**条件要等组合定下来才判得了**（0032）：一个算出来的
-                // 门槛读的是这一轮选中的那几条读数，判断不再只看一条事实。
-                // 同一区间可能由多个组合得出（同一读数报了两遍），按区间去重
+                // Cartesian product. **Conditions can only be judged once the combination is fixed** (0032): a computed
+                // threshold reads the readings selected in this round, so the judgement no longer looks at just one fact.
+                // The same interval may come from several combinations (the same reading reported twice); deduplicate by interval
                 for combo in cartesian(&per_slot) {
-                    // 槽位 → 这一轮选中的那条读数。算式与条件都照着它读
+                    // Slot → the reading selected this round. Both the formula and the conditions read through it
                     let mut bound: HashMap<Uuid, &AttrFact> = HashMap::new();
                     for (i, id) in combo.iter().enumerate() {
                         let Some(f) = by_id.get(id) else { continue };
@@ -395,8 +395,8 @@ pub fn evaluate_with_pool(
                     let Some((from, to)) = validity(&combo, spans) else {
                         continue;
                     };
-                    // 去重按 (区间, 值)：算出来的结论同一区间可以有不同的值，
-                    // 那是两行，不是一行
+                    // Deduplication is by (interval, value): a computed conclusion can have different values on the same interval,
+                    // which makes two rows, not one
                     let key = (from, to, value.clone());
                     // Keep the old numeric bit key while admitting text results.
                     if seen.iter().any(|(old_from, old_to, old_value)| {
@@ -432,11 +432,11 @@ pub fn evaluate_with_pool(
     (hits, report)
 }
 
-/// 求值一条跨两个实体的规则（0047）。
+/// Evaluate a rule spanning two entities (0047).
 ///
-/// **一条连接边是一对 `(X, Y)`，不是一次笛卡尔连接。** ADR 只放行一跳，并且
-/// 让每条边自己成为前提：两条同谓词边哪怕首尾一样，也可能各有一段成立期。
-/// 封顶因此按 `(rule, X, Y)` 报，与单实体规则的 `(rule, X)` 保持同一种含义。
+/// **A join edge is a pair `(X, Y)`, not a Cartesian join.** The ADR allows only one hop, and
+/// makes each edge a premise in its own right: two same-predicate edges, even with identical ends, may each hold for a span of their own.
+/// The cap is therefore reported by `(rule, X, Y)`, keeping the same meaning as `(rule, X)` for single-entity rules.
 #[allow(clippy::too_many_arguments)]
 fn joined_evaluate(
     rule: &BusinessRule,
@@ -459,8 +459,8 @@ fn joined_evaluate(
         pool_by_subject.entry(f.subject).or_default().push(f);
     }
 
-    // 连接边按 X 分桶，一次扫完：对每个 X 再去全部边里找它的，是 X 数乘边数——
-    // 十万对上量出来是 5.9 s 对 1 万对的 82 ms，分桶之后随对数线性
+    // Join edges are bucketed by X and scanned once: searching all edges for each X would cost (number of X) × (number of edges)—
+    // measured at 5.9 s for 100k pairs versus 82 ms for 10k pairs; after bucketing it is linear in the number of pairs
     let mut edges_by_x: HashMap<Uuid, Vec<&RuleEdge>> = HashMap::new();
     for e in edges.iter().filter(|e| e.predicate == join_predicate) {
         edges_by_x.entry(e.subject).or_default().push(e);
@@ -477,8 +477,8 @@ fn joined_evaluate(
                 .get(&y)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            // 同一对上的多个组可能推出同一结论。留先到的组作证明，与单实体
-            // 规则的去重规则一致
+            // Several groups on the same pair may infer the same conclusion. The first-arriving group is kept as the proof, consistent with the single-entity
+            // rule's deduplication rule
             let mut seen: Vec<(Option<i64>, Option<i64>, Option<u64>)> = Vec::new();
             let mut capped_here = false;
             for group in &groups {
@@ -606,8 +606,8 @@ fn expr_predicates(expr: &Expr, side: Side, out: &mut Vec<(Side, Uuid)>) {
     }
 }
 
-/// 按 `group` 切成几组，**组序按 group_seq 升序**——两组推出同一区间时，
-/// 留下的证明得是稳定的那一条，不能随存储顺序变。
+/// Split into groups by `group`, **group order ascending by group_seq**—when two groups infer the same interval,
+/// the proof kept must be the stable one, and must not vary with storage order.
 fn group_conditions(conditions: &[Condition]) -> Vec<Vec<&Condition>> {
     let mut keys: Vec<i32> = conditions.iter().map(|c| c.group).collect();
     keys.sort_unstable();
@@ -617,7 +617,7 @@ fn group_conditions(conditions: &[Condition]) -> Vec<Vec<&Condition>> {
         .collect()
 }
 
-/// 调用方已排除空槽；任一前缀超过上限，完整组合也必定超限。
+/// The caller has already excluded empty slots; if any prefix exceeds the cap, the full combination necessarily exceeds it too.
 fn combinations_exceed_cap(per_slot: &[Vec<Uuid>]) -> bool {
     let mut combinations = 1_usize;
     for candidates in per_slot {
@@ -632,7 +632,7 @@ fn combinations_exceed_cap(per_slot: &[Vec<Uuid>]) -> bool {
     false
 }
 
-/// 每个条件取一条，穷举组合。调用方已经把上限挡在外面。
+/// Take one from each condition and enumerate combinations exhaustively. The caller has already blocked the cap outside.
 fn cartesian(sets: &[Vec<Uuid>]) -> Vec<Vec<Uuid>> {
     let mut out: Vec<Vec<Uuid>> = vec![Vec::new()];
     for set in sets {
@@ -649,12 +649,12 @@ fn cartesian(sets: &[Vec<Uuid>]) -> Vec<Vec<Uuid>> {
     out
 }
 
-/// 一条属性值满不满足一个条件。
+/// Whether an attribute value satisfies a condition.
 ///
-/// **类型不对就是不满足，不是报错。** 一个本该是数字的属性被抽成了
-/// "十二点三"，这条规则在这个实体上不成立——而不是让整轮物化失败。
+/// **A wrong type means not satisfied, not an error.** An attribute that should be a number was extracted as
+/// "twelve point three", and this rule does not hold on this entity—rather than failing the whole materialization round.
 fn satisfies(c: &Condition, value: &serde_json::Value, bound: &HashMap<Uuid, &AttrFact>) -> bool {
-    // 算出来的门槛：先按这一轮选中的读数算个数，算不出来就是不满足（0032）
+    // A computed threshold: first compute it from the readings selected this round; if it cannot be computed, the condition is not satisfied (0032)
     if let Operand::Calc(e) = &c.operand {
         let Some(n) = e.eval(bound) else { return false };
         let Some(v) = num(value) else { return false };
@@ -663,13 +663,13 @@ fn satisfies(c: &Condition, value: &serde_json::Value, bound: &HashMap<Uuid, &At
             Op::Gte => v >= n,
             Op::Lt => v < n,
             Op::Lte => v <= n,
-            // 算式给的是一个数：区间、集合、有记录都不是它能填的位置
+            // The formula yields a number: intervals, sets and recorded-ness are not positions it can fill
             _ => false,
         };
     }
     match (&c.op, &c.operand) {
         (Op::Present, _) => !value.is_null(),
-        // 值不在集合里就算满足；**没有值不算**——那是「没记」，不是「不是它」
+        // A value not in the set counts as satisfied; **no value does not count**—that is "not recorded", not "not it"
         (Op::NotIn, Operand::Set(set)) => !value.is_null() && in_set(value, set) == Some(false),
         (Op::Gt, Operand::Num(n)) => num(value).is_some_and(|v| v > *n),
         (Op::Gte, Operand::Num(n)) => num(value).is_some_and(|v| v >= *n),
@@ -677,13 +677,13 @@ fn satisfies(c: &Condition, value: &serde_json::Value, bound: &HashMap<Uuid, &At
         (Op::Lte, Operand::Num(n)) => num(value).is_some_and(|v| v <= *n),
         (Op::Between, Operand::Range(lo, hi)) => num(value).is_some_and(|v| v >= *lo && v <= *hi),
         (Op::In, Operand::Set(set)) => in_set(value, set) == Some(true),
-        // op 与操作数形状对不上：库里的 CHECK 挡了大部分，剩下的当不满足
+        // op and the operand shape do not match: the library's CHECK blocks most of these, and the rest count as not satisfied
         _ => false,
     }
 }
 
-/// 数字。**字符串里的数字也认**——抽取把「12.3」存成字符串是常有的事，
-/// 而一个阈值规则因为引号而静默失效，是最难被发现的那种失效。
+/// numbers. **Numbers inside strings also count**—extraction often stores "12.3" as a string,
+/// and a threshold rule silently failing because of the quotes is the hardest kind of failure to spot.
 fn num(v: &serde_json::Value) -> Option<f64> {
     match v {
         serde_json::Value::Number(n) => n.as_f64(),
@@ -693,9 +693,9 @@ fn num(v: &serde_json::Value) -> Option<f64> {
     }
 }
 
-/// 集合成员（0029）。读数与集合里的一项都读得出数时按数比：数值属性存成 f64，
-/// 读回来是 `3.0`，集合里写的是 `3`；写成 `[3.0]` 的集合存的又是 "3.0"。按字比
-/// 两头总有一头对不上。别的照旧按字面比。读数连字面都没有时是 `None`
+/// Set membership (0029). When both the reading and an item in the set can be read as numbers, compare as numbers: numeric attributes are stored as f64,
+/// read back as `3.0`, while the set writes `3`; a set written as `[3.0]` stores "3.0". Comparing as text
+/// always fails on one side. Anything else is still compared literally. When a reading has no literal at all, it is `None`
 fn in_set(value: &serde_json::Value, set: &[String]) -> Option<bool> {
     let v = text(value)?;
     let n = match value {
@@ -710,7 +710,7 @@ fn in_set(value: &serde_json::Value, set: &[String]) -> Option<bool> {
     )
 }
 
-/// 类别。数字与布尔也转成字面形态参与集合比较，理由同上。
+/// Category. Numbers and booleans are also converted to their literal forms for set comparison, for the same reason.
 fn text(v: &serde_json::Value) -> Option<String> {
     match v {
         serde_json::Value::String(s) => Some(s.trim().to_string()),
@@ -826,7 +826,7 @@ mod tests {
         }
     }
 
-    /// 全烃 12.3 且解释为气测异常 → 命中，前提正是那两条读数
+    /// Total hydrocarbon 12.3 and interpreted as gas-logging anomaly → hit, premises are exactly those two readings
     #[test]
     fn a_conjunction_fires_and_names_the_two_readings() {
         let rule = BusinessRule {
@@ -865,8 +865,8 @@ mod tests {
         assert_eq!(report.hits, 1);
     }
 
-    /// 合取里少一条就不成立。**这是最容易写反的地方**：任一条件没有命中的
-    /// 事实，整条规则在这个实体上就不成立，而不是「按剩下的条件算」
+    /// Missing one item in a conjunction means it does not hold. **This is the easiest place to get backwards**: if any condition has no hit,
+    /// the whole rule does not hold on this entity, rather than being "computed from the remaining conditions"
     #[test]
     fn a_missing_condition_fires_nothing() {
         let rule = BusinessRule {
@@ -898,7 +898,7 @@ mod tests {
         assert!(hits.is_empty(), "第二个条件没有任何事实，不该命中");
     }
 
-    /// 同一属性的两次读数各自成立 → 两段区间，而不是一行翻转（0021 决策 4）
+    /// Two readings of the same attribute each hold → two intervals, not one row flipped (0021 decision 4)
     #[test]
     fn two_readings_give_two_intervals() {
         let rule = BusinessRule {
@@ -915,7 +915,7 @@ mod tests {
                 operand: Operand::Num(8.0),
             }],
         };
-        // 2023 与 2025 两次读数都过阈值，区间不相交
+        // 2023 and 2025 readings both pass the threshold, and the intervals do not intersect
         let facts = vec![fact(1, 50, 10, json!(12.3)), fact(2, 50, 10, json!(9.9))];
         let spans = HashMap::from([
             (id(1), (Some(100), Some(200))),
@@ -931,8 +931,8 @@ mod tests {
         );
     }
 
-    /// 区间不相交的两条前提凑不成一次命中：全烃是 2023 的，解释是 2025 的，
-    /// 这两条从来没有同时成立过
+    /// Two premises with non-intersecting intervals cannot make up one hit: the total hydrocarbon is from 2023, the interpretation is from 2025,
+    /// and the two were never true at the same time
     #[test]
     fn premises_that_never_overlapped_fire_nothing() {
         let rule = BusinessRule {
@@ -970,8 +970,8 @@ mod tests {
         assert!(hits.is_empty(), "两条前提没有同时成立的时段");
     }
 
-    /// 两组「或」：任一组成立就命中。第二组的前提里**没有**第一组那条读数——
-    /// 一条派生事实带的是真正让它成立的那几条，不是这个实体的全部属性
+    /// Two groups joined by OR: a hit if either holds. The second group's premises do **not** include the first group's reading—
+    /// a derived fact carries only the ones that actually made it hold, not all this entity's attributes
     #[test]
     fn either_group_can_fire_and_carries_only_its_own_premises() {
         let rule = BusinessRule {
@@ -981,7 +981,7 @@ mod tests {
                 class: "GasBearingWell".into(),
             },
             conditions: vec![
-                // 第 0 组：全烃 > 8 且 解释 ∈ {气测异常}
+                // Group 0: total hydrocarbon > 8 and interpretation ∈ {gas-logging anomaly}
                 Condition {
                     group: 0,
                     side: Side::X,
@@ -996,7 +996,7 @@ mod tests {
                     op: Op::In,
                     operand: Operand::Set(vec!["气测异常".into()]),
                 },
-                // 第 1 组：综合解释 ∈ {气层}
+                // Group 1: comprehensive interpretation ∈ {gas layer}
                 Condition {
                     side: Side::X,
                     group: 1,
@@ -1006,7 +1006,7 @@ mod tests {
                 },
             ],
         };
-        // 只有第二组的那条读数
+        // Only the second group's reading
         let facts = vec![fact(3, 50, 12, json!("气层"))];
         let spans = HashMap::from([(id(3), (Some(100), Some(200)))]);
         let (hits, _) = evaluate(&[rule], &facts, &spans, &[]);
@@ -1015,8 +1015,8 @@ mod tests {
         assert_eq!((hits[0].from, hits[0].to), (Some(100), Some(200)));
     }
 
-    /// 两组同时成立、且推出同一段区间：**一条命中，不是两条**——它们落成的是
-    /// 同一行派生事实，留下的证明是组序在前的那一组
+    /// Two groups hold at once and infer the same span: **one hit, not two**—they land as
+    /// the same derived fact row, and the proof kept is the one from the group that comes first
     #[test]
     fn two_groups_on_the_same_interval_are_one_hit() {
         let rule = BusinessRule {
@@ -1043,7 +1043,7 @@ mod tests {
             ],
         };
         let facts = vec![fact(1, 50, 10, json!(12.3)), fact(2, 50, 11, json!("气层"))];
-        // 同一段区间
+        // The same span
         let spans = HashMap::from([
             (id(1), (Some(100), Some(200))),
             (id(2), (Some(100), Some(200))),
@@ -1058,18 +1058,18 @@ mod tests {
         assert_eq!(report.hits, 1);
     }
 
-    /// 一组展不开不该拖累另一组：**封顶按组算**，而且这个 (规则, 实体) 对
-    /// 只报一次「没展完」
+    /// One group failing to expand must not drag down another: **the cap is per group**, and this (rule, entity) pair
+    /// is reported as "not fully expanded" only once
     #[test]
     fn a_capped_group_does_not_stop_the_other() {
         let mut facts: Vec<AttrFact> = Vec::new();
         let mut spans = HashMap::new();
-        // 第 0 组：同一个属性上 100 条读数，组合数 100 > 64
+        // Group 0: 100 readings on the same attribute, combination count 100 > 64
         for i in 1..=100u8 {
             facts.push(fact(i, 50, 10, json!(12.3)));
             spans.insert(id(i), (Some(100), Some(200)));
         }
-        // 第 1 组：一条就够
+        // Group 1: one is enough
         facts.push(fact(200, 50, 11, json!("气层")));
         spans.insert(id(200), (Some(100), Some(200)));
         let rule = BusinessRule {
@@ -1101,8 +1101,8 @@ mod tests {
         assert_eq!(report.capped, 1, "(规则, 实体) 只报一次");
     }
 
-    /// `is not one of`：值在集合外算满足；**没有这条读数不算**——那是「没记」，
-    /// 不是「不是它」
+    /// `is not one of`: a value outside the set counts as satisfied; **no such reading does not count**—that is "not recorded",
+    /// not "not it"
     #[test]
     fn not_one_of_needs_a_reading_to_be_true() {
         let rule = BusinessRule {
@@ -1138,8 +1138,8 @@ mod tests {
         assert!(none.is_empty(), "没有这条读数：不成立，而不是「不是它」");
     }
 
-    /// 数字被抽成字符串照样比得动。**这一条挡的是最难发现的失效**：
-    /// 规则从不报错，只是永远不命中
+    /// Numbers extracted as strings are still comparable. **This one guards against the hardest failure to spot**:
+    /// the rule never errors, it just never hits
     #[test]
     fn a_number_in_quotes_still_compares() {
         let rule = BusinessRule {
@@ -1163,7 +1163,7 @@ mod tests {
         assert_eq!(hits.len(), 1);
     }
 
-    /// 数值属性的读数存成 f64：`3` 存进去读出来是 `3.0`，「属于 {3}」照样要命中
+    /// Readings of numeric attributes are stored as f64: `3` stored comes back as `3.0`, and "belongs to {3}" must still hit
     #[test]
     fn a_stored_number_is_one_of_the_numbers_in_the_set() {
         let rule = BusinessRule {
@@ -1184,7 +1184,7 @@ mod tests {
         let spans = HashMap::from([(id(1), (None, None))]);
         let (hits, _) = evaluate(std::slice::from_ref(&rule), &facts, &spans, &[]);
         assert_eq!(hits.len(), 1);
-        // `parse_operand` 把 `[3.0]` 存成 "3.0"：读数 3.0 仍在其中，整数 3 也在其中
+        // `parse_operand` stores `[3.0]` as "3.0": the reading 3.0 is still in it, and the integer 3 is too
         let mut rule = rule;
         rule.conditions[0].operand = Operand::Set(vec!["3.0".into()]);
         let facts = vec![fact(1, 50, 10, json!(3.0))];
@@ -1193,14 +1193,14 @@ mod tests {
         let facts = vec![fact(1, 50, 10, json!(3))];
         let (hits, _) = evaluate(std::slice::from_ref(&rule), &facts, &spans, &[]);
         assert_eq!(hits.len(), 1);
-        // 不是数的照旧按字面比
+        // Anything that is not a number is still compared literally
         rule.conditions[0].operand = Operand::Set(vec!["3".into()]);
         let facts = vec![fact(1, 50, 10, json!("三"))];
         let (hits, _) = evaluate(&[rule], &facts, &spans, &[]);
         assert!(hits.is_empty());
     }
 
-    /// 阈值抬高到读数之上，同一份数据就不再命中——降/升阈值重跑是 0021 的验收项
+    /// Raise the threshold above the reading and the same data stops hitting—rerunning with lowered/raised thresholds is an acceptance item of 0021
     #[test]
     fn raising_the_threshold_clears_the_hit() {
         let facts = vec![fact(1, 50, 10, json!(12.3))];
@@ -1223,8 +1223,8 @@ mod tests {
         assert!(evaluate(&[mk(20.0)], &facts, &spans, &[]).0.is_empty());
     }
 
-    /// 没有条件的规则什么都不推。空合取在逻辑上恒真，会把整个类归进去——
-    /// 那是「规则还没写完」最坏的失败方式
+    /// A rule with no conditions infers nothing. An empty conjunction is logically always true, and would sweep in the whole class—
+    /// that is the worst way for "the rule isn't finished yet" to fail
     #[test]
     fn a_rule_without_conditions_concludes_nothing() {
         let rule = BusinessRule {
@@ -1239,7 +1239,7 @@ mod tests {
         assert!(hits.is_empty());
     }
 
-    /// 组合数超上限时**报出来**，不是静默少推
+    /// When the combination count exceeds the cap, **report it**, rather than silently inferring less
     #[test]
     fn too_many_combinations_are_reported() {
         let rule = BusinessRule {
@@ -1300,7 +1300,7 @@ mod tests {
             } else {
                 Vec::new()
             };
-            // 每个条件有两条候选：6 个条件是 64 种，7 个是 128 种，usize::BITS 个会溢出。
+            // Each condition has two candidates: 6 conditions gives 64 combinations, 7 gives 128, and usize::BITS conditions would overflow.
             for (condition_count, has_other_group, expected_capped, expected_hits) in [
                 (6, false, 0, 1),
                 (7, false, 1, 0),
@@ -1361,8 +1361,8 @@ mod tests {
         }
     }
 
-    /// 结论是算出来的：margin = revenue − cost。**算式读的两条读数都进前提**，
-    /// 所以这条结论说得出凭什么，也会在任一条读数变了的时候退场（0032）
+    /// The conclusion is computed: margin = revenue − cost. **Both readings the formula reads go into the premises**,
+    /// so the conclusion can say on what basis it holds, and it also retires when either reading changes (0032)
     #[test]
     fn a_computed_conclusion_carries_the_readings_it_read() {
         let rule = BusinessRule {
@@ -1385,13 +1385,13 @@ mod tests {
         let (hits, _) = evaluate(&[rule], &facts, &spans, &[]);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].value, Some(Scalar::Number(180.0)));
-        // 条件只提到 revenue，可 cost 也读了——它照样是前提
+        // The condition only mentions revenue, but cost is also read—it is still a premise
         assert_eq!(hits[0].premises.len(), 2);
         assert!(hits[0].premises.contains(&id(1)) && hits[0].premises.contains(&id(2)));
     }
 
-    /// **每个组合各算各的。** 两条 revenue 一条 cost，就是两个数、两段区间、
-    /// 两行结论——而不是挑一条算一次（0032 里说的「行数才是真代价」）
+    /// **Each combination is computed separately.** Two revenue readings and one cost reading make two numbers, two intervals,
+    /// two conclusion rows—rather than picking one and computing once (0032's "row count is the real cost")
     #[test]
     fn each_combination_of_readings_computes_its_own_value() {
         let rule = BusinessRule {
@@ -1429,8 +1429,8 @@ mod tests {
         assert_eq!(values, vec![180.0, 280.0]);
     }
 
-    /// 缺一条读数就不出结论——**不是当零**。没记不等于零，在无知的地方填一个
-    /// 确定的答案正是这套账本最不该做的事
+    /// A missing reading means no conclusion—**it is not treated as zero**. Not recorded is not zero; filling in a definite answer where there is ignorance
+    /// is exactly what this ledger should least do
     #[test]
     fn a_missing_reading_computes_nothing_rather_than_zero() {
         let rule = BusinessRule {
@@ -1454,7 +1454,7 @@ mod tests {
         assert!(hits.is_empty(), "cost 没记，margin 就不该有");
     }
 
-    /// 除零同样什么都不出。一条算不出来的结论与一条不成立的结论一样：没有
+    /// Division by zero likewise yields nothing. A conclusion that cannot be computed is the same as one that does not hold: there is no
     #[test]
     fn dividing_by_zero_computes_nothing() {
         let rule = BusinessRule {
@@ -1478,8 +1478,8 @@ mod tests {
         assert!(hits.is_empty());
     }
 
-    /// 门槛也能是算出来的：`revenue > cost × 1.5`。判断要等组合定下来才做得了，
-    /// 因为门槛读的正是这一轮选中的那条 cost
+    /// The threshold can also be computed: `revenue > cost × 1.5`. The judgement can only be made once the combination is fixed,
+    /// because the threshold reads exactly the cost selected this round
     #[test]
     fn a_threshold_can_be_computed_from_another_reading() {
         let rule = |factor: f64| BusinessRule {
@@ -1507,8 +1507,8 @@ mod tests {
         assert!(none.is_empty(), "300 不大于 120 × 3");
     }
 
-    /// 同一区间上两个不同的值是**两行**，不是一行。去重的键带上值，否则
-    /// 后算出来的那个会被当成重复丢掉
+    /// Two different values on the same interval are **two rows**, not one. The deduplication key includes the value, otherwise
+    /// the one computed later would be dropped as a duplicate
     #[test]
     fn two_values_on_one_interval_are_two_hits() {
         let rule = BusinessRule {
@@ -1532,7 +1532,7 @@ mod tests {
         assert_eq!(hits.len(), 2, "同一段区间，两个值");
     }
 
-    /// 算式的深度算得对——编译那一侧靠它拦住「有人在这里写程序」
+    /// The formula's depth is computed correctly—the compile side relies on it to stop "someone writing a program here"
     #[test]
     fn depth_counts_the_deepest_branch() {
         assert_eq!(attr(10).depth(), 1);

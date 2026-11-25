@@ -6,6 +6,10 @@ from dataclasses import dataclass
 CJK = re.compile(r"[一-鿿　-〿＀-￯]")
 RUST_SUFFIXES = (".rs",)
 TS_SUFFIXES = (".ts", ".tsx", ".mjs", ".js")
+ANCHOR = re.compile(r"#\d+|\d{2,}(?:\.\d+)?|[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z0-9_]+)+|[A-Za-z]+_[A-Za-z0-9_]+|[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+")
+MIN_COPY_LENGTH = 40
+REWRITTEN_NUMBER_WORDS = re.compile(r"[万亿千百年月日]")
+RAW_STRING_OPENER = re.compile(r'(?<![A-Za-z0-9_])b?r(#*)"')
 
 
 @dataclass(frozen=True)
@@ -14,11 +18,17 @@ class Segment:
     text: str
 
 
+@dataclass(frozen=True)
+class LineState:
+    block_depth: int = 0
+    raw_string_closer: str = ""
+
+
 def split_lines(source_lines: list[str], is_rust: bool) -> list[list[Segment]]:
-    block_depth = 0
+    state = LineState()
     result = []
     for line in source_lines:
-        segments, block_depth = _split_line(line, block_depth, is_rust)
+        segments, state = _split_line(line, state, is_rust)
         result.append(segments)
     return result
 
@@ -38,6 +48,31 @@ def code_text(segments: list[Segment]) -> str:
     return "".join(segment.text for segment in segments if not segment.is_comment)
 
 
+def anchors(comment: str) -> list[str]:
+    """Names (snake_case, paths, CamelCase) and issue numbers a translation must carry over."""
+    return sorted(set(ANCHOR.findall(re.sub(r"(?<=\d),(?=\d{3})", "", comment))))
+
+
+def missing_anchors(before: str, after: str) -> list[str]:
+    lost = set(anchors(before)) - set(anchors(after))
+    if REWRITTEN_NUMBER_WORDS.search(before):
+        lost = {anchor for anchor in lost if not anchor[0].isdigit()}
+    return sorted(lost)
+
+
+def copied_translations(before_comments: list[str], after_comments: list[str]) -> list[int]:
+    """Lines whose translation is a long text that also sits on a line with a different original."""
+    originals_by_text: dict[str, set[str]] = {}
+    for old, new in zip(before_comments, after_comments):
+        if old != new and len(new.strip()) >= MIN_COPY_LENGTH:
+            originals_by_text.setdefault(new.strip(), set()).add(old.strip())
+    return [
+        number
+        for number, (old, new) in enumerate(zip(before_comments, after_comments), start=1)
+        if old != new and len(originals_by_text.get(new.strip(), ())) > 1
+    ]
+
+
 def is_rust_path(path: str) -> bool:
     return path.endswith(RUST_SUFFIXES)
 
@@ -46,12 +81,22 @@ def is_supported_path(path: str) -> bool:
     return path.endswith(RUST_SUFFIXES + TS_SUFFIXES)
 
 
-def _split_line(line: str, block_depth: int, is_rust: bool):
+def _split_line(line: str, state: LineState, is_rust: bool):
+    block_depth = state.block_depth
+    raw_string_closer = state.raw_string_closer
     segments: list[Segment] = []
     start = 0
     position = 0
     quote = ""
     while position < len(line):
+        if raw_string_closer:
+            end = line.find(raw_string_closer, position)
+            if end == -1:
+                position = len(line)
+            else:
+                position = end + len(raw_string_closer)
+                raw_string_closer = ""
+            continue
         if block_depth:
             end = line.find("*/", position)
             nested = line.find("/*", position) if is_rust else -1
@@ -77,6 +122,11 @@ def _split_line(line: str, block_depth: int, is_rust: bool):
                 quote = ""
             position += 1
             continue
+        raw_opener = RAW_STRING_OPENER.match(line, position) if is_rust else None
+        if raw_opener:
+            raw_string_closer = '"' + raw_opener.group(1)
+            position = raw_opener.end()
+            continue
         if char == '"' or (char == "`" and not is_rust):
             quote = char
         elif is_rust and char == "'":
@@ -88,7 +138,7 @@ def _split_line(line: str, block_depth: int, is_rust: bool):
             if start < position:
                 segments.append(Segment(False, line[start:position]))
             segments.append(Segment(True, line[position:]))
-            return segments, block_depth
+            return segments, LineState(block_depth, raw_string_closer)
         elif two == "/*":
             if start < position:
                 segments.append(Segment(False, line[start:position]))
@@ -101,7 +151,7 @@ def _split_line(line: str, block_depth: int, is_rust: bool):
         segments.append(Segment(True, line[start:]))
     elif start < len(line):
         segments.append(Segment(False, line[start:]))
-    return segments, block_depth
+    return segments, LineState(block_depth, raw_string_closer)
 
 
 def _skip_rust_char_literal(line: str, position: int) -> int:

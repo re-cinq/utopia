@@ -1,25 +1,25 @@
-//! MinerU 读出来的版面（`content_list`）→ 一份正文 + 按页的出处段（0040 第二刀）。
+//! MinerU layout (`content_list`) → one body text plus provenance segments per page (0040, second slice).
 //!
-//! MinerU 先认版面、再逐区域认字，交回一串按阅读顺序排好的区域：正文、标题、表、公式、
-//! 图注，每个带 `page_idx` 和 `bbox`（映射到 0–1000）。这里把它们拼成分块器认得的
-//! Markdown——标题还是标题，表还是表，于是扫描件的块跟原生文档按同一套规矩切：表头
-//! 跟着续块走、标题贴着下一段。
+//! MinerU detects the layout first, then recognizes text region by region, and returns the regions in reading order: body text, headings, tables, formulas,
+//! captions, each with a `page_idx` and a `bbox` (mapped to 0–1000). Here they are joined into the Markdown the chunker understands:
+//! headings stay headings and tables stay tables, so scanned-document chunks are cut by the same rules as native documents: a table header
+//! follows its continuation chunks, and a heading sticks to the paragraph after it.
 //!
-//! **段按页分，不按区域分。**一块只装一种出处（决定 2），而每个区域的框都不一样；按区域
-//! 分段，一段话一块，块就碎到抽取看不见上下文。页是人核对时翻到的那个单位，所以一页一
-//! 段，块切好之后再把它盖住的那几个区域的框并成一个，写进锚点。
+//! **Segments are split by page, not by region.** A chunk holds only one provenance (decision 2), and every region has a different box; splitting by region
+//! would make one chunk per paragraph, too fragmented for extraction to see context. The page is the unit a person turns to when checking, so one page
+//! is one segment. After chunking, the boxes of the regions it covers are merged into one and written into the anchor.
 //!
-//! 页码从 1 数（`page_idx` + 1）：锚点是给人翻页用的，查看器的 `#page=` 也从 1 数。
+//! Page numbers count from 1 (`page_idx` + 1): the anchor is for a person paging through, and the viewer's `#page=` also counts from 1.
 
 use crate::provenance::{Origin, Provenance, Segment};
 use crate::reading::{Place, Reading, Region};
 use serde_json::{json, Value};
 
-/// 版面上的辅助区域：页眉、页脚、页码。每页重复一遍，进了正文只会让每块都多一行噪声。
-/// 页脚注和旁注不在这里——合同的脚注里写着条款
+/// Auxiliary layout regions: headers, footers, page numbers. They repeat on every page, and in the body they would add a line of noise to every chunk.
+/// Footnotes and side notes are not here: in a contract, footnotes state clauses
 const CHROME: &[&str] = &["header", "footer", "page_number"];
 
-/// 读 `content_list`。`model` 记在出处上：哪个版本、哪个后端读的
+/// Reads `content_list`. `model` is recorded in the provenance: which version and which backend did the reading
 pub fn reading(content_list: &Value, model: &str) -> Reading {
     let mut text = String::new();
     let mut regions: Vec<Region> = Vec::new();
@@ -50,7 +50,7 @@ pub fn reading(content_list: &Value, model: &str) -> Reading {
         });
     }
 
-    // 一页一段，段首尾相接盖满整份正文：段从这一页第一个区域开始，到下一页第一个区域为止
+    // One segment per page, end to end, covering the whole body: a segment starts at the first region of its page and ends where the next page's first region starts
     let mut segments: Vec<Segment> = Vec::new();
     for r in &regions {
         let Place::Page { page, .. } = r.place else {
@@ -84,7 +84,7 @@ pub fn reading(content_list: &Value, model: &str) -> Reading {
     }
 }
 
-/// 一个区域写成 Markdown。认不出的类型有字就照字收，没字就跳过
+/// Writes one region as Markdown. An unrecognized type is kept as text if it has any, and skipped if it has none
 fn render(kind: &str, item: &Value) -> Option<String> {
     let s = |key: &str| item[key].as_str().map(str::trim).filter(|t| !t.is_empty());
     let lines = |key: &str| -> Vec<String> {
@@ -111,7 +111,7 @@ fn render(kind: &str, item: &Value) -> Option<String> {
             let t = s("text")?;
             match item["text_level"].as_u64().unwrap_or(0) {
                 0 => Some(t.to_string()),
-                // 标题要单独一行才认得出；认字认出来的换行并成空格
+                // A heading is only recognized on its own line; line breaks inside recognized text become spaces
                 n => Some(format!(
                     "{} {}",
                     "#".repeat(n.min(6) as usize),
@@ -153,7 +153,7 @@ fn bbox(v: &Value) -> Option<[f64; 4]> {
     Some(out)
 }
 
-/// 认字、转写出来的 NUL 跟 PDF 文本层里的一样要剥（#611）
+/// NUL bytes from recognized or transcribed text are stripped, as in the PDF text layer (#611)
 pub(crate) fn without_nul(s: &str) -> String {
     s.replace('\0', "")
 }

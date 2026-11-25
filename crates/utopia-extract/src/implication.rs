@@ -1,16 +1,16 @@
-//! 蕴含规则的两次模型调用（0044 决定 3 第五片）。
+//! Two model calls for implication rules (0044 decision 3, fifth slice).
 //!
-//! 一是**提规则**：给对齐器刚判过的签名（或类别词），问「这种形状的陈述除了它绑到的属性，
-//! 还蕴含哪条属性的事实，宾语怎么来」。答案是 (属性, 读数或 null)；null 属性 = 什么也不蕴含。
-//! 二是**读数**：给 distinct 的字，问「按这种读法它指什么」，答一个名字或一个值或 null。
-//! 读数按字缓存，一个字一辈子只问一次；提示词里只有字和读法，没有文档。
+//! One is **proposing rules**: given a signature the aligner just judged (or a kind word), ask "for statements of this shape, besides the attribute they bind to,
+//! what other attribute facts they imply, and where the object comes from". The answer is (attribute, reading or null); a null attribute = implies nothing.
+//! The second is **readings**: for a word given as distinct, ask "under this reading, what does it refer to", answering a name, a value or null.
+//! Readings are cached per word, so each word is asked once for life; the prompt has only the word and the reading, no document.
 //!
-//! 回复都是紧凑 JSON，解析同 phrase_align：坏的一条计数，不毁掉整批；没答到的 id 不出现。
+//! Replies are all compact JSON, parsed as in phrase_align: a bad item is counted, not allowed to ruin the batch; ids not answered do not appear.
 
 use crate::phrase_align::{candidate_line, PropertyCandidate};
 use utopia_llm::ChatMessage;
 
-/// 一条待提规则的形状：签名或类别词，带例句与候选属性
+/// One shape to propose a rule for: a signature or kind word, with example sentences and candidate attributes
 #[derive(Debug, Clone)]
 pub struct RuleItem<'a> {
     pub id: i64,
@@ -20,13 +20,13 @@ pub struct RuleItem<'a> {
     pub subject_class: Option<&'a str>,
     pub object_class: Option<&'a str>,
     pub object_is_value: bool,
-    /// 签名已绑到的属性键（类别词没有）；提的规则不能又是它
+    /// Attribute keys the signature is already bound to (kind words have none); the proposed rule cannot be one of them
     pub bound_to: Option<&'a str>,
     pub examples: &'a [String],
     pub candidates: Vec<PropertyCandidate<'a>>,
 }
 
-/// 模型对一条形状的回答：Some((属性键, 读数)) 或 None（什么也不蕴含）
+/// The model's answer for one shape: Some((attribute key, reading)) or None (implies nothing)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleChoice {
     pub id: i64,
@@ -61,8 +61,8 @@ fn readings_text(readings: &[(&str, &str)]) -> String {
 }
 
 pub fn build_rule_messages(items: &[RuleItem<'_>], readings: &[(&str, &str)]) -> Vec<ChatMessage> {
-    // 候选表一批只写一遍，各项只列键（与 `phrase_align::build_phrase_messages` 同一条理由：
-    // 每项带整张表时一次请求五万多 token）
+    // The candidate table is written once per batch, and each item lists only keys (same reasoning as `phrase_align::build_phrase_messages`:
+    // with the whole table in every item, one request ran over 50,000 tokens)
     let mut glossary: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for c in items.iter().flat_map(|i| i.candidates.iter()) {
@@ -127,8 +127,8 @@ pub fn build_rule_messages(items: &[RuleItem<'_>], readings: &[(&str, &str)]) ->
     ]
 }
 
-/// 解析提规则的回复：`(裁决, 坏项数)`。同一个 id 只收第一次；属性键不在候选里、读数不在
-/// 清单里、属性就是已绑到的那条，都算坏
+/// Parse the rule-proposal reply: `(verdicts, bad item count)`. Only the first answer per id is kept; an attribute key not among the candidates, a reading not
+/// in the list, or the attribute that is already bound, all count as bad
 pub fn parse_rule_response(
     raw: &str,
     items: &[RuleItem<'_>],
@@ -142,7 +142,7 @@ pub fn parse_rule_response(
         .ok_or_else(|| "no \"i\" array".to_string())?;
     let mut out = Vec::new();
     let mut malformed = 0usize;
-    // 坏行不占 id：只有收下的答案才算答过，后面同 id 的完好答案还能收；收过再来的才是重复
+    // A bad row does not use up an id: only accepted answers count as answered, so a later good answer for the same id can still be accepted; a repeat is one that comes after an accepted answer
     let mut seen = std::collections::HashSet::new();
     for row in rows {
         let parsed = (|| {
@@ -166,7 +166,7 @@ pub fn parse_rule_response(
                             return None;
                         }
                     }
-                    // 类别词自己没有宾语：没有读数就没有宾语，这条答案没意义
+                    // A kind word has no object of its own: without a reading there is no object, and the answer is meaningless
                     if item.trigger == "kind_word" && reading.is_none() {
                         return None;
                     }
@@ -186,7 +186,7 @@ pub fn parse_rule_response(
     Ok((out, malformed))
 }
 
-/// 一条待读的字
+/// A word to read
 #[derive(Debug, Clone)]
 pub struct ReadingItem<'a> {
     pub id: i64,
@@ -194,7 +194,7 @@ pub struct ReadingItem<'a> {
     pub phrase: &'a str,
 }
 
-/// 读数的答案：一个名字（库里的一样东西）、一个值，或读不出来
+/// The reading's answer: a name (an existing thing in the library), a value, or unreadable
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadingAnswer {
     pub id: i64,
@@ -233,7 +233,7 @@ pub fn build_reading_messages(
     ]
 }
 
-/// 解析读数的回复。年份读数的答案落成值，其余落成名字；空串、非四位数的年份算坏
+/// Parse the reading reply. A year reading's answer becomes a value, the rest become names; an empty string or a non-four-digit year counts as bad
 pub fn parse_reading_response(
     raw: &str,
     items: &[ReadingItem<'_>],
@@ -296,9 +296,9 @@ pub fn parse_reading_response(
     Ok((out, malformed))
 }
 
-/// 回复里可能裹着 ```json 围栏或前后的话：取第一个 { 到最后一个 }
-/// 模型写的键：候选里的键（大小写不论），或唯一对上的标签——键是 `p569` 这种代号时模型
-/// 常答标签（与 `phrase_align::candidate_key` 同一条理由）
+/// The reply may be wrapped in ```json fences or surrounded by chatter: take the first { through the last }
+/// The model's keys: a candidate key (case-insensitive), or a label that matches uniquely. When the key is a code like `p569` the model
+/// often answers with the label (same reasoning as `phrase_align::candidate_key`)
 fn resolve_key<'a>(item: &RuleItem<'a>, written: &str) -> Option<&'a str> {
     let written = written.trim();
     if let Some(c) = item.candidates.iter().find(|c| c.key.trim() == written) {
@@ -384,7 +384,7 @@ mod tests {
     fn bad_rule_answers_are_counted_not_believed() {
         let items = vec![item(0, "kind_word", None), item(1, "phrase", Some("genre"))];
         let (choices, bad) = parse_rule_response(
-            // 未知属性；类别词没有读数；已绑到的属性；未知读数；重复 id
+            // Unknown attribute; kind word with no reading; already-bound attribute; unknown reading; duplicate id
             "{\"i\":[[0,\"director\",null],[0,\"country_of_origin\",null],[1,\"genre\",null],[1,\"country_of_origin\",\"made_up\"],[1,null,null],[1,null,null]]}",
             &items,
             READINGS,

@@ -1,6 +1,6 @@
-//! 给没有能力问题的库提问题（0061 决定 1）：从开放图谱说得最多的东西——陈述最多的形状、
-//! 最多的类别词、连接最多的实体——出发，让模型写出这个库该答得上来的问题。提出来的是
-//! `proposed`，人接受、改或拒；代理不替人决定库是干什么的。
+//! Asks questions of a library that has no capability questions (0061 decision 1): starting from what the open graph says most about (the shapes with the most statements,
+//! the kind words used most, the most-connected entities), the model writes the questions the library should be able to answer. What it proposes is
+//! `proposed`; a person accepts, edits or rejects it. The agent does not decide what the library is for.
 
 use std::collections::HashSet;
 
@@ -10,7 +10,7 @@ use utopia_llm::ChatMessage;
 use crate::align::parse_value;
 use crate::ontology_agent::Glossary;
 
-/// 一条说得多的形状；`property` 是对齐绑上的属性键（绑上了才有）
+/// A shape that is said a lot; `property` is the attribute key the alignment bound (present only if bound)
 #[derive(Debug, Clone)]
 pub struct TopSignature<'a> {
     pub phrase: &'a str,
@@ -35,7 +35,7 @@ pub struct TopEntity<'a> {
     pub degree: i64,
 }
 
-/// 一条提出来的问题：原话，加上答它要走的类与属性（都是现有的键；模型编的键丢掉）
+/// A proposed question: its wording, plus the classes and attributes needed to answer it (all existing keys; keys the model invented are dropped)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProposedQuestion {
     pub question: String,
@@ -149,8 +149,8 @@ pub fn build_question_messages(
     ]
 }
 
-/// 读回复。`class_keys` / `property_keys` 是本体现有的键：答案里不存在的键丢掉（不算坏项——
-/// 模型常把它想要的属性写成键，那正是缺口）。返回 (问题, 坏项数)
+/// Read the reply. `class_keys` / `property_keys` are the ontology's existing keys: keys not in the answer are dropped (not counted as bad items;
+/// the model often writes the attribute it wants as a key, which is exactly the gap). Returns (questions, bad item count)
 pub fn parse_question_response(
     raw: &str,
     class_keys: &HashSet<&str>,

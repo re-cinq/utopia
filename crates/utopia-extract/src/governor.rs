@@ -1,26 +1,26 @@
-//! 治理的第二层（0025 第二刀）：攒批判不定的对，逐条带工具再看一遍。
+//! The second layer of governance (0025, second cut): batch the pairs that cannot be decided, and look at each one again, one at a time, with tools.
 //!
-//! 模型能看的东西：一侧的全部事实、一侧的原文片段、台账里人对某个名字的决定、
-//! 库里名字相近的其他实体、合并会牵动什么（0028：一致性检查会开出的矛盾、靠着
-//! 一边的派生、点过名的回答、两边的类型是不是一个大类）。结束只有两种：`decide`（same / different + 置信度 +
-//! 一句理由）或 `defer`（留给人一个具体的问题）。工具定义、提示词与回合的解析
-//! 在这里；跑循环、查库的在 server 的 governance 任务里——这里不碰库也不碰模型。
+//! What the model can see: all facts on one side, source excerpts from one side, the ledger's human decisions on a name,
+//! other entities in the library with similar names, and what a merge would affect (0028: contradictions that consistency checks would raise, derivations on one side,
+//! answers to questions already asked, and whether the two sides' types belong to one broad class). It ends in one of two ways: `decide` (same / different + confidence +
+//! one sentence of reasoning) or `defer` (leave a specific question to a person). Tool definitions, the prompt and turn parsing
+//! live here; running the loop and querying the database happens in the server's governance task. Nothing here touches the database or the model.
 
 use serde_json::{json, Value};
 
 use crate::{AdjudicationPair, IDENTITY_RULES};
 
-/// 一对最多查几次再表态。模型按菜单走：两侧的事实、两侧的原文、两个名字的台账、
-/// 同名者、合并会碰到什么——八次。原来给六次，identity bench 上第二眼三分之一
-/// 「看了没收尾」：轨迹显示它把最后两次花在被拒的同名者与后果查询上，没回合表态
+/// Each pair gets at most this many queries before a verdict. The model follows a menu: facts on both sides, sources on both sides, the ledger for both names,
+/// namesakes, and what a merge would touch. Eight. It used to be six; on the identity bench a third of second looks
+/// "looked but never finished": the trace shows it spent its last two queries on rejected namesakes and consequence queries, and never gave a verdict in a turn
 pub const MAX_STEPS: usize = 8;
 
-/// 查够了还想查时的回话：不给结果，只提醒收尾
+/// Reply when it still wants to query after the limit: no results, only a reminder to finish
 pub const LIMIT_REACHED: &str = "Lookup limit reached: you have seen what can be seen. \
      Answer now with decide (same or different, with your confidence) or defer (with the \
      question a person should answer).";
 
-/// 攒批那一眼说了什么：带进第二眼，模型知道自己上次为什么没定
+/// What the first look said: carried into the second look so the model knows why it did not decide last time
 pub struct EarlierLook<'a> {
     /// same | different | unsure
     pub verdict: &'a str,
@@ -28,10 +28,10 @@ pub struct EarlierLook<'a> {
     pub why: Option<&'a str>,
 }
 
-/// 模型在一个回合里要的事
+/// What the model asks for in one turn
 #[derive(Debug, PartialEq)]
 pub enum Step {
-    /// 查一样东西：facts / quotes / ledger / namesakes / consequences
+    /// Look up one thing: facts / quotes / ledger / namesakes / consequences
     Lookup {
         tool: String,
         args: Value,
@@ -44,11 +44,11 @@ pub enum Step {
     Defer {
         question: String,
     },
-    /// 认不出的工具名或缺参数：告诉模型，别猜
+    /// Unknown tool name or missing argument: tell the model, do not guess
     Unknown(String),
 }
 
-/// OpenAI 协议的 function 定义
+/// Function definition in the OpenAI protocol
 pub fn tools() -> Value {
     let side = json!({
         "type": "object",
@@ -106,7 +106,7 @@ pub fn tools() -> Value {
     ])
 }
 
-/// 对话的开头：系统提示 + 这一对 + 上一眼的结论
+/// Start of the conversation: system prompt + this pair + the conclusion of the last look
 pub fn messages(pair: &AdjudicationPair, earlier: &EarlierLook) -> Vec<Value> {
     let system = format!(
         "You are an entity-resolution adjudicator for a knowledge graph, looking at ONE pair of \
@@ -174,10 +174,10 @@ pub fn messages(pair: &AdjudicationPair, earlier: &EarlierLook) -> Vec<Value> {
     ]
 }
 
-/// 模型让工具循环去找结论时的提醒
+/// Reminder when the model lets the tool loop look for a conclusion
 pub const NUDGE: &str = "Finish with the decide or defer tool.";
 
-/// 一个工具调用读成一步。参数是协议原样的 JSON 字符串
+/// One tool call counts as one step. Arguments are the protocol's JSON string as is
 pub fn read_step(name: &str, arguments: &str) -> Step {
     let args: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
     match name {
