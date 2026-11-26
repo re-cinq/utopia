@@ -455,7 +455,9 @@ pub async fn ingest_item_with_outcome(
             )
             .await;
         }
-        if doc.sha256 == sha256 {
+        // A failed document is repaired by the same bytes: its blob may have been left empty by a full disk, so write it again and process it again
+        let repairs_failure = doc.sha256 == sha256 && doc.status == "failed";
+        if doc.sha256 == sha256 && !repairs_failure {
             if revived {
                 state.emit_document(kb_id, doc.id);
                 return Ok(IngestOutcome {

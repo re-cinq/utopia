@@ -351,3 +351,108 @@ async fn a_repush_keeps_the_entity_of_a_name_it_did_not_change() -> anyhow::Resu
     assert_eq!(remembered_entity(&f, doc, &ada_key).await?, first_ada);
     f.cleanup().await
 }
+
+/// A full disk once stored pushed items as empty blobs and processing failed them; the same item pushed again once there is room must repair them
+#[tokio::test]
+async fn an_identical_repush_repairs_a_document_whose_processing_failed() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let body = item("obs-1", &[("is based in", "Port Ellen")]);
+    let (status, reply) = f.push(f.source, &f.token, &body).await?;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    let doc = documents::find_by_external_key(&f.pool, f.source, "statements:obs-1")
+        .await?
+        .expect("the push made a document under its identity");
+    f.state.blob.delete(&doc.sha256).await?;
+    f.state.blob.put(&doc.sha256, b"").await?;
+    let _ = crate::pipeline::process_document(&f.state, doc.id).await;
+    let failed = documents::get(&f.pool, doc.id).await?;
+    assert_eq!(failed.status, "failed", "the empty blob failed processing");
+
+    let (status, reply) = f.push(f.source, &f.token, &body).await?;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    let _ = crate::pipeline::process_document(&f.state, doc.id).await;
+
+    let repaired = documents::get(&f.pool, doc.id).await?;
+    assert_ne!(repaired.status, "failed", "{reply}");
+    f.cleanup().await
+}
+
+/// Pushes `body`, then forces the document it made into `status`
+async fn pushed_document_in_status(
+    f: &Fixture,
+    body: &Value,
+    status: &str,
+) -> anyhow::Result<Uuid> {
+    let (code, reply) = f.push(f.source, &f.token, body).await?;
+    assert_eq!(code, StatusCode::OK, "{reply}");
+    let key = format!("statements:{}", body["external_id"].as_str().unwrap());
+    let doc = documents::find_by_external_key(&f.pool, f.source, &key)
+        .await?
+        .expect("the push made a document under its identity");
+    documents::set_status(&f.pool, doc.id, status).await?;
+    Ok(doc.id)
+}
+
+#[tokio::test]
+async fn an_identical_repush_of_a_ready_document_answers_unchanged() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let body = item("obs-1", &[("is based in", "Port Ellen")]);
+    pushed_document_in_status(&f, &body, "ready").await?;
+
+    let (_, reply) = f.push(f.source, &f.token, &body).await?;
+
+    assert_eq!(reply["action"], "unchanged");
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn an_identical_repush_of_a_ready_document_adds_no_version() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let body = item("obs-1", &[("is based in", "Port Ellen")]);
+    let doc = pushed_document_in_status(&f, &body, "ready").await?;
+
+    f.push(f.source, &f.token, &body).await?;
+
+    assert_eq!(documents::versions(&f.pool, doc).await?.len(), 1);
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn an_identical_repush_of_a_document_still_parsing_answers_unchanged() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let body = item("obs-1", &[("is based in", "Port Ellen")]);
+    pushed_document_in_status(&f, &body, "parsing").await?;
+
+    let (_, reply) = f.push(f.source, &f.token, &body).await?;
+
+    assert_eq!(reply["action"], "unchanged");
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn a_changed_repush_of_a_failed_document_answers_updated() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    pushed_document_in_status(
+        &f,
+        &item("obs-1", &[("is based in", "Port Ellen")]),
+        "failed",
+    )
+    .await?;
+
+    let (_, reply) = f
+        .push(f.source, &f.token, &item("obs-1", &[("visited", "Oslo")]))
+        .await?;
+
+    assert_eq!(reply["action"], "updated");
+    f.cleanup().await
+}
