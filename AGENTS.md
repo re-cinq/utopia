@@ -59,7 +59,7 @@ Deploy: images are published to ghcr.io by `release.yml` on `v*` tags; the Helm 
 ## Pull requests
 
 - Base `dev` (contributors); `re-dev` is this fork's integration branch. Never target `main`.
-- Fill every section of `.github/PULL_REQUEST_TEMPLATE.md`; the description check requires `## Why`, `## What Changed` and `## Testing`.
+- Fill every section of `.github/PULL_REQUEST_TEMPLATE.md`; the description check requires `## Why`, `## What changes` and `## How it was checked`.
 - One PR is one reviewable change; over 500 lines of code and tests combined needs an explanation of why it cannot be split.
 - CI (`backend` and `web`) must pass. New features and dependency changes start with an issue.
 

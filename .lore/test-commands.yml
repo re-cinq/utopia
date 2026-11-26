@@ -23,6 +23,21 @@
         s = re.sub(r"'(\\.|[^'\\])'", "''", s)
         s = s.split("//")[0]
         return s.count("{") - s.count("}")
+    def module_path(parts):
+        return parts[:-1] if parts and parts[-1] in ("lib", "main", "mod") else parts
+    # `#[path = "x_tests.rs"] mod tests;` mounts a file under its declaring module.
+    mounted = {}
+    for crate in sorted(os.listdir("crates")):
+        src = os.path.join("crates", crate, "src")
+        for root, _, files in os.walk(src):
+            for f in files:
+                if not f.endswith(".rs"):
+                    continue
+                path = os.path.join(root, f)
+                owner = module_path(os.path.relpath(path, src)[:-3].split(os.sep))
+                text = open(path, encoding="utf-8").read()
+                for target, name in re.findall(r'#\[path\s*=\s*"([^"]+)"\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;', text):
+                    mounted[os.path.normpath(os.path.join(root, target))] = owner + [name]
     for crate in sorted(os.listdir("crates")):
         for sub in ("src", "tests"):
             for root, _, files in os.walk(os.path.join("crates", crate, sub)):
@@ -31,10 +46,9 @@
                         continue
                     path = os.path.join(root, f)
                     rel = os.path.relpath(path, os.path.join("crates", crate, sub))
-                    parts = rel[:-3].split(os.sep)
-                    if parts[-1] in ("lib", "main", "mod"):
-                        parts = parts[:-1]
-                    base = parts if sub == "src" else []
+                    parts = module_path(rel[:-3].split(os.sep))
+                    # a tests/<dir>/ target is one binary named <dir>; its files are modules in it
+                    base = mounted.get(os.path.normpath(path), parts) if sub == "src" else parts[1:]
                     lines = open(path, encoding="utf-8").read().split("\n")
                     depth, mods, i = 0, [], 0
                     while i < len(lines):
@@ -44,9 +58,14 @@
                             mods.append((m.group(1), depth))
                         if re.match(r"\s*#\[(tokio::)?test\b", line):
                             j = i
-                            while j < len(lines) and not re.search(r"\bfn\s+(\w+)", lines[j]):
+                            while j < len(lines) and not re.search(r"\bfn\s+\$?\w+", lines[j]):
                                 j += 1
-                            name = re.search(r"\bfn\s+(\w+)", lines[j]).group(1)
+                            name = re.search(r"\bfn\s+(\$?\w+)", lines[j]).group(1)
+                            if name.startswith("$"):
+                                # a macro_rules! template; its expansions have no source line of their own
+                                depth += braces(line)
+                                i += 1
+                                continue
                             d, k, seen = 0, j, False
                             while k < len(lines):
                                 d += braces(lines[k])
@@ -75,7 +94,7 @@
     - Cargo.lock
     - "crates/*/Cargo.toml"
     - "migrations/**"
-  list_files: git ls-files 'crates/*/tests/*.rs' | jq -R -s -c 'split("\n") | map(select(. != ""))'
+  list_files: git grep -lE '#\[(tokio::)?test' -- 'crates/*/src/*.rs' 'crates/*/tests/*.rs' | jq -R -s -c 'split("\n") | map(select(. != ""))'
 - name: web
   cwd: web
   # id is `<file>::<full vitest name>`; the line range is resolved from the test file.

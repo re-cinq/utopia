@@ -12,12 +12,12 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Require the Why, What Changed and Testing sections
+      - name: Require the Why, What changes and How it was checked sections
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           missing=0
-          for section in "## Why" "## What Changed" "## Testing"; do
+          for section in "## Why" "## What changes" "## How it was checked"; do
             if ! printf '%s\n' "$PR_BODY" | grep -qiE "^${section}[[:space:]]*$"; then
               echo "::error::PR description is missing the required section: ${section}"
               missing=1
