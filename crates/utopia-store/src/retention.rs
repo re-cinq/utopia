@@ -66,6 +66,36 @@ pub async fn prune_superseded(pool: &PgPool, kb_id: Uuid, days: i64) -> AppResul
     }
 }
 
+/// One page, after `after`, of the blob digests of the base that no reader can still ask
+/// for: recorded as a version more than `days` ago ([`window`]), and neither any
+/// document's current digest, nor a version inside the window, nor a deleted document's
+/// (restore and purge need those). Blobs are keyed by digest across every base, so the
+/// checks span them. The version rows stay.
+pub async fn superseded_blobs(
+    pool: &PgPool,
+    kb_id: Uuid,
+    days: i64,
+    after: &str,
+) -> AppResult<Vec<String>> {
+    let cutoff = Utc::now() - window(days);
+    let shas: Vec<(String,)> = sqlx::query_as(
+        // The outer deleted/age filters repeat the NOT EXISTS checks but narrow candidates early.
+        "SELECT DISTINCT v.sha256 FROM document_versions v JOIN documents d ON d.id = v.document_id
+          WHERE d.kb_id = $1 AND d.deleted_at IS NULL AND v.ingested_at < $2 AND v.sha256 > $3
+            AND NOT EXISTS (SELECT 1 FROM documents cur WHERE cur.sha256 = v.sha256)
+            AND NOT EXISTS (SELECT 1 FROM document_versions w JOIN documents wd ON wd.id = w.document_id
+                             WHERE w.sha256 = v.sha256 AND (w.ingested_at >= $2 OR wd.deleted_at IS NOT NULL))
+          ORDER BY v.sha256 LIMIT $4",
+    )
+    .bind(kb_id)
+    .bind(cutoff)
+    .bind(after)
+    .bind(BATCH)
+    .fetch_all(pool)
+    .await?;
+    Ok(shas.into_iter().map(|(sha,)| sha).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::window;

@@ -702,10 +702,23 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
                 .ok_or_else(|| anyhow::anyhow!("payload is missing days"))?;
             let vectors_cleared =
                 utopia_store::retention::prune_superseded(&st.pool, kb_id, days).await?;
+            let mut files_deleted = 0;
+            let mut after = String::new();
+            loop {
+                let shas = utopia_store::retention::superseded_blobs(&st.pool, kb_id, days, &after)
+                    .await?;
+                let Some(last) = shas.last() else { break };
+                after = last.clone();
+                for sha in &shas {
+                    st.blob.delete(sha).await?;
+                }
+                files_deleted += shas.len();
+            }
             tracing::info!(
                 %kb_id,
                 days,
                 vectors_cleared,
+                files_deleted,
                 "被取代的分块清理完成"
             );
             Ok(())

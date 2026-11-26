@@ -922,3 +922,212 @@ async fn fallback_restore_and_other_ingest_dates_do_not_change() -> anyhow::Resu
     }
     f.cleanup().await
 }
+
+#[tokio::test]
+async fn a_superseded_versions_file_is_deleted_after_the_retention_window() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let doc = f.create_retained(f.kb, &unique("first draft")).await?;
+    f.revise(doc.id, &unique("second draft")).await?;
+    f.age_versions(doc.id, 10).await?;
+
+    f.prune_superseded_files(f.kb).await?;
+
+    assert!(!f.state.blob.exists(&doc.sha256).await?);
+    f.cleanup().await
+}
+
+impl Fixture {
+    /// Makes `bytes` the document's current version, returning its digest.
+    async fn revise(&self, doc_id: Uuid, bytes: &[u8]) -> anyhow::Result<String> {
+        use sha2::{Digest, Sha256};
+
+        let sha256 = super::hex(&Sha256::digest(bytes));
+        self.state.blob.put(&sha256, bytes).await?;
+        sqlx::query("UPDATE documents SET sha256 = $2 WHERE id = $1")
+            .bind(doc_id)
+            .bind(&sha256)
+            .execute(&self.pool)
+            .await?;
+        documents::record_version(&self.pool, doc_id, &sha256, bytes.len() as i64).await?;
+        Ok(sha256)
+    }
+
+    async fn age_versions(&self, doc_id: Uuid, days: i32) -> anyhow::Result<()> {
+        sqlx::query("UPDATE document_versions SET ingested_at = now() - make_interval(days => $2) WHERE document_id = $1")
+            .bind(doc_id)
+            .bind(days)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn prune_superseded_files(&self, kb: Uuid) -> anyhow::Result<()> {
+        let job = utopia_store::jobs::Job {
+            id: 1,
+            kind: utopia_store::retention::JOB_KIND.to_string(),
+            payload: json!({ "kb_id": kb, "days": 7 }),
+            attempts: 1,
+            max_attempts: 3,
+            locked_at: Utc::now(),
+        };
+        crate::dispatch(&self.state, &job).await?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn an_old_version_reverted_to_as_current_keeps_its_file() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let draft = unique("draft a");
+    let doc = f.create_retained(f.kb, &draft).await?;
+    let middle = f.revise(doc.id, &unique("draft b")).await?;
+    f.revise(doc.id, &draft).await?;
+    f.age_versions(doc.id, 10).await?;
+
+    f.prune_superseded_files(f.kb).await?;
+
+    assert!(f.state.blob.exists(&doc.sha256).await?);
+    assert!(!f.state.blob.exists(&middle).await?);
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn an_old_version_current_in_another_base_keeps_its_file() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let shared = unique("shared bytes");
+    let doc = f.create_retained(f.kb, &shared).await?;
+    f.revise(doc.id, &unique("second draft")).await?;
+    let neighbour = f.create_retained(f.other_kb, &shared).await?;
+    f.age_versions(doc.id, 10).await?;
+    f.age_versions(neighbour.id, 10).await?;
+
+    f.prune_superseded_files(f.kb).await?;
+
+    assert!(f.state.blob.exists(&doc.sha256).await?);
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn an_old_version_also_inside_the_window_of_another_document_keeps_its_file(
+) -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let shared = unique("shared bytes");
+    let doc = f.create_retained(f.kb, &shared).await?;
+    f.revise(doc.id, &unique("second draft")).await?;
+    f.age_versions(doc.id, 10).await?;
+    let neighbour = f.create_retained(f.other_kb, &shared).await?;
+    f.revise(neighbour.id, &unique("neighbour draft")).await?;
+    f.age_versions(neighbour.id, 10).await?;
+    sqlx::query(
+        "UPDATE document_versions SET ingested_at = now() WHERE document_id = $1 AND version = 1",
+    )
+    .bind(neighbour.id)
+    .execute(&f.pool)
+    .await?;
+
+    f.prune_superseded_files(f.kb).await?;
+
+    assert!(f.state.blob.exists(&doc.sha256).await?);
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn a_deleted_documents_old_versions_keep_their_files() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let doc = f.create_retained(f.kb, &unique("first draft")).await?;
+    f.revise(doc.id, &unique("second draft")).await?;
+    f.age_versions(doc.id, 10).await?;
+    documents::delete(&f.pool, f.kb, doc.id, None).await?;
+
+    f.prune_superseded_files(f.kb).await?;
+
+    assert!(f.state.blob.exists(&doc.sha256).await?);
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn an_old_version_shared_with_a_deleted_document_keeps_its_file() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let shared = unique("shared bytes");
+    let doc = f.create_retained(f.kb, &shared).await?;
+    f.revise(doc.id, &unique("second draft")).await?;
+    let deleted = f.create_retained(f.other_kb, &shared).await?;
+    f.revise(deleted.id, &unique("deleted draft")).await?;
+    f.age_versions(doc.id, 10).await?;
+    f.age_versions(deleted.id, 10).await?;
+    documents::delete(&f.pool, f.other_kb, deleted.id, None).await?;
+
+    f.prune_superseded_files(f.kb).await?;
+
+    assert!(f.state.blob.exists(&doc.sha256).await?);
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn a_version_recorded_3_days_ago_keeps_its_file_with_a_7_day_window() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let doc = f.create_retained(f.kb, &unique("first draft")).await?;
+    f.revise(doc.id, &unique("second draft")).await?;
+    f.age_versions(doc.id, 3).await?;
+
+    f.prune_superseded_files(f.kb).await?;
+
+    assert!(f.state.blob.exists(&doc.sha256).await?);
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn pruning_a_superseded_file_keeps_both_version_rows() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let doc = f.create_retained(f.kb, &unique("first draft")).await?;
+    f.revise(doc.id, &unique("second draft")).await?;
+    f.age_versions(doc.id, 10).await?;
+
+    f.prune_superseded_files(f.kb).await?;
+
+    let versions = documents::versions(&f.pool, doc.id).await?;
+    assert_eq!(
+        versions.iter().map(|v| v.version).collect::<Vec<_>>().len(),
+        2
+    );
+    assert!(!f.state.blob.exists(&doc.sha256).await?);
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn a_pruned_old_version_answers_410_gone() -> anyhow::Result<()> {
+    let Some(f) = Fixture::new().await? else {
+        return Ok(());
+    };
+    let doc = f.create_retained(f.kb, &unique("first draft")).await?;
+    f.revise(doc.id, &unique("second draft")).await?;
+    f.age_versions(doc.id, 10).await?;
+    f.prune_superseded_files(f.kb).await?;
+
+    let path = format!("/api/v1/documents/{}/content?version=1", doc.id);
+    let (status, _, bytes) = f.get_raw(&path, Some(&f.token)).await?;
+
+    assert_eq!(status, StatusCode::GONE, "{:?}", bytes);
+    f.cleanup().await
+}
+
+/// Blobs are keyed by digest across every test's base, so each test writes bytes no other test shares.
+fn unique(label: &str) -> Vec<u8> {
+    format!("{label} {}", Uuid::now_v7()).into_bytes()
+}

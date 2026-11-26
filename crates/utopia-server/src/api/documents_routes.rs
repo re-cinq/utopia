@@ -171,11 +171,13 @@ async fn read_retained(
             )
         })?,
     };
-    let bytes = state
-        .blob
-        .get(&version.sha256)
-        .await
-        .map_err(|_| missing_blob_invariant(id, &version.sha256))?;
+    let Ok(bytes) = state.blob.get(&version.sha256).await else {
+        // Retention deletes the files of superseded versions; only the current one must exist
+        if version.sha256 != document.sha256 {
+            return Ok(None);
+        }
+        return Err(missing_blob_invariant(id, &version.sha256).into());
+    };
     tx.commit().await?;
 
     if version.size_bytes != bytes.len() as i64 {
