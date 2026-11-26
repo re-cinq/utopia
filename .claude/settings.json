@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'This repository is onboarded into Lore. You have access to the Lore MCP server: ALWAYS call lore_assemble_context as your FIRST action, before reading files or answering. Then use lore_search_memory to check what other developers learned. Before the session ends, call lore_write_memory with a session summary.'"
+          }
+        ]
+      }
+    ]
+  }
+}
