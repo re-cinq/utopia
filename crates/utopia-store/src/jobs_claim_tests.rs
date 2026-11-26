@@ -92,6 +92,20 @@ async fn a_later_time_resolution_is_claimed_before_an_earlier_extraction() -> an
 }
 
 #[tokio::test]
+async fn a_later_retention_prune_is_claimed_before_an_earlier_extraction() -> anyhow::Result<()> {
+    let Some(pool) = isolated_queue(&[
+        ("extraction", "extract_document", "-2 hours"),
+        ("prune", "prune_superseded", "-1 hour"),
+    ])
+    .await?
+    else {
+        return Ok(());
+    };
+    assert_eq!(claimed_labels(&pool, false).await?, ["prune", "extraction"]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_later_intake_job_is_claimed_before_an_earlier_time_resolution() -> anyhow::Result<()> {
     let Some(pool) = isolated_queue(&[
         ("resolution", "resolve_time", "-2 hours"),
