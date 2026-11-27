@@ -1305,6 +1305,12 @@ pub async fn add_evidence_located(
     Ok(())
 }
 
+const NODE_COLUMNS_BEFORE_DEGREE: &str = "e.id, e.canonical_name AS name, t.key AS type_key,
+        t.label AS type_label,
+        coalesce(t.color, '#94a3b8') AS color,
+        coalesce(t.shape, 'circle') AS shape,
+        e.disambiguator";
+
 /// The node-fetching statement shared by all graph queries.
 ///
 /// **LEFT JOIN, not JOIN** (0009). An entity whose type has not been determined is still a node on the graph: it has a name,
@@ -1326,14 +1332,42 @@ fn node_sql(as_of: Option<usize>, owner: Option<usize>) -> String {
     // Name facts do not count towards degree (0041): every entity has at least one name, and counting them would make every node one size bigger
     let not_name = crate::names::not_a_name("f");
     format!(
-        "SELECT e.id, e.canonical_name AS name, t.key AS type_key,
-        t.label AS type_label,
-        coalesce(t.color, '#94a3b8') AS color,
-        coalesce(t.shape, 'circle') AS shape,
-        e.disambiguator,
+        "SELECT {NODE_COLUMNS_BEFORE_DEGREE},
         (SELECT count(*) FROM facts f
          WHERE f.kb_id = e.kb_id AND ({subject} = e.id OR {object} = e.id) AND {held} AND {not_name}) AS degree
      FROM entities e LEFT JOIN entity_types t ON t.id = e.type_id"
+    )
+}
+
+/// The overview's node query. Replaying keeps the per-entity count of `node_sql`; for now every degree is counted in one pass over the
+/// base's facts, because looking facts up once per entity never finished on a base of hundreds of thousands of entities.
+fn overview_nodes_sql(replay: bool) -> String {
+    let visible = crate::record_axis::entity_visible_at("e", replay.then_some(3));
+    if replay {
+        return format!(
+            "{} WHERE e.kb_id = $1 AND {visible} ORDER BY degree DESC, e.created_at LIMIT $2",
+            node_sql(Some(3), Some(3)),
+        );
+    }
+    let held = crate::record_axis::facts_held_at("f", None);
+    let not_name = crate::names::not_a_name("f");
+    // A fact whose object is its own subject is one edge on this node, not two
+    format!(
+        "WITH degrees AS (
+           SELECT ends.id, count(*) AS degree FROM (
+             SELECT f.subject_id AS id FROM facts f
+              WHERE f.kb_id = $1 AND {held} AND {not_name}
+             UNION ALL
+             SELECT f.object_id FROM facts f
+              WHERE f.kb_id = $1 AND {held} AND {not_name}
+                AND f.object_id IS NOT NULL AND f.object_id <> f.subject_id
+           ) ends GROUP BY ends.id)
+         SELECT {NODE_COLUMNS_BEFORE_DEGREE}, coalesce(d.degree, 0) AS degree
+           FROM entities e
+           LEFT JOIN degrees d ON d.id = e.id
+           LEFT JOIN entity_types t ON t.id = e.type_id
+          WHERE e.kb_id = $1 AND {visible}
+          ORDER BY degree DESC, e.created_at LIMIT $2"
     )
 }
 
@@ -1356,16 +1390,12 @@ pub async fn overview(
     at: Option<chrono::DateTime<chrono::Utc>>,
     as_of: Option<chrono::DateTime<chrono::Utc>>,
 ) -> AppResult<(Vec<GraphNode>, Vec<GraphEdge>, i64, i64)> {
-    let nodes: Vec<GraphNode> = sqlx::query_as(&format!(
-        "{} WHERE e.kb_id = $1 AND {visible} ORDER BY degree DESC, e.created_at LIMIT $2",
-        node_sql(as_of.map(|_| 3), as_of.map(|_| 3)),
-        visible = crate::record_axis::entity_visible_at("e", as_of.map(|_| 3)),
-    ))
-    .bind(kb_id)
-    .bind(limit)
-    .bind(as_of)
-    .fetch_all(pool)
-    .await?;
+    let nodes: Vec<GraphNode> = sqlx::query_as(&overview_nodes_sql(as_of.is_some()))
+        .bind(kb_id)
+        .bind(limit)
+        .bind(as_of)
+        .fetch_all(pool)
+        .await?;
 
     let ids: Vec<Uuid> = nodes.iter().map(|n| n.id).collect();
     let edges = edges_among(pool, kb_id, &ids, at, as_of).await?;
@@ -2784,3 +2814,7 @@ mod temporal_shape_tests {
 #[cfg(test)]
 #[path = "graph_search_plan_tests.rs"]
 mod search_plan_tests;
+
+#[cfg(test)]
+#[path = "graph_overview_plan_tests.rs"]
+mod overview_plan_tests;

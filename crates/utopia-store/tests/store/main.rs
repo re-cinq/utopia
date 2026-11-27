@@ -189,6 +189,7 @@ mod search_entities_degree_respects_as_of;
 mod the_backstop_can_be_raised;
 mod the_floor_under_retrieval;
 mod the_nearest_chunk_is_found_however_it_is_reached;
+mod the_overview_counts_each_live_edge_once;
 mod the_second_clock_can_be_rewound;
 mod the_world_axis_reaches_the_second;
 mod tied_signatures_come_in_a_fixed_order;

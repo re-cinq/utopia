@@ -152,7 +152,8 @@ pub fn has_name_or_alias_in(entity: &str, kb: usize, names: usize) -> String {
 
 /// For substring lookup: the ids of entities with a current name fact matching the pattern in `${pattern}`, the store id in `${kb}`.
 ///
-/// `lower() LIKE lower()` rather than `ILIKE`: the trigram index on the lowercased value only matches that form.
+/// Bound to the store and the name predicate, so it reads this store's name facts (`facts_live_predicate_idx`) and not every fact.
+/// `lower() LIKE lower()` rather than `ILIKE`, the same fold as the canonical-name half, whose trigram index only matches that form.
 pub fn names_like_ids(kb: usize, pattern: usize) -> String {
     format!(
         "SELECT nf.subject_id FROM facts nf
