@@ -14,6 +14,23 @@ use uuid::Uuid;
 
 pub const JOB_CHANNEL: &str = "utopia_jobs";
 
+/// Extraction of a document that goes through the chat model.
+pub const EXTRACT_DOCUMENT: &str = "extract_document";
+/// Extraction of a document of a `statements` source: no model call, so it is claimed ahead of model work (migration 9018).
+pub const EXTRACT_STATEMENTS: &str = "extract_statements";
+/// Both extraction kinds; a document has at most one queued job of either.
+pub const EXTRACTION_KINDS: [&str; 2] = [EXTRACT_DOCUMENT, EXTRACT_STATEMENTS];
+
+/// SQL for the extraction kind of the document whose id the SQL expression `document_id` yields:
+/// by its source, and `extract_document` when it has none. Shared by every place that queues an extraction.
+pub fn extraction_kind_sql(document_id: &str) -> String {
+    format!(
+        "coalesce((SELECT CASE WHEN s.kind = 'statements' THEN '{EXTRACT_STATEMENTS}' END
+                     FROM documents d JOIN sources s ON s.id = d.source_id
+                    WHERE d.id = {document_id}), '{EXTRACT_DOCUMENT}')"
+    )
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Job {
     pub id: i64,
@@ -258,7 +275,7 @@ pub async fn enqueue_with_max_attempts_tx(
     Ok(id)
 }
 
-/// Queue one `extract_document` unless the same document already has one queued (RC-009).
+/// Queue one extraction (`extract_document` or `extract_statements`, by the document's source) unless the same document already has one queued (RC-009).
 ///
 /// Extraction carries only the document id and reads the current chunks when it runs, so a second queued copy reads the same as the first; match by
 /// `document_id` rather than the whole payload, since the two enqueue sites have different payloads. A running one does not count: it may have finished reading before
@@ -280,16 +297,18 @@ pub async fn enqueue_extraction_tx(
     payload: serde_json::Value,
     max_attempts: i32,
 ) -> AppResult<Option<i64>> {
-    let row: Option<(i64,)> = sqlx::query_as(
+    let kind = extraction_kind_sql("($1->>'document_id')::uuid");
+    let row: Option<(i64,)> = sqlx::query_as(&format!(
         "INSERT INTO jobs (kind, payload, max_attempts)
-         SELECT 'extract_document', $1, $2
+         SELECT {kind}, $1, $2
           WHERE NOT EXISTS (SELECT 1 FROM jobs
-                             WHERE kind = 'extract_document' AND status = 'queued'
+                             WHERE kind = ANY($3) AND status = 'queued'
                                AND payload->>'document_id' = $1->>'document_id')
-         RETURNING id",
-    )
+         RETURNING id"
+    ))
     .bind(payload)
     .bind(max_attempts)
+    .bind(&EXTRACTION_KINDS[..])
     .fetch_optional(&mut **tx)
     .await?;
     if row.is_some() {
