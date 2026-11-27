@@ -30,7 +30,7 @@
 //! - `intake_runs_while_model_work_holds_every_slot`: likewise starts a real `run_worker`, and likewise claims
 //!   any queued job in the DB, erroring on ones that are not its own.
 //! - `a_name_embedding_runs_while_model_work_holds_every_slot`: as above, with `embed_names` instead.
-//! - `a_worker_pauses_claiming_while_memory_is_short`, `the_reserved_lane_pauses_while_memory_is_short`: as above, with the headroom gate's memory reader driven by the test.
+//! - `a_worker_pauses_claiming_while_memory_is_short`, `an_idle_worker_claims_one_job_while_memory_is_short`, `the_reserved_lane_pauses_while_memory_is_short`: as above, with the headroom gate's memory reader driven by the test.
 //!
 //! New tests belong in this directory by default; only those touching the kind of global state above go at the top level, and a line here should explain why.
 mod a_batch_decides_like_a_person;
