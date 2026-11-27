@@ -756,6 +756,76 @@ async fn concurrent_exports_on_a_minimum_pool_still_record_their_audits() -> any
     f.clean().await
 }
 
+/// `authorize` and the audit row read through the main pool, so the pool a tool query uses is observed by calling `tools::dispatch` directly
+async fn find_alice_through(state: &AppState, f: &Fixture) -> ToolResult {
+    let ctx = ToolCtx {
+        state,
+        kb_id: f.kb,
+        workspace_id: f.ws,
+        mounted_sources: &[],
+        can_write: false,
+        actor: None,
+        via_token: None,
+        question: None,
+    };
+    tools::dispatch(
+        &ctx,
+        &mut ToolSink::default(),
+        "find_entities",
+        &json!({"name":"Alice"}),
+    )
+    .await
+}
+
+async fn two_connection_pool(url: &str) -> anyhow::Result<sqlx::PgPool> {
+    Ok(sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(std::time::Duration::from_millis(400))
+        .connect(url)
+        .await?)
+}
+
+#[tokio::test]
+async fn find_entities_answers_while_every_main_connection_is_held() -> anyhow::Result<()> {
+    let Some(url) = utopia_store::test_db::url() else {
+        return Ok(());
+    };
+    let f = Fixture::with_pool(two_connection_pool(&url).await?).await?;
+    let state = f
+        .state
+        .clone()
+        .with_interactive_pool(sqlx::PgPool::connect(&url).await?);
+    let held = (f.state.pool.acquire().await?, f.state.pool.acquire().await?);
+
+    let result = find_alice_through(&state.for_interactive_reads(), &f).await;
+    drop(held);
+    assert_eq!(
+        (result.is_error, result.text),
+        (
+            false,
+            format!("Best match: {} | Alice | Thing | 2 facts", f.subject)
+        )
+    );
+    f.clean().await
+}
+
+#[tokio::test]
+async fn find_entities_returns_a_tool_error_when_every_interactive_connection_is_held(
+) -> anyhow::Result<()> {
+    let Some(url) = utopia_store::test_db::url() else {
+        return Ok(());
+    };
+    let f = Fixture::new().await?.unwrap();
+    let interactive = two_connection_pool(&url).await?;
+    let state = f.state.clone().with_interactive_pool(interactive.clone());
+    let held = (interactive.acquire().await?, interactive.acquire().await?);
+
+    let result = find_alice_through(&state.for_interactive_reads(), &f).await;
+    drop(held);
+    assert!(result.is_error);
+    f.clean().await
+}
+
 #[tokio::test]
 async fn refused_and_executed_calls_are_each_audited_once() -> anyhow::Result<()> {
     let Some(f) = Fixture::new().await? else {

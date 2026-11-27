@@ -150,15 +150,17 @@ pub fn has_name_or_alias_in(entity: &str, kb: usize, names: usize) -> String {
     )
 }
 
-/// For lookup: entity `{entity}` has a current name fact ILIKE parameter `${param}`.
-pub fn has_name_like(entity: &str, param: usize) -> String {
+/// For substring lookup: the ids of entities with a current name fact matching the pattern in `${pattern}`, the store id in `${kb}`.
+///
+/// Bound to the store and the name predicate, so it reads this store's name facts (`facts_live_predicate_idx`) and not every fact.
+/// `lower() LIKE lower()` rather than `ILIKE`, the same fold as the canonical-name half, whose trigram index only matches that form.
+pub fn names_like_ids(kb: usize, pattern: usize) -> String {
     format!(
-        "EXISTS (SELECT 1 FROM facts nf
-                   JOIN relation_types nr ON nr.id = nf.predicate_id
-                  WHERE nf.subject_id = {entity}.id AND nf.kb_id = {entity}.kb_id
-                    AND nr.builtin AND nr.key = '{KNOWN_AS}'
-                    AND nf.invalidated_at IS NULL
-                    AND nf.object_value->>'value' ILIKE ${param})"
+        "SELECT nf.subject_id FROM facts nf
+                    JOIN relation_types nr ON nr.id = nf.predicate_id
+                   WHERE nf.kb_id = ${kb} AND nr.kb_id = ${kb} AND nr.builtin AND nr.key = '{KNOWN_AS}'
+                     AND nf.invalidated_at IS NULL AND nf.object_value IS NOT NULL
+                     AND lower(nf.object_value->>'value') LIKE lower(${pattern})"
     )
 }
 

@@ -20,6 +20,8 @@ pub struct AppEvent {
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
+    /// Chat/MCP tool calls and graph reads run here, so they can never hold more than its size of the main pool
+    pub interactive_pool: PgPool,
     pub jwt_secret: String,
     pub search: Arc<SearchIndex>,
     /// In-memory index of the Charter (built-in documents): used by the chat's search_docs tool
@@ -49,6 +51,20 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn with_interactive_pool(self, pool: PgPool) -> Self {
+        Self {
+            interactive_pool: pool,
+            ..self
+        }
+    }
+
+    pub fn for_interactive_reads(&self) -> AppState {
+        Self {
+            pool: self.interactive_pool.clone(),
+            ..self.clone()
+        }
+    }
+
     /// `jwt_secret` is resolved by the entry point: if the environment variable is set, that is it; otherwise it is the one in the DB (generated on first start).
     /// It is not taken from cfg, because by this point it must already be a definite value, not an Option.
     pub fn new(
@@ -61,6 +77,7 @@ impl AppState {
         let data_dir = PathBuf::from(&cfg.data_dir);
         let blob = Arc::new(crate::blob::LocalBlobStore::new(data_dir.join("files")));
         Self {
+            interactive_pool: pool.clone(),
             pool,
             jwt_secret,
             search,
@@ -142,3 +159,7 @@ impl AppState {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "state_tests.rs"]
+mod tests;

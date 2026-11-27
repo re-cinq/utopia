@@ -61,6 +61,9 @@ use utopia_core::config::AppConfig;
 use utopia_search::SearchIndex;
 use uuid::Uuid;
 
+/// Postgres cancels any interactive read (chat/MCP tool call, graph route) that runs longer than this.
+const INTERACTIVE_STATEMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The memory path carries "who said it" (0015, 0026); other tasks do not have these two fields,
 /// and reading the default is exactly right for them
 fn payload_proposer(payload: &serde_json::Value) -> utopia_core::models::Proposer {
@@ -184,7 +187,22 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let state = AppState::new(pool.clone(), &cfg, search, jwt_secret);
+    let interactive_pool_size =
+        utopia_store::db::interactive_pool_size(pool.options().get_max_connections());
+    let interactive_pool = utopia_store::db::connect_interactive(
+        &cfg.database_url,
+        interactive_pool_size,
+        INTERACTIVE_STATEMENT_TIMEOUT,
+    )
+    .await
+    .map_err(explain_db_error)?;
+    tracing::info!(
+        max_connections = interactive_pool_size,
+        "interactive database connection pool established"
+    );
+
+    let state = AppState::new(pool.clone(), &cfg, search, jwt_secret)
+        .with_interactive_pool(interactive_pool);
     api::oidc_routes::warn_about_password_login(&state);
     api::oidc_routes::warn_about_scopes();
 

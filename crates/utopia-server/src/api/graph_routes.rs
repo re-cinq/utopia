@@ -15,6 +15,10 @@ use crate::state::AppState;
 #[path = "graph_routes_time_tests.rs"]
 mod time_tests;
 
+#[cfg(test)]
+#[path = "graph_routes_pool_tests.rs"]
+mod pool_tests;
+
 pub(super) async fn require_kb(
     state: &AppState,
     user: &utopia_core::models::User,
@@ -85,7 +89,7 @@ pub async fn overview(
         .unwrap_or(GRAPH_NODE_CAP)
         .clamp(10, GRAPH_NODE_CAP_MAX);
     let (nodes, edges, total_nodes, total_edges) =
-        utopia_store::graph::overview(&state.pool, kb_id, limit, at, as_of).await?;
+        utopia_store::graph::overview(&state.interactive_pool, kb_id, limit, at, as_of).await?;
     Ok(Json(json!({
         "nodes": nodes, "edges": edges,
         "total_nodes": total_nodes, "total_edges": total_edges,
@@ -113,7 +117,7 @@ pub async fn neighborhood(
     let at = parse_instant("at", q.at.as_deref())?;
     let as_of = parse_instant("as_of", q.as_of.as_deref())?;
     let (nodes, edges) = utopia_store::graph::neighborhood(
-        &state.pool,
+        &state.interactive_pool,
         kb_id,
         q.entity,
         q.hops.unwrap_or(2),
@@ -155,7 +159,7 @@ pub async fn search_entities(
     // Also return the total: "prefer splitting over merging" naturally produces a pile of same-named entities, and with a fixed ten
     // the one you want may not be among those ten at all, and the UI gives no hint of that
     let (entities, total) = utopia_store::graph::search_entities(
-        &state.pool,
+        &state.interactive_pool,
         kb_id,
         &query.q,
         query.limit.unwrap_or(10).clamp(1, 100),
@@ -185,26 +189,39 @@ pub async fn entity_detail(
     // The world axis is not filtered (at = None): the panel wants the whole timeline; the "holds right now" tier is split out by the front end
     // by holds_from / holds_to (0022)
     let (entity, facts) =
-        utopia_store::graph::entity_detail(&state.pool, kb_id, entity_id, None, as_of).await?;
+        utopia_store::graph::entity_detail(&state.interactive_pool, kb_id, entity_id, None, as_of)
+            .await?;
     // Derived facts that were inferred come back under their own key, not mixed into `facts`. The front end uses this to give them their own tier:
     // when a derived edge and an asserted edge share one list, the user cannot tell "this is written in the document" from
     // "the engine inferred this", and that is exactly how reasoning pollutes knowledge
     // The same as_of (#549): on the replay panel, the derived tier is also what was derived **then**
-    let derived =
-        utopia_store::reasoning::derived_for_entity(&state.pool, kb_id, entity_id, None, as_of)
-            .await?;
+    let derived = utopia_store::reasoning::derived_for_entity(
+        &state.interactive_pool,
+        kb_id,
+        entity_id,
+        None,
+        as_of,
+    )
+    .await?;
     // Same-named ones are supplied **when the panel opens**, not only after a rename.
     //
     // Previously they only came back in the response to `update_entity`, so the "merge the same-named ones in" action
     // was reachable only after a rename first. Yet two Zhang Weis coexisting is a legitimate product of "prefer splitting over merging", not something
     // produced by renaming. The merge entry point should live where same-named entities are visible.
     let same_name =
-        utopia_store::graph::same_name_peers(&state.pool, kb_id, entity_id, as_of).await?;
+        utopia_store::graph::same_name_peers(&state.interactive_pool, kb_id, entity_id, as_of)
+            .await?;
     // Derivations that did not land (0017 §3) also get their own key: they are not even in `derived_facts`
-    let blocked =
-        utopia_store::reasoning::blocked_for_entity(&state.pool, kb_id, entity_id, as_of).await?;
+    let blocked = utopia_store::reasoning::blocked_for_entity(
+        &state.interactive_pool,
+        kb_id,
+        entity_id,
+        as_of,
+    )
+    .await?;
     // Names also get their own key (0041): the main name, short forms and former names, each with its source and validity period
-    let names = utopia_store::names::for_entity(&state.pool, kb_id, entity_id, as_of).await?;
+    let names =
+        utopia_store::names::for_entity(&state.interactive_pool, kb_id, entity_id, as_of).await?;
     Ok(Json(json!({
         "entity": entity, "facts": facts, "names": names,
         "derived": derived, "blocked": blocked, "same_name": same_name,
@@ -527,7 +544,8 @@ pub async fn fact_evidence(
     Path((kb_id, fact_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_reader_kb(&state, &reader, kb_id).await?;
-    let evidence = utopia_store::graph::fact_evidence(&state.pool, kb_id, fact_id).await?;
+    let evidence =
+        utopia_store::graph::fact_evidence(&state.interactive_pool, kb_id, fact_id).await?;
     Ok(Json(json!({ "evidence": evidence })))
 }
 
@@ -539,7 +557,7 @@ pub async fn derived_proof(
     Path((kb_id, derived_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_kb(&state, &user, kb_id, Role::Viewer).await?;
-    let proof = utopia_store::reasoning::proof(&state.pool, kb_id, derived_id).await?;
+    let proof = utopia_store::reasoning::proof(&state.interactive_pool, kb_id, derived_id).await?;
     Ok(Json(json!({ "proof": proof })))
 }
 
@@ -551,7 +569,9 @@ pub async fn blocked_proof(
     Path((kb_id, violation_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_kb(&state, &user, kb_id, Role::Viewer).await?;
-    let steps = utopia_store::reasoning::blocked_proof(&state.pool, kb_id, violation_id).await?;
+    let steps =
+        utopia_store::reasoning::blocked_proof(&state.interactive_pool, kb_id, violation_id)
+            .await?;
     Ok(Json(json!({ "steps": steps })))
 }
 
@@ -638,7 +658,13 @@ pub async fn entity_history(
     require_reader_kb(&state, &reader, kb_id).await?;
     let per = q.per.clamp(1, 200);
     let page = q.page.max(0);
-    let (events, total) =
-        utopia_store::graph::entity_history(&state.pool, kb_id, entity_id, per, page * per).await?;
+    let (events, total) = utopia_store::graph::entity_history(
+        &state.interactive_pool,
+        kb_id,
+        entity_id,
+        per,
+        page * per,
+    )
+    .await?;
     Ok(Json(json!({ "events": events, "total": total })))
 }
