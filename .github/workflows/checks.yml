@@ -175,6 +175,12 @@ jobs:
         run: helm template utopia deploy/chart -n utopia > /dev/null
       - name: Render with the internal cluster's values
         run: helm template utopia deploy/chart -n utopia -f deploy/clusters/internal-cluster.values.yaml > /dev/null
+      - name: The internal cluster keeps its raised memory
+        run: |
+          resources=$(helm template utopia deploy/chart -n utopia -f deploy/clusters/internal-cluster.values.yaml \
+            --show-only templates/deployment.yaml | grep -A6 '^          resources:')
+          expected=$'          resources:\n            limits:\n              cpu: "2"\n              memory: 8Gi\n            requests:\n              cpu: 500m\n              memory: 2Gi'
+          [ "$resources" = "$expected" ] || { echo "$resources"; exit 1; }
 
   web:
     runs-on: ubuntu-latest
