@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::json;
 use utopia_core::models::{Role, User};
 use utopia_core::AppError;
+use utopia_store::jobs::{may_claim, Headroom, PauseReason};
 
 use crate::auth::{self, AuthUser};
 use crate::error::ApiResult;
@@ -37,7 +38,28 @@ pub async fn get_deployment(
         "model_limits": limits,
         "default_model_concurrency": dflt,
         "models_in_use": in_use.into_iter().map(|(b, m, k)| json!({"base_url": b, "model": m, "kind": k})).collect::<Vec<_>>(),
+        "headroom": headroom_json(
+            state.pool.options().get_max_connections(),
+            Headroom {
+                free_connections: utopia_store::jobs::free_connections(&state.pool),
+                memory: crate::memory_use::read(),
+            },
+        ),
     })))
+}
+
+fn headroom_json(max_connections: u32, headroom: Headroom) -> serde_json::Value {
+    let claiming = match may_claim(headroom) {
+        Ok(()) => "ok",
+        Err(PauseReason::Connections { .. }) => "paused: connections",
+        Err(PauseReason::Memory(_)) => "paused: memory",
+    };
+    json!({
+        "max_connections": max_connections,
+        "free_connections": headroom.free_connections,
+        "memory": headroom.memory,
+        "claiming": claiming,
+    })
 }
 
 #[derive(Deserialize)]
@@ -238,3 +260,7 @@ pub async fn set_system_admin(
     .await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
+
+#[cfg(test)]
+#[path = "admin_headroom_tests.rs"]
+mod headroom_tests;

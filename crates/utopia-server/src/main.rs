@@ -24,6 +24,7 @@ mod live;
 mod llm_util;
 mod mapping_index;
 mod mappings;
+mod memory_use;
 #[cfg(test)]
 mod namesake_scripted_cases;
 mod notion;
@@ -223,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(utopia_store::jobs::run_worker(
         pool,
         state.worker_concurrency.clone(),
+        memory_use::read,
         move |job| {
             let st = worker_state.clone();
             async move {

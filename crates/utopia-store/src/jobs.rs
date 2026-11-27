@@ -744,13 +744,76 @@ pub async fn prune_done(pool: &PgPool, older_than: Duration) -> AppResult<u64> {
 /// so `worker_concurrency` governs everything else, plus at most two more running at once
 pub const NO_CHAT_LANE: usize = 2;
 
+/// A container's memory as the orchestrator judges it: the working set against the limit it is killed at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct MemoryUse {
+    pub working_set_bytes: u64,
+    pub limit_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Headroom {
+    pub free_connections: u32,
+    pub memory: Option<MemoryUse>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseReason {
+    Connections { free: u32 },
+    Memory(MemoryUse),
+}
+
+const MIN_FREE_CONNECTIONS: u32 = 2;
+const MAX_MEMORY_PERCENT: u128 = 85;
+
+/// Whether the worker may claim another job: the pool must keep connections free for the API and memory must stay under the limit's share.
+pub fn may_claim(headroom: Headroom) -> Result<(), PauseReason> {
+    if headroom.free_connections < MIN_FREE_CONNECTIONS {
+        return Err(PauseReason::Connections {
+            free: headroom.free_connections,
+        });
+    }
+    match headroom.memory {
+        Some(memory)
+            if memory.limit_bytes > 0
+                && u128::from(memory.working_set_bytes) * 100
+                    > u128::from(memory.limit_bytes) * MAX_MEMORY_PERCENT =>
+        {
+            Err(PauseReason::Memory(memory))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A memory shortage is no reason to wait when nothing of ours is running: the memory is held elsewhere, and waiting would never end.
+fn pause_for(shortage: Option<PauseReason>, jobs_running: usize) -> Option<PauseReason> {
+    match shortage {
+        Some(PauseReason::Memory(_)) if jobs_running == 0 => None,
+        other => other,
+    }
+}
+
+/// Connections the pool could still hand out: the ones idle plus the ones it has not opened yet.
+pub fn free_connections(pool: &PgPool) -> u32 {
+    pool.options()
+        .get_max_connections()
+        .saturating_sub(pool.size())
+        .saturating_add(pool.num_idle() as u32)
+}
+
 /// Worker scheduling loop: while the running task count is below the target concurrency, keep claiming (if work exists, dispatch again immediately),
 /// when idle wait for a queue notification, with a 2s poll as backup (#517); each task runs in its own tokio task, so long extractions no longer block synchronous work.
 /// When the regular slots are full, [`NO_CHAT_LANE`] further slots claim only tasks that do not call the chat model.
+/// Before every claim [`may_claim`] checks free connections and memory; while either is short the worker pauses, for the regular slots and the reserved lane alike.
 /// `concurrency` is hot-read every round: changing the concurrency count in system settings takes effect immediately.
 /// Task dispatch logic is injected by the caller as a handler (the store does not depend on upper-layer crates).
-pub async fn run_worker<F, Fut>(pool: PgPool, concurrency: Arc<AtomicUsize>, handler: F)
-where
+pub async fn run_worker<M, F, Fut>(
+    pool: PgPool,
+    concurrency: Arc<AtomicUsize>,
+    memory_use: M,
+    handler: F,
+) where
+    M: Fn() -> Option<MemoryUse> + Send + 'static,
     F: Fn(Job) -> Fut + Clone + Send + Sync + 'static,
     Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
 {
@@ -780,6 +843,7 @@ where
     );
     let mut listener = listen_for_jobs(&pool).await;
     let mut last_prune: Option<std::time::Instant> = None;
+    let mut paused: Option<PauseReason> = None;
     loop {
         if pool.is_closed() {
             return;
@@ -794,6 +858,34 @@ where
                     Err(e) => tracing::error!(error = %e, "failed to clean up old completed jobs"),
                 }
             });
+        }
+        let shortage = pause_for(
+            may_claim(Headroom {
+                free_connections: free_connections(&pool),
+                memory: memory_use(),
+            })
+            .err(),
+            running.load(Ordering::Relaxed) + in_lane.load(Ordering::Relaxed),
+        );
+        match (paused, shortage) {
+            (None, Some(PauseReason::Connections { free })) => {
+                tracing::warn!(
+                    free,
+                    "job claiming paused: too few free database connections"
+                )
+            }
+            (None, Some(PauseReason::Memory(memory))) => tracing::warn!(
+                working_set_bytes = memory.working_set_bytes,
+                limit_bytes = memory.limit_bytes,
+                "job claiming paused: memory use is close to the limit"
+            ),
+            (Some(_), None) => tracing::info!("job claiming resumed"),
+            _ => {}
+        }
+        paused = shortage;
+        if shortage.is_some() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
         }
         let cap = concurrency.load(Ordering::Relaxed).max(1);
         // When the regular slots are full, claim only from the reserved lane, and stop only when that lane is full too
@@ -862,6 +954,10 @@ mod claim_tests;
 #[cfg(test)]
 #[path = "jobs_plan_tests.rs"]
 mod plan_tests;
+
+#[cfg(test)]
+#[path = "jobs_headroom_tests.rs"]
+mod headroom_tests;
 
 #[cfg(test)]
 mod tests {
