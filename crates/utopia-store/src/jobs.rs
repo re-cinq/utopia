@@ -745,7 +745,7 @@ pub async fn prune_done(pool: &PgPool, older_than: Duration) -> AppResult<u64> {
 pub const NO_CHAT_LANE: usize = 2;
 
 /// A container's memory as the orchestrator judges it: the working set against the limit it is killed at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct MemoryUse {
     pub working_set_bytes: u64,
     pub limit_bytes: u64,
@@ -783,6 +783,22 @@ pub fn may_claim(headroom: Headroom) -> Result<(), PauseReason> {
         }
         _ => Ok(()),
     }
+}
+
+/// A memory shortage is no reason to wait when nothing of ours is running: the memory is held elsewhere, and waiting would never end.
+fn pause_for(shortage: Option<PauseReason>, jobs_running: usize) -> Option<PauseReason> {
+    match shortage {
+        Some(PauseReason::Memory(_)) if jobs_running == 0 => None,
+        other => other,
+    }
+}
+
+/// Connections the pool could still hand out: the ones idle plus the ones it has not opened yet.
+pub fn free_connections(pool: &PgPool) -> u32 {
+    pool.options()
+        .get_max_connections()
+        .saturating_sub(pool.size())
+        .saturating_add(pool.num_idle() as u32)
 }
 
 /// Worker scheduling loop: while the running task count is below the target concurrency, keep claiming (if work exists, dispatch again immediately),
@@ -843,14 +859,14 @@ pub async fn run_worker<M, F, Fut>(
                 }
             });
         }
-        let free_connections = (pool.options().get_max_connections())
-            .saturating_sub(pool.size())
-            .saturating_add(pool.num_idle() as u32);
-        let shortage = may_claim(Headroom {
-            free_connections,
-            memory: memory_use(),
-        })
-        .err();
+        let shortage = pause_for(
+            may_claim(Headroom {
+                free_connections: free_connections(&pool),
+                memory: memory_use(),
+            })
+            .err(),
+            running.load(Ordering::Relaxed) + in_lane.load(Ordering::Relaxed),
+        );
         match (paused, shortage) {
             (None, Some(PauseReason::Connections { free })) => {
                 tracing::warn!(
