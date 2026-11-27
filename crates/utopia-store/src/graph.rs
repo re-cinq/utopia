@@ -1305,6 +1305,12 @@ pub async fn add_evidence_located(
     Ok(())
 }
 
+const NODE_COLUMNS_BEFORE_DEGREE: &str = "e.id, e.canonical_name AS name, t.key AS type_key,
+        t.label AS type_label,
+        coalesce(t.color, '#94a3b8') AS color,
+        coalesce(t.shape, 'circle') AS shape,
+        e.disambiguator";
+
 /// The node-fetching statement shared by all graph queries.
 ///
 /// **LEFT JOIN, not JOIN** (0009). An entity whose type has not been determined is still a node on the graph: it has a name,
@@ -1326,14 +1332,42 @@ fn node_sql(as_of: Option<usize>, owner: Option<usize>) -> String {
     // Name facts do not count towards degree (0041): every entity has at least one name, and counting them would make every node one size bigger
     let not_name = crate::names::not_a_name("f");
     format!(
-        "SELECT e.id, e.canonical_name AS name, t.key AS type_key,
-        t.label AS type_label,
-        coalesce(t.color, '#94a3b8') AS color,
-        coalesce(t.shape, 'circle') AS shape,
-        e.disambiguator,
+        "SELECT {NODE_COLUMNS_BEFORE_DEGREE},
         (SELECT count(*) FROM facts f
          WHERE f.kb_id = e.kb_id AND ({subject} = e.id OR {object} = e.id) AND {held} AND {not_name}) AS degree
      FROM entities e LEFT JOIN entity_types t ON t.id = e.type_id"
+    )
+}
+
+/// The overview's node query. Replaying keeps the per-entity count of `node_sql`; for now every degree is counted in one pass over the
+/// base's facts, because looking facts up once per entity never finished on a base of hundreds of thousands of entities.
+fn overview_nodes_sql(replay: bool) -> String {
+    let visible = crate::record_axis::entity_visible_at("e", replay.then_some(3));
+    if replay {
+        return format!(
+            "{} WHERE e.kb_id = $1 AND {visible} ORDER BY degree DESC, e.created_at LIMIT $2",
+            node_sql(Some(3), Some(3)),
+        );
+    }
+    let held = crate::record_axis::facts_held_at("f", None);
+    let not_name = crate::names::not_a_name("f");
+    // A fact whose object is its own subject is one edge on this node, not two
+    format!(
+        "WITH degrees AS (
+           SELECT ends.id, count(*) AS degree FROM (
+             SELECT f.subject_id AS id FROM facts f
+              WHERE f.kb_id = $1 AND {held} AND {not_name}
+             UNION ALL
+             SELECT f.object_id FROM facts f
+              WHERE f.kb_id = $1 AND {held} AND {not_name}
+                AND f.object_id IS NOT NULL AND f.object_id <> f.subject_id
+           ) ends GROUP BY ends.id)
+         SELECT {NODE_COLUMNS_BEFORE_DEGREE}, coalesce(d.degree, 0) AS degree
+           FROM entities e
+           LEFT JOIN degrees d ON d.id = e.id
+           LEFT JOIN entity_types t ON t.id = e.type_id
+          WHERE e.kb_id = $1 AND {visible}
+          ORDER BY degree DESC, e.created_at LIMIT $2"
     )
 }
 
@@ -1356,16 +1390,12 @@ pub async fn overview(
     at: Option<chrono::DateTime<chrono::Utc>>,
     as_of: Option<chrono::DateTime<chrono::Utc>>,
 ) -> AppResult<(Vec<GraphNode>, Vec<GraphEdge>, i64, i64)> {
-    let nodes: Vec<GraphNode> = sqlx::query_as(&format!(
-        "{} WHERE e.kb_id = $1 AND {visible} ORDER BY degree DESC, e.created_at LIMIT $2",
-        node_sql(as_of.map(|_| 3), as_of.map(|_| 3)),
-        visible = crate::record_axis::entity_visible_at("e", as_of.map(|_| 3)),
-    ))
-    .bind(kb_id)
-    .bind(limit)
-    .bind(as_of)
-    .fetch_all(pool)
-    .await?;
+    let nodes: Vec<GraphNode> = sqlx::query_as(&overview_nodes_sql(as_of.is_some()))
+        .bind(kb_id)
+        .bind(limit)
+        .bind(as_of)
+        .fetch_all(pool)
+        .await?;
 
     let ids: Vec<Uuid> = nodes.iter().map(|n| n.id).collect();
     let edges = edges_among(pool, kb_id, &ids, at, as_of).await?;
@@ -1632,6 +1662,45 @@ pub async fn profile_distances(
     Ok(rows)
 }
 
+/// The name predicate of `search_entities`, as ids of `e`. `names` is the position of the exact-name list.
+///
+/// Canonical name and alias are written as one set of ids, each going through its own index (`entities_kb_name_idx` / `entities_name_trgm_idx`,
+/// `facts_value_text_idx` / `facts_live_predicate_idx`). Written as `OR`, one side is a subquery, and the planner can only scan the entities in the KB or every fact.
+/// The canonical-name indexes only hold entities that have not been merged: without replay this is the same as `visible`, so include it; during replay
+/// the merged-away entity was still there at that time, so it cannot be included, and that branch falls back to scanning the KB. For exact matches `$2` is bound but unused, so parameter positions do not shift
+fn search_matches_sql(exact: bool, replay: bool, names: usize) -> String {
+    let unmerged = if replay {
+        ""
+    } else {
+        " AND x.merged_into IS NULL"
+    };
+    if exact {
+        return format!(
+            "e.id IN (SELECT x.id FROM entities x
+                       WHERE x.kb_id = $1 AND lower(x.canonical_name) = ANY(${names}){unmerged}
+                      UNION ALL {})",
+            crate::names::named_ids(1, names),
+        );
+    }
+    format!(
+        "e.id IN (SELECT x.id FROM entities x
+                   WHERE x.kb_id = $1 AND lower(x.canonical_name) LIKE lower($2){unmerged}
+                  UNION ALL {})",
+        crate::names::names_like_ids(1, 2),
+    )
+}
+
+/// The count query of `search_entities`: the name list is in `$3`, and the moment (replay only) in `$4`
+fn search_count_sql(exact: bool, replay: bool) -> String {
+    format!(
+        "SELECT count(*) FROM entities e
+          WHERE e.kb_id = $1 AND {visible}
+            AND {matches}",
+        visible = crate::record_axis::entity_visible_at("e", replay.then_some(4)),
+        matches = search_matches_sql(exact, replay, 3),
+    )
+}
+
 /// Find entities by name. **Also returns the total** — "decline to merge" by its nature produces many same-named entities,
 /// and with a fixed ten, the one being sought may not be among those ten at all, and the interface gives no sign of it.
 ///
@@ -1651,35 +1720,13 @@ pub async fn search_entities(
     exact: bool,
 ) -> AppResult<(Vec<GraphNode>, i64)> {
     let pattern = format!("%{}%", text.trim());
-    let named = crate::names::has_name_like("e", 2);
     // The same-name key uses the same form as recall (the use of `has_name_in` in `resolution`): after normalisation, lowercased
     let folded_name = vec![crate::resolution::normalize_name(text).to_lowercase()];
     // Without replay the SQL has no moment parameter, identical to before; only during replay is one more bound
+    let replay = as_of.is_some();
     let visible = |param: usize| crate::record_axis::entity_visible_at("e", as_of.map(|_| param));
     let rewind = as_of.map(|_| 6);
     let same_name = crate::names::has_name_in("e", 1, 5);
-    // For exact matches, write canonical name and alias as one set of ids, each going through its own index (`entities_kb_name_idx`,
-    // `facts_value_text_idx`). Written as `OR`, one side is a subquery, and the planner can only scan the entities in the KB.
-    // The canonical-name index only holds entities that have not been merged: without replay this is the same as `visible`, so include it; during replay
-    // the merged-away entity was still there at that time, so it cannot be included, and that branch falls back to scanning the KB. `$2` is bound but unused, so parameter positions do not shift
-    let exactly_named = |names: usize| {
-        format!(
-            "e.id IN (SELECT x.id FROM entities x
-                       WHERE x.kb_id = $1 AND lower(x.canonical_name) = ANY(${names}){unmerged}
-                      UNION ALL {aliases})",
-            unmerged = if as_of.is_none() {
-                " AND x.merged_into IS NULL"
-            } else {
-                ""
-            },
-            aliases = crate::names::named_ids(1, names),
-        )
-    };
-    let matches = if exact {
-        exactly_named(5)
-    } else {
-        format!("(e.canonical_name ILIKE $2 OR {named})")
-    };
     let sql = format!(
         "{} WHERE e.kb_id = $1 AND {visible}
          AND {matches}
@@ -1687,6 +1734,7 @@ pub async fn search_entities(
                   degree DESC, e.canonical_name, e.id LIMIT $3 OFFSET $4",
         node_sql(rewind, rewind),
         visible = visible(6),
+        matches = search_matches_sql(exact, replay, 5),
     );
     let mut nodes_query = sqlx::query_as::<_, GraphNode>(&sql)
         .bind(kb_id)
@@ -1698,18 +1746,7 @@ pub async fn search_entities(
         nodes_query = nodes_query.bind(t);
     }
     let nodes: Vec<GraphNode> = nodes_query.fetch_all(pool).await?;
-    // The name list for the count clause is in `$3`, and the moment has moved to `$4`
-    let count_matches = if exact {
-        exactly_named(3)
-    } else {
-        format!("(e.canonical_name ILIKE $2 OR {named})")
-    };
-    let count_sql = format!(
-        "SELECT count(*) FROM entities e
-          WHERE e.kb_id = $1 AND {visible}
-            AND {count_matches}",
-        visible = visible(4),
-    );
+    let count_sql = search_count_sql(exact, replay);
     let mut count_query = sqlx::query_as::<_, (i64,)>(&count_sql)
         .bind(kb_id)
         .bind(&pattern)
@@ -2773,3 +2810,11 @@ mod temporal_shape_tests {
         .is_ok());
     }
 }
+
+#[cfg(test)]
+#[path = "graph_search_plan_tests.rs"]
+mod search_plan_tests;
+
+#[cfg(test)]
+#[path = "graph_overview_plan_tests.rs"]
+mod overview_plan_tests;
