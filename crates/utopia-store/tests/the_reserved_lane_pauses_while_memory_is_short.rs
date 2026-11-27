@@ -63,6 +63,8 @@ async fn the_reserved_lane_pauses_while_memory_is_short() -> anyhow::Result<()> 
         queue("extract_document").await?;
         tokio::time::timeout(Duration::from_secs(10), extracting.recv()).await?;
         working_set.store(SHORT_WORKING_SET, Ordering::Relaxed);
+        // The worker checks headroom and then claims: a claim already in flight when memory rises would still take the job queued next
+        tokio::time::sleep(Duration::from_millis(500)).await;
         let job_id = queue("embed_names").await?;
         tokio::time::sleep(Duration::from_secs(1)).await;
         let while_short: (String, i32) =
