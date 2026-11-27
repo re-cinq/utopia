@@ -30,6 +30,11 @@ ingress:
 podDisruptionBudget:
   enabled: true
 
+# 2Gi was OOMKilled 11 times in 13 hours on 2026-11-27 while 34k extractions were queued.
+resources:
+  requests: { cpu: 500m, memory: 1Gi }
+  limits: { cpu: "1", memory: 4Gi }
+
 # A superseded chunk keeps its vector for a week (RC-007). Unset, nothing is cleared.
 env:
   UTOPIA_SUPERSEDED_VECTOR_DAYS: "7"
