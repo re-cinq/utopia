@@ -305,9 +305,9 @@ impl Shared {
             .remove(internal_call_id)
     }
 
-    fn tool_ctx(&self) -> ToolCtx<'_> {
+    fn tool_ctx<'a>(&'a self, reads: &'a AppState) -> ToolCtx<'a> {
         ToolCtx {
-            state: &self.state,
+            state: reads,
             kb_id: self.kb_id,
             workspace_id: self.workspace_id,
             mounted_sources: &self.mounted_sources,
@@ -343,7 +343,8 @@ pub fn dynamic_tools(shared: &Arc<Shared>) -> Vec<DynamicTool> {
                 let shared = owned.clone();
                 let name = tool_name.clone();
                 Box::pin(async move {
-                    let tool_ctx = shared.tool_ctx();
+                    let reads = shared.state.for_interactive_reads();
+                    let tool_ctx = shared.tool_ctx(&reads);
                     // dispatch now returns a struct (#601 added structuredContent and
                     // is_error for MCP). The web chat only needs the body and the UI step, the same as the hand-written loop on dev.
                     let tools::ToolResult {
