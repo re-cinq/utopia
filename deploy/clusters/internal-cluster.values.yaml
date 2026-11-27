@@ -30,6 +30,12 @@ ingress:
 podDisruptionBudget:
   enabled: true
 
+# 2Gi was OOMKilled 16 times on 2026-11-27. The requests guarantee what the pod uses steadily;
+# the limits, which Autopilot does not bill, let it burst into spare node capacity.
+resources:
+  requests: { cpu: 500m, memory: 2Gi }
+  limits: { cpu: "2", memory: 8Gi }
+
 # A superseded chunk keeps its vector for a week (RC-007). Unset, nothing is cleared.
 env:
   UTOPIA_SUPERSEDED_VECTOR_DAYS: "7"
