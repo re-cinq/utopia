@@ -228,8 +228,9 @@ pub async fn handle(
                 Ok(args) => {
                     // `mounted_sources` stays empty: `query_data` is not exposed, so giving it would help no one.
                     // `can_write` is no longer hard-coded to false: it is now computed from the token and the role together
+                    let reads = state.for_interactive_reads();
                     let ctx = ToolCtx {
-                        state: &state,
+                        state: &reads,
                         kb_id,
                         workspace_id: kb.workspace_id,
                         mounted_sources: &[],
