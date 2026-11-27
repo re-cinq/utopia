@@ -24,6 +24,7 @@ async fn a_name_embedding_runs_while_model_work_holds_every_slot() -> anyhow::Re
     let worker = tokio::spawn(jobs::run_worker(
         pool.clone(),
         Arc::new(AtomicUsize::new(1)),
+        || None,
         move |job| {
             let (ours, started, finished) = (ours.clone(), started.clone(), finished.clone());
             async move {
