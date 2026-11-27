@@ -390,15 +390,12 @@ pub async fn upsert_source_document_tx(
             .await?);
     }
 
-    if let Some(document) = sqlx::query_as::<_, Document>(
-        "SELECT * FROM documents
-          WHERE source_id = $1 AND external_key IS NULL AND filename = $2
-            AND deleted_at IS NULL LIMIT 1 FOR UPDATE",
-    )
-    .bind(source_id)
-    .bind(filename)
-    .fetch_optional(&mut **tx)
-    .await?
+    if let Some(document) =
+        sqlx::query_as::<_, Document>(&format!("{LEGACY_BY_FILENAME_SQL} FOR UPDATE"))
+            .bind(source_id)
+            .bind(filename)
+            .fetch_optional(&mut **tx)
+            .await?
     {
         sqlx::query("UPDATE documents SET external_key = $2, updated_at = now() WHERE id = $1")
             .bind(document.id)
@@ -727,20 +724,27 @@ pub async fn find_by_external_key(
     )
 }
 
+/// A live document of a source by its content hash; `documents_source_sha_live_idx` (9019) serves it.
+pub(crate) const SOURCE_SHA_SQL: &str = "SELECT * FROM documents
+      WHERE source_id = $1 AND sha256 = $2 AND deleted_at IS NULL LIMIT 1";
+
+/// A live legacy document of a source (no external key) by its file name; `documents_source_legacy_filename_idx` (9019)
+/// serves it through `md5(filename)`, and the name itself is still compared, so an md5 collision cannot match.
+pub(crate) const LEGACY_BY_FILENAME_SQL: &str = "SELECT * FROM documents
+     WHERE source_id = $1 AND external_key IS NULL AND md5(filename) = md5($2) AND filename = $2
+       AND deleted_at IS NULL LIMIT 1";
+
 /// Fetch a document by source + content hash (used to recognize renames/moves).
 pub async fn find_by_source_sha(
     pool: &PgPool,
     source_id: Uuid,
     sha256: &str,
 ) -> AppResult<Option<Document>> {
-    Ok(sqlx::query_as(
-        "SELECT * FROM documents
-              WHERE source_id = $1 AND sha256 = $2 AND deleted_at IS NULL LIMIT 1",
-    )
-    .bind(source_id)
-    .bind(sha256)
-    .fetch_optional(pool)
-    .await?)
+    Ok(sqlx::query_as(SOURCE_SHA_SQL)
+        .bind(source_id)
+        .bind(sha256)
+        .fetch_optional(pool)
+        .await?)
 }
 
 /// The document in the store holding this content (the range covered by `documents_kb_sha_idx`: not purged, including those in the trash).
@@ -764,15 +768,11 @@ pub async fn find_legacy_by_filename(
     source_id: Uuid,
     filename: &str,
 ) -> AppResult<Option<Document>> {
-    Ok(sqlx::query_as(
-        "SELECT * FROM documents
-         WHERE source_id = $1 AND external_key IS NULL AND filename = $2
-           AND deleted_at IS NULL LIMIT 1",
-    )
-    .bind(source_id)
-    .bind(filename)
-    .fetch_optional(pool)
-    .await?)
+    Ok(sqlx::query_as(LEGACY_BY_FILENAME_SQL)
+        .bind(source_id)
+        .bind(filename)
+        .fetch_optional(pool)
+        .await?)
 }
 
 /// Backfills a logical identity onto legacy documents.
@@ -2209,3 +2209,7 @@ pub async fn live_chunk_count(pool: &PgPool) -> AppResult<i64> {
             .await?,
     )
 }
+
+#[cfg(test)]
+#[path = "documents_source_plan_tests.rs"]
+mod source_plan_tests;
