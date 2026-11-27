@@ -513,7 +513,7 @@ async fn dispatch(st: &state::AppState, job: &utopia_store::jobs::Job) -> anyhow
             st.emit_graph(kb_id);
             Ok(())
         }
-        "extract_document" => {
+        utopia_store::jobs::EXTRACT_DOCUMENT | utopia_store::jobs::EXTRACT_STATEMENTS => {
             let id = payload_document_id(&job.payload)?;
             extraction::extract_document(st, id, payload_proposer(&job.payload)).await
         }

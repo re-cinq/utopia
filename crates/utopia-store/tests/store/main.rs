@@ -24,6 +24,7 @@
 //!   it recomputes the witnesses of typed rows across the whole DB by source, and can change rows that another test is materialising.
 //! - `a_document_waits_for_one_extraction`: runs migration 9011 verbatim; it deletes the duplicate extractions queued across the whole DB,
 //!   without filtering by kb, and would delete extractions another test has queued.
+//! - `pushed_statements_move_to_their_own_queue`: runs migration 9018's data statement verbatim; it moves queued extractions across the whole DB, without filtering by kb, and would move ones another test has queued.
 //! - `a_due_base_is_queued_once`: `queue_due_inferences` scans every KB that is due across the whole DB. KBs created since 0050 have inference switched on
 //!   and have never run one, so every KB another test just created counts as due and gets an inference job queued by it — a test counting its own KB's jobs
 //!   (for example `phrase_bindings_delivery_tests` in the lib unit tests) would then get one too many.
@@ -82,6 +83,7 @@ mod a_proof_reaches_the_sentence;
 mod a_purge_is_final;
 mod a_purge_judges_its_blobs_once;
 mod a_pushed_item_closes_what_its_new_version_stopped_stating;
+mod a_pushed_statements_document_queues_its_own_extraction;
 mod a_qualifier_is_not_the_edges_identity;
 mod a_question_picks_its_definitions;
 mod a_reader_keeps_its_key_for_its_provider;

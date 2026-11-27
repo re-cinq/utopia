@@ -179,6 +179,67 @@ async fn other_model_work_keeps_run_at_order_beside_extraction() -> anyhow::Resu
 }
 
 #[tokio::test]
+async fn a_later_pushed_statement_extraction_is_claimed_before_an_earlier_model_extraction(
+) -> anyhow::Result<()> {
+    let Some(pool) = isolated_queue(&[
+        ("extraction", "extract_document", "-2 hours"),
+        ("statements", "extract_statements", "-1 hour"),
+    ])
+    .await?
+    else {
+        return Ok(());
+    };
+    assert_eq!(
+        claimed_labels(&pool, false).await?,
+        ["statements", "extraction"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_later_intake_job_is_claimed_before_an_earlier_pushed_statement_extraction(
+) -> anyhow::Result<()> {
+    let Some(pool) = isolated_queue(&[
+        ("statements", "extract_statements", "-2 hours"),
+        ("intake", "sync_source", "-1 hour"),
+    ])
+    .await?
+    else {
+        return Ok(());
+    };
+    assert_eq!(
+        claimed_labels(&pool, false).await?,
+        ["intake", "statements"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_fast_lane_leaves_a_lone_pushed_statement_extraction_queued() -> anyhow::Result<()> {
+    let Some(pool) = isolated_queue(&[("statements", "extract_statements", "-1 hour")]).await?
+    else {
+        return Ok(());
+    };
+    assert_eq!(claimed_labels(&pool, true).await?, Vec::<String>::new());
+    Ok(())
+}
+
+#[tokio::test]
+async fn extract_statements_has_priority_1_and_extract_document_stays_at_2() -> anyhow::Result<()> {
+    let Some(url) = crate::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPool::connect(&url).await?;
+    let priorities: Vec<i16> = sqlx::query_scalar(
+        "SELECT job_priority(kind) FROM unnest(ARRAY['extract_statements', 'extract_document']) AS kind",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(priorities, [1, 2]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn reapplying_the_time_resolution_migration_keeps_the_priorities() -> anyhow::Result<()> {
     let Some(url) = crate::test_db::url() else {
         return Ok(());

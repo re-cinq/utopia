@@ -25,3 +25,5 @@ Two places enqueue the job, `documents::finish_processing_if_current` with `{doc
 - A busy queue does each document's extraction once for the version current when it runs, instead of once per change.
 - A job can no longer be queued for a document "on top" of a waiting one to force a second read. Re-reading the same chunks would change nothing, so nothing needs that.
 - Other job kinds keep their own enqueue rules; this record covers `extract_document` only.
+
+**2026-11-27:** documents of a `statements` source are now queued as `extract_statements` (migration `9018`), which is claimed before model work. The one-waiting-extraction rule covers both kinds, and `jobs_queued_extraction` replaces `jobs_queued_extraction_document` as the index behind the check.

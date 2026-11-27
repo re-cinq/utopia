@@ -1,3 +1,4 @@
+use crate::jobs::{extraction_kind_sql, EXTRACTION_KINDS};
 use chrono::{DateTime, Utc};
 use pgvector::Vector;
 use serde::Serialize;
@@ -1804,10 +1805,11 @@ pub async fn queue_extraction_one(pool: &PgPool, document_id: Uuid) -> AppResult
     .await?;
     // Delete old tasks that never started: clicking Extract twice should not pile up two tasks extracting the same document
     sqlx::query(
-        "DELETE FROM jobs WHERE kind = 'extract_document' AND status = 'queued'
+        "DELETE FROM jobs WHERE kind = ANY($2) AND status = 'queued'
            AND payload->>'document_id' = $1",
     )
     .bind(document_id.to_string())
+    .bind(&EXTRACTION_KINDS[..])
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -1818,11 +1820,12 @@ pub async fn queue_extraction_one(pool: &PgPool, document_id: Uuid) -> AppResult
     .bind(document_id)
     .execute(&mut *tx)
     .await?;
-    let (job_id,): (i64,) = sqlx::query_as(
+    let kind = extraction_kind_sql("$1");
+    let (job_id,): (i64,) = sqlx::query_as(&format!(
         "INSERT INTO jobs (kind, payload)
-         VALUES ('extract_document', jsonb_build_object('document_id', $1::text))
-         RETURNING id",
-    )
+         VALUES ({kind}, jsonb_build_object('document_id', $1::text))
+         RETURNING id"
+    ))
     .bind(document_id)
     .fetch_one(&mut *tx)
     .await?;
@@ -2122,10 +2125,11 @@ pub async fn queue_extraction(
     }
 
     sqlx::query(
-        "DELETE FROM jobs WHERE kind = 'extract_document' AND status = 'queued'
+        "DELETE FROM jobs WHERE kind = ANY($2) AND status = 'queued'
            AND payload->>'document_id' = ANY($1)",
     )
     .bind(ids.iter().map(|i| i.to_string()).collect::<Vec<_>>())
+    .bind(&EXTRACTION_KINDS[..])
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -2144,11 +2148,12 @@ pub async fn queue_extraction(
     .execute(&mut *tx)
     .await?;
     // The payload shape matches jobs::enqueue(json!({"document_id": id})): uuid is serialized as a string
-    sqlx::query(
+    let kind = extraction_kind_sql("t.id");
+    sqlx::query(&format!(
         "INSERT INTO jobs (kind, payload)
-         SELECT 'extract_document', jsonb_build_object('document_id', id::text)
-         FROM unnest($1::uuid[]) AS t(id)",
-    )
+         SELECT {kind}, jsonb_build_object('document_id', id::text)
+         FROM unnest($1::uuid[]) AS t(id)"
+    ))
     .bind(&ids)
     .execute(&mut *tx)
     .await?;
