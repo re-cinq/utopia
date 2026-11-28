@@ -3,7 +3,7 @@
 //! The projection at the moment of judgement (`apply`) only sees the entities that exist at that moment; a company created in the second half of a half-extracted document ends up with no class,
 //! so its attribute statements never reach any attribute candidate whose domain is declared. Skipped when `UTOPIA_DATABASE_URL` is not set.
 
-use super::apply_bound;
+use super::{apply_bound, apply_bound_to};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -124,6 +124,147 @@ async fn an_entity_built_after_the_decision_still_gets_its_class() -> anyhow::Re
         );
         // Idempotent: entities already on that class do not count as a change
         assert_eq!(apply_bound(&pool, f.kb).await?, 0);
+        anyhow::Ok(())
+    }
+    .await;
+    sqlx::query("DELETE FROM organizations WHERE id=$1")
+        .bind(f.org)
+        .execute(&pool)
+        .await?;
+    run
+}
+
+/// What one document's extraction runs (RC-011): the catch-up reaches the entities it names and the ends of the facts
+/// the document is evidence for, and no other entity, so it does not read the whole base. The base-wide pass still
+/// picks up the rest.
+#[tokio::test]
+async fn a_documents_catch_up_reaches_only_what_the_document_touches() -> anyhow::Result<()> {
+    let Some(url) = crate::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPool::connect(&url).await?;
+    crate::db::migrate(&pool).await?;
+    let f = seed(&pool).await?;
+    let run = async {
+        let (doc, chunk, other_doc) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        for (id, name) in [(doc, "pushed.json"), (other_doc, "other.json")] {
+            sqlx::query("INSERT INTO documents(id,kb_id,filename,sha256) VALUES($1,$2,$3,$4)")
+                .bind(id)
+                .bind(f.kb)
+                .bind(name)
+                .bind(id.to_string())
+                .execute(&pool)
+                .await?;
+        }
+        sqlx::query("INSERT INTO chunks(id,kb_id,document_id,seq,text) VALUES($1,$2,$3,0,'pushed')")
+            .bind(chunk)
+            .bind(f.kb)
+            .bind(doc)
+            .execute(&pool)
+            .await?;
+        // A second company built after the judgement, by another document
+        let elsewhere = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO entities(id,kb_id,canonical_name,specific_type) VALUES($1,$2,'远洋货运有限公司','公司')",
+        )
+        .bind(elsewhere)
+        .bind(f.kb)
+        .execute(&pool)
+        .await?;
+
+        // Nothing named and no fact yet: nothing to do, and the base is not read
+        assert_eq!(apply_bound_to(&pool, f.kb, Some(doc), &[]).await?, 0);
+        assert_eq!(class_of(&pool, f.late).await?.0, None);
+
+        // This run resolved the late company, the human-decided one and the chairman
+        assert_eq!(
+            apply_bound_to(&pool, f.kb, Some(doc), &[f.late, f.human, f.other]).await?,
+            1
+        );
+        assert_eq!(
+            class_of(&pool, f.late).await?,
+            (Some(f.class), "aligned".into(), None)
+        );
+        assert_eq!(
+            class_of(&pool, f.human).await?,
+            (None, "human".into(), None)
+        );
+        assert_eq!(
+            class_of(&pool, f.other).await?,
+            (None, "extracted".into(), Some("chairman".into()))
+        );
+        assert_eq!(class_of(&pool, elsewhere).await?.0, None);
+        // Idempotent for the same entities
+        assert_eq!(apply_bound_to(&pool, f.kb, Some(doc), &[f.late]).await?, 0);
+
+        // A fact the document is evidence for, which this run did not resolve (carried over from the item's previous
+        // version, or written by an attempt that was interrupted): both of its ends are caught up
+        let (subject, object, fact) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        sqlx::query(
+            "INSERT INTO entities(id,kb_id,canonical_name,specific_type) VALUES($1,$3,'北港仓储有限公司','公司'),($2,$3,'南湾码头有限公司','公司')",
+        )
+        .bind(subject)
+        .bind(object)
+        .bind(f.kb)
+        .execute(&pool)
+        .await?;
+        sqlx::query("INSERT INTO facts(id,kb_id,subject_id,object_id,layer,phrase) VALUES($1,$2,$3,$4,'open','租用')")
+            .bind(fact)
+            .bind(f.kb)
+            .bind(subject)
+            .bind(object)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO fact_evidence(fact_id,chunk_id,quote,document_id,doc_version) VALUES($1,$2,'租用',$3,1)")
+            .bind(fact)
+            .bind(chunk)
+            .bind(doc)
+            .execute(&pool)
+            .await?;
+        // A fact only an earlier version of the document was evidence for: its chunk is superseded, and it is not read
+        let (old_chunk, gone, old_fact) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        sqlx::query("INSERT INTO chunks(id,kb_id,document_id,seq,text,superseded_at) VALUES($1,$2,$3,0,'earlier',now())")
+            .bind(old_chunk)
+            .bind(f.kb)
+            .bind(doc)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO entities(id,kb_id,canonical_name,specific_type) VALUES($1,$2,'旧港物流有限公司','公司')")
+            .bind(gone)
+            .bind(f.kb)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO facts(id,kb_id,subject_id,layer,phrase,object_value) VALUES($1,$2,$3,'open','成立于','{\"value\":\"2001\"}')")
+            .bind(old_fact)
+            .bind(f.kb)
+            .bind(gone)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO fact_evidence(fact_id,chunk_id,quote,document_id,doc_version) VALUES($1,$2,'成立于',$3,1)")
+            .bind(old_fact)
+            .bind(old_chunk)
+            .bind(doc)
+            .execute(&pool)
+            .await?;
+
+        // Another document's catch-up does not reach them
+        assert_eq!(apply_bound_to(&pool, f.kb, Some(other_doc), &[]).await?, 0);
+        assert_eq!(class_of(&pool, subject).await?.0, None);
+        // Without a document to read evidence of (a memory log), only the named entities count
+        assert_eq!(apply_bound_to(&pool, f.kb, None, &[]).await?, 0);
+        assert_eq!(class_of(&pool, subject).await?.0, None);
+        assert_eq!(apply_bound_to(&pool, f.kb, Some(doc), &[]).await?, 2);
+        assert_eq!(class_of(&pool, subject).await?.0, Some(f.class));
+        assert_eq!(class_of(&pool, object).await?.0, Some(f.class));
+        assert_eq!(class_of(&pool, elsewhere).await?.0, None);
+        assert_eq!(class_of(&pool, gone).await?.0, None);
+
+        // The base-wide pass still reaches the ones no document touches now
+        assert_eq!(apply_bound(&pool, f.kb).await?, 2);
+        assert_eq!(
+            class_of(&pool, elsewhere).await?,
+            (Some(f.class), "aligned".into(), None)
+        );
         anyhow::Ok(())
     }
     .await;

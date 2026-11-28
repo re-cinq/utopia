@@ -1112,6 +1112,12 @@ async fn place(
 
 /// `await_nod`: this is a memory log (0015): statements do not go into the store directly; they go unchanged to the pending-confirmation table, and become open statements only when a person nods.
 /// `proposer`: who said that sentence and with which token (0026); it is recorded along with the pending item.
+/// Whether category-word alignment rounds run for this workspace: `type_alignment` needs a chat model and stops
+/// before its base-wide `apply_bound` without one (RC-011).
+fn alignment_rounds_run(settings: Option<&LlmSettings>) -> bool {
+    settings.is_some_and(LlmSettings::chat_ready)
+}
+
 /// `pushed`: the chunk is the contract (the `statements` source of 0054): no prompt is built and the model is not asked; it is parsed directly;
 /// in this case `client` (the chat model) is None; `settings` is passed if present, and the name-vector embedding model comes from it. The other steps are unchanged
 #[allow(clippy::too_many_arguments)]
@@ -1354,7 +1360,22 @@ pub(crate) async fn run_open(
     .await?;
     // Category words not yet bound when this extraction began, but bound midway: their class is applied to the entities built later in this document
     // (`bound_types` is a copy read at the start of extraction; the projection at the moment of writing cannot see entities built afterwards)
-    let caught_up = utopia_store::type_bindings::apply_bound(pool, kb_id).await?;
+    let caught_up = if alignment_rounds_run(settings) {
+        // Only what this document touches (RC-011): the entities this run resolved, and the ends of the facts the
+        // document's live chunks are evidence for (carried-over facts, and chunks an interrupted attempt had already
+        // extracted). The whole base is read at the judgement and at the start of each alignment round
+        let touched: Vec<Uuid> = doc_entities
+            .iter()
+            .map(|(id, _, _)| *id)
+            .chain(described.values().copied())
+            .collect();
+        // A memory log keeps every episode live, so its evidence is its whole history: there, only this run's entities
+        let evidence_of = (!await_nod).then_some(document_id);
+        utopia_store::type_bindings::apply_bound_to(pool, kb_id, evidence_of, &touched).await?
+    } else {
+        // Without a chat model no alignment round runs its base-wide pass, so the document still does it itself
+        utopia_store::type_bindings::apply_bound(pool, kb_id).await?
+    };
     if caught_up > 0 {
         tracing::info!(%document_id, entities = caught_up, "class bound during extraction was applied to entities created later");
     }
