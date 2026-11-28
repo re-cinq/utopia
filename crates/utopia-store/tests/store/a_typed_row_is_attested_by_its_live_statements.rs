@@ -442,28 +442,65 @@ async fn a_sync_of_given_rows_leaves_a_given_row_of_another_base_alone() -> anyh
 }
 
 #[tokio::test]
-async fn the_rows_following_a_statement_are_those_materialized_or_implied_from_it(
+async fn a_sync_following_statements_attests_the_rows_materialized_or_implied_from_them(
 ) -> anyhow::Result<()> {
     let Some(pool) = pool().await? else {
         return Ok(());
     };
     let base = base(&pool).await?;
-    let moved = statement(&pool, &base, Some((day(2026, 9, 4), "live report"))).await?;
-    let untouched = statement(&pool, &base, Some((day(2026, 9, 5), "next report"))).await?;
-    let materialized = materialized_from(&pool, &base, &[moved, untouched]).await?;
+    let followed = statement(&pool, &base, Some((day(2026, 9, 4), "live report"))).await?;
+    let other = statement(&pool, &base, Some((day(2026, 9, 5), "next report"))).await?;
+    let materialized = materialized_from(&pool, &base, &[followed, other]).await?;
     let implied = typed_row(&pool, &base, true, None).await?;
-    implied_from_statement(&pool, &base, implied, moved).await?;
-    let of_the_other = materialized_from(&pool, &base, &[untouched]).await?;
+    implied_from_statement(&pool, &base, implied, followed).await?;
+    let of_the_other = materialized_from(&pool, &base, &[other]).await?;
 
-    let mut following = utopia_store::materialize::typed_rows_following(&pool, &[moved]).await?;
-    let none = utopia_store::materialize::typed_rows_following(&pool, &[]).await?;
+    let mut moved =
+        utopia_store::materialize::sync_typed_attestation_following(&pool, base.kb, &[followed])
+            .await?;
+    let none =
+        utopia_store::materialize::sync_typed_attestation_following(&pool, base.kb, &[]).await?;
 
+    let attested = (
+        anchor(&pool, materialized).await?,
+        anchor(&pool, implied).await?,
+        anchor(&pool, of_the_other).await?,
+    );
     cleanup(&pool, &[&base]).await?;
-    following.sort();
+    moved.sort();
     let mut expected = vec![materialized, implied];
     expected.sort();
-    assert_eq!(following, expected);
-    assert!(!following.contains(&of_the_other));
+    assert_eq!(moved, expected);
     assert_eq!(none, Vec::<Uuid>::new());
+    // the materialized row takes the earliest of all its sources, not only the followed one
+    assert_eq!(attested.0, anchored(day(2026, 9, 4), "live report"));
+    assert_eq!(attested.1, anchored(day(2026, 9, 4), "live report"));
+    assert_eq!(attested.2, (None, None));
+    Ok(())
+}
+
+/// A timeline correction puts a new row in place of a typed row and carries its source links over. A sync
+/// following the statements finds the new row, because it resolves the rows in the same statement (RC-012).
+#[tokio::test]
+async fn a_sync_following_statements_reaches_a_row_put_in_place_of_a_followed_one(
+) -> anyhow::Result<()> {
+    let Some(pool) = pool().await? else {
+        return Ok(());
+    };
+    let base = base(&pool).await?;
+    let source = statement(&pool, &base, Some((day(2026, 9, 4), "live report"))).await?;
+    let replaced = materialized_from(&pool, &base, &[source]).await?;
+    // what the correction leaves: the old row invalidated, a successor carrying its source link
+    let successor = materialized_from(&pool, &base, &[source]).await?;
+    invalidate(&pool, replaced).await?;
+
+    let moved =
+        utopia_store::materialize::sync_typed_attestation_following(&pool, base.kb, &[source])
+            .await?;
+
+    let attested = anchor(&pool, successor).await?;
+    cleanup(&pool, &[&base]).await?;
+    assert_eq!(moved, vec![successor]);
+    assert_eq!(attested, anchored(day(2026, 9, 4), "live report"));
     Ok(())
 }

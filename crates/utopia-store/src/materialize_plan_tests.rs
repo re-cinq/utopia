@@ -211,7 +211,7 @@ async fn attestation_sync_reads_only_the_facts_of_its_base() -> anyhow::Result<(
 
     let plan: serde_json::Value = sqlx::query_scalar(&format!(
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
-        super::typed_attestation_sql(false)
+        super::typed_attestation_sql(super::SyncScope::Base)
     ))
     .persistent(false)
     .bind(base)
@@ -293,14 +293,47 @@ async fn attestation_sync_of_given_rows_reads_only_their_sources() -> anyhow::Re
 
     let plan: serde_json::Value = sqlx::query_scalar(&format!(
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
-        super::typed_attestation_sql(true)
+        super::typed_attestation_sql(super::SyncScope::Rows)
     ))
     .persistent(false)
     .bind(base)
     .bind(&given)
     .fetch_one(&mut *tx)
     .await?;
+    // the same rows reached through their statements (a dated document's pass)
+    let statements: Vec<Uuid> =
+        sqlx::query_scalar("SELECT statement_id FROM typed_fact_sources WHERE fact_id = ANY($1)")
+            .bind(&given)
+            .fetch_all(&mut *tx)
+            .await?;
+    sqlx::query("UPDATE facts SET attested_from = now() WHERE id = ANY($1)")
+        .bind(&given)
+        .execute(&mut *tx)
+        .await?;
+    let following: serde_json::Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        super::typed_attestation_sql(super::SyncScope::FollowingStatements)
+    ))
+    .persistent(false)
+    .bind(base)
+    .bind(&statements)
+    .fetch_one(&mut *tx)
+    .await?;
     tx.rollback().await?;
+    let following_top = &following[0]["Plan"];
+    let (following_facts, following_sources) = (
+        rows_read_from(following_top, "facts"),
+        rows_read_from(following_top, "typed_fact_sources"),
+    );
+    assert_eq!(
+        following_top["Actual Rows"].as_u64(),
+        Some(7),
+        "all rows following the 7 statements move: {following:#}"
+    );
+    assert!(
+        following_facts < 200 && following_sources < 200,
+        "{following_facts} facts rows and {following_sources} source rows read for the rows following 7 statements: {following:#}"
+    );
 
     let top = &plan[0]["Plan"];
     let (facts, sources) = (

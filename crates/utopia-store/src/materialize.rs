@@ -416,22 +416,45 @@ async fn materialize_in_tx(
     ))
 }
 
-/// The witness sync as one statement. For the whole base (`given` false) it gathers every source of the base.
-/// For given rows it gathers only those rows' sources: with the rows named on the outer `UPDATE` alone, Postgres
-/// still aggregated every source of the base before it looked at them, and a recompute for seven facts read
-/// the base's whole `facts` and all of `typed_fact_sources` (RC-012). The rows it moves are the same.
-fn typed_attestation_sql(given: bool) -> String {
-    let (of_materialized, of_implied, rows) = if given {
-        (
+/// Which typed rows a witness sync touches.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SyncScope {
+    /// Every typed row of the base.
+    Base,
+    /// The rows given in `$2`.
+    Rows,
+    /// The rows that follow the statements given in `$2`: materialized from them, or read from them by a rule.
+    FollowingStatements,
+}
+
+/// The witness sync as one statement. For the whole base it gathers every source of the base. For given rows, or for
+/// the rows that follow given statements, it gathers only those rows' sources: with the rows named on the outer
+/// `UPDATE` alone, Postgres still aggregated every source of the base before it looked at them, and a recompute for
+/// seven facts read the base's whole `facts` and all of `typed_fact_sources` (RC-012). The rows that follow given
+/// statements are resolved inside the statement, so a row a timeline correction put in place of one of them (it
+/// carries the source links over) is synced as well. The rows it moves are the same as before.
+fn typed_attestation_sql(scope: SyncScope) -> String {
+    let (rows, of_materialized, of_implied, touched) = match scope {
+        SyncScope::Base => ("", "", "", "$2::uuid[] IS NULL"),
+        SyncScope::Rows => (
+            "",
             "WHERE ts.fact_id = ANY($2)",
             "WHERE i.fact_id = ANY($2)",
             "t.id = ANY($2)",
-        )
-    } else {
-        ("", "", "$2::uuid[] IS NULL")
+        ),
+        SyncScope::FollowingStatements => (
+            "WITH following AS MATERIALIZED (
+                 SELECT ts.fact_id FROM typed_fact_sources ts WHERE ts.statement_id = ANY($2)
+                 UNION
+                 SELECT i.fact_id FROM implied_fact_sources i WHERE i.statement_id = ANY($2))",
+            "WHERE ts.fact_id IN (SELECT fact_id FROM following)",
+            "WHERE i.fact_id IN (SELECT fact_id FROM following)",
+            "t.id IN (SELECT fact_id FROM following)",
+        ),
     };
     format!(
-        "UPDATE facts t
+        "{rows}
+         UPDATE facts t
             SET attested_from = src.at, attested_by = src.by
            FROM (SELECT u.fact_id,
                         min(u.attested_from) AS at,
@@ -453,7 +476,7 @@ fn typed_attestation_sql(given: bool) -> String {
                   GROUP BY u.fact_id) src
           WHERE t.id = src.fact_id AND t.kb_id = $1 AND t.layer = 'typed'
             AND t.invalidated_at IS NULL
-            AND {rows}
+            AND {touched}
             AND (t.implied
                  OR EXISTS (SELECT 1 FROM typed_fact_sources ts WHERE ts.fact_id = t.id))
             AND (t.attested_from IS DISTINCT FROM src.at
@@ -483,7 +506,12 @@ pub async fn sync_typed_attestation<'e>(
     kb_id: Uuid,
     only: Option<&[Uuid]>,
 ) -> AppResult<Vec<Uuid>> {
-    let moved = sqlx::query_scalar(&typed_attestation_sql(only.is_some()))
+    let scope = if only.is_some() {
+        SyncScope::Rows
+    } else {
+        SyncScope::Base
+    };
+    let moved = sqlx::query_scalar(&typed_attestation_sql(scope))
         .persistent(false)
         .bind(kb_id)
         .bind(only)
@@ -492,24 +520,24 @@ pub async fn sync_typed_attestation<'e>(
     Ok(moved)
 }
 
-/// The typed rows that follow these statements: materialized from them, or read from them by a rule.
-/// A caller that moved the witness of a few statements syncs these rows instead of the whole base (RC-012).
-pub async fn typed_rows_following<'e>(
+/// Syncs the witness of the typed rows that follow these statements: materialized from them, or read from them by a rule.
+/// A caller that attested a document's statements syncs these rows instead of the whole base (RC-012). The rows are
+/// resolved in the same statement that updates them. Returns the rows whose witness moved, as [`sync_typed_attestation`] does.
+pub async fn sync_typed_attestation_following<'e>(
     ex: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
+    kb_id: Uuid,
     statements: &[Uuid],
 ) -> AppResult<Vec<Uuid>> {
     if statements.is_empty() {
         return Ok(Vec::new());
     }
-    let rows = sqlx::query_scalar(
-        "SELECT ts.fact_id FROM typed_fact_sources ts WHERE ts.statement_id = ANY($1)
-         UNION
-         SELECT i.fact_id FROM implied_fact_sources i WHERE i.statement_id = ANY($1)",
-    )
-    .bind(statements)
-    .fetch_all(ex)
-    .await?;
-    Ok(rows)
+    let moved = sqlx::query_scalar(&typed_attestation_sql(SyncScope::FollowingStatements))
+        .persistent(false)
+        .bind(kb_id)
+        .bind(statements)
+        .fetch_all(ex)
+        .await?;
+    Ok(moved)
 }
 
 #[derive(sqlx::FromRow)]

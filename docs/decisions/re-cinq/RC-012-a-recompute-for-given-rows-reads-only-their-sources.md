@@ -18,8 +18,8 @@ On that day 253 documents were deleted in the base. 87 `reattest_facts` jobs fin
 
 **A sync for given rows gathers only those rows' sources.**
 
-- `materialize::typed_attestation_sql(given)` builds the statement in two forms. For given rows both branches of the source subquery carry `fact_id = ANY($2)`, so the sources are read through `typed_fact_sources_pkey` and the primary key of `implied_fact_sources`. For the whole base the statement is the one from before this record. `sync_typed_attestation` picks the form by whether rows are given.
-- `time_resolution::attest_statements` no longer syncs the whole base. It takes the statements the document's live chunks are evidence for, looks up the typed rows that follow them (`materialize::typed_rows_following`: materialized from them or read from them by a rule) and syncs those rows. All of the document's statements, not only the ones this pass moved: a pass interrupted after it attested them finds nothing left to move on its retry.
+- `materialize::typed_attestation_sql` builds the statement in three forms: for the whole base (the statement from before this record), for given rows (both branches of the source subquery carry `fact_id = ANY($2)`, so the sources are read through `typed_fact_sources_pkey` and the primary key of `implied_fact_sources`), and for the rows that follow given statements (resolved through `typed_fact_sources_statement_idx` and `implied_fact_sources_statement_idx` in the same statement).
+- `time_resolution::attest_statements` no longer syncs the whole base. It takes the statements the document's live chunks are evidence for and syncs the typed rows that follow them (`materialize::sync_typed_attestation_following`: materialized from them or read from them by a rule). The rows are resolved in the same statement that updates them, so a row a timeline correction put in place of one of them in the meantime (it carries the source links over) is synced too. All of the document's statements, not only the ones this pass moved: a pass interrupted after it attested them finds nothing left to move on its retry.
 - A materialization still syncs the whole base.
 
 ## Consequences

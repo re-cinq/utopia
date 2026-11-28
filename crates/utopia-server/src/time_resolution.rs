@@ -834,12 +834,9 @@ async fn attest_statements(
     // Typed rows already materialized by rules follow their statements. Only the rows that follow this document's statements (RC-012): a sync of
     // the whole base per dated document read the base's every fact. All of the document's statements, not just those this pass moved: a pass
     // interrupted after it attested them finds nothing left to move on its retry, and their typed rows would stay behind
-    let following = utopia_store::materialize::typed_rows_following(pool, &statements).await?;
-    let typed = if following.is_empty() {
-        Vec::new()
-    } else {
-        utopia_store::materialize::sync_typed_attestation(pool, doc.kb_id, Some(&following)).await?
-    };
+    let typed =
+        utopia_store::materialize::sync_typed_attestation_following(pool, doc.kb_id, &statements)
+            .await?;
     // Rows whose witness changed take a new place on the uniqueness timeline: recompute only the timelines those rows sit in, not the whole database
     // -- re-running every timeline across the database in a transaction for each document would be thousands of transactions per document once the database grows.
     // Commit the sync first, then take the timeline lock; do not wait for the advisory lock while holding an UPDATE row lock (same order as reconciliation after a materialization commit)
