@@ -390,39 +390,45 @@ async fn materialize_in_tx(
         .bind(d.statement)
         .execute(&mut **tx)
         .await?;
-        // 证据每次都抄：证据是同一段原文的同一处引文
-        sqlx::query(
-            "INSERT INTO fact_evidence (fact_id, chunk_id, quote, document_id, doc_version,
-                                        proposed_predicate, quote_start, quote_end)
-             SELECT $1, chunk_id, quote, document_id, doc_version, proposed_predicate,
-                    quote_start, quote_end
-               FROM fact_evidence WHERE fact_id = $2
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(fact)
-        .bind(d.statement)
-        .execute(&mut **tx)
-        .await?;
-        // 角色词只抄行还没有的角色（0070 决定 1 的修订）：并进已有行的陈述若对同一角色
-        // 说了别的值，抄过来这一行就同时读到两个值；别的值由决定 4 带过来
-        sqlx::query(
-            "INSERT INTO statement_qualifiers (fact_id, role, value, entity_id, chunk_id)
-             SELECT $1, q.role, q.value, q.entity_id, q.chunk_id
-               FROM statement_qualifiers q
-              WHERE q.fact_id = $2
-                AND NOT EXISTS (SELECT 1 FROM statement_qualifiers n
-                                 WHERE n.fact_id = $1 AND n.role = q.role)
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(fact)
-        .bind(d.statement)
-        .execute(&mut **tx)
-        .await?;
     }
     // 3a. 已批准的规则算隐含行（0044 决定 3 第五片）。读数只查缓存：缓存里没有的这一轮
     //     不算，`read_phrases` 填上之后再来。短语规则按陈述触发，类别词规则按实体触发
     let implied = imply_in_tx(tx, kb_id, &mut written, &mut unreadable).await?;
     record_unreadable(tx, kb_id, &unreadable).await?;
+    // 证据和角色词整库一次补：来源陈述的引文和角色词抄到活着的类型化行和隐含行上，排在 3a 之后
+    // 本轮写下的行也覆盖；行已有的靠主键跳过（0070 决定 4）
+    sqlx::query(
+        "INSERT INTO fact_evidence (fact_id, chunk_id, quote, document_id, doc_version,
+                                    proposed_predicate, quote_start, quote_end)
+         SELECT t.id, e.chunk_id, e.quote, e.document_id, e.doc_version, e.proposed_predicate,
+                e.quote_start, e.quote_end
+           FROM facts t
+           JOIN (SELECT fact_id, statement_id FROM typed_fact_sources
+                  UNION SELECT fact_id, statement_id FROM implied_fact_sources) src
+             ON src.fact_id = t.id
+           JOIN fact_evidence e ON e.fact_id = src.statement_id
+          WHERE t.kb_id = $1 AND t.layer = 'typed' AND t.invalidated_at IS NULL
+         ON CONFLICT DO NOTHING",
+    )
+    .persistent(false)
+    .bind(kb_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO statement_qualifiers (fact_id, role, value, entity_id, chunk_id)
+         SELECT t.id, q.role, q.value, q.entity_id, q.chunk_id
+           FROM facts t
+           JOIN (SELECT fact_id, statement_id FROM typed_fact_sources
+                  UNION SELECT fact_id, statement_id FROM implied_fact_sources) src
+             ON src.fact_id = t.id
+           JOIN statement_qualifiers q ON q.fact_id = src.statement_id
+          WHERE t.kb_id = $1 AND t.layer = 'typed' AND t.invalidated_at IS NULL
+         ON CONFLICT DO NOTHING",
+    )
+    .persistent(false)
+    .bind(kb_id)
+    .execute(&mut **tx)
+    .await?;
     // 3b. 见证跟着来源陈述走（0064 决定 3、5）：类型化的行自己没有出处。物化与算隐含行
     //     用的写入口在陈述没有见证时填的是此刻（那是给人写的事实用的缺省），这里改回陈述的。
     //     排在 3a 之后：规则算出的行也是这样写下的
@@ -649,21 +655,6 @@ async fn imply_in_tx(
         .bind(d.entity)
         .execute(&mut **tx)
         .await?;
-        // 证据：短语规则抄触发它的那条陈述的引文——读的人从这句得出的结论，证据就是这句
-        if let Some(statement) = d.statement {
-            sqlx::query(
-                "INSERT INTO fact_evidence (fact_id, chunk_id, quote, document_id, doc_version,
-                                            proposed_predicate, quote_start, quote_end)
-                 SELECT $1, chunk_id, quote, document_id, doc_version, proposed_predicate,
-                        quote_start, quote_end
-                   FROM fact_evidence WHERE fact_id = $2
-                 ON CONFLICT DO NOTHING",
-            )
-            .bind(fact)
-            .bind(statement)
-            .execute(&mut **tx)
-            .await?;
-        }
     }
     Ok(implied)
 }

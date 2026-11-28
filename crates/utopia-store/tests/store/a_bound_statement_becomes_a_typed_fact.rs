@@ -222,11 +222,10 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
                 .bind(typed_id)
                 .fetch_one(&pool)
                 .await?;
-        // 并进来的那条说 since 2021：行已有 since，不抄，只读建行那条的 2019；
-        // 它说的 until 行还没有，跟进来
+        // 并进来的那条说 since 2021：两条都在活的分块上，两个值都抄过来（0070 决定 2、4）
         let qualifiers: Vec<(String, String, Uuid)> = sqlx::query_as(
             "SELECT role, value #>> '{}', chunk_id FROM statement_qualifiers
-              WHERE fact_id = $1 ORDER BY role",
+              WHERE fact_id = $1 ORDER BY role, value #>> '{}'",
         )
         .bind(typed_id)
         .fetch_all(&pool)
@@ -238,6 +237,7 @@ async fn a_bound_statement_becomes_a_typed_fact() -> anyhow::Result<()> {
                 2,
                 vec![
                     ("since".to_string(), "2019".to_string(), stated_chunk),
+                    ("since".to_string(), "2021".to_string(), again_chunk),
                     ("until".to_string(), "2024".to_string(), again_chunk),
                 ]
             )

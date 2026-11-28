@@ -1,6 +1,6 @@
 # 0070 · A role word speaks while its chunk is live
 
-- **Status**: In progress · 2026-10-25 · [#1267](https://github.com/deeplethe/utopia/issues/1267) · decision 1 built (migration 0121), decisions 2 and 3 built (`record_axis::role_word_speaks_given`, the three `mood` checks included) · open: decision 4
+- **Status**: Implemented · 2026-11-28 · #1428, #1450, migration 0121 · open: flagging contested role words
 - **Written**: 2026-10-16 (conventions in the [README](README.md))
 - **Related**: [0037](0037-a-relation-carries-its-own-attributes.md) decided that a qualifier is not part of a fact's identity and that the first value stays; [0044](0044-the-ontology-is-a-view-over-what-documents-say.md) owns the open statement and the role words on it; [0054](0054-a-source-may-push-statements-in-the-open-contract.md) decision 7 is the re-push that supersedes a chunk; migration `0061` created `statement_qualifiers`; [0048](0048-provenance-references-stay-inside-the-knowledge-base.md) gets one more edge to keep inside the base; [0019](0019-the-second-clock-can-be-rewound.md) is the record axis `as_of` reads on; [#1267](https://github.com/deeplethe/utopia/issues/1267), [#1272](https://github.com/deeplethe/utopia/issues/1272)
 
@@ -25,6 +25,8 @@ Three facts of the code make it so:
 The backfill copies each existing `(fact, role)` value onto every evidence chunk of its fact, superseded ones included. Attaching it only to the earliest chunk would hide role words that show today: for a statement already re-pushed under 0054 decision 7, the earliest chunk is superseded, the live chunk carries no row because `DO NOTHING` dropped it, and under decision 2 the role would disappear. With the value on every chunk, every read after the migration returns exactly what it returned before; only the pushes that follow can change a value.
 
 *Revised with migration 0121 (2026-10-30).* As first written this decision put each role word on every evidence chunk of its fact. That holds for open statements. A typed row can have several source statements, and their chunks are all its evidence, so copying a value onto all of them would let a statement speak for a value it never said. A typed row takes a role word only on the chunk of a source statement that said the same value; the migration falls back to every evidence chunk only when no source gave that value. At runtime `materialize` copies onto a typed row only the roles the row does not have yet: a statement that merges in brings its new roles, and a different value for a role the row already has stays on the statement, or the row would read two. Bringing the other values across is decision 4.
+
+*Revised with decision 4 (2026-11-28).* `materialize` no longer holds back a role the row already has. On each run it copies every row the row's statements carry, so a typed row whose statements disagree reads both values, the way two live statements do (decision 2).
 
 `chunk_id` is a new provenance edge, and 0048's invariant covers it: the owner-derived trigger `statement_qualifiers_same_kb` checks that the chunk's document is in the fact's base, and the export preflight scans the edge.
 
