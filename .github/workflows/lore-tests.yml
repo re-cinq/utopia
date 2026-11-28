@@ -1,0 +1,201 @@
+name: Lore Tests
+
+# Ingest runs on push to the default branch (re-dev) so coverage describes the merged
+# state. The pull_request trigger exists only for the draft jobs. This workflow only
+# sets up each toolchain and runs Lore's prebuilt `lore-code-trace` binary; it reads
+# .lore/test-commands.yml. The repo's own CI (checks.yml) is separate and unchanged.
+on:
+  push:
+    branches: [re-dev]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  rust:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: utopia
+          POSTGRES_PASSWORD: utopia
+          POSTGRES_DB: utopia
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - name: Install PDF and PostgreSQL test tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y poppler-utils poppler-data postgresql-client-16
+          echo '/usr/lib/postgresql/16/bin' >> "$GITHUB_PATH"
+      - name: Migrate the test database
+        run: cargo run -p utopia-store --example migrate
+        env:
+          UTOPIA_DATABASE_URL: postgres://utopia:utopia@localhost:5432/utopia
+      - name: Fetch lore-code-trace
+        env:
+          LORE_INGEST_URL: ${{ secrets.LORE_INGEST_URL || vars.LORE_INGEST_URL || vars.LORE_API_URL }}
+        run: |
+          if [ -z "${LORE_INGEST_URL}" ]; then
+            echo "::warning::LORE_INGEST_URL is not set - skipping Lore test ingest"
+            exit 0
+          fi
+          if curl -fsS --connect-timeout 20 --retry 6 --retry-delay 30 --retry-all-errors \
+              -o lore-code-trace "${LORE_INGEST_URL}/dist/lore-code-trace/linux-amd64" \
+            && curl -fsS --connect-timeout 20 --retry 6 --retry-delay 30 --retry-all-errors \
+              -o checksums.txt "${LORE_INGEST_URL}/dist/lore-code-trace/checksums.txt" \
+            && grep " linux-amd64\$" checksums.txt | sed 's| linux-amd64$| lore-code-trace|' | sha256sum -c -; then
+            chmod +x lore-code-trace
+          else
+            rm -f lore-code-trace
+            echo "::warning::could not fetch lore-code-trace - skipping Lore test ingest"
+          fi
+      - name: Run tests and ingest
+        env:
+          LORE_API_URL: ${{ secrets.LORE_INGEST_URL || vars.LORE_INGEST_URL || vars.LORE_API_URL }}
+          LORE_CI_AUTH: ${{ vars.LORE_CI_AUTH }}
+          UTOPIA_DATABASE_URL: postgres://utopia:utopia@localhost:5432/utopia
+        run: |
+          if [ -x ./lore-code-trace ]; then
+            ./lore-code-trace --post || echo "::warning::Lore test ingest failed"
+          fi
+
+  web:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+      - name: Fetch lore-code-trace
+        env:
+          LORE_INGEST_URL: ${{ secrets.LORE_INGEST_URL || vars.LORE_INGEST_URL || vars.LORE_API_URL }}
+        run: |
+          if [ -z "${LORE_INGEST_URL}" ]; then
+            echo "::warning::LORE_INGEST_URL is not set - skipping Lore test ingest"
+            exit 0
+          fi
+          if curl -fsS --connect-timeout 20 --retry 6 --retry-delay 30 --retry-all-errors \
+              -o lore-code-trace "${LORE_INGEST_URL}/dist/lore-code-trace/linux-amd64" \
+            && curl -fsS --connect-timeout 20 --retry 6 --retry-delay 30 --retry-all-errors \
+              -o checksums.txt "${LORE_INGEST_URL}/dist/lore-code-trace/checksums.txt" \
+            && grep " linux-amd64\$" checksums.txt | sed 's| linux-amd64$| lore-code-trace|' | sha256sum -c -; then
+            chmod +x lore-code-trace
+          else
+            rm -f lore-code-trace
+            echo "::warning::could not fetch lore-code-trace - skipping Lore test ingest"
+          fi
+      - name: Run tests and ingest
+        env:
+          LORE_API_URL: ${{ secrets.LORE_INGEST_URL || vars.LORE_INGEST_URL || vars.LORE_API_URL }}
+          LORE_CI_AUTH: ${{ vars.LORE_CI_AUTH }}
+        run: |
+          if [ -x ./lore-code-trace ]; then
+            ./lore-code-trace --post || echo "::warning::Lore test ingest failed"
+          fi
+
+  rust-draft:
+    if: github.event.pull_request.draft == true
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: utopia
+          POSTGRES_PASSWORD: utopia
+          POSTGRES_DB: utopia
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - name: Install PDF and PostgreSQL test tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y poppler-utils poppler-data postgresql-client-16
+          echo '/usr/lib/postgresql/16/bin' >> "$GITHUB_PATH"
+      - name: Migrate the test database
+        run: cargo run -p utopia-store --example migrate
+        env:
+          UTOPIA_DATABASE_URL: postgres://utopia:utopia@localhost:5432/utopia
+      - name: Fetch lore-code-trace
+        env:
+          LORE_INGEST_URL: ${{ secrets.LORE_INGEST_URL || vars.LORE_INGEST_URL || vars.LORE_API_URL }}
+        run: |
+          curl -fsS --connect-timeout 20 --retry 6 --retry-delay 30 --retry-all-errors \
+            -o lore-code-trace "${LORE_INGEST_URL}/dist/lore-code-trace/linux-amd64"
+          curl -fsS --connect-timeout 20 --retry 6 --retry-delay 30 --retry-all-errors \
+            -o checksums.txt "${LORE_INGEST_URL}/dist/lore-code-trace/checksums.txt"
+          grep " linux-amd64\$" checksums.txt | sed 's| linux-amd64$| lore-code-trace|' | sha256sum -c -
+          chmod +x lore-code-trace
+      - name: Run the tests this change reaches
+        env:
+          LORE_API_URL: ${{ secrets.LORE_INGEST_URL || vars.LORE_INGEST_URL || vars.LORE_API_URL }}
+          LORE_CI_AUTH: ${{ vars.LORE_CI_AUTH }}
+          UTOPIA_DATABASE_URL: postgres://utopia:utopia@localhost:5432/utopia
+        run: ./lore-code-trace --affected --base origin/${{ github.base_ref }}
+
+  web-draft:
+    if: github.event.pull_request.draft == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+      - name: Fetch lore-code-trace
+        env:
+          LORE_INGEST_URL: ${{ secrets.LORE_INGEST_URL || vars.LORE_INGEST_URL || vars.LORE_API_URL }}
+        run: |
+          curl -fsS --connect-timeout 20 --retry 6 --retry-delay 30 --retry-all-errors \
+            -o lore-code-trace "${LORE_INGEST_URL}/dist/lore-code-trace/linux-amd64"
+          curl -fsS --connect-timeout 20 --retry 6 --retry-delay 30 --retry-all-errors \
+            -o checksums.txt "${LORE_INGEST_URL}/dist/lore-code-trace/checksums.txt"
+          grep " linux-amd64\$" checksums.txt | sed 's| linux-amd64$| lore-code-trace|' | sha256sum -c -
+          chmod +x lore-code-trace
+      - name: Run the tests this change reaches
+        env:
+          LORE_API_URL: ${{ secrets.LORE_INGEST_URL || vars.LORE_INGEST_URL || vars.LORE_API_URL }}
+          LORE_CI_AUTH: ${{ vars.LORE_CI_AUTH }}
+        run: ./lore-code-trace --affected --base origin/${{ github.base_ref }}

@@ -1,0 +1,134 @@
+# Suggested Lore test-command manifest. A scaffold for the team to review and adjust.
+# Two toolchains, so one entry each: the Cargo workspace at the repo root, and the
+# vitest suite under web/. Both mirror what CI already runs; nothing here changes
+# test behaviour.
+#
+# Coverage: neither toolchain declares a coverage dependency (no cargo-llvm-cov, no
+# @vitest/coverage-v8), and none is added here. `run` therefore reports the pass/fail
+# verdict as `json` with an empty `covered` list. Add per-test coverage once the team
+# picks a provider.
+#
+# Database-backed Rust tests skip unless UTOPIA_DATABASE_URL is set (and fail instead of
+# skipping with UTOPIA_TEST_REQUIRE_DB=1), see CONTRIBUTING.md.
+- name: rust
+  cwd: .
+  # id is `<crate>::<native test path>`; the crate is split off again in `run`.
+  # Line ranges come from scanning the source, since the runner's listing has none.
+  list: |
+    python3 -I - <<'PY'
+    import json, os, re
+    tests = []
+    def braces(s):
+        s = re.sub(r'"(\\.|[^"\\])*"', '""', s)
+        s = re.sub(r"'(\\.|[^'\\])'", "''", s)
+        s = s.split("//")[0]
+        return s.count("{") - s.count("}")
+    def module_path(parts):
+        return parts[:-1] if parts and parts[-1] in ("lib", "main", "mod") else parts
+    # `#[path = "x_tests.rs"] mod tests;` mounts a file under its declaring module.
+    mounted = {}
+    for crate in sorted(os.listdir("crates")):
+        src = os.path.join("crates", crate, "src")
+        for root, _, files in os.walk(src):
+            for f in files:
+                if not f.endswith(".rs"):
+                    continue
+                path = os.path.join(root, f)
+                owner = module_path(os.path.relpath(path, src)[:-3].split(os.sep))
+                text = open(path, encoding="utf-8").read()
+                for target, name in re.findall(r'#\[path\s*=\s*"([^"]+)"\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;', text):
+                    mounted[os.path.normpath(os.path.join(root, target))] = owner + [name]
+    for crate in sorted(os.listdir("crates")):
+        for sub in ("src", "tests"):
+            for root, _, files in os.walk(os.path.join("crates", crate, sub)):
+                for f in sorted(files):
+                    if not f.endswith(".rs"):
+                        continue
+                    path = os.path.join(root, f)
+                    rel = os.path.relpath(path, os.path.join("crates", crate, sub))
+                    parts = module_path(rel[:-3].split(os.sep))
+                    # a tests/<dir>/ target is one binary named <dir>; its files are modules in it
+                    base = mounted.get(os.path.normpath(path), parts) if sub == "src" else parts[1:]
+                    lines = open(path, encoding="utf-8").read().split("\n")
+                    depth, mods, i = 0, [], 0
+                    while i < len(lines):
+                        line = lines[i]
+                        m = re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*\{", line)
+                        if m:
+                            mods.append((m.group(1), depth))
+                        if re.match(r"\s*#\[(tokio::)?test\b", line):
+                            j = i
+                            while j < len(lines) and not re.search(r"\bfn\s+\$?\w+", lines[j]):
+                                j += 1
+                            name = re.search(r"\bfn\s+(\$?\w+)", lines[j]).group(1)
+                            if name.startswith("$"):
+                                # a macro_rules! template; its expansions have no source line of their own
+                                depth += braces(line)
+                                i += 1
+                                continue
+                            d, k, seen = 0, j, False
+                            while k < len(lines):
+                                d += braces(lines[k])
+                                seen = seen or "{" in lines[k]
+                                if seen and d <= 0:
+                                    break
+                                k += 1
+                            native = "::".join(base + [n for n, _ in mods] + [name])
+                            tests.append({"id": crate + "::" + native, "name": name,
+                                          "file": path, "startLine": i + 1, "endLine": k + 1})
+                        depth += braces(line)
+                        while mods and depth <= mods[-1][1]:
+                            mods.pop()
+                        i += 1
+    print(json.dumps(tests))
+    PY
+  run: |
+    sel='{selector}'
+    pkg="${sel%%::*}"
+    name="${sel#*::}"
+    if cargo test -p "$pkg" -- --exact "$name" >&2; then ok=true; else ok=false; fi
+    printf '{"passed": %s, "covered": []}\n' "$ok"
+  coverage_format: json
+  run_all_when:
+    - Cargo.toml
+    - Cargo.lock
+    - "crates/*/Cargo.toml"
+    - "migrations/**"
+  list_files: git grep -lE '#\[(tokio::)?test' -- 'crates/*/src/*.rs' 'crates/*/tests/*.rs' | jq -R -s -c 'split("\n") | map(select(. != ""))'
+- name: web
+  cwd: web
+  # id is `<file>::<full vitest name>`; the line range is resolved from the test file.
+  list: |
+    pnpm exec vitest list --json 2>/dev/null | python3 -I -c '
+    import json, os, re, sys
+    out = []
+    for t in json.load(sys.stdin):
+        f = os.path.relpath(t["file"])
+        leaf = t["name"].split(" > ")[-1]
+        lines = open(f, encoding="utf-8").read().split("\n")
+        start = next((n for n, l in enumerate(lines) if leaf in l and re.search(r"\b(it|test)\b", l)), 0)
+        depth, end, seen = 0, start, False
+        for n in range(start, len(lines)):
+            depth += lines[n].count("{") - lines[n].count("}")
+            seen = seen or "{" in lines[n]
+            if seen and depth <= 0:
+                end = n
+                break
+        out.append({"id": f + "::" + t["name"], "name": t["name"], "file": f,
+                    "startLine": start + 1, "endLine": end + 1})
+    print(json.dumps(out))'
+  run: |
+    sel='{selector}'
+    file="${sel%%::*}"
+    # vitest matches -t against the suite and test names joined by spaces, not " > "
+    name=$(printf '%s' "${sel#*::}" | sed 's/ > / /g')
+    pattern=$(python3 -I -c 'import re, sys; print("^" + re.escape(sys.argv[1]) + "$")' "$name")
+    if pnpm exec vitest run "$file" -t "$pattern" >&2; then ok=true; else ok=false; fi
+    printf '{"passed": %s, "covered": []}\n' "$ok"
+  coverage_format: json
+  run_all_when:
+    - package.json
+    - pnpm-lock.yaml
+    - vite.config.ts
+    - tsconfig.json
+  list_files: git ls-files 'src/**/*.test.ts' | jq -R -s -c 'split("\n") | map(select(. != ""))'
