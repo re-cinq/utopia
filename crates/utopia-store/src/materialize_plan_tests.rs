@@ -211,7 +211,7 @@ async fn attestation_sync_reads_only_the_facts_of_its_base() -> anyhow::Result<(
 
     let plan: serde_json::Value = sqlx::query_scalar(&format!(
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
-        super::TYPED_ATTESTATION_SQL
+        super::typed_attestation_sql(super::SyncScope::Base)
     ))
     .persistent(false)
     .bind(base)
@@ -228,6 +228,153 @@ async fn attestation_sync_reads_only_the_facts_of_its_base() -> anyhow::Result<(
     );
     Ok(())
 }
+const GIVEN_BASE_STATEMENTS: u32 = 120_000;
+const GIVEN_ROWS: i64 = 7;
+
+/// A recompute for a few rows (a deleted document's, or those following a dated document's statements)
+/// reads those rows' sources, not the base: on the internal cluster a recompute for seven facts read the
+/// base's 7.3 M facts and all 4.6 M sources and took three minutes (RC-012).
+#[tokio::test]
+async fn attestation_sync_of_given_rows_reads_only_their_sources() -> anyhow::Result<()> {
+    let Some(url) = crate::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await?;
+    let (base, rule) = (Uuid::now_v7(), Uuid::now_v7());
+    let mut tx = pool.begin().await?;
+    for table in [
+        "facts",
+        "typed_fact_sources",
+        "implied_fact_sources",
+        "implication_rules",
+    ] {
+        sqlx::raw_sql(&format!(
+            "CREATE TEMP TABLE {table} (LIKE public.{table} INCLUDING ALL) ON COMMIT DROP"
+        ))
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::raw_sql(&format!(
+        "INSERT INTO facts (id, kb_id, subject_id, object_value, layer, phrase, attested_from)
+              SELECT gen_random_uuid(), '{base}', gen_random_uuid(), '1'::jsonb, 'open',
+                     'statement ' || n, now() - make_interval(days => n % 900)
+                FROM generate_series(1, {GIVEN_BASE_STATEMENTS}) n;
+         INSERT INTO facts (id, kb_id, subject_id, object_value, layer, phrase, attested_from)
+              SELECT gen_random_uuid(), '{base}', gen_random_uuid(), '1'::jsonb, 'typed',
+                     'typed ' || n, now()
+                FROM generate_series(1, {GIVEN_BASE_STATEMENTS}) n;
+         INSERT INTO typed_fact_sources (fact_id, statement_id)
+              SELECT t.id, s.id
+                FROM (SELECT id, row_number() OVER () n FROM facts WHERE layer = 'typed') t
+                JOIN (SELECT id, row_number() OVER () n FROM facts WHERE layer = 'open') s
+                  USING (n);
+         INSERT INTO implication_rules (id, kb_id, trigger, phrase, conclude_property_id, status)
+              VALUES ('{rule}', '{base}', 'phrase', 'statement', gen_random_uuid(), 'approved');
+         -- a tenth of the typed rows are also read by a rule from their statement
+         INSERT INTO implied_fact_sources (fact_id, rule_id, statement_id)
+              SELECT ts.fact_id, '{rule}', ts.statement_id
+                FROM (SELECT fact_id, statement_id, row_number() OVER () n FROM typed_fact_sources) ts
+               WHERE ts.n % 10 = 0;
+         ANALYZE pg_temp.facts; ANALYZE pg_temp.typed_fact_sources;
+         ANALYZE pg_temp.implied_fact_sources; ANALYZE pg_temp.implication_rules"
+    ))
+    .execute(&mut *tx)
+    .await?;
+    let mut given: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT fact_id FROM (SELECT fact_id, row_number() OVER () n FROM typed_fact_sources) ts
+          WHERE ts.n % 10 = 0 LIMIT $1",
+    )
+    .bind(GIVEN_ROWS)
+    .fetch_all(&mut *tx)
+    .await?;
+    // two rows a rule read from a statement and nothing materialized: reached only through `implied_fact_sources`
+    let implied_only: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "WITH s AS (INSERT INTO facts (id, kb_id, subject_id, object_value, layer, phrase, attested_from)
+                    SELECT gen_random_uuid(), '{base}', gen_random_uuid(), '1'::jsonb, 'open', 'ruled ' || n, now() - interval '9 days'
+                      FROM generate_series(1, 2) n RETURNING id),
+              t AS (INSERT INTO facts (id, kb_id, subject_id, object_value, layer, phrase, implied, attested_from)
+                    SELECT gen_random_uuid(), '{base}', gen_random_uuid(), '1'::jsonb, 'typed', 'ruled', true, now()
+                      FROM generate_series(1, 2) RETURNING id),
+              pairs AS (SELECT s.id AS statement_id, t.id AS fact_id
+                          FROM (SELECT id, row_number() OVER () n FROM s) s
+                          JOIN (SELECT id, row_number() OVER () n FROM t) t USING (n))
+         INSERT INTO implied_fact_sources (fact_id, rule_id, statement_id)
+              SELECT fact_id, '{rule}', statement_id FROM pairs RETURNING fact_id"
+    ))
+    .fetch_all(&mut *tx)
+    .await?;
+    given.extend(&implied_only);
+
+    let plan: serde_json::Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        super::typed_attestation_sql(super::SyncScope::Rows)
+    ))
+    .persistent(false)
+    .bind(base)
+    .bind(&given)
+    .fetch_one(&mut *tx)
+    .await?;
+    // the same rows reached through their statements (a dated document's pass)
+    let statements: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT statement_id FROM typed_fact_sources WHERE fact_id = ANY($1)
+         UNION
+         SELECT statement_id FROM implied_fact_sources WHERE fact_id = ANY($1)",
+    )
+    .bind(&given)
+    .fetch_all(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE facts SET attested_from = now() WHERE id = ANY($1)")
+        .bind(&given)
+        .execute(&mut *tx)
+        .await?;
+    let following: serde_json::Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        super::typed_attestation_sql(super::SyncScope::FollowingStatements)
+    ))
+    .persistent(false)
+    .bind(base)
+    .bind(&statements)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+    let following_top = &following[0]["Plan"];
+    let (following_facts, following_sources, following_rule_sources) = (
+        rows_read_from(following_top, "facts"),
+        rows_read_from(following_top, "typed_fact_sources"),
+        rows_read_from(following_top, "implied_fact_sources"),
+    );
+    assert_eq!(
+        following_top["Actual Rows"].as_u64(),
+        Some(9),
+        "all rows following the 9 statements move: {following:#}"
+    );
+    assert!(
+        following_facts < 200 && following_sources < 200 && following_rule_sources < 200,
+        "{following_facts} facts rows, {following_sources} source rows and {following_rule_sources} rule source rows read for the rows following 9 statements: {following:#}"
+    );
+
+    let top = &plan[0]["Plan"];
+    let (facts, sources, rule_sources) = (
+        rows_read_from(top, "facts"),
+        rows_read_from(top, "typed_fact_sources"),
+        rows_read_from(top, "implied_fact_sources"),
+    );
+    assert_eq!(given.len(), 9);
+    assert_eq!(
+        top["Actual Rows"].as_u64(),
+        Some(9),
+        "all given rows move: {plan:#}"
+    );
+    assert!(
+        facts < 200 && sources < 200 && rule_sources < 200,
+        "{facts} facts rows, {sources} source rows and {rule_sources} rule source rows read for 9 given rows in a base of {GIVEN_BASE_STATEMENTS} statements: {plan:#}"
+    );
+    Ok(())
+}
+
 /// Rows the plan read from `relation`, counting what filters threw away, over all loops.
 fn rows_read_from(node: &serde_json::Value, relation: &str) -> u64 {
     let own_rows = if node["Relation Name"].as_str() == Some(relation) {

@@ -330,3 +330,177 @@ async fn a_sync_for_one_base_leaves_the_implied_rows_of_another_base_alone() -> 
     assert_eq!(attested, (None, None));
     Ok(())
 }
+
+/// Four stale rows of every kind the sync knows, with what the whole-base sync makes of each.
+async fn four_stale_rows(pool: &PgPool, base: &Base) -> anyhow::Result<Vec<(Uuid, Anchor)>> {
+    let live = statement(pool, base, Some((day(2026, 9, 4), "live report"))).await?;
+    let earlier = statement(pool, base, Some((day(2024, 3, 1), "earlier report"))).await?;
+    let dead = statement(pool, base, Some((day(2015, 1, 1), "dead report"))).await?;
+    invalidate(pool, dead).await?;
+    let unstated = statement(pool, base, None).await?;
+    let materialized = materialized_from(pool, base, &[live, earlier, dead]).await?;
+    let implied = typed_row(pool, base, true, Some((day(2030, 1, 1), "stale"))).await?;
+    implied_from_statement(pool, base, implied, live).await?;
+    implied_from_entity(pool, base, implied).await?;
+    let from_the_dead = materialized_from(pool, base, &[dead]).await?;
+    sqlx::query("UPDATE facts SET attested_from = $2, attested_by = 'stale' WHERE id = $1")
+        .bind(from_the_dead)
+        .bind(day(2030, 1, 1))
+        .execute(pool)
+        .await?;
+    let from_the_unstated = materialized_from(pool, base, &[unstated]).await?;
+    sqlx::query("UPDATE facts SET attested_from = $2, attested_by = 'stale' WHERE id = $1")
+        .bind(from_the_unstated)
+        .bind(day(2030, 1, 1))
+        .execute(pool)
+        .await?;
+    Ok(vec![
+        (materialized, anchored(day(2024, 3, 1), "earlier report")),
+        (implied, anchored(day(2026, 9, 4), "live report")),
+        (from_the_dead, (None, None)),
+        (from_the_unstated, (None, None)),
+    ])
+}
+
+#[tokio::test]
+async fn a_sync_of_given_rows_attests_them_as_the_whole_base_sync_does() -> anyhow::Result<()> {
+    let Some(pool) = pool().await? else {
+        return Ok(());
+    };
+    let (whole, given) = (base(&pool).await?, base(&pool).await?);
+    let by_whole_base = four_stale_rows(&pool, &whole).await?;
+    let by_given_rows = four_stale_rows(&pool, &given).await?;
+    let rows: Vec<Uuid> = by_given_rows.iter().map(|(row, _)| *row).collect();
+
+    let mut moved_whole = sync_typed_attestation(&pool, whole.kb, None).await?;
+    let mut moved_given = sync_typed_attestation(&pool, given.kb, Some(&rows)).await?;
+
+    let mut expected = Vec::new();
+    let mut attested = Vec::new();
+    for ((whole_row, anchor_expected), (given_row, _)) in by_whole_base.iter().zip(&by_given_rows) {
+        expected.push((anchor(&pool, *whole_row).await?, anchor_expected.clone()));
+        attested.push(anchor(&pool, *given_row).await?);
+    }
+    cleanup(&pool, &[&whole, &given]).await?;
+    for ((by_whole, wanted), by_given) in expected.iter().zip(&attested) {
+        assert_eq!(by_whole, wanted, "the whole-base sync");
+        assert_eq!(by_given, wanted, "the sync of given rows");
+    }
+    moved_whole.sort();
+    moved_given.sort();
+    let mut all_whole: Vec<Uuid> = by_whole_base.iter().map(|(row, _)| *row).collect();
+    let mut all_given = rows;
+    all_whole.sort();
+    all_given.sort();
+    assert_eq!(
+        moved_whole, all_whole,
+        "rows the whole-base sync reports as moved"
+    );
+    assert_eq!(
+        moved_given, all_given,
+        "rows the sync of given rows reports as moved"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sync_of_given_rows_leaves_the_rows_not_given_alone() -> anyhow::Result<()> {
+    let Some(pool) = pool().await? else {
+        return Ok(());
+    };
+    let base = base(&pool).await?;
+    let source = statement(&pool, &base, Some((day(2026, 9, 4), "live report"))).await?;
+    let given = materialized_from(&pool, &base, &[source]).await?;
+    let not_given = materialized_from(&pool, &base, &[source]).await?;
+
+    let moved = sync_typed_attestation(&pool, base.kb, Some(&[given])).await?;
+
+    let (attested, left) = (anchor(&pool, given).await?, anchor(&pool, not_given).await?);
+    cleanup(&pool, &[&base]).await?;
+    assert_eq!(attested, anchored(day(2026, 9, 4), "live report"));
+    assert_eq!(left, (None, None));
+    assert_eq!(moved, vec![given]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sync_of_given_rows_leaves_a_given_row_of_another_base_alone() -> anyhow::Result<()> {
+    let Some(pool) = pool().await? else {
+        return Ok(());
+    };
+    let (synced, other) = (base(&pool).await?, base(&pool).await?);
+    let source = statement(&pool, &other, Some((day(2026, 9, 4), "other report"))).await?;
+    let row = materialized_from(&pool, &other, &[source]).await?;
+
+    let moved = sync_typed_attestation(&pool, synced.kb, Some(&[row])).await?;
+
+    let attested = anchor(&pool, row).await?;
+    cleanup(&pool, &[&synced, &other]).await?;
+    assert_eq!(attested, (None, None));
+    assert_eq!(moved, Vec::<Uuid>::new());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sync_following_statements_attests_the_rows_materialized_or_implied_from_them(
+) -> anyhow::Result<()> {
+    let Some(pool) = pool().await? else {
+        return Ok(());
+    };
+    let base = base(&pool).await?;
+    let followed = statement(&pool, &base, Some((day(2026, 9, 4), "live report"))).await?;
+    let other = statement(&pool, &base, Some((day(2024, 3, 1), "earlier report"))).await?;
+    let materialized = materialized_from(&pool, &base, &[followed, other]).await?;
+    let implied = typed_row(&pool, &base, true, None).await?;
+    implied_from_statement(&pool, &base, implied, followed).await?;
+    let of_the_other = materialized_from(&pool, &base, &[other]).await?;
+
+    let mut moved =
+        utopia_store::materialize::sync_typed_attestation_following(&pool, base.kb, &[followed])
+            .await?;
+    let none =
+        utopia_store::materialize::sync_typed_attestation_following(&pool, base.kb, &[]).await?;
+
+    let attested = (
+        anchor(&pool, materialized).await?,
+        anchor(&pool, implied).await?,
+        anchor(&pool, of_the_other).await?,
+    );
+    cleanup(&pool, &[&base]).await?;
+    moved.sort();
+    let mut expected = vec![materialized, implied];
+    expected.sort();
+    assert_eq!(moved, expected);
+    assert_eq!(none, Vec::<Uuid>::new());
+    // the materialized row takes the earliest of all its sources, here the one that is not followed
+    assert_eq!(attested.0, anchored(day(2024, 3, 1), "earlier report"));
+    assert_eq!(attested.1, anchored(day(2026, 9, 4), "live report"));
+    assert_eq!(attested.2, (None, None));
+    Ok(())
+}
+
+/// A timeline correction puts a new row in place of a typed row and carries its source links over. A sync
+/// following the statements finds the new row, because it resolves the rows in the same statement (RC-012).
+#[tokio::test]
+async fn a_sync_following_statements_reaches_a_row_put_in_place_of_a_followed_one(
+) -> anyhow::Result<()> {
+    let Some(pool) = pool().await? else {
+        return Ok(());
+    };
+    let base = base(&pool).await?;
+    let source = statement(&pool, &base, Some((day(2026, 9, 4), "live report"))).await?;
+    let replaced = materialized_from(&pool, &base, &[source]).await?;
+    // what the correction leaves: the old row invalidated, a successor carrying its source link
+    let successor = materialized_from(&pool, &base, &[source]).await?;
+    invalidate(&pool, replaced).await?;
+
+    let moved =
+        utopia_store::materialize::sync_typed_attestation_following(&pool, base.kb, &[source])
+            .await?;
+
+    let attested = anchor(&pool, successor).await?;
+    cleanup(&pool, &[&base]).await?;
+    assert_eq!(moved, vec![successor]);
+    assert_eq!(attested, anchored(day(2026, 9, 4), "live report"));
+    Ok(())
+}
