@@ -211,7 +211,7 @@ async fn attestation_sync_reads_only_the_facts_of_its_base() -> anyhow::Result<(
 
     let plan: serde_json::Value = sqlx::query_scalar(&format!(
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
-        super::TYPED_ATTESTATION_SQL
+        super::typed_attestation_sql(false)
     ))
     .persistent(false)
     .bind(base)
@@ -228,6 +228,98 @@ async fn attestation_sync_reads_only_the_facts_of_its_base() -> anyhow::Result<(
     );
     Ok(())
 }
+const GIVEN_BASE_STATEMENTS: u32 = 120_000;
+const GIVEN_ROWS: i64 = 7;
+
+/// A recompute for a few rows (a deleted document's, or those following a dated document's statements)
+/// reads those rows' sources, not the base: on the internal cluster a recompute for seven facts read the
+/// base's 7.3 M facts and all 4.6 M sources and took three minutes (RC-012).
+#[tokio::test]
+async fn attestation_sync_of_given_rows_reads_only_their_sources() -> anyhow::Result<()> {
+    let Some(url) = crate::test_db::url() else {
+        return Ok(());
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await?;
+    let (base, rule) = (Uuid::now_v7(), Uuid::now_v7());
+    let mut tx = pool.begin().await?;
+    for table in [
+        "facts",
+        "typed_fact_sources",
+        "implied_fact_sources",
+        "implication_rules",
+    ] {
+        sqlx::raw_sql(&format!(
+            "CREATE TEMP TABLE {table} (LIKE public.{table} INCLUDING ALL) ON COMMIT DROP"
+        ))
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::raw_sql(&format!(
+        "INSERT INTO facts (id, kb_id, subject_id, object_value, layer, phrase, attested_from)
+              SELECT gen_random_uuid(), '{base}', gen_random_uuid(), '1'::jsonb, 'open',
+                     'statement ' || n, now() - make_interval(days => n % 900)
+                FROM generate_series(1, {GIVEN_BASE_STATEMENTS}) n;
+         INSERT INTO facts (id, kb_id, subject_id, object_value, layer, phrase, attested_from)
+              SELECT gen_random_uuid(), '{base}', gen_random_uuid(), '1'::jsonb, 'typed',
+                     'typed ' || n, now()
+                FROM generate_series(1, {GIVEN_BASE_STATEMENTS}) n;
+         INSERT INTO typed_fact_sources (fact_id, statement_id)
+              SELECT t.id, s.id
+                FROM (SELECT id, row_number() OVER () n FROM facts WHERE layer = 'typed') t
+                JOIN (SELECT id, row_number() OVER () n FROM facts WHERE layer = 'open') s
+                  USING (n);
+         INSERT INTO implication_rules (id, kb_id, trigger, phrase, conclude_property_id, status)
+              VALUES ('{rule}', '{base}', 'phrase', 'statement', gen_random_uuid(), 'approved');
+         -- a tenth of the typed rows are also read by a rule from their statement
+         INSERT INTO implied_fact_sources (fact_id, rule_id, statement_id)
+              SELECT ts.fact_id, '{rule}', ts.statement_id
+                FROM (SELECT fact_id, statement_id, row_number() OVER () n FROM typed_fact_sources) ts
+               WHERE ts.n % 10 = 0;
+         ANALYZE pg_temp.facts; ANALYZE pg_temp.typed_fact_sources;
+         ANALYZE pg_temp.implied_fact_sources; ANALYZE pg_temp.implication_rules"
+    ))
+    .execute(&mut *tx)
+    .await?;
+    let given: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT fact_id FROM (SELECT fact_id, row_number() OVER () n FROM typed_fact_sources) ts
+          WHERE ts.n % 10 = 0 LIMIT $1",
+    )
+    .bind(GIVEN_ROWS)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let plan: serde_json::Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        super::typed_attestation_sql(true)
+    ))
+    .persistent(false)
+    .bind(base)
+    .bind(&given)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+
+    let top = &plan[0]["Plan"];
+    let (facts, sources) = (
+        rows_read_from(top, "facts"),
+        rows_read_from(top, "typed_fact_sources"),
+    );
+    assert_eq!(given.len(), 7);
+    assert_eq!(
+        top["Actual Rows"].as_u64(),
+        Some(7),
+        "all given rows move: {plan:#}"
+    );
+    assert!(
+        facts < 200 && sources < 200,
+        "{facts} facts rows and {sources} source rows read for 7 given rows in a base of {GIVEN_BASE_STATEMENTS} statements: {plan:#}"
+    );
+    Ok(())
+}
+
 /// Rows the plan read from `relation`, counting what filters threw away, over all loops.
 fn rows_read_from(node: &serde_json::Value, relation: &str) -> u64 {
     let own_rows = if node["Relation Name"].as_str() == Some(relation) {

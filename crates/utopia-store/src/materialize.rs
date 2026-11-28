@@ -416,7 +416,22 @@ async fn materialize_in_tx(
     ))
 }
 
-const TYPED_ATTESTATION_SQL: &str = "UPDATE facts t
+/// The witness sync as one statement. For the whole base (`given` false) it gathers every source of the base.
+/// For given rows it gathers only those rows' sources: with the rows named on the outer `UPDATE` alone, Postgres
+/// still aggregated every source of the base before it looked at them, and a recompute for seven facts read
+/// the base's whole `facts` and all of `typed_fact_sources` (RC-012). The rows it moves are the same.
+fn typed_attestation_sql(given: bool) -> String {
+    let (of_materialized, of_implied, rows) = if given {
+        (
+            "WHERE ts.fact_id = ANY($2)",
+            "WHERE i.fact_id = ANY($2)",
+            "t.id = ANY($2)",
+        )
+    } else {
+        ("", "", "$2::uuid[] IS NULL")
+    };
+    format!(
+        "UPDATE facts t
             SET attested_from = src.at, attested_by = src.by
            FROM (SELECT u.fact_id,
                         min(u.attested_from) AS at,
@@ -426,22 +441,26 @@ const TYPED_ATTESTATION_SQL: &str = "UPDATE facts t
                                 CASE WHEN k.invalidated_at IS NULL THEN k.attested_by END AS attested_by
                            FROM typed_fact_sources ts
                            JOIN facts k ON k.id = ts.statement_id AND k.kb_id = $1
+                          {of_materialized}
                          UNION ALL
                          -- 规则的来源按规则的库筛：类别词规则的来源是实体，没有陈述
                          SELECT i.fact_id, i.statement_id, s.attested_from, s.attested_by
                            FROM implied_fact_sources i
                            JOIN implication_rules r ON r.id = i.rule_id AND r.kb_id = $1
                       LEFT JOIN facts s ON s.id = i.statement_id AND s.kb_id = $1
-                                       AND s.invalidated_at IS NULL) u
+                                       AND s.invalidated_at IS NULL
+                          {of_implied}) u
                   GROUP BY u.fact_id) src
           WHERE t.id = src.fact_id AND t.kb_id = $1 AND t.layer = 'typed'
             AND t.invalidated_at IS NULL
-            AND ($2::uuid[] IS NULL OR t.id = ANY($2))
+            AND {rows}
             AND (t.implied
                  OR EXISTS (SELECT 1 FROM typed_fact_sources ts WHERE ts.fact_id = t.id))
             AND (t.attested_from IS DISTINCT FROM src.at
                  OR t.attested_by IS DISTINCT FROM src.by)
-          RETURNING t.id";
+          RETURNING t.id"
+    )
+}
 
 /// The witness of a typed row = the earliest witness among its source statements, together with that date's name; if no source statement has a witness,
 /// neither does it (it holds at any moment, 0064 decision 5). Source statements come in two places: those materialized into this row
@@ -458,18 +477,39 @@ const TYPED_ATTESTATION_SQL: &str = "UPDATE facts t
 /// A voided source statement bears no witness: materialization itself first removes them from the sources, but the document-deletion path
 /// (`documents::reattest_tx`) runs before materialization, when the statement was just voided along with the document and the source table is not yet updated.
 /// `only`: touch only these rows (on document deletion, only those citing that document, whose timelines are already locked); `None` is the whole KB
+/// (and then only these rows' sources are read, see [`typed_attestation_sql`])
 pub async fn sync_typed_attestation<'e>(
     ex: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
     kb_id: Uuid,
     only: Option<&[Uuid]>,
 ) -> AppResult<Vec<Uuid>> {
-    let moved = sqlx::query_scalar(TYPED_ATTESTATION_SQL)
+    let moved = sqlx::query_scalar(&typed_attestation_sql(only.is_some()))
         .persistent(false)
         .bind(kb_id)
         .bind(only)
         .fetch_all(ex)
         .await?;
     Ok(moved)
+}
+
+/// The typed rows that follow these statements: materialized from them, or read from them by a rule.
+/// A caller that moved the witness of a few statements syncs these rows instead of the whole base (RC-012).
+pub async fn typed_rows_following<'e>(
+    ex: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
+    statements: &[Uuid],
+) -> AppResult<Vec<Uuid>> {
+    if statements.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query_scalar(
+        "SELECT ts.fact_id FROM typed_fact_sources ts WHERE ts.statement_id = ANY($1)
+         UNION
+         SELECT i.fact_id FROM implied_fact_sources i WHERE i.statement_id = ANY($1)",
+    )
+    .bind(statements)
+    .fetch_all(ex)
+    .await?;
+    Ok(rows)
 }
 
 #[derive(sqlx::FromRow)]

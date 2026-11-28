@@ -805,6 +805,9 @@ async fn attest_statements(
     .bind(doc.id)
     .fetch_all(pool)
     .await?;
+    let mut statements: Vec<Uuid> = rows.iter().map(|(fact_id, ..)| *fact_id).collect();
+    statements.sort_unstable();
+    statements.dedup();
     let mut moved = 0usize;
     for (fact_id, chunk_id, text, start) in rows {
         let path = headings_at(&text, usize::try_from(start.unwrap_or(0)).unwrap_or(0));
@@ -828,8 +831,15 @@ async fn attest_statements(
             moved += 1;
         }
     }
-    // Typed rows already materialized by rules follow their statements
-    let typed = utopia_store::materialize::sync_typed_attestation(pool, doc.kb_id, None).await?;
+    // Typed rows already materialized by rules follow their statements. Only the rows that follow this document's statements (RC-012): a sync of
+    // the whole base per dated document read the base's every fact. All of the document's statements, not just those this pass moved: a pass
+    // interrupted after it attested them finds nothing left to move on its retry, and their typed rows would stay behind
+    let following = utopia_store::materialize::typed_rows_following(pool, &statements).await?;
+    let typed = if following.is_empty() {
+        Vec::new()
+    } else {
+        utopia_store::materialize::sync_typed_attestation(pool, doc.kb_id, Some(&following)).await?
+    };
     // Rows whose witness changed take a new place on the uniqueness timeline: recompute only the timelines those rows sit in, not the whole database
     // -- re-running every timeline across the database in a transaction for each document would be thousands of transactions per document once the database grows.
     // Commit the sync first, then take the timeline lock; do not wait for the advisory lock while holding an UPDATE row lock (same order as reconciliation after a materialization commit)

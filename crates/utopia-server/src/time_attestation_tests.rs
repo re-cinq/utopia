@@ -300,3 +300,129 @@ async fn current_context_does_not_reattest_superseded_chunks() -> anyhow::Result
         .await?;
     run
 }
+
+async fn typed_attestations(
+    pool: &sqlx::PgPool,
+    kb: Uuid,
+) -> anyhow::Result<Vec<(String, Option<DateTime<Utc>>)>> {
+    Ok(sqlx::query_as(
+        "SELECT object_value->>'value', attested_from FROM facts
+          WHERE kb_id=$1 AND layer='typed' AND invalidated_at IS NULL
+          ORDER BY object_value->>'value'",
+    )
+    .bind(kb)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// A pass interrupted after it attested the statements finds nothing left to move when it is retried.
+/// The typed rows that follow the document's statements are synced all the same (RC-012).
+#[tokio::test]
+async fn a_retried_pass_attests_the_typed_rows_an_interrupted_pass_left_behind(
+) -> anyhow::Result<()> {
+    let Some(fixture) = fixture().await? else {
+        return Ok(());
+    };
+    let pool = &fixture.state.pool;
+    let run = async {
+        chapter(&fixture, 0, "Report", "desk", None).await?;
+        utopia_store::materialize::materialize(pool, fixture.kb).await?;
+        let context: DocumentDating = serde_json::from_value(json!({"entries": [
+            {"kind":"now","name":"Report date","words":"2025-01-01",
+             "from":{"year":2025,"month":1,"day":1},"scope":["Report"]}
+        ]}))?;
+        let doc = utopia_store::documents::get(pool, fixture.doc).await?;
+        attest_statements(&fixture.state, &doc, &context).await?;
+        assert_eq!(
+            typed_attestations(pool, fixture.kb).await?,
+            vec![("desk".to_string(), Some(day(2025)))]
+        );
+        // the state an interrupted pass leaves: the statement attested, its typed row not yet
+        sqlx::query(
+            "UPDATE facts SET attested_from=NULL, attested_by=NULL WHERE kb_id=$1 AND layer='typed'",
+        )
+        .bind(fixture.kb)
+        .execute(pool)
+        .await?;
+
+        attest_statements(&fixture.state, &doc, &context).await?;
+
+        assert_eq!(
+            typed_attestations(pool, fixture.kb).await?,
+            vec![("desk".to_string(), Some(day(2025)))]
+        );
+        anyhow::Ok(())
+    }
+    .await;
+    sqlx::query("DELETE FROM organizations WHERE id=$1")
+        .bind(fixture.org)
+        .execute(pool)
+        .await?;
+    run
+}
+
+/// A dated document's pass syncs the typed rows that follow its own statements, not the base (RC-012):
+/// a row that follows another document's statement is left to the base's next whole-base sync.
+#[tokio::test]
+async fn a_dated_pass_leaves_the_typed_rows_of_other_documents_to_the_whole_base_sync(
+) -> anyhow::Result<()> {
+    let Some(fixture) = fixture().await? else {
+        return Ok(());
+    };
+    let pool = &fixture.state.pool;
+    let run = async {
+        chapter(&fixture, 0, "Report", "desk", None).await?;
+        // another document's statement, attested, and its typed row not yet synced
+        let elsewhere = json!({"value": "shelf"});
+        let (other_statement, _) = graph::insert_open_statement(
+            pool,
+            fixture.kb,
+            fixture.subject,
+            "is on",
+            FactObject::Value(&elsewhere),
+            Some(day(2020)),
+            1.0,
+        )
+        .await?;
+        utopia_store::materialize::materialize(pool, fixture.kb).await?;
+        sqlx::query(
+            "UPDATE facts t SET attested_from=NULL, attested_by=NULL
+              WHERE t.kb_id=$1 AND t.layer='typed'
+                AND EXISTS (SELECT 1 FROM typed_fact_sources s WHERE s.fact_id=t.id AND s.statement_id=$2)",
+        )
+        .bind(fixture.kb)
+        .bind(other_statement)
+        .execute(pool)
+        .await?;
+        let context: DocumentDating = serde_json::from_value(json!({"entries": [
+            {"kind":"now","name":"Report date","words":"2025-01-01",
+             "from":{"year":2025,"month":1,"day":1},"scope":["Report"]}
+        ]}))?;
+        let doc = utopia_store::documents::get(pool, fixture.doc).await?;
+
+        attest_statements(&fixture.state, &doc, &context).await?;
+
+        assert_eq!(
+            typed_attestations(pool, fixture.kb).await?,
+            vec![
+                ("desk".to_string(), Some(day(2025))),
+                ("shelf".to_string(), None)
+            ]
+        );
+        utopia_store::materialize::sync_typed_attestation(pool, fixture.kb, None).await?;
+        assert_eq!(
+            typed_attestations(pool, fixture.kb).await?,
+            vec![
+                ("desk".to_string(), Some(day(2025))),
+                ("shelf".to_string(), Some(day(2020)))
+            ]
+        );
+        anyhow::Ok(())
+    }
+    .await;
+    sqlx::query("DELETE FROM organizations WHERE id=$1")
+        .bind(fixture.org)
+        .execute(pool)
+        .await?;
+    run
+}
