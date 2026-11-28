@@ -449,7 +449,7 @@ async fn a_sync_following_statements_attests_the_rows_materialized_or_implied_fr
     };
     let base = base(&pool).await?;
     let followed = statement(&pool, &base, Some((day(2026, 9, 4), "live report"))).await?;
-    let other = statement(&pool, &base, Some((day(2026, 9, 5), "next report"))).await?;
+    let other = statement(&pool, &base, Some((day(2024, 3, 1), "earlier report"))).await?;
     let materialized = materialized_from(&pool, &base, &[followed, other]).await?;
     let implied = typed_row(&pool, &base, true, None).await?;
     implied_from_statement(&pool, &base, implied, followed).await?;
@@ -472,8 +472,8 @@ async fn a_sync_following_statements_attests_the_rows_materialized_or_implied_fr
     expected.sort();
     assert_eq!(moved, expected);
     assert_eq!(none, Vec::<Uuid>::new());
-    // the materialized row takes the earliest of all its sources, not only the followed one
-    assert_eq!(attested.0, anchored(day(2026, 9, 4), "live report"));
+    // the materialized row takes the earliest of all its sources, here the one that is not followed
+    assert_eq!(attested.0, anchored(day(2024, 3, 1), "earlier report"));
     assert_eq!(attested.1, anchored(day(2026, 9, 4), "live report"));
     assert_eq!(attested.2, (None, None));
     Ok(())

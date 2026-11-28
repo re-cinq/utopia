@@ -283,13 +283,30 @@ async fn attestation_sync_of_given_rows_reads_only_their_sources() -> anyhow::Re
     ))
     .execute(&mut *tx)
     .await?;
-    let given: Vec<Uuid> = sqlx::query_scalar(
+    let mut given: Vec<Uuid> = sqlx::query_scalar(
         "SELECT fact_id FROM (SELECT fact_id, row_number() OVER () n FROM typed_fact_sources) ts
           WHERE ts.n % 10 = 0 LIMIT $1",
     )
     .bind(GIVEN_ROWS)
     .fetch_all(&mut *tx)
     .await?;
+    // two rows a rule read from a statement and nothing materialized: reached only through `implied_fact_sources`
+    let implied_only: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "WITH s AS (INSERT INTO facts (id, kb_id, subject_id, object_value, layer, phrase, attested_from)
+                    SELECT gen_random_uuid(), '{base}', gen_random_uuid(), '1'::jsonb, 'open', 'ruled ' || n, now() - interval '9 days'
+                      FROM generate_series(1, 2) n RETURNING id),
+              t AS (INSERT INTO facts (id, kb_id, subject_id, object_value, layer, phrase, implied, attested_from)
+                    SELECT gen_random_uuid(), '{base}', gen_random_uuid(), '1'::jsonb, 'typed', 'ruled', true, now()
+                      FROM generate_series(1, 2) RETURNING id),
+              pairs AS (SELECT s.id AS statement_id, t.id AS fact_id
+                          FROM (SELECT id, row_number() OVER () n FROM s) s
+                          JOIN (SELECT id, row_number() OVER () n FROM t) t USING (n))
+         INSERT INTO implied_fact_sources (fact_id, rule_id, statement_id)
+              SELECT fact_id, '{rule}', statement_id FROM pairs RETURNING fact_id"
+    ))
+    .fetch_all(&mut *tx)
+    .await?;
+    given.extend(&implied_only);
 
     let plan: serde_json::Value = sqlx::query_scalar(&format!(
         "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
@@ -301,11 +318,14 @@ async fn attestation_sync_of_given_rows_reads_only_their_sources() -> anyhow::Re
     .fetch_one(&mut *tx)
     .await?;
     // the same rows reached through their statements (a dated document's pass)
-    let statements: Vec<Uuid> =
-        sqlx::query_scalar("SELECT statement_id FROM typed_fact_sources WHERE fact_id = ANY($1)")
-            .bind(&given)
-            .fetch_all(&mut *tx)
-            .await?;
+    let statements: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT statement_id FROM typed_fact_sources WHERE fact_id = ANY($1)
+         UNION
+         SELECT statement_id FROM implied_fact_sources WHERE fact_id = ANY($1)",
+    )
+    .bind(&given)
+    .fetch_all(&mut *tx)
+    .await?;
     sqlx::query("UPDATE facts SET attested_from = now() WHERE id = ANY($1)")
         .bind(&given)
         .execute(&mut *tx)
@@ -321,34 +341,36 @@ async fn attestation_sync_of_given_rows_reads_only_their_sources() -> anyhow::Re
     .await?;
     tx.rollback().await?;
     let following_top = &following[0]["Plan"];
-    let (following_facts, following_sources) = (
+    let (following_facts, following_sources, following_rule_sources) = (
         rows_read_from(following_top, "facts"),
         rows_read_from(following_top, "typed_fact_sources"),
+        rows_read_from(following_top, "implied_fact_sources"),
     );
     assert_eq!(
         following_top["Actual Rows"].as_u64(),
-        Some(7),
-        "all rows following the 7 statements move: {following:#}"
+        Some(9),
+        "all rows following the 9 statements move: {following:#}"
     );
     assert!(
-        following_facts < 200 && following_sources < 200,
-        "{following_facts} facts rows and {following_sources} source rows read for the rows following 7 statements: {following:#}"
+        following_facts < 200 && following_sources < 200 && following_rule_sources < 200,
+        "{following_facts} facts rows, {following_sources} source rows and {following_rule_sources} rule source rows read for the rows following 9 statements: {following:#}"
     );
 
     let top = &plan[0]["Plan"];
-    let (facts, sources) = (
+    let (facts, sources, rule_sources) = (
         rows_read_from(top, "facts"),
         rows_read_from(top, "typed_fact_sources"),
+        rows_read_from(top, "implied_fact_sources"),
     );
-    assert_eq!(given.len(), 7);
+    assert_eq!(given.len(), 9);
     assert_eq!(
         top["Actual Rows"].as_u64(),
-        Some(7),
+        Some(9),
         "all given rows move: {plan:#}"
     );
     assert!(
-        facts < 200 && sources < 200,
-        "{facts} facts rows and {sources} source rows read for 7 given rows in a base of {GIVEN_BASE_STATEMENTS} statements: {plan:#}"
+        facts < 200 && sources < 200 && rule_sources < 200,
+        "{facts} facts rows, {sources} source rows and {rule_sources} rule source rows read for 9 given rows in a base of {GIVEN_BASE_STATEMENTS} statements: {plan:#}"
     );
     Ok(())
 }
