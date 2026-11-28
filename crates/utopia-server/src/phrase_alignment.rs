@@ -253,7 +253,8 @@ pub(crate) async fn bind_declared(
     kb_id: Uuid,
     document_id: Uuid,
 ) -> anyhow::Result<usize> {
-    let props = utopia_store::ontology::relation_type_views(pool, kb_id).await?;
+    // Runs after every pushed document: the listing without usage reads no fact (RC-011)
+    let props = utopia_store::ontology::relation_type_views_uncounted(pool, kb_id).await?;
     let keys: HashSet<SignatureKey> =
         phrase_bindings::signature_keys_of_document(pool, kb_id, document_id)
             .await?

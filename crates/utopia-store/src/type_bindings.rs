@@ -611,19 +611,71 @@ pub async fn apply_bound<'e>(
     pool: impl Executor<'e, Database = Postgres>,
     kb_id: Uuid,
 ) -> AppResult<u64> {
-    let sql = format!(
+    let res = sqlx::query(&apply_bound_sql(false))
+        .bind(kb_id)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// [`apply_bound`] for what one document touches (RC-011): the entities its extraction just resolved or created
+/// (`entity_ids`) and, for `evidence_of`, both ends of every fact that document's live chunks are evidence for. The
+/// second part covers what this run did not resolve itself: facts carried over from a pushed item's previous version
+/// (their evidence is copied onto the new chunk), and chunks an earlier, interrupted attempt had already extracted.
+/// Superseded chunks are left out, so the work does not grow with the document's history. A memory log passes `None`:
+/// all of its episodes stay live, so its evidence is its whole history.
+/// Reading every entity of the base once per document is too much for a base of a hundred thousand entities; the
+/// judgement itself ([`apply`]) and each alignment round ([`apply_bound`]) still cover the whole base.
+pub async fn apply_bound_to(
+    pool: &PgPool,
+    kb_id: Uuid,
+    evidence_of: Option<Uuid>,
+    entity_ids: &[Uuid],
+) -> AppResult<u64> {
+    let mut ids = entity_ids.to_vec();
+    if let Some(document_id) = evidence_of {
+        let ends: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+            "SELECT f.subject_id, f.object_id
+               FROM chunks c
+               JOIN fact_evidence fe ON fe.chunk_id = c.id
+               JOIN facts f ON f.id = fe.fact_id
+              WHERE c.document_id = $1 AND c.superseded_at IS NULL",
+        )
+        .bind(document_id)
+        .fetch_all(pool)
+        .await?;
+        for (subject, object) in ends {
+            ids.push(subject);
+            ids.extend(object);
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let res = sqlx::query(&apply_bound_sql(true))
+        .bind(kb_id)
+        .bind(&ids)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// `$1` base; when `scoped`, `$2` the entity ids it is limited to.
+fn apply_bound_sql(scoped: bool) -> String {
+    format!(
         "UPDATE entities e
             SET type_id = b.type_id, type_source = 'aligned', proposed_type = NULL, updated_at = now()
            FROM type_bindings b
-          WHERE e.kb_id = $1 AND b.kb_id = e.kb_id
+          WHERE e.kb_id = $1 AND b.kb_id = e.kb_id{only}
             AND b.status = 'bound' AND b.type_id IS NOT NULL
             AND e.merged_into IS NULL AND e.type_source <> 'human'
             AND e.specific_type IS NOT NULL AND {kind} = b.kind_word
             AND e.type_id IS DISTINCT FROM b.type_id",
+        only = if scoped { " AND e.id = ANY($2)" } else { "" },
         kind = kind_word_sql("e.specific_type")
-    );
-    let res = sqlx::query(&sql).bind(kb_id).execute(pool).await?;
-    Ok(res.rows_affected())
+    )
 }
 
 /// Binding table used during extraction: normalized category word → class id, bound ones only.

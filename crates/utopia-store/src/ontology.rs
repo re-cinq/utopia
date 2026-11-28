@@ -216,8 +216,23 @@ fn validate_shape(shape: &str) -> AppResult<()> {
     Ok(())
 }
 
-pub async fn relation_type_views(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<RelationTypeView>> {
-    Ok(sqlx::query_as(
+/// The SQL of [`relation_type_views`] (`counted`) and [`relation_type_views_uncounted`]; `$1` is the base.
+/// Only the counted form reads `facts`: it counts every live typed fact of the base per relation.
+pub(crate) fn relation_type_views_sql(counted: bool) -> String {
+    let (usage, counts) = if counted {
+        (
+            "COALESCE(u.usage, 0)",
+            "LEFT JOIN (
+             SELECT predicate_id, count(*)::bigint AS usage
+             FROM facts
+             WHERE kb_id = $1 AND invalidated_at IS NULL AND predicate_id IS NOT NULL
+             GROUP BY predicate_id
+         ) u ON u.predicate_id = r.id",
+        )
+    } else {
+        ("0::bigint", "")
+    };
+    format!(
         "SELECT r.id, r.key, r.label, r.temporal, r.functional, r.inverse_functional,
                 r.is_transitive, r.is_symmetric, r.is_asymmetric, r.is_irreflexive,
                 r.inverse_of, r.sub_property_of,
@@ -229,19 +244,30 @@ pub async fn relation_type_views(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<Re
                       WHERE g.relation_type_id = r.id) AS ranges,
                 ARRAY(SELECT q.qualifier_type_id FROM relation_type_qualifiers q
                       WHERE q.relation_type_id = r.id) AS qualifiers,
-                COALESCE(u.usage, 0) AS usage
+                {usage} AS usage
          FROM relation_types r
-         LEFT JOIN (
-             SELECT predicate_id, count(*)::bigint AS usage
-             FROM facts
-             WHERE kb_id = $1 AND invalidated_at IS NULL AND predicate_id IS NOT NULL
-             GROUP BY predicate_id
-         ) u ON u.predicate_id = r.id
-         WHERE r.kb_id = $1 ORDER BY lower(r.label)",
+         {counts}
+         WHERE r.kb_id = $1 ORDER BY lower(r.label)"
     )
-    .bind(kb_id)
-    .fetch_all(pool)
-    .await?)
+}
+
+pub async fn relation_type_views(pool: &PgPool, kb_id: Uuid) -> AppResult<Vec<RelationTypeView>> {
+    Ok(sqlx::query_as(&relation_type_views_sql(true))
+        .bind(kb_id)
+        .fetch_all(pool)
+        .await?)
+}
+
+/// The same listing with `usage` 0 and no read of `facts` (RC-011): for a caller that decides by a relation's
+/// name, domain and range. Counting usage scans the base's facts, which is too much to do once per pushed document.
+pub async fn relation_type_views_uncounted(
+    pool: &PgPool,
+    kb_id: Uuid,
+) -> AppResult<Vec<RelationTypeView>> {
+    Ok(sqlx::query_as(&relation_type_views_sql(false))
+        .bind(kb_id)
+        .fetch_all(pool)
+        .await?)
 }
 
 /// Display names of predicates are normalized to **lowerCamelCase** (see migration 0042).
@@ -2303,3 +2329,7 @@ pub async fn agent_proposal_report(pool: &PgPool, kb_id: Uuid) -> AppResult<Agen
     .fetch_one(pool)
     .await?)
 }
+
+#[cfg(test)]
+#[path = "ontology_relation_listing_tests.rs"]
+mod relation_listing_tests;
